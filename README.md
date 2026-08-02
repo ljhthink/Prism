@@ -4,7 +4,7 @@
 
 ## 项目状态
 
-🚧 **M0 脚手架已完成（US-001 通过 guardrail 三轮审查 + ac-verifier 验收），进入 M1 编码阶段**（2026-08-02）
+🚧 **M0 脚手架 + M1 数据层已完成（US-001/US-002 通过 guardrail 审查 + ac-verifier 验收），推进 M1 BYOK 聊天核心**（2026-08-02）
 
 - 平台：仅 Android（API 26+，Android 8.0+）
 - 算力：纯云端 BYOK（用户自配 OpenAI/Claude/Ollama 等端点）
@@ -36,6 +36,7 @@
   - [2026-08-02-prism-tech-selection.md](docs/reports/2026-08-02-prism-tech-selection.md) —— 技术选型对比分析（tech-selection-researcher）
   - [2026-08-02-continuous-learning-archaeology.md](docs/reports/2026-08-02-continuous-learning-archaeology.md) —— Continuous-learning 考古（code-archaeologist）
   - [2026-08-02-openclaw-archaeology.md](docs/reports/2026-08-02-openclaw-archaeology.md) —— OpenClaw/NullClaw 考古（code-archaeologist）
+  - [2026-08-02-us002-objectbox-archaeology.md](docs/reports/2026-08-02-us002-objectbox-archaeology.md) —— US-002 ObjectBox 集成源码考古（code-archaeologist）
   - [2026-08-02-us001-m0-scaffold-guardrail.md](docs/reports/2026-08-02-us001-m0-scaffold-guardrail.md) —— US-001 M0 脚手架安全与质量审计（guardrail-enforcer，三轮）
   - [2026-08-02-us001-m0-scaffold-acceptance.md](docs/reports/2026-08-02-us001-m0-scaffold-acceptance.md) —— US-001 M0 脚手架验收测试（ac-verifier）
 

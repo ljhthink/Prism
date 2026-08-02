@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | Proposed |
+| 状态 | Accepted（US-001 M0 脚手架 + US-002 ObjectBox 数据层已通过 guardrail-enforcer 审查 + ac-verifier 验收，基线已确立） |
 | 日期 | 2026-08-02 |
 | 决策者 | 主 Agent + 用户 |
 | 关联文档 | [PRD](../PRD.md) / [可行性调研汇报](../reports/2026-08-02-prism-feasibility-research.md) |
@@ -143,7 +143,7 @@ Prism 是一款手机端 AI 聊天 Agent 应用，定位为"个人 AI Agent 平�
 
 - 仅 Android，失去 iOS 用户（用户已接受）
 - MCP Kotlin SDK 为 Tier 3，功能完整性低于 TS/Python 版，OAuth 2.1 可能需基于 Ktor 自行补齐
-- ObjectBox 向量搜索功能**可能需商业许可证**，需向厂商确认
+- ~~ObjectBox 向量搜索功能**可能需商业许可证**，需向厂商确认~~ → **已解除**：web-access 调研确认向量搜索免费（2026-08-02 US-002 阶段）
 - 复用 Continuous-learning 设计需 21-31 人天移植 + 29-42 人天新建（总 50-73 人天）
 - 个人开源自发布，无应用商店流量分发
 
@@ -160,7 +160,7 @@ Prism 是一款手机端 AI 聊天 Agent 应用，定位为"个人 AI Agent 平�
 
 | 风险 | 等级 | 缓解措施 |
 |---|---|---|
-| ObjectBox 向量搜索许可证需商业授权 | 高 | 编码前向 ObjectBox 厂商确认；若需付费，备选 sqlite-vec |
+| ~~ObjectBox 向量搜索许可证需商业授权~~ | ~~高~~ → **已解除** | web-access 调研确认（2026-08-02，US-002 阶段）：核心 CRUD 与向量搜索均免费，商业付费仅限 Data Sync/Time Series。备选 sqlite-vec 不再需要 |
 | MCP Kotlin SDK Tier 3 功能不完整 | 中 | Context7 已验证 Client/StreamableHttpClientTransport/listTools/callTool API 可用；OAuth 2.1 需手动路由 workaround（mcpStreamableHttp 不能嵌套 authenticate{}）；PoC 验证 |
 | NullClaw 交叉编译不可行 | 高 | 考古判定不可行（Zig 无法链接 Android libc，上游 ziglang/zig#23906；沙箱全不适用 Android）；已调整为纯 Kotlin 重实现 OpenClaw 设计 |
 | AGPL-3.0 依赖意外引入 | 高 | 依赖审查；CI 集成 license 检查；禁用 pymupdf |

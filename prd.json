@@ -29,8 +29,8 @@
         "Typecheck passes"
       ],
       "priority": 2,
-      "passes": false,
-      "notes": "Context7 验证 ObjectBox 5.4.2 API。AGP 8.13- 用 kotlin.android + kotlin.kapt。"
+      "passes": true,
+      "notes": "Context7 验证 ObjectBox 5.4.2 API。AGP 8.13- 用 kotlin.android + kotlin.kapt。已通过 guardrail-enforcer 审查（TKN-PRISM-GUARDRAIL-004）+ ac-verifier 验收（TKN-PRISM-ACCEPTANCE-001，2026-08-02）。AC-003 因无模拟器受限通过（JVM 间接验证 + APK 静态检查）。"
     },
     {
       "id": "US-003",
