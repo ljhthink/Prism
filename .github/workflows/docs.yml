@@ -1,0 +1,31 @@
+name: docs-quality
+
+on:
+  pull_request:
+    paths:
+      - '**/*.md'
+      - 'scripts/consistency-check.js'
+      - '.github/workflows/docs.yml'
+  push:
+    branches: [main]
+
+jobs:
+  docs-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+      - name: Install markdownlint-cli2
+        run: npm install -g markdownlint-cli2
+      - name: Run markdownlint
+        run: markdownlint-cli2 '**/*.md' '#node_modules' '#**/node_modules' '#tmp' '#.trae' '#build' '#.gradle'
+      - name: Run consistency check
+        run: node scripts/consistency-check.js
+      - name: Link checker
+        uses: lycheeverse/lychee-action@v2
+        with:
+          fail: true
+          args: --config lychee.toml '**/*.md'

@@ -1,0 +1,36 @@
+# lychee 链接检查配置
+# 依 CLAUDE.md 第五节 5.5
+
+# 排除目录
+exclude = [
+  "node_modules",
+  ".git",
+  "tmp",
+  ".trae",
+  "build",
+  ".gradle",
+]
+
+# 排除路径（文件系统）
+exclude_path = [
+  "node_modules",
+  ".git",
+  "tmp",
+  "build",
+  ".gradle",
+]
+
+# 超时（秒）
+timeout = 20
+
+# 最大重试
+max_retries = 2
+
+# 接受状态码
+accept = [200, 206, 429]
+
+# 用户代理
+user_agent = "Mozilla/5.0 (compatible; lychee/Prism-doc-check)"
+
+# 仅检查 markdown
+include = ["**/*.md"]

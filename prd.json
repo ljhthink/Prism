@@ -1,0 +1,155 @@
+{
+  "project": "Prism",
+  "branchName": "ralph/prism-foundation",
+  "description": "Prism 手机端 AI 聊天 Agent 应用 —— M0 脚手架 + M1 BYOK 聊天核心 + M2 MCP Client 首期任务分解。依 ADR-001 技术栈：原生 Kotlin + Jetpack Compose + MCP Kotlin SDK 0.12.0 + ObjectBox 5.4.2 + ONNX Runtime + Android Keystore。每个故事可在单次迭代完成。",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "初始化 Android 项目骨架",
+      "description": "作为开发者，我需要创建 Android 项目骨架，以便后续模块有统一构建基础。",
+      "acceptanceCriteria": [
+        "Gradle Kotlin DSL 项目，AGP 8.13+，minSdk 26，targetSdk 最新",
+        "Jetpack Compose BOM 已配置，MainActivity 使用 Compose 空白界面",
+        "应用可编译并运行显示 'Prism' 标题",
+        "Typecheck passes"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": "M0 脚手架。依 ADR-001 最低 Android 8.0 (API 26)。"
+    },
+    {
+      "id": "US-002",
+      "title": "配置 ObjectBox 数据库基础",
+      "description": "作为开发者，我需要集成 ObjectBox 5.4.2，以便持久化知识库/记忆/配置数据。",
+      "acceptanceCriteria": [
+        "build.gradle.kts 应用 io.objectbox 插件 version 5.4.2",
+        "定义 @Entity 数据类 KnowledgeChunk（id/title/content/embedding 字段）",
+        "MyObjectBox.builder().androidContext(context).build() 初始化成功",
+        "box.put/box.get/box.remove CRUD 单元测试通过",
+        "Typecheck passes"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": "Context7 验证 ObjectBox 5.4.2 API。AGP 8.13- 用 kotlin.android + kotlin.kapt。"
+    },
+    {
+      "id": "US-003",
+      "title": "实现 API Key 加密存储",
+      "description": "作为用户，我希望 API Key 加密存储，以便密钥安全不泄露。",
+      "acceptanceCriteria": [
+        "Android Keystore 生成主密钥（AES-256-GCM，StrongBox 可用时启用）",
+        "DataStore + Tink AEAD 加密 API Key，不落明文",
+        "保存/读取 API Key 单元测试通过（明文不出 Keystore）",
+        "日志中不输出 API Key（安全扫描通过）",
+        "Typecheck passes"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": "依 ADR-001 Key 存储：Keystore + DataStore(Tink) + 生物识别。"
+    },
+    {
+      "id": "US-004",
+      "title": "定义 BYOK Provider 配置数据模型",
+      "description": "作为用户，我希望配置多个 AI Provider 端点，以便灵活切换模型。",
+      "acceptanceCriteria": [
+        "ProviderConfig 数据类含 name/baseUrl/apiKeyRef/models/headers 字段",
+        "支持预设 5 种 Provider：OpenAI 兼容/Anthropic/Ollama/Moonshot/OpenRouter",
+        "Provider 配置持久化到 ObjectBox",
+        "配置列表可增删改查单元测试通过",
+        "Typecheck passes"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": "US-001 验收标准 1。"
+    },
+    {
+      "id": "US-005",
+      "title": "实现聊天 UI 骨架",
+      "description": "作为用户，我希望有聊天界面，以便与 AI 对话。",
+      "acceptanceCriteria": [
+        "NavHost 配置主路由（会话列表/聊天/设置）",
+        "ConversationScreen 显示消息列表 + 输入框",
+        "ConversationViewModel 用 StateFlow 暴露消息列表",
+        "输入消息点击发送可更新 UI（暂不接 AI）",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": "Context7 验证 Compose NavHost + hiltViewModel + StateFlow。"
+    },
+    {
+      "id": "US-006",
+      "title": "实现 OpenAI 兼容 Provider 流式请求",
+      "description": "作为用户，我希望 AI 回复流式显示，以便体验流畅。",
+      "acceptanceCriteria": [
+        "OpenAICompatibleProvider 实现 SSE 流式 /v1/chat/completions 请求",
+        "首字延迟 <1s（取决于端点）",
+        "流式 token 实时更新 UI",
+        "端点不可达时显示错误不崩溃",
+        "Typecheck passes"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": "US-001 验收标准 4-6。用 Ktor HttpClient SSE。"
+    },
+    {
+      "id": "US-007",
+      "title": "实现 Provider 切换",
+      "description": "作为用户，我希望会话中切换 Provider，以便对比不同模型。",
+      "acceptanceCriteria": [
+        "聊天界面提供 Provider 选择器",
+        "切换 Provider 后保留对话历史",
+        "切换后新消息走新 Provider",
+        "Typecheck passes",
+        "Verify in browser using dev-browser skill"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": "US-001 验收标准 3。"
+    },
+    {
+      "id": "US-008",
+      "title": "集成 MCP Kotlin SDK Client",
+      "description": "作为开发者，我需要集成 MCP Client，以便 AI 能调用工具。",
+      "acceptanceCriteria": [
+        "引入 MCP Kotlin SDK 0.12.0 依赖",
+        "Client + StreamableHttpClientTransport 可连接远程 MCP Server",
+        "client.listTools() 返回工具列表",
+        "client.callTool(name, arguments) 可调用并返回结果",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": "Context7 验证 API。OAuth 2.1 后续故事处理。"
+    },
+    {
+      "id": "US-009",
+      "title": "实现内置 Filesystem MCP Server",
+      "description": "作为用户，我希望 AI 能读取本地文件，以便处理文档。",
+      "acceptanceCriteria": [
+        "Kotlin 实现 Filesystem MCP Server（基于 SAF/DocumentPicker）",
+        "注册为本地 MCP Server，零配置可用",
+        "AI 调用前需用户确认（防误操作）",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": "ADR-001 形态 B 内置 Server 之一。"
+    },
+    {
+      "id": "US-010",
+      "title": "实现预设远程 MCP Server 模板加载",
+      "description": "作为用户，我希望一键添加常用远程 MCP Server，以便快速扩展能力。",
+      "acceptanceCriteria": [
+        "预设 9 个远程模板（GitHub/Notion/Slack/Sentry/Stripe/Asana/Brave/Exa/Context7）",
+        "用户填 API Key 后一键添加",
+        "Server 连接状态可观测（连接中/已连接/错误）",
+        "Typecheck passes"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": "ADR-001 形态 A 预设模板。"
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+# Android / Gradle
+.gradle/
+build/
+*/build/
+*.apk
+*.aab
+*.ap_
+*.dex
+local.properties
+keystore/
+*.keystore
+*.jks
+
+# Kotlin
+*.kotlin_metadata
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node（文档工具链）
+node_modules/
+
+# 运行时产物（CLAUDE.md 第二十节）
+logs/
+tmp/
+temp/
+.coverage/
+.nyc_output/
+dist/
+out/
+target/
+
+# 环境变量（CLAUDE.md 20.3，仅 .env.example 提交）
+.env
+.env.local
+.env.*.local
+
+# 性能/测试产物
+perf/baselines/*.bin
