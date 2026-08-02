@@ -4,7 +4,7 @@
 
 ## 项目状态
 
-🚧 **需求调研与可行性论证完成，待进入编码阶段**（2026-08-02）
+🚧 **M0 脚手架已完成（US-001 通过 guardrail 三轮审查 + ac-verifier 验收），进入 M1 编码阶段**（2026-08-02）
 
 - 平台：仅 Android（API 26+，Android 8.0+）
 - 算力：纯云端 BYOK（用户自配 OpenAI/Claude/Ollama 等端点）
@@ -25,7 +25,7 @@
 ### Explanation（解释说明 / ADR）
 
 - [docs/decisions/](docs/decisions/README.md) —— 架构决策记录
-  - [ADR-001 Prism 技术栈与架构选型](docs/decisions/ADR-001-prism-tech-stack.md)（Proposed）
+  - [ADR-001 Prism 技术栈与架构选型](docs/decisions/ADR-001-prism-tech-stack.md)（Accepted）
 
 ### Reference（参考 / 报告）
 

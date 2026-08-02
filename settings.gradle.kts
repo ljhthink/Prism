@@ -38,6 +38,11 @@ dependencyResolutionManagement {
         }
         maven {
             url = uri("https://maven.aliyun.com/repository/public")
+            // BR-build-003：public 聚合镜像排除 AndroidX 组，确保从 google 镜像获取，降低交叉投毒风险
+            content {
+                excludeGroupByRegex("com\\.android.*")
+                excludeGroupByRegex("androidx.*")
+            }
         }
         google()
         mavenCentral()
