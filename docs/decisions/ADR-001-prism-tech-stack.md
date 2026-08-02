@@ -176,7 +176,7 @@ Prism 是一款手机端 AI 聊天 Agent 应用，定位为"个人 AI Agent 平�
 |---|---|---|
 | Jetpack Compose | BOM 锁定 | UI 框架，升级可能破坏 UI |
 | 官方 MCP Kotlin SDK | 0.12.0 | MCP 协议合规核心，0.x API 不稳定 |
-| ObjectBox | 6.0.0-beta | 向量数据持久化，迁移成本高 |
+| ObjectBox | 5.4.2 | 向量数据持久化，迁移成本高（Context7 验证版本，见下方 Context7 调研验证节；原 6.0.0-beta 为笔误） |
 | ONNX Runtime Mobile | 稳定版锁定 | 嵌入模型推理引擎 |
 | Android Keystore + DataStore | 系统级 | API Key 安全核心 |
 
@@ -203,6 +203,71 @@ client.connect(transport)
 val tools = client.listTools().tools
 val result = client.callTool(name = "search", arguments = mapOf("q" to "..."))
 ```
+
+## 环境适配修订（2026-08-02 M0 实施阶段）
+
+> 本节为 ADR-001 的修订补充，记录 M0 脚手架实施阶段因开发环境限制对版本配置的调整。原决策（3.5 节）的架构选型不变，仅版本号适配。
+
+### 修订原因
+
+| 环境限制 | 影响 | 验证方法 |
+|---|---|---|
+| `dl.google.com` 完全不可达（连接超时/SSL 中断） | Google Maven 和 Android SDK Repository 均无法访问 | `Invoke-WebRequest` 测试返回超时/连接关闭 |
+| 仅 `android-34` 平台完整安装；`android-36` 安装中断（仅 `.installer` 空目录）；无 `android-35` | compileSdk 只能用 34 | `Get-ChildItem` 检查 `platforms/` 目录 |
+| `sdkmanager` 未安装（cmdline-tools 缺失） | 无法通过命令行安装 SDK 平台 | `Test-Path` 检查 cmdline-tools 目录 |
+| AGP 8.13.0 默认要求 Build Tools 35.0.0；已安装 34.0.0 和 36.1.0 | 需显式指定 `buildToolsVersion = "36.1.0"` | `assembleDebug` 构建验证 |
+| AndroidX core-ktx 1.15.0+ 要求 compileSdk 35+ | 需降级到 compileSdk 34 兼容版本 | AGP 编译期依赖检查报错 |
+
+### 版本调整清单
+
+| 依赖 | 原版本（3.5 节） | 修订版本 | 修订理由 |
+|---|---|---|---|
+| compileSdk | 35 | **34** | 仅 android-34 平台完整可用 |
+| targetSdk | 35 | **34** | 同上（M0 脚手架阶段；后续升级时同步） |
+| buildToolsVersion | 未指定（AGP 默认） | **36.1.0**（显式） | AGP 8.13 默认 35.0.0 未安装；36.1.0 已安装且 ≥ 最低要求 |
+| Compose BOM | 2024.12.01 | **2024.06.00** | 2024.09+ 的 Compose 库要求 compileSdk 35+ |
+| core-ktx | 1.15.0 | **1.13.1** | 1.14.0+ 要求 compileSdk 35+ |
+| lifecycle-runtime-ktx | 2.8.7 | **2.8.3** | 2.8.5+ 可能要求 compileSdk 35+ |
+| activity-compose | 1.9.3 | **1.9.0** | 确保 compileSdk 34 兼容 |
+
+### 未变更项
+
+| 项目 | 版本 | 说明 |
+|---|---|---|
+| AGP | 8.13.0 | 不变，支持 compileSdk 34 |
+| Kotlin | 2.1.0 | 不变，Compose Compiler 插件追踪 Kotlin 版本 |
+| minSdk | 26 | 不变，ADR-001 确认 |
+| Gradle | 8.13 | 不变，满足 AGP 8.13 最低要求 |
+
+### 仓库镜像配置
+
+`settings.gradle.kts` 新增阿里云镜像作为首选仓库，官方源作 fallback：
+
+- `pluginManagement`：阿里云 gradle-plugin + google 镜像 → 官方 google + mavenCentral + gradlePluginPortal
+- `dependencyResolutionManagement`：阿里云 google + public 镜像 → 官方 google + mavenCentral
+
+CI/CD（GitHub Actions Linux）自动回退到官方源，不影响国际贡献者。
+
+### 升级计划
+
+当以下任一条件满足时，应将 compileSdk 升级至 35+ 并恢复原版本：
+
+1. 开发环境安装 `cmdline-tools` + 通过 sdkmanager 安装 android-35/36 平台
+2. 用户通过 Android Studio SDK Manager 安装 android-35/36 平台
+3. CI/CD 环境使用官方 SDK 镜像（Linux 已预装 android-35+）
+
+升级时同步恢复：Compose BOM 2024.12.01 / core-ktx 1.15.0 / lifecycle-runtime-ktx 2.8.7 / activity-compose 1.9.3。
+
+### 构建验证
+
+```
+./gradlew assembleDebug
+BUILD SUCCESSFUL in 1m 52s
+```
+
+APK 产物：`app/build/outputs/apk/debug/app-debug.apk`（8.65 MB，含 classes.dex + AndroidManifest.xml + resources.arsc）。
+
+---
 
 ## 参考
 

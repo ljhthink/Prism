@@ -36,6 +36,8 @@
   - [2026-08-02-prism-tech-selection.md](docs/reports/2026-08-02-prism-tech-selection.md) —— 技术选型对比分析（tech-selection-researcher）
   - [2026-08-02-continuous-learning-archaeology.md](docs/reports/2026-08-02-continuous-learning-archaeology.md) —— Continuous-learning 考古（code-archaeologist）
   - [2026-08-02-openclaw-archaeology.md](docs/reports/2026-08-02-openclaw-archaeology.md) —— OpenClaw/NullClaw 考古（code-archaeologist）
+  - [2026-08-02-us001-m0-scaffold-guardrail.md](docs/reports/2026-08-02-us001-m0-scaffold-guardrail.md) —— US-001 M0 脚手架安全与质量审计（guardrail-enforcer，三轮）
+  - [2026-08-02-us001-m0-scaffold-acceptance.md](docs/reports/2026-08-02-us001-m0-scaffold-acceptance.md) —— US-001 M0 脚手架验收测试（ac-verifier）
 
 ### 运维
 

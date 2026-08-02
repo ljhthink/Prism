@@ -1,0 +1,37 @@
+# 跨平台行结束符与权限控制
+# 依据：BR-build-002（Windows 环境生成的 shell 脚本须确保跨平台可用）
+
+# Unix shell 脚本：强制 LF，确保 Linux/CI 可执行
+gradlew        text eol=lf
+*.sh           text eol=lf
+
+# Windows 批处理脚本：强制 CRLF
+gradlew.bat    text eol=crlf
+*.bat          text eol=crlf
+*.cmd          text eol=crlf
+
+# 二进制文件：不做行结束符转换
+*.jar          binary
+*.png          binary
+*.jpg          binary
+*.keystore     binary
+*.jks          binary
+*.apk          binary
+*.aab          binary
+
+# Kotlin/Java 源码：自动（Windows CRLF / Unix LF）
+*.kt           text
+*.kts          text
+*.java         text
+*.xml          text
+*.properties   text
+*.toml         text
+*.pro          text
+
+# 文档与配置：自动
+*.md           text
+*.json         text
+*.yml          text
+*.yaml         text
+*.cfg          text
+*.txt          text

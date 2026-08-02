@@ -14,8 +14,8 @@
         "Typecheck passes"
       ],
       "priority": 1,
-      "passes": false,
-      "notes": "M0 脚手架。依 ADR-001 最低 Android 8.0 (API 26)。"
+      "passes": true,
+      "notes": "M0 脚手架。依 ADR-001 最低 Android 8.0 (API 26)。已通过 guardrail-enforcer 三轮审查 + ac-verifier 验收（2026-08-02）。"
     },
     {
       "id": "US-002",
