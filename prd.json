@@ -44,8 +44,8 @@
         "Typecheck passes"
       ],
       "priority": 3,
-      "passes": false,
-      "notes": "依 ADR-001 Key 存储：Keystore + DataStore(Tink) + 生物识别。"
+      "passes": true,
+      "notes": "依 ADR-001 Key 存储：Keystore + DataStore(Tink) + 生物识别。已通过 guardrail-enforcer 审查（TKN-PRISM-GUARDRAIL-005，G-01 中风险已修复）+ ac-verifier 验收（TKN-PRISM-ACCEPTANCE-002，2026-08-02）。AC-001 因无模拟器受限通过（JVM 间接验证 + APK 静态检查，与 US-002 同模式）。34 测试通过（14 基础 + 16 边界 + 4 性能基准 @Ignore）。性能基线已建立。"
     },
     {
       "id": "US-004",

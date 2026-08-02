@@ -26,6 +26,17 @@
 - 适用场景：dev
 - 状态：active
 
+#### BR-security-002: Android Keystore StrongBox 密钥生成必须捕获通用异常回退 TEE
+
+- 类别：security
+- 规则：Android Keystore 使用 StrongBox 生成密钥时，不能仅捕获 `StrongBoxUnavailableException`。厂商 StrongBox 实现碎片化可能导致其他异常（如 `ProviderException`、`IllegalStateException`），必须额外捕获通用 `Exception` 回退到 TEE，保证密钥生成可用性。仅捕获 `StrongBoxUnavailableException` 会在部分厂商设备上导致密钥生成失败、应用不可用。
+- 反例：`try { generateStrongBoxKey() } catch (e: StrongBoxUnavailableException) { fallbackTee() }` —— 厂商抛出 `ProviderException` 时未回退，密钥生成失败
+- 正例：`try { generateStrongBoxKey() } catch (e: StrongBoxUnavailableException) { fallbackTee() } catch (e: Exception) { fallbackTee() }` —— 任何异常都回退 TEE
+- 来源：US-003 API Key 加密存储审查（TKN-PRISM-GUARDRAIL-005，G-01 发现）
+- 添加日期：2026-08-02
+- 适用场景：dev
+- 状态：active
+
 ### concurrency
 
 （暂无规则，待累积）
@@ -49,7 +60,16 @@
 
 ### testing
 
-（暂无规则，待累积）
+#### BR-testing-001: 测试替身模拟第三方组件时必须复现原组件关键语义
+
+- 类别：testing
+- 规则：为第三方组件（如 DataStore、Room 等）创建测试替身（Fake/Mock）时，必须复现原组件的关键语义（如原子性、串行化、错误传播）。仅模拟接口方法而不复现语义会导致测试通过但生产环境失败。对于 DataStore，其 `updateData` 保证原子串行化语义；测试替身若用简单字段赋值（非 `MutableStateFlow` 原子更新）会在并发测试中产生假阳性。
+- 反例：`class FakeDataStore { var data: Preferences = emptyPreferences() }` —— 无原子性保证，并发测试假阳性
+- 正例：`class FakeDataStore : DataStore<Preferences> { private val state = MutableStateFlow(initial); override val data = state; override suspend fun updateData(transform) { state.value = transform(state.value) } }` —— 用 `MutableStateFlow` 保证原子性
+- 来源：US-003 API Key 加密存储审查（TKN-PRISM-GUARDRAIL-005，G-04 发现）
+- 添加日期：2026-08-02
+- 适用场景：dev
+- 状态：active
 
 ### docs
 
@@ -122,3 +142,5 @@
 | 2026-08-02 | guardrail-enforcer | 新增 BR-build-003 | US-001 M0 第三轮审查发现镜像缺少 content 过滤（G-10） |
 | 2026-08-02 | guardrail-enforcer | 新增 BR-build-004/005 + BR-security-001 | US-002 ObjectBox 审查发现 JNI DLL 未忽略（G-01）、schema 文件需提交（G-03）、FloatArray equals 缺陷（G-02） |
 | 2026-08-02 | ac-verifier | 验收通过，无新规则 | US-002 ObjectBox 验收（TKN-PRISM-ACCEPTANCE-001）：18 测试通过，性能基线已建立，AC-003 因无模拟器受限通过 |
+| 2026-08-02 | guardrail-enforcer | 新增 BR-security-002 + BR-testing-001 | US-003 API Key 审查（TKN-PRISM-GUARDRAIL-005）：StrongBox 异常捕获过窄（G-01）、测试替身语义缺失（G-04） |
+| 2026-08-02 | ac-verifier | 验收通过，无新规则 | US-003 API Key 验收（TKN-PRISM-ACCEPTANCE-002）：30 测试通过（14 基础 + 16 边界），性能基线已建立，AC-001 因无模拟器受限通过，G-01 已修复确认 |
