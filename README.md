@@ -4,7 +4,7 @@
 
 ## 项目状态
 
-🚧 **M0 脚手架 + M1 数据层 + 安全层 + BYOK Provider 配置已完成（US-001~US-004 通过 guardrail 审查 + ac-verifier 验收），推进 M1 BYOK 聊天 UI 骨架（US-005）**（2026-08-02）
+🚧 **M0 脚手架 + M1 数据层 + 安全层 + BYOK Provider 配置 + 聊天 UI + 流式请求 + Provider 切换已完成（US-001~US-007 通过 guardrail 审查 + ac-verifier 验收），推进 M2 MCP Client（US-008）**（2026-08-06）
 
 - 平台：仅 Android（API 26+，Android 8.0+）
 - 算力：纯云端 BYOK（用户自配 OpenAI/Claude/Ollama 等端点）
@@ -28,6 +28,7 @@
   - [ADR-001 Prism 技术栈与架构选型](docs/decisions/ADR-001-prism-tech-stack.md)（Accepted）
   - [ADR-002 Prism 聊天 UI 架构（US-005）](docs/decisions/ADR-002-prism-chat-ui-architecture.md)（Proposed）
   - [ADR-003 Provider 配置详情页接入（设置模块）](docs/decisions/ADR-003-prism-provider-config-settings.md)（Accepted）
+  - [ADR-004 Prism Provider 流式请求（US-006/US-007）](docs/decisions/ADR-004-prism-provider-streaming.md)（Accepted）
 
 ### Reference（参考 / 报告）
 
@@ -54,6 +55,14 @@
   - [2026-08-05-settings-provider-acceptance.md](docs/reports/2026-08-05-settings-provider-acceptance.md) —— Provider 配置详情页接入验收测试（ac-verifier）
   - [2026-08-05-settings-provider-guardrail-round2.md](docs/reports/2026-08-05-settings-provider-guardrail-round2.md) —— Provider 配置详情页接入增量安全与质量审计（guardrail-enforcer，R2）
   - [2026-08-05-settings-provider-acceptance-round2.md](docs/reports/2026-08-05-settings-provider-acceptance-round2.md) —— Provider 配置详情页接入增量验收测试（ac-verifier，R2）
+  - [2026-08-05-us006-provider-streaming-tech-selection.md](docs/reports/2026-08-05-us006-provider-streaming-tech-selection.md) —— US-006 流式请求技术选型对比（tech-selection-researcher）
+  - [2026-08-05-us006-provider-streaming-guardrail.md](docs/reports/2026-08-05-us006-provider-streaming-guardrail.md) —— US-006 流式请求安全与质量审计（guardrail-enforcer，阻断）
+  - [2026-08-05-us006-guardrail.md](docs/reports/2026-08-05-us006-guardrail.md) —— US-006 流式请求 CR-01~CR-05 修复复审（guardrail-enforcer，条件通过）
+  - [2026-08-06-us006-guardrail-recheck.md](docs/reports/2026-08-06-us006-guardrail-recheck.md) —— US-006 流式请求 CR-02 残留修复复审（guardrail-enforcer，通过）
+  - [2026-08-06-us006-acceptance.md](docs/reports/2026-08-06-us006-acceptance.md) —— US-006 流式请求验收测试（ac-verifier，通过）
+  - [2026-08-06-us007-guardrail.md](docs/reports/2026-08-06-us007-guardrail.md) —— US-007 Provider 切换安全与质量审计（guardrail-enforcer，有条件通过）
+  - [2026-08-06-us007-guardrail-round2.md](docs/reports/2026-08-06-us007-guardrail-round2.md) —— US-007 Provider 切换修复复审（guardrail-enforcer，通过）
+  - [2026-08-06-us007-acceptance.md](docs/reports/2026-08-06-us007-acceptance.md) —— US-007 Provider 切换验收测试（ac-verifier，通过）
   - [性能基线](docs/reports/perf/) —— 性能基线报告目录
     - [2026-08-02-us002-objectbox-crud-baseline.md](docs/reports/perf/2026-08-02-us002-objectbox-crud-baseline.md) —— US-002 ObjectBox CRUD 性能基线
     - [2026-08-02-us003-apikey-baseline.md](docs/reports/perf/2026-08-02-us003-apikey-baseline.md) —— US-003 API Key 加密存储性能基线

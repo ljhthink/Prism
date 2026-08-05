@@ -21,6 +21,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -43,6 +44,7 @@ import io.prism.ui.components.PrismSheetHost
 import io.prism.ui.components.PrismSwitch
 import io.prism.ui.components.PrismTopBar
 import io.prism.ui.theme.PrismCyan
+import io.prism.ui.theme.PrismDanger
 import io.prism.ui.theme.PrismPanel2
 import io.prism.ui.theme.PrismIndigo
 import io.prism.ui.theme.PrismLine
@@ -263,7 +265,7 @@ private fun ProviderListSheet(
     }
 }
 
-/** Provider 详情编辑弹层（config.id=0 为新建自定义模式）。 */
+/** Provider 详情编辑弹层（config.id=0 为新建自定义模式）。含自定义请求头编辑（US-007）与输入校验（N1）。 */
 @Composable
 private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewModel) {
     val isNew = config.id == 0L
@@ -273,6 +275,14 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
     var apiKey by remember(config.id) { mutableStateOf("") }
     var apiKeyLoaded by remember(config.id) { mutableStateOf(false) }
     var enabled by remember(config.id) { mutableStateOf(config.isActive) }
+    // 自定义请求头用 SnapshotStateList：原地改值（headers[index]=…）会触发重组，
+    // 与删除/新增重建列表行为一致，避免丢输入（guardrail Q2）。
+    val headers = remember(config.id) {
+        mutableStateListOf<Pair<String, String>>().apply {
+            addAll(config.headers.entries.map { it.key to it.value })
+        }
+    }
+    var showValidation by remember(config.id) { mutableStateOf(false) }
 
     // 仅首次进入弹层时回显已存 Key，避免重组覆盖用户输入（与 ApiKeySheet 守卫一致）
     if (!apiKeyLoaded) {
@@ -282,13 +292,31 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
         }
     }
 
+    // 输入校验（N1）：名称非空 + Base URL 为合法 http(s) 地址。
+    // CRLF 纵深防御（guardrail S1）：baseUrl / header key/value 拒绝含 \r\n 的输入，
+    // 防止经 buildEndpoint / applyCustomHeaders 注入首部（OkHttp 引擎虽已 fail-closed，此处兜底）。
+    val nameValid = name.trim().isNotEmpty()
+    val baseUrlTrimmed = baseUrl.trim()
+    val urlValid = baseUrlTrimmed.startsWith("http://") || baseUrlTrimmed.startsWith("https://")
+    val urlSafe = urlValid && !baseUrlTrimmed.contains('\r') && !baseUrlTrimmed.contains('\n')
+    val canSave = nameValid && urlValid && urlSafe
+    val validHeaders = headers
+        .map { it.first.trim() to it.second.trim() }
+        .filter { it.first.isNotEmpty() && !it.first.contains('\r') && !it.first.contains('\n') && !it.second.contains('\r') && !it.second.contains('\n') }
+
     PrismSheet(
         title = if (isNew) "新建 Provider" else "编辑 ${config.name}",
-        subtitle = "端点 · 模型 · 激活"
+        subtitle = "端点 · 模型 · 请求头 · 激活"
     ) {
         PrismField(label = "名称", value = name, onValueChange = { name = it }, placeholder = "自定义 Provider 名称")
+        if (showValidation && !nameValid) {
+            ValidationError("名称不能为空")
+        }
         Spacer(Modifier.height(16.dp))
         PrismField(label = "Base URL", value = baseUrl, onValueChange = { baseUrl = it }, placeholder = "https://…")
+        if (showValidation && !urlValid) {
+            ValidationError("Base URL 需以 http:// 或 https:// 开头")
+        }
         Spacer(Modifier.height(16.dp))
         PrismField(label = "模型（逗号分隔）", value = models, onValueChange = { models = it })
         Spacer(Modifier.height(16.dp))
@@ -301,6 +329,59 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
             hint = "Keystore 加密存储 · 明文仅在内存短暂存在"
         )
         Spacer(Modifier.height(20.dp))
+
+        // 自定义请求头编辑器（US-007，上轮决策纳入）
+        Text(text = "自定义请求头", color = PrismTextDim, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.4.sp)
+        Spacer(Modifier.height(8.dp))
+        if (headers.isEmpty()) {
+            Text(text = "无需额外请求头，通常由 Provider 自动填充。", color = PrismTextFaint, fontSize = 11.sp)
+            Spacer(Modifier.height(8.dp))
+        }
+        headers.forEachIndexed { index, (k, v) ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                PrismField(
+                    label = null,
+                    value = k,
+                    onValueChange = { headers[index] = it to v },
+                    placeholder = "Header 名（如 X-API-Key）",
+                    modifier = Modifier.weight(1f)
+                )
+                PrismField(
+                    label = null,
+                    value = v,
+                    onValueChange = { headers[index] = k to it },
+                    placeholder = "值",
+                    modifier = Modifier.weight(1f)
+                )
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(PrismPanel2)
+                        .border(1.dp, PrismLine, RoundedCornerShape(8.dp))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = { headers.removeAt(index) }
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(text = "✕", color = PrismTextDim, fontSize = 12.sp)
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        PrismButton(
+            text = "＋ 添加请求头",
+            variant = PrismButtonVariant.Ghost,
+            onClick = { headers.add("" to "") }
+        )
+        Spacer(Modifier.height(20.dp))
+
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(text = "设为激活 Provider", color = PrismText, fontSize = 14.sp, modifier = Modifier.weight(1f))
             PrismSwitch(checked = enabled, onCheckedChange = { enabled = it })
@@ -308,7 +389,9 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
         Spacer(Modifier.height(16.dp))
         PrismButton(
             text = "保存配置",
+            enabled = canSave,
             onClick = {
+                if (!canSave) { showValidation = true; return@PrismButton }
                 viewModel.saveApiKey(config.apiKeyRef, apiKey)
                 // 激活态绝不直接写入 isActive（会绕过单激活不变式），统一经 setActive 事务处理
                 val savedId = viewModel.saveProvider(
@@ -316,6 +399,7 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
                         name = name.trim().ifEmpty { config.name },
                         baseUrl = baseUrl.trim(),
                         models = models.split(",").map { it.trim() }.filter { it.isNotEmpty() },
+                        headers = validHeaders.toMap(),
                         isActive = false
                     )
                 )
@@ -324,6 +408,10 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
                 }
             }
         )
+        if (showValidation && !canSave) {
+            Spacer(Modifier.height(8.dp))
+            ValidationError("请修正以上无效输入后再保存")
+        }
         Spacer(Modifier.height(12.dp))
         PrismButton(
             text = "激活",
@@ -340,6 +428,18 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
             )
         }
     }
+}
+
+/** 校验错误提示（薄荷红系警示文案）。 */
+@Composable
+private fun ValidationError(text: String) {
+    Text(
+        text = text,
+        color = PrismDanger,
+        fontSize = 11.sp,
+        lineHeight = 16.sp,
+        modifier = Modifier.padding(top = 6.dp)
+    )
 }
 
 /** API Key 管理弹层。 */

@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 /**
  * 设置界面 ViewModel —— 管理 Provider 配置与 API Key。
@@ -78,7 +79,7 @@ class SettingsViewModel(
         _selectedProvider.value = ProviderConfig(
             name = "",
             baseUrl = "",
-            apiKeyRef = "custom-${System.currentTimeMillis()}",
+            apiKeyRef = "custom-${UUID.randomUUID()}",
             models = emptyList()
         )
     }

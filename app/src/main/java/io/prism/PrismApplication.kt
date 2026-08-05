@@ -3,9 +3,13 @@ package io.prism
 import android.app.Application
 import android.content.Context
 import androidx.datastore.preferences.preferencesDataStore
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.plugins.sse.SSE
 import io.objectbox.BoxStore
 import io.prism.data.MyObjectBox
 import io.prism.data.ProviderConfigRepository
+import io.prism.network.OpenAICompatibleProvider
 import io.prism.security.ApiKeyRepository
 import io.prism.security.CryptoService
 import io.prism.security.KeystoreCryptoService
@@ -34,6 +38,22 @@ class PrismApplication : Application() {
 
     /** API Key 加密存储仓库（DataStore 单例 + 加密服务） */
     val apiKeyRepository: ApiKeyRepository by lazy { ApiKeyRepository(dataStore, cryptoService) }
+
+    /** HTTP 客户端（OkHttp engine + SSE 插件，供流式对话使用，ADR-004 4.1） */
+    val httpClient: HttpClient by lazy {
+        HttpClient(OkHttp) {
+            // expectSuccess=true：非 2xx 抛 ClientRequestException（4xx），
+            // 使 OpenAICompatibleProvider 能区分 401 鉴权失败与其他 4xx（US-007 LOW 修复；
+            // 默认 false 时 4xx 被 SSE 插件转成普通异常，落入通用网络错误分支）。
+            expectSuccess = true
+            install(SSE)
+        }
+    }
+
+    /** OpenAI 兼容 Provider 流式请求（依赖 httpClient + apiKeyRepository） */
+    val openAICompatibleProvider: OpenAICompatibleProvider by lazy {
+        OpenAICompatibleProvider(httpClient, apiKeyRepository)
+    }
 
     override fun onCreate() {
         super.onCreate()

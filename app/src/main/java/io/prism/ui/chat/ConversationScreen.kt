@@ -12,13 +12,16 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -45,14 +48,18 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import io.prism.PrismApplication
+import io.prism.data.ProviderConfig
 import io.prism.ui.components.PrismAvatar
+import io.prism.ui.components.PrismButton
+import io.prism.ui.components.PrismButtonVariant
 import io.prism.ui.components.PrismGlassCard
+import io.prism.ui.components.PrismSheet
+import io.prism.ui.components.PrismSheetHost
 import io.prism.ui.components.PrismTopBar
 import io.prism.ui.components.PrismTopBarAction
 import io.prism.ui.model.ChatMessage
@@ -63,6 +70,7 @@ import io.prism.ui.theme.PrismIndigoSoft
 import io.prism.ui.theme.PrismLine
 import io.prism.ui.theme.PrismMint
 import io.prism.ui.theme.PrismPanel
+import io.prism.ui.theme.PrismPanel2
 import io.prism.ui.theme.PrismText
 import io.prism.ui.theme.PrismTextDim
 import io.prism.ui.theme.PrismTextFaint
@@ -78,51 +86,146 @@ import io.prism.ui.theme.PrismTextFaint
  */
 @Composable
 fun ConversationScreen(
-    viewModel: ConversationViewModel = viewModel()
+    viewModel: ConversationViewModel = viewModel(factory = ConversationViewModel.Factory)
 ) {
     val messages by viewModel.messages.collectAsState()
     val isTyping by viewModel.isTyping.collectAsState()
-    val context = LocalContext.current
-    val app = context.applicationContext as? PrismApplication
-    val activeProvider by (app?.providerConfigRepository?.activeProviderFlow)
-        ?.collectAsState() ?: remember { mutableStateOf<io.prism.data.ProviderConfig?>(null) }
+    val activeProvider by viewModel.activeProvider.collectAsState()
+    val providers by viewModel.providers.collectAsState()
+    var providerSelectorVisible by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        PrismTopBar(
-            title = "Prism",
-            subtitle = activeProvider?.name ?: "Prism AI · 未配置",
-            actions = {
-                PrismTopBarAction(icon = { Icon(Icons.Filled.Add, null, tint = PrismTextDim) }, contentDescription = "新会话")
-                PrismTopBarAction(icon = { Icon(Icons.Filled.Bolt, null, tint = PrismTextDim) }, contentDescription = "能力")
-            }
-        )
+    Box(modifier = Modifier.fillMaxSize()) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            PrismTopBar(
+                title = "Prism",
+                subtitle = "深空 AI · ${activeProvider?.name ?: "未配置"}",
+                actions = {
+                    PrismTopBarAction(icon = { Icon(Icons.Filled.Add, null, tint = PrismTextDim) }, contentDescription = "新会话")
+                    PrismTopBarAction(icon = { Icon(Icons.Filled.Bolt, null, tint = PrismTextDim) }, contentDescription = "能力")
+                }
+            )
 
-        LazyColumn(
-            state = listState,
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            items(messages, key = { it.id }) { message ->
-                MessageBubble(message)
+            // Provider 选择器胶囊（US-007）：点击弹出切换列表
+            ProviderChip(
+                name = activeProvider?.name,
+                onClick = { providerSelectorVisible = true }
+            )
+
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                items(messages, key = { it.id }) { message ->
+                    MessageBubble(message)
+                }
+                if (isTyping) {
+                    item { TypingIndicator() }
+                }
             }
-            if (isTyping) {
-                item { TypingIndicator() }
-            }
+
+            MessageInputBar(
+                value = input,
+                onValueChange = { input = it },
+                onSend = {
+                    viewModel.sendMessage(input)
+                    input = ""
+                }
+            )
         }
 
-        MessageInputBar(
-            value = input,
-            onValueChange = { input = it },
-            onSend = {
-                viewModel.sendMessage(input)
-                input = ""
-            }
+        // Provider 切换弹层（US-007）
+        PrismSheetHost(visible = providerSelectorVisible, onDismiss = { providerSelectorVisible = false }) {
+            ProviderSelectorSheet(
+                providers = providers,
+                activeId = activeProvider?.id,
+                onSelect = { viewModel.setActiveProvider(it); providerSelectorVisible = false },
+                onClose = { providerSelectorVisible = false }
+            )
+        }
+    }
+}
+
+/** 当前 Provider 胶囊 —— 点击弹出切换列表（US-007）。 */
+@Composable
+private fun ProviderChip(name: String?, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .padding(horizontal = 20.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(PrismPanel2)
+            .border(1.dp, PrismLine, RoundedCornerShape(10.dp))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(text = "◈", color = PrismMint, fontSize = 12.sp)
+        Text(
+            text = name ?: "选择 Provider",
+            color = if (name != null) PrismText else PrismTextDim,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold
         )
+        Spacer(Modifier.weight(1f))
+        Text(text = "切换 ▾", color = PrismTextFaint, fontSize = 10.sp)
+    }
+}
+
+/** Provider 切换列表弹层（US-007）。 */
+@Composable
+private fun ProviderSelectorSheet(
+    providers: List<ProviderConfig>,
+    activeId: Long?,
+    onSelect: (Long) -> Unit,
+    onClose: () -> Unit
+) {
+    PrismSheet(
+        title = "切换 Provider",
+        subtitle = "切换后保留对话历史，新消息走新 Provider"
+    ) {
+        if (providers.isEmpty()) {
+            Text(text = "尚未配置 Provider，请到「设置」中添加并激活。", color = PrismTextFaint, fontSize = 12.sp)
+            Spacer(Modifier.height(16.dp))
+        }
+        providers.forEach { config ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(PrismPanel2)
+                    .border(1.dp, if (config.id == activeId) PrismMint.copy(alpha = 0.4f) else PrismLine, RoundedCornerShape(12.dp))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { onSelect(config.id) }
+                    )
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(text = "◈", color = PrismIndigo, fontSize = 14.sp)
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(text = config.name, color = PrismText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text(text = config.baseUrl, color = PrismTextFaint, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                if (config.id == activeId) {
+                    Text(text = "当前", color = PrismMint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        Spacer(Modifier.height(8.dp))
+        PrismButton(text = "关闭", variant = PrismButtonVariant.Ghost, onClick = onClose)
     }
 }
 

@@ -75,8 +75,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 5,
-      "passes": false,
-      "notes": "Context7 验证 Compose NavHost + hiltViewModel + StateFlow。"
+      "passes": true,
+      "notes": "聊天 UI 骨架已完成（2026-08-05）：PrismApp 用 NavHost 配置 4 Tab 主路由（会话/知识库/能力/设置），ConversationScreen 显示消息列表 + 输入框，ConversationViewModel 用 StateFlow 暴露 messages/isTyping，发送可更新 UI（暂不接 AI）。guardrail-enforcer + ac-verifier 验收通过（TKN-PRISM-ACCEPTANCE-004，4 测试通过）。AC-6 浏览器验证为原生 Android 应用不适用，与 US-002/003/004 同模式跳过。"
     },
     {
       "id": "US-006",
@@ -90,8 +90,8 @@
         "Typecheck passes"
       ],
       "priority": 6,
-      "passes": false,
-      "notes": "US-001 验收标准 4-6。用 Ktor HttpClient SSE。"
+      "passes": true,
+      "notes": "US-001 验收标准 4-6。用 Ktor HttpClient SSE。已通过 guardrail-enforcer 审查（TKN-NETWORK-US006-002，CR-01~CR-05 闭合）+ ac-verifier 验收（TKN-NETWORK-US006-AC-001，2026-08-06，AC-2 公网首字延迟受限通过待 US-007 真机补测）。SSE 首字延迟 JVM 基线 p99≈4ms。单元+集成 23 用例，全量 167 用例 0 失败。"
     },
     {
       "id": "US-007",
@@ -105,8 +105,8 @@
         "Verify in browser using dev-browser skill"
       ],
       "priority": 7,
-      "passes": false,
-      "notes": "US-001 验收标准 3。"
+      "passes": true,
+      "notes": "US-001 验收标准 3。Provider 切换已完成（2026-08-06）：Provider 选择器胶囊 + 底部切换弹层（保留历史、新消息走新 Provider），自定义 headers 编辑界面，名称/BaseURL 输入校验，3 项 guardrail LOW 修复（401 文案区分 / 头名大小写 / apiKeyRef 空回退自定义 Authorization 头）。guardrail 两轮审查（TKN-US007-GUARDRAIL-001/002）+ ac-verifier 验收（TKN-US007-ACCEPTANCE-001）通过。AC-5 浏览器验证为原生 Android 不适用，与 US-002/003/004/005/006 同模式受限通过。"
     },
     {
       "id": "US-008",

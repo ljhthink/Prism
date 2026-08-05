@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.byteArrayPreferencesKey
 import androidx.datastore.preferences.core.edit
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
 /**
@@ -59,6 +60,16 @@ class ApiKeyRepository(
                 }
             }
         }
+
+    /**
+     * 读取 API Key 明文（suspend 单值）。
+     *
+     * 供流式请求在协程内一次取用明文（ADR-004 4.4），语义等价于 `readApiKey(key).first()`。
+     *
+     * @param key API Key 标识符
+     * @return 解密后的明文；不存在或解密失败返回 null
+     */
+    suspend fun readApiKeyOnce(key: String): String? = readApiKey(key).first()
 
     /**
      * 删除指定的 API Key。

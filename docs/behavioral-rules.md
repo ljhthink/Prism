@@ -11,7 +11,27 @@
 
 ### error-handling
 
-（暂无规则，待累积）
+#### BR-error-handling-003: 错误文案安全映射时应保留业务语义区分
+
+- 类别：error-handling
+- 规则：对异常做安全映射（隐藏内部细节）时，应保留业务语义区分（如 401 鉴权失败 vs 网络断开），避免为隐藏细节而将诊断价值一并抹除。映射结果不得泄露内部路径/堆栈，但应能区分可诊断类别。
+- 反例：所有异常统一为「网络请求失败」—— 区分不了「API Key 无效」与「断网」
+- 正例：`if (isUnauthorized) "鉴权失败，请检查 API Key" else "网络请求失败，请检查网络连接或 Provider 配置"`（均不泄露内部细节）
+- 来源：US-006 流式请求修复复审（TKN-NETWORK-US006-001，发现 3）
+- 添加日期：2026-08-06
+- 适用场景：dev
+- 状态：active
+
+#### BR-error-handling-004: catch 兜底异常须输出结构日志并保留可诊断类别
+
+- 类别：error-handling
+- 规则：`catch (e: Exception)` 兜底时，除向用户提供通用安全文案外，应记录结构化日志（含异常类型与可诊断信息，不含密钥/请求体/完整 URL），禁止静默吞异常。若项目暂未引入结构化日志基建，应在该分支保留注释说明异常被归一化处理，且不得将内部异常细节（路径/堆栈）暴露给用户。
+- 反例：`catch (e: Exception) { emit(StreamEvent.Error("网络请求失败")) }` —— 无任何日志，异常被静默吞掉，难定位
+- 正例：`catch (e: Exception) { logger.error("chat stream failed", e); emit(StreamEvent.Error("网络请求失败…")) }`（日志不含密钥/请求体）
+- 来源：US-007 流式请求审查（TKN-US007-GUARDRAIL-001，Q3）
+- 添加日期：2026-08-06
+- 适用场景：dev
+- 状态：active
 
 ### security
 
@@ -48,6 +68,17 @@
 - 适用场景：dev
 - 状态：active
 
+#### BR-security-003: 用户可配置 header/URL 在保存点须拒绝控制字符（CRLF）
+
+- 类别：security
+- 规则：用户可配置的 HTTP header 名称/值、base URL 等，在保存点（UI 校验层）即须拒绝控制字符（`\r`/`\n`/`\u0000`），不宜仅依赖运行时引擎的 fail-closed 行为作为唯一防线。CRLF 注入可导致请求头拆分/污染，纵深防御应在入口校验。
+- 反例：直接把用户输入的 header 值写入请求构造函数，仅依赖 OkHttp 对含 `\r`/`\n` 值抛异常
+- 正例：保存时过滤 `it.contains('\r') || it.contains('\n')`，非法输入阻止保存并提示
+- 来源：US-007 自定义 headers 审查（TKN-US007-GUARDRAIL-001，S1）
+- 添加日期：2026-08-06
+- 适用场景：dev
+- 状态：active
+
 ### concurrency
 
 #### BR-concurrency-001: 多步骤数据库状态变更必须使用事务保证原子性
@@ -74,6 +105,17 @@
 - 适用场景：dev
 - 状态：active
 
+#### BR-interface-003: 请求历史过滤空占位消息必须排除所有空 content 的 assistant 消息
+
+- 类别：interface
+- 规则：构造对话请求历史时，过滤空占位消息必须排除**所有**空 content 的 assistant 消息，而非仅排除当前刚追加的占位。否则上一轮因服务端零增量（仅 `[DONE]`）结束而残留的空 AI 消息仍会进入请求体，被严格 API 拒绝（400）。
+- 反例：`_messages.value.filterNot { it.id == aiId }` —— 只排除当前占位，历史遗留空 AI 消息仍入请求体
+- 正例：`_messages.value.filterNot { it.role == Role.ASSISTANT && it.content.isEmpty() }`
+- 来源：US-006 流式请求修复复审（TKN-NETWORK-US006-001，发现 1）
+- 添加日期：2026-08-06
+- 适用场景：dev
+- 状态：active
+
 ### ops
 
 （暂无规则，待累积）
@@ -88,6 +130,17 @@
 - 正例：`class FakeDataStore : DataStore<Preferences> { private val state = MutableStateFlow(initial); override val data = state; override suspend fun updateData(transform) { state.value = transform(state.value) } }` —— 用 `MutableStateFlow` 保证原子性
 - 来源：US-003 API Key 加密存储审查（TKN-PRISM-GUARDRAIL-005，G-04 发现）
 - 添加日期：2026-08-02
+- 适用场景：dev
+- 状态：active
+
+#### BR-ui-001: Compose 状态持有可变列表时禁止原地改值
+
+- 类别：testing
+- 规则：将可变列表持有于 Compose 状态时，禁止对 `mutableStateOf(list)` 中的列表**原地改值**（如 `xs[i] = v`、`xs.add(...)`），因为 `mutableStateOf` 只侦测引用变化，原地改值不触发重组，导致 UI 不回显/丢输入。必须重建新列表，或使用 `mutableStateListOf`（其内部为快照列表，原地改值亦触发重组），与删除/新增行为保持一致。
+- 反例：`var xs by remember { mutableStateOf(mutableListOf(...)) }; xs[i] = v` —— 界面不更新
+- 正例：`val xs = remember { mutableStateListOf<Pair<String,String>>() }; xs[i] = v` —— 原地改值触发重组
+- 来源：US-007 自定义 headers 编辑器审查（TKN-US007-GUARDRAIL-001，Q2）
+- 添加日期：2026-08-06
 - 适用场景：dev
 - 状态：active
 
@@ -168,3 +221,6 @@
 | 2026-08-02 | 主 Agent | 确认 BR-concurrency-001 + BR-data-001 | 修复 G-01（setActive 用 runInTx 事务）+ G-02（StringListConverter 单次扫描转义/反转义），新增 3 边界测试，35 测试通过 |
 | 2026-08-02 | guardrail-enforcer | 复审通过，无新规则 | US-004 复审（TKN-PRISM-GUARDRAIL-006）：G-01/G-02 修复正确，报告追加 8.6 节独立复审确认 |
 | 2026-08-02 | ac-verifier | 验收通过，无新规则 | US-004 ProviderConfig 验收（TKN-PRISM-ACCEPTANCE-003）：52 测试通过（35 基础 + 17 边缘），性能基线已建立，AC-3 真实设备持久化因无模拟器受限通过，G-01/G-02 已修复确认 |
+| 2026-08-06 | guardrail-enforcer | 新增 BR-error-handling-004 + BR-ui-001 + BR-security-003 | US-007 Provider 切换审查（TKN-US007-GUARDRAIL-001）：Q2 headers 编辑器原地改值（MEDIUM）、Q3 catch 无日志（LOW）、Q4 apiKeyRef 时间戳碰撞（LOW）、Q5/S1 CRLF 纵深防御（LOW） |
+| 2026-08-06 | guardrail-enforcer | 复审通过，无新规则 | US-007 复审（TKN-US007-GUARDRAIL-002）：Q2（mutableStateListOf）/Q4（UUID）/Q5（CRLF 校验）修复正确，单激活不变式保持，可进入 ac-verifier |
+| 2026-08-06 | ac-verifier | 验收通过，无新规则 | US-007 Provider 切换验收（TKN-US007-ACCEPTANCE-001）：prd.json 五条 AC 满足，SSE 首字延迟 p99 +1.7% 无回退，安全通过，回归 157 用例 0 失败 |

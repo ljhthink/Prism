@@ -34,7 +34,7 @@ import io.prism.ui.theme.PrismTextFaint
  */
 @Composable
 fun PrismField(
-    label: String,
+    label: String? = null,
     value: String,
     onValueChange: (String) -> Unit,
     modifier: Modifier = Modifier,
@@ -44,14 +44,16 @@ fun PrismField(
     trailing: (@Composable () -> Unit)? = null
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
-        Text(
-            text = label,
-            color = PrismTextDim,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.4.sp,
-            modifier = Modifier.padding(bottom = 7.dp)
-        )
+        if (label != null) {
+            Text(
+                text = label,
+                color = PrismTextDim,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                letterSpacing = 0.4.sp,
+                modifier = Modifier.padding(bottom = 7.dp)
+            )
+        }
         Row(
             modifier = Modifier
                 .fillMaxWidth()
