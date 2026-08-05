@@ -80,9 +80,63 @@
         }
       ],
       "relations": []
+    },
+    {
+      "id": "3:8462063586024992104",
+      "lastPropertyId": "9:8056497783581255741",
+      "name": "McpServerConfig",
+      "properties": [
+        {
+          "id": "1:5357346489113237287",
+          "name": "id",
+          "type": 6,
+          "flags": 1
+        },
+        {
+          "id": "2:4496541196069693225",
+          "name": "name",
+          "type": 9
+        },
+        {
+          "id": "3:4875708070054859318",
+          "name": "serverType",
+          "type": 9
+        },
+        {
+          "id": "4:2830681246801668775",
+          "name": "transport",
+          "type": 9
+        },
+        {
+          "id": "5:3902001180733905656",
+          "name": "baseUrl",
+          "type": 9
+        },
+        {
+          "id": "6:3615321285042753433",
+          "name": "apiKeyRef",
+          "type": 9
+        },
+        {
+          "id": "7:696707411007737155",
+          "name": "headers",
+          "type": 9
+        },
+        {
+          "id": "8:3715854321624412562",
+          "name": "isEnabled",
+          "type": 1
+        },
+        {
+          "id": "9:8056497783581255741",
+          "name": "createdAt",
+          "type": 6
+        }
+      ],
+      "relations": []
     }
   ],
-  "lastEntityId": "2:2044962236284629724",
+  "lastEntityId": "3:8462063586024992104",
   "lastIndexId": "0:0",
   "lastRelationId": "0:0",
   "lastSequenceId": "0:0",

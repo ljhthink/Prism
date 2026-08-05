@@ -35,8 +35,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
+    kotlin {
+        compilerOptions {
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+        }
     }
 
     buildFeatures {
@@ -53,11 +55,15 @@ android {
         }
     }
 
-    // 临时配置：禁用 lint 崩溃检测器（已知工具链问题，US-005 验证后仍保留以维持 Typecheck）
-    // 背景：Kotlin 2.1.0 产 metadata v2.1.0，lint 内置 kotlinx-metadata-jvm 仅支持 v2.0.0，
-    // ComposableCoroutineCreationDetector 解析含协程的测试文件时崩溃。非 US-005 代码缺陷。
+    // 临时配置：禁用 lint 崩溃检测器（已知工具链问题，保留以维持 Typecheck）。
+    // 背景：Kotlin 2.3.21 产 metadata v2.3.0，lint 内置 kotlinx-metadata-jvm 无法读取更高版本 metadata，
+    // 导致多个 UAST 检测器解析含协程/StateFlow 的源码时抛 throwIfNotCompatible 崩溃（非业务代码缺陷）。
+    // US-008 guardrail L1 实测（2026-08-06 lintDebug）：Kotlin 2.3.21 下 CoroutineCreationDuringComposition、
+    // StateFlowValueCalledInComposition、FlowOperatorInvokedInComposition 均崩溃，故一并禁用。
     lint {
         disable += "CoroutineCreationDuringComposition"
+        disable += "StateFlowValueCalledInComposition"
+        disable += "FlowOperatorInvokedInComposition"
     }
 }
 
@@ -81,6 +87,7 @@ dependencies {
     implementation(libs.ktor.client.content.negotiation)
     implementation(libs.ktor.serialization.kotlinx.json)
     implementation(libs.kotlinx.serialization.json)
+    implementation(libs.mcp.kotlin.sdk.client)
     debugImplementation(libs.androidx.ui.tooling)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
@@ -89,4 +96,6 @@ dependencies {
     testImplementation(libs.ktor.server.core)
     testImplementation(libs.ktor.server.netty)
     testImplementation(libs.ktor.server.sse)
+    // 真实 MCP Server 集成测试（ADR-005 5.6：嵌入式 Ktor Netty 起 Streamable HTTP 端点）
+    testImplementation(libs.mcp.kotlin.sdk.server)
 }

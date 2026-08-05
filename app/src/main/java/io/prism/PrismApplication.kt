@@ -7,8 +7,10 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.sse.SSE
 import io.objectbox.BoxStore
+import io.prism.data.McpServerRepository
 import io.prism.data.MyObjectBox
 import io.prism.data.ProviderConfigRepository
+import io.prism.network.McpClientManager
 import io.prism.network.OpenAICompatibleProvider
 import io.prism.security.ApiKeyRepository
 import io.prism.security.CryptoService
@@ -53,6 +55,14 @@ class PrismApplication : Application() {
     /** OpenAI 兼容 Provider 流式请求（依赖 httpClient + apiKeyRepository） */
     val openAICompatibleProvider: OpenAICompatibleProvider by lazy {
         OpenAICompatibleProvider(httpClient, apiKeyRepository)
+    }
+
+    /** MCP Server 配置仓库（延迟初始化，供 UI 读取/管理 MCP Server 配置） */
+    val mcpServerRepository: McpServerRepository by lazy { McpServerRepository(boxStore) }
+
+    /** MCP Client 连接层（依赖 httpClient + apiKeyRepository，ADR-005 5.3） */
+    val mcpClientManager: McpClientManager by lazy {
+        McpClientManager(httpClient, apiKeyRepository)
     }
 
     override fun onCreate() {

@@ -133,6 +133,28 @@
 - 适用场景：dev
 - 状态：active
 
+#### BR-testing-002: 集成测试「先启动资源再断言」必须在 try 块内或辅助函数自清理
+
+- 类别：testing
+- 规则：集成测试中任何「先启动资源（如起嵌入式服务器）再断言」的辅助函数，必须置于 `try` 块内，或辅助函数自身对失败路径自清理，确保资源获取失败时不留泄漏。若启动成功后取端口/句柄的后续步骤抛异常，已启动的资源仍须被清理。
+- 反例：`val port = startMcpServer()` 位于 `try` 之外 —— 若 `startMcpServer()` 内部 `resolvedConnectors()` 取端口失败，`finally { stopServers() }` 不会执行，服务器泄漏
+- 正例：`val port = try { startMcpServer() } catch (e: Exception) { stopServers(); throw e }`，或 `startMcpServer()` 内部 `try/catch` 兜底 stop；清理函数对每个 teardown 逐项容错并最终 `clear()`
+- 来源：US-008 MCP 集成测试审查（TKN-MCP-CLIENT-GUARDRAIL-005，Q1/Q3）
+- 添加日期：2026-08-06
+- 适用场景：dev
+- 状态：active
+
+#### BR-testing-003: 真实服务器集成测试的 HttpClient 必须与生产逐项对齐
+
+- 类别：testing
+- 规则：起真实服务器的集成测试，其 HttpClient 配置必须与生产（如 `PrismApplication.httpClient`）逐项对齐（engine、插件、`expectSuccess` 等），避免测试环境与生产行为漂移。仅对齐部分配置（如只 `install(SSE)` 而省略 `expectSuccess`）可能导致测试通过但生产行为不一致。
+- 反例：测试仅 `HttpClient(OkHttp) { install(SSE) }`，而生产含 `expectSuccess = true` —— 非 2xx 行为在测试与生产间漂移
+- 正例：`HttpClient(OkHttp) { install(SSE); expectSuccess = true }`，并用注释说明「与生产 PrismApplication.httpClient 逐项对齐」
+- 来源：US-008 MCP 集成测试审查（TKN-MCP-CLIENT-GUARDRAIL-005，Q2）
+- 添加日期：2026-08-06
+- 适用场景：dev
+- 状态：active
+
 #### BR-ui-001: Compose 状态持有可变列表时禁止原地改值
 
 - 类别：testing
@@ -224,3 +246,5 @@
 | 2026-08-06 | guardrail-enforcer | 新增 BR-error-handling-004 + BR-ui-001 + BR-security-003 | US-007 Provider 切换审查（TKN-US007-GUARDRAIL-001）：Q2 headers 编辑器原地改值（MEDIUM）、Q3 catch 无日志（LOW）、Q4 apiKeyRef 时间戳碰撞（LOW）、Q5/S1 CRLF 纵深防御（LOW） |
 | 2026-08-06 | guardrail-enforcer | 复审通过，无新规则 | US-007 复审（TKN-US007-GUARDRAIL-002）：Q2（mutableStateListOf）/Q4（UUID）/Q5（CRLF 校验）修复正确，单激活不变式保持，可进入 ac-verifier |
 | 2026-08-06 | ac-verifier | 验收通过，无新规则 | US-007 Provider 切换验收（TKN-US007-ACCEPTANCE-001）：prd.json 五条 AC 满足，SSE 首字延迟 p99 +1.7% 无回退，安全通过，回归 157 用例 0 失败 |
+| 2026-08-06 | guardrail-enforcer | 新增 BR-testing-002 + BR-testing-003 | US-008 MCP 集成测试审查（TKN-MCP-CLIENT-GUARDRAIL-005）：Q1「先启动资源再断言」在 try 外、Q2 测试 HttpClient 未逐项对齐生产、Q3 stopServers 未逐项容错 |
+| 2026-08-06 | ac-verifier | 验收通过，无新规则 | US-008 MCP Client 复验（TKN-MCP-CLIENT-AC-002）：DEF-001/GAP-001/GAP-002 三项闭合，AC-1~AC-5 全部通过，lintDebug BUILD SUCCESSFUL，回归 214 用例 0 失败 |

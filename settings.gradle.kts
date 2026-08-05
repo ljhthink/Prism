@@ -44,7 +44,15 @@ dependencyResolutionManagement {
                 excludeGroupByRegex("androidx.*")
             }
         }
-        google()
+        google {
+            // BR-build-003：官方 google 源同样限定 Android 组，避免 io.ktor / io.modelcontextprotocol
+            // 等非 Android 依赖被发往不可达的 dl.google.com 导致解析超时（ADR-001 环境适配修订）
+            content {
+                includeGroupByRegex("com\\.android.*")
+                includeGroupByRegex("com\\.google.*")
+                includeGroupByRegex("androidx.*")
+            }
+        }
         mavenCentral()
     }
 }

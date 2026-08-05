@@ -28,10 +28,12 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,10 +41,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import io.prism.data.McpServerConfig
+import io.prism.data.McpServerType
 import io.prism.ui.components.PrismButton
 import io.prism.ui.components.PrismButtonVariant
+import io.prism.ui.components.PrismCard
 import io.prism.ui.components.PrismField
-import io.prism.ui.components.PrismGlassCard
 import io.prism.ui.components.PrismSegmented
 import io.prism.ui.components.PrismStatusDot
 import io.prism.ui.components.PrismDotState
@@ -63,29 +68,6 @@ import io.prism.ui.theme.PrismTextFaint
 /** 能力中枢分段。 */
 private enum class CapSegment(val label: String) { MCP("MCP 工具"), SKILLS("Skills"), MEMORY("记忆") }
 
-/** MCP Server 状态。 */
-private data class McpServer(
-    val icon: String,
-    val name: String,
-    val desc: String,
-    val state: PrismDotState,
-    val enabled: Boolean,
-    val accent: Color = PrismIndigo
-)
-
-private val localMcp = listOf(
-    McpServer("F", "Filesystem", "本地文件系统", PrismDotState.OK, true),
-    McpServer("⊕", "Fetch", "网页抓取", PrismDotState.RUN, true, PrismCyan),
-    McpServer("M", "Memory", "记忆读写", PrismDotState.OK, true),
-    McpServer("◈", "Sequential Thinking", "深度推理", PrismDotState.OK, true)
-)
-
-private val remoteMcp = listOf(
-    McpServer("G", "GitHub", "已连接 · 填 Key 激活", PrismDotState.OK, true, PrismCyan),
-    McpServer("N", "Notion", "需配置 Token", PrismDotState.ERR, false),
-    McpServer("C", "Context7", "需配置 API Key", PrismDotState.ERR, false)
-)
-
 /** Skill。 */
 private data class PrismSkill(
     val icon: String,
@@ -104,16 +86,19 @@ private val skills = listOf(
 )
 
 /**
- * 能力中枢屏幕 —— 深空玻璃肌理（设计规范 v0.4 第 8.3 节，US-002/004/005）。
+ * 能力中枢屏幕 —— 深空玻璃肌理（设计规范 v0.4 第 8.3 节，US-002/004/005/008）。
  *
- * 顶部三段式（MCP 工具 / Skills / 记忆）。点击 MCP Server 行 → 打开**配置弹层**（传输类型 /
- * Base URL / Token / 测试连接 / 启用 / 删除）；点击 Skill 行 → 打开**详情弹层**（说明 / 参数 / 启用）。
+ * 顶部三段式（MCP 工具 / Skills / 记忆）。MCP 段接入 [CapabilitiesViewModel]，展示动态、
+ * 可配置的 MCP Server（US-008）：点击 Server 行 → 配置弹层（Base URL / API Key / 自定义头 /
+ * 测试连接 / 启用 / 删除）；点击预设模板 → 一键创建；点击「新建」→ 自定义 Server。
  */
 @Composable
-fun CapabilitiesScreen() {
+fun CapabilitiesScreen(
+    viewModel: CapabilitiesViewModel = viewModel(factory = CapabilitiesViewModel.Factory)
+) {
     var segment by remember { mutableStateOf(CapSegment.MCP) }
-    var mcpTarget by remember { mutableStateOf<McpServer?>(null) }
-    var skillTarget by remember { mutableStateOf<PrismSkill?>(null) }
+    val servers by viewModel.servers.collectAsState()
+    val selectedServer by viewModel.selectedServer.collectAsState()
 
     Box {
         LazyColumn(
@@ -129,7 +114,12 @@ fun CapabilitiesScreen() {
                             modifier = Modifier
                                 .size(36.dp)
                                 .background(PrismPanel2, RoundedCornerShape(12.dp))
-                                .border(1.dp, PrismLine, RoundedCornerShape(12.dp)),
+                                .border(1.dp, PrismLine, RoundedCornerShape(12.dp))
+                                .clickable(
+                                    interactionSource = remember { MutableInteractionSource() },
+                                    indication = null,
+                                    onClick = { viewModel.newCustomServer() }
+                                ),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(Icons.Filled.Add, null, tint = PrismTextDim)
@@ -152,7 +142,11 @@ fun CapabilitiesScreen() {
                     enter = fadeIn() + slideInVertically { it / 4 },
                     exit = fadeOut()
                 ) {
-                    McpPanel(onServerClick = { mcpTarget = it })
+                    McpPanel(
+                        servers = servers,
+                        viewModel = viewModel,
+                        onServerClick = { viewModel.selectServer(it) }
+                    )
                 }
             }
             item {
@@ -161,7 +155,7 @@ fun CapabilitiesScreen() {
                     enter = fadeIn() + slideInVertically { it / 4 },
                     exit = fadeOut()
                 ) {
-                    SkillsPanel(onSkillClick = { skillTarget = it })
+                    SkillsPanel(onSkillClick = { })
                 }
             }
             item {
@@ -176,125 +170,312 @@ fun CapabilitiesScreen() {
         }
 
         // MCP Server 配置弹层
-        PrismSheetHost(visible = mcpTarget != null, onDismiss = { mcpTarget = null }) {
-            mcpTarget?.let { McpConfigSheet(it) }
-        }
-        // Skill 详情弹层
-        PrismSheetHost(visible = skillTarget != null, onDismiss = { skillTarget = null }) {
-            skillTarget?.let { SkillDetailSheet(it) }
+        PrismSheetHost(visible = selectedServer != null, onDismiss = { viewModel.selectServer(null) }) {
+            selectedServer?.let { McpConfigSheet(it, viewModel) }
         }
     }
 }
 
-/** MCP 工具面板。 */
+/** MCP 工具面板 —— 本地/远程分组展示动态 Server + 预设快捷添加。 */
 @Composable
-private fun McpPanel(onServerClick: (McpServer) -> Unit) {
+private fun McpPanel(
+    servers: List<McpServerConfig>,
+    viewModel: CapabilitiesViewModel,
+    onServerClick: (McpServerConfig) -> Unit
+) {
+    val local = servers.filter { it.serverType == McpServerType.LOCAL }
+    val remote = servers.filter { it.serverType == McpServerType.REMOTE }
+
     Column {
-        SectionHeader("本地内置 · 6", "管理")
-        localMcp.forEach { McpRow(it, Modifier.padding(horizontal = 20.dp), onClick = { onServerClick(it) }) }
-        SectionHeader("远程模板 · 9", "+ 自定义")
-        remoteMcp.forEach { McpRow(it, Modifier.padding(horizontal = 20.dp), onClick = { onServerClick(it) }) }
+        SectionHeader("本地内置 · ${local.size}", "管理")
+        if (local.isEmpty()) EmptySection("暂无本地 Server，点击右上角 + 或下方预设添加")
+        local.forEach { McpRow(it, Modifier.padding(horizontal = 20.dp), onClick = { onServerClick(it) }, onToggle = { checked -> viewModel.setEnabled(it.id, checked) }) }
+
+        SectionHeader("远程模板 · ${remote.size}", "+ 自定义")
+        if (remote.isEmpty()) EmptySection("暂无远程 Server，点击下方预设一键添加")
+        remote.forEach { McpRow(it, Modifier.padding(horizontal = 20.dp), onClick = { onServerClick(it) }, onToggle = { checked -> viewModel.setEnabled(it.id, checked) }) }
+
+        // 预设快捷添加（基于 McpServerPresets）
+        SectionHeader("从预设添加", "模板")
+        CapabilitiesViewModel.presets.forEach { preset ->
+            PresetRow(preset, Modifier.padding(horizontal = 20.dp), onClick = {
+                viewModel.createFromPreset(preset)
+            })
+        }
     }
 }
 
 /** 单个 MCP Server 行（点击打开配置）。 */
 @Composable
-private fun McpRow(server: McpServer, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    var enabled by remember { mutableStateOf(server.enabled) }
-    PrismGlassCard(
+private fun McpRow(
+    server: McpServerConfig,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+    onToggle: (Boolean) -> Unit
+) {
+    PrismCard(
         modifier = modifier
             .fillMaxWidth()
-            .padding(bottom = 10.dp)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick
-            )
+            .padding(bottom = 10.dp),
+        onClick = onClick
     ) {
         Row(
             modifier = Modifier.padding(13.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            val accent = if (server.serverType == McpServerType.LOCAL) PrismCyan else PrismIndigo
             Box(
                 modifier = Modifier
                     .size(38.dp)
-                    .background(server.accent.copy(alpha = 0.12f), RoundedCornerShape(12.dp))
+                    .background(accent.copy(alpha = 0.12f), RoundedCornerShape(12.dp))
                     .border(1.dp, PrismLine, RoundedCornerShape(12.dp)),
                 contentAlignment = Alignment.Center
             ) {
-                Text(text = server.icon, color = server.accent, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text(text = server.name.firstOrNull()?.toString() ?: "?", color = accent, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             }
             Column(modifier = Modifier.weight(1f)) {
-                Text(text = server.name, color = PrismText, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
-                Text(text = server.desc, color = PrismTextFaint, fontSize = 11.sp)
+                Text(text = server.name.ifEmpty { "未命名 Server" }, color = PrismText, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
+                Text(text = server.baseUrl.ifEmpty { "本地内置 · 零配置" }, color = PrismTextFaint, fontSize = 11.sp)
             }
-            PrismStatusDot(server.state)
-            PrismSwitch(checked = enabled, onCheckedChange = { enabled = it })
+            PrismStatusDot(if (server.isEnabled) PrismDotState.OK else PrismDotState.ERR)
+            // 无 baseUrl 的本地内建 Server（本期仅支持 Streamable HTTP）不可连接，禁用启用开关（guardrail M2）
+            PrismSwitch(
+                checked = server.isEnabled,
+                onCheckedChange = onToggle,
+                enabled = server.baseUrl.isNotBlank()
+            )
+        }
+    }
+}
+
+/** 空态占位。 */
+@Composable
+private fun EmptySection(text: String) {
+    Text(
+        text = text,
+        color = PrismTextFaint,
+        fontSize = 12.sp,
+        modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
+    )
+}
+
+/** 预设模板行 —— 点击一键创建。 */
+@Composable
+private fun PresetRow(preset: McpServerConfig, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    PrismCard(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(bottom = 8.dp),
+        onClick = onClick
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(text = "＋", color = PrismIndigo, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = preset.name, color = PrismText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text(
+                    text = if (preset.serverType == McpServerType.LOCAL) "本地内置 · 零配置" else "远程模板 · 需填 Key",
+                    color = PrismTextFaint,
+                    fontSize = 11.sp
+                )
+            }
         }
     }
 }
 
 /**
- * MCP Server 配置弹层 —— 设计规范 v0.4 第 8.3 节。
- * 连接信息名称 / 传输类型（stdio/SSE→HTTP）/ Base URL / Token / Schema 校验 / 测试连接 / 启用 / 删除。
+ * MCP Server 配置弹层 —— 编辑参考 ProviderEditSheet（US-007）模式（ADR-005 5.4）。
+ * 名称 / 传输类型（仅 Streamable HTTP）/ Base URL / API Key / 自定义头 / 测试连接 / 启用 / 删除。
  */
 @Composable
-private fun McpConfigSheet(server: McpServer) {
-    var transport by remember(server.name) { mutableStateOf("SSE → HTTP") }
-    var baseUrl by remember(server.name) { mutableStateOf("https://api.example.com/mcp") }
-    var token by remember(server.name) { mutableStateOf("") }
-    var enabled by remember(server.name) { mutableStateOf(server.enabled) }
+private fun McpConfigSheet(config: McpServerConfig, viewModel: CapabilitiesViewModel) {
+    val isNew = config.id == 0L
+    var name by remember(config.id) { mutableStateOf(config.name) }
+    var baseUrl by remember(config.id) { mutableStateOf(config.baseUrl) }
+    var apiKey by remember(config.id) { mutableStateOf("") }
+    var enabled by remember(config.id) { mutableStateOf(config.isEnabled) }
+    var showValidation by remember(config.id) { mutableStateOf(false) }
+    val headers = remember(config.id) {
+        mutableStateListOf<Pair<String, String>>().apply {
+            addAll(config.headers.entries.map { it.key to it.value })
+        }
+    }
+    val testState by viewModel.testState.collectAsState()
+
+    // 输入校验：名称非空 + Base URL 为合法 http(s) 地址 + 拒绝 CRLF（纵深防御，guardrail S1）
+    val nameValid = name.trim().isNotEmpty()
+    val baseUrlTrimmed = baseUrl.trim()
+    val urlValid = baseUrlTrimmed.startsWith("http://") || baseUrlTrimmed.startsWith("https://")
+    val urlSafe = urlValid && !baseUrlTrimmed.contains('\r') && !baseUrlTrimmed.contains('\n')
+    val canSave = nameValid && urlValid && urlSafe
+    val validHeaders = headers
+        .map { it.first.trim() to it.second.trim() }
+        .filter { it.first.isNotEmpty() && !it.first.contains('\r') && !it.first.contains('\n') && !it.second.contains('\r') && !it.second.contains('\n') }
+
+    /** 由当前输入组装草稿配置（测试连接 / 保存共用）。 */
+    val draft = config.copy(
+        name = name.trim().ifEmpty { config.name },
+        baseUrl = baseUrl.trim(),
+        headers = validHeaders.toMap(),
+        isEnabled = enabled
+    )
 
     PrismSheet(
-        title = server.name,
-        subtitle = server.desc
+        title = if (isNew) "新建 MCP Server" else "编辑 ${config.name}",
+        subtitle = "Streamable HTTP · JSON-RPC 2.0"
     ) {
+        PrismField(label = "名称", value = name, onValueChange = { name = it }, placeholder = "Server 名称")
+        if (showValidation && !nameValid) ValidationError("名称不能为空")
+        Spacer(Modifier.height(16.dp))
         PrismField(
             label = "传输类型",
-            value = transport,
+            value = "Streamable HTTP",
             onValueChange = {},
             trailing = {
                 PrismSegmented(
-                    options = listOf("stdio", "SSE → HTTP"),
-                    selected = transport,
-                    onSelect = { transport = it },
+                    options = listOf("Streamable HTTP"),
+                    selected = "Streamable HTTP",
+                    onSelect = {},
                     labelOf = { it },
                     modifier = Modifier.width(160.dp)
                 )
             }
         )
         Spacer(Modifier.height(16.dp))
-        PrismField(
-            label = "Base URL",
-            value = baseUrl,
-            onValueChange = { baseUrl = it },
-            placeholder = "https://…",
-            hint = "Schema 校验通过 · JSON-RPC 2.0"
-        )
+        PrismField(label = "Base URL", value = baseUrl, onValueChange = { baseUrl = it }, placeholder = "https://…/mcp")
+        if (showValidation && !urlValid) ValidationError("Base URL 需以 http:// 或 https:// 开头")
         Spacer(Modifier.height(16.dp))
         PrismField(
             label = "Token / API Key",
-            value = token,
-            onValueChange = { token = it },
+            value = apiKey,
+            onValueChange = { apiKey = it },
             placeholder = "eyJ…",
             secret = true,
+            hint = "Keystore 加密存储 · 明文仅在内存短暂存在",
             trailing = {
                 Icon(Icons.Filled.Lock, contentDescription = null, tint = PrismTextFaint, modifier = Modifier.size(16.dp))
             }
         )
         Spacer(Modifier.height(20.dp))
-        PrismButton(text = "测试连接", onClick = {})
+
+        // 自定义请求头编辑器（对齐 ProviderEditSheet）
+        Text(text = "自定义请求头", color = PrismTextDim, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.4.sp)
+        Spacer(Modifier.height(8.dp))
+        if (headers.isEmpty()) {
+            Text(text = "无需额外请求头，通常由 Server 自动填充。", color = PrismTextFaint, fontSize = 11.sp)
+            Spacer(Modifier.height(8.dp))
+        }
+        headers.forEachIndexed { index, (k, v) ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                PrismField(
+                    label = null,
+                    value = k,
+                    onValueChange = { headers[index] = it to v },
+                    placeholder = "Header 名",
+                    modifier = Modifier.weight(1f)
+                )
+                PrismField(
+                    label = null,
+                    value = v,
+                    onValueChange = { headers[index] = k to it },
+                    placeholder = "值",
+                    modifier = Modifier.weight(1f)
+                )
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(PrismPanel2)
+                        .border(1.dp, PrismLine, RoundedCornerShape(8.dp))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = { headers.removeAt(index) }
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(text = "✕", color = PrismTextDim, fontSize = 12.sp)
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+        PrismButton(
+            text = "＋ 添加请求头",
+            variant = PrismButtonVariant.Ghost,
+            onClick = { headers.add("" to "") }
+        )
+        Spacer(Modifier.height(20.dp))
+
+        // 测试连接（对齐 viewModel.testConnection）
+        val testEnabled = !isNew && nameValid && urlValid && urlSafe
+        PrismButton(
+            text = when (val s = testState) {
+                is CapabilitiesViewModel.TestState.Testing -> "测试中…"
+                is CapabilitiesViewModel.TestState.Success -> "连接成功 · ${s.toolCount} 个工具"
+                is CapabilitiesViewModel.TestState.Fail -> "连接失败 · 重试"
+                else -> "测试连接"
+            },
+            enabled = testEnabled && testState !is CapabilitiesViewModel.TestState.Testing,
+            onClick = { viewModel.testConnection(draft) }
+        )
+        if (testState is CapabilitiesViewModel.TestState.Fail) {
+            Spacer(Modifier.height(8.dp))
+            ValidationError((testState as CapabilitiesViewModel.TestState.Fail).message)
+        }
         Spacer(Modifier.height(12.dp))
+
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(text = "启用该 Server", color = PrismText, fontSize = 14.sp, modifier = Modifier.weight(1f))
-            PrismSwitch(checked = enabled, onCheckedChange = { enabled = it })
+            // 无 baseUrl 时不可启用（本期仅支持 Streamable HTTP，guardrail M2）
+            PrismSwitch(checked = enabled, onCheckedChange = { enabled = it }, enabled = baseUrlTrimmed.isNotBlank())
         }
         Spacer(Modifier.height(16.dp))
-        PrismButton(text = "删除 Server", variant = PrismButtonVariant.Danger, leadingIcon = {
-            Icon(Icons.Filled.Delete, contentDescription = null, tint = PrismDanger, modifier = Modifier.size(16.dp))
-        }, onClick = {})
+        PrismButton(
+            text = "保存配置",
+            enabled = canSave,
+            onClick = {
+                if (!canSave) { showValidation = true; return@PrismButton }
+                // 先落盘 API Key（加密存储，明文不落盘），再保存 Server 配置
+                viewModel.saveApiKey(draft.apiKeyRef, apiKey)
+                viewModel.saveServer(draft)
+            }
+        )
+        if (showValidation && !canSave) {
+            Spacer(Modifier.height(8.dp))
+            ValidationError("请修正以上无效输入后再保存")
+        }
+        if (!isNew) {
+            Spacer(Modifier.height(12.dp))
+            PrismButton(
+                text = "删除 Server",
+                variant = PrismButtonVariant.Danger,
+                leadingIcon = {
+                    Icon(Icons.Filled.Delete, contentDescription = null, tint = PrismDanger, modifier = Modifier.size(16.dp))
+                },
+                onClick = { viewModel.deleteServer(config) }
+            )
+        }
     }
+}
+
+/** 校验错误提示（薄荷红系警示文案）。 */
+@Composable
+private fun ValidationError(text: String) {
+    Text(
+        text = text,
+        color = PrismDanger,
+        fontSize = 11.sp,
+        lineHeight = 16.sp,
+        modifier = Modifier.padding(top = 6.dp)
+    )
 }
 
 /** Skills 面板。 */
@@ -310,15 +491,11 @@ private fun SkillsPanel(onSkillClick: (PrismSkill) -> Unit) {
 @Composable
 private fun SkillRow(skill: PrismSkill, modifier: Modifier = Modifier, onClick: () -> Unit) {
     var enabled by remember { mutableStateOf(skill.enabled) }
-    PrismGlassCard(
+    PrismCard(
         modifier = modifier
             .fillMaxWidth()
-            .padding(bottom = 10.dp)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick
-            )
+            .padding(bottom = 10.dp),
+        onClick = onClick
     ) {
         Row(
             modifier = Modifier.padding(14.dp),
@@ -344,37 +521,6 @@ private fun SkillRow(skill: PrismSkill, modifier: Modifier = Modifier, onClick: 
             StatusChip(if (enabled) "已启用" else "已停用", enabled)
             PrismSwitch(checked = enabled, onCheckedChange = { enabled = it })
         }
-    }
-}
-
-/** Skill 详情弹层 —— 设计规范 v0.4 第 8.3 节。说明 / 来源 / 安装参数 / 启用。 */
-@Composable
-private fun SkillDetailSheet(skill: PrismSkill) {
-    var installArgs by remember(skill.name) { mutableStateOf("") }
-    var enabled by remember(skill.name) { mutableStateOf(skill.enabled) }
-
-    PrismSheet(
-        title = skill.name,
-        subtitle = "${skill.origin} · ${skill.desc}"
-    ) {
-        PrismField(
-            label = "安装参数",
-            value = installArgs,
-            onValueChange = { installArgs = it },
-            placeholder = "--model llama3 …",
-            hint = "远程 Skill 需配置来源仓库 / 参数"
-        )
-        Spacer(Modifier.height(20.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(text = "启用该 Skill", color = PrismText, fontSize = 14.sp, modifier = Modifier.weight(1f))
-            PrismSwitch(checked = enabled, onCheckedChange = { enabled = it })
-        }
-        Spacer(Modifier.height(16.dp))
-        PrismButton(text = "更新配置", onClick = {})
-        Spacer(Modifier.height(12.dp))
-        PrismButton(text = "卸载 Skill", variant = PrismButtonVariant.Danger, leadingIcon = {
-            Icon(Icons.Filled.Delete, contentDescription = null, tint = PrismDanger, modifier = Modifier.size(16.dp))
-        }, onClick = {})
     }
 }
 
@@ -407,7 +553,7 @@ private fun MemoryPanel() {
 /** 单层记忆卡。 */
 @Composable
 private fun MemoryCard(title: String, desc: String, meta: String, accent: Color, modifier: Modifier = Modifier) {
-    PrismGlassCard(modifier = modifier.fillMaxWidth().padding(bottom = 12.dp)) {
+    PrismCard(modifier = modifier.fillMaxWidth().padding(bottom = 12.dp)) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(text = "◈  ", color = accent, fontSize = 15.sp, fontWeight = FontWeight.Bold)
