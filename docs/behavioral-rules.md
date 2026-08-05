@@ -37,9 +37,29 @@
 - 适用场景：dev
 - 状态：active
 
+#### BR-data-001: 自定义序列化转换器必须对所有分隔符与特殊字符做转义
+
+- 类别：security
+- 规则：为 ORM 类型转换器（如 ObjectBox `PropertyConverter`）实现自定义序列化时，必须对所用分隔符（换行、等号、逗号等）和转义字符（反斜杠）做完整转义。若序列化格式用某字符做分隔符，该字符在数据中出现时必须转义，否则会导致数据损坏（元素数量变化/键值错位）。同一项目内多个转换器应保持一致的转义策略。
+- 反例：`StringListConverter` 用 `\n` 分隔但不对元素中的 `\n` 转义 —— 模型名含换行时 `split("\n")` 产生多余元素
+- 正例：`StringMapConverter` 对 `\`/`\n`/`=` 全部转义，单次扫描反转义 —— 无歧义
+- 来源：US-004 ProviderConfig 审查（TKN-PRISM-GUARDRAIL-006，G-02 发现）
+- 添加日期：2026-08-02
+- 适用场景：dev
+- 状态：active
+
 ### concurrency
 
-（暂无规则，待累积）
+#### BR-concurrency-001: 多步骤数据库状态变更必须使用事务保证原子性
+
+- 类别：concurrency
+- 规则：当一个数据库操作方法需要修改多条记录以维护业务不变式（如"同一时间仅一个激活"、"唯一默认值"等）时，必须使用数据库事务（如 ObjectBox `runInTx`、Room `@Transaction`）将所有修改包装为原子操作。逐条 put/update 在异常场景下可能破坏不变式，留下不一致状态。
+- 反例：`fun setActive(id: Long) { box.all.forEach { if (it.id == id) { it.isActive = true; box.put(it) } else if (it.isActive) { it.isActive = false; box.put(it) } } }` —— 遍历中途异常留下多个 isActive=true
+- 正例：`fun setActive(id: Long) { boxStore.runInTx { box.all.forEach { ... box.put(it) } }; refresh() }` —— 事务保证全成功或全回滚
+- 来源：US-004 ProviderConfig 审查（TKN-PRISM-GUARDRAIL-006，G-01 发现）
+- 添加日期：2026-08-02
+- 适用场景：dev
+- 状态：active
 
 ### interface
 
@@ -144,3 +164,7 @@
 | 2026-08-02 | ac-verifier | 验收通过，无新规则 | US-002 ObjectBox 验收（TKN-PRISM-ACCEPTANCE-001）：18 测试通过，性能基线已建立，AC-003 因无模拟器受限通过 |
 | 2026-08-02 | guardrail-enforcer | 新增 BR-security-002 + BR-testing-001 | US-003 API Key 审查（TKN-PRISM-GUARDRAIL-005）：StrongBox 异常捕获过窄（G-01）、测试替身语义缺失（G-04） |
 | 2026-08-02 | ac-verifier | 验收通过，无新规则 | US-003 API Key 验收（TKN-PRISM-ACCEPTANCE-002）：30 测试通过（14 基础 + 16 边界），性能基线已建立，AC-001 因无模拟器受限通过，G-01 已修复确认 |
+| 2026-08-02 | guardrail-enforcer | 提议 BR-concurrency-001 + BR-data-001 | US-004 ProviderConfig 审查（TKN-PRISM-GUARDRAIL-006）：32 测试通过，编译通过，无阻断级漏洞，结论通过。G-01 setActive 原子性（高风险）、G-02 StringListConverter 换行转义（中风险）为强建议修复项 |
+| 2026-08-02 | 主 Agent | 确认 BR-concurrency-001 + BR-data-001 | 修复 G-01（setActive 用 runInTx 事务）+ G-02（StringListConverter 单次扫描转义/反转义），新增 3 边界测试，35 测试通过 |
+| 2026-08-02 | guardrail-enforcer | 复审通过，无新规则 | US-004 复审（TKN-PRISM-GUARDRAIL-006）：G-01/G-02 修复正确，报告追加 8.6 节独立复审确认 |
+| 2026-08-02 | ac-verifier | 验收通过，无新规则 | US-004 ProviderConfig 验收（TKN-PRISM-ACCEPTANCE-003）：52 测试通过（35 基础 + 17 边缘），性能基线已建立，AC-3 真实设备持久化因无模拟器受限通过，G-01/G-02 已修复确认 |

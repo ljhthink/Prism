@@ -59,8 +59,8 @@
         "Typecheck passes"
       ],
       "priority": 4,
-      "passes": false,
-      "notes": "US-001 验收标准 1。"
+      "passes": true,
+      "notes": "US-001 验收标准 1。已通过 guardrail-enforcer 审查（TKN-PRISM-GUARDRAIL-006，G-01 setActive 事务原子性 + G-02 StringListConverter 换行转义已修复，BR-concurrency-001 + BR-data-001 固化）+ ac-verifier 验收（TKN-PRISM-ACCEPTANCE-003，2026-08-02）。52 测试通过（35 基础 + 17 边缘），性能基线已建立。AC-3 真实设备持久化因无模拟器受限通过（与 US-002/003 同模式）。"
     },
     {
       "id": "US-005",

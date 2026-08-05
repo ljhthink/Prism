@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prism · 深空玻璃肌理 v0.4 · 高保真原型</title>
+<style>
+  :root{
+    --bg:#0c0c11; --surface:#14141a; --surface-2:#1a1a22; --surface-3:#20202a;
+    --primary:#6e62ff; --primary-strong:#5a4eff;
+    --cyan:#22c7e0; --mint:#2fbf8f; --warning:#d99a2b; --danger:#e5484d;
+    --text:#eaeaf0; --text-dim:#a0a0ac; --text-faint:#6e6e7a;
+    --line:rgba(255,255,255,.07); --line-strong:rgba(255,255,255,.12);
+    --r:12px; --rs:8px; --font:'Noto Sans CJK SC','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{
+    font-family:var(--font); background:#07070a; color:var(--text);
+    min-height:100vh; display:flex; flex-direction:column; align-items:center; padding:30px 16px 60px;
+  }
+  .stage-head{max-width:760px;width:100%;margin-bottom:24px}
+  .stage-head h1{font-size:15px;font-weight:600;letter-spacing:.4px;color:var(--text-dim)}
+  .stage-head p{font-size:12px;color:var(--text-faint);margin-top:6px;line-height:1.7}
+  .stage-head .badges{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+  .badge{font-size:11px;padding:4px 10px;border-radius:999px;border:1px solid var(--line);color:var(--text-dim)}
+
+  .phone{width:390px;max-width:100%;background:var(--bg);border-radius:44px;position:relative;
+    border:1px solid var(--line);box-shadow:0 40px 80px -20px rgba(0,0,0,.85), inset 0 0 0 .5px rgba(255,255,255,.02);overflow:hidden;}
+  .notch{position:absolute;top:12px;left:50%;transform:translateX(-50%);width:120px;height:26px;background:#000;border-radius:20px;z-index:60}
+  .viewport{height:844px;position:relative;overflow:hidden;display:flex;flex-direction:column}
+  @media(max-width:420px){.phone{width:100%}.viewport{height:820px}}
+
+  .ic{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0}
+
+  /* ===== surfaces (实体化，去玻璃/渐变光晕) ===== */
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+    box-shadow:0 1px 0 rgba(255,255,255,.03) inset, 0 8px 24px -16px rgba(0,0,0,.9);}
+  .card:hover{background:var(--surface-2)}
+  .lift{box-shadow:0 1px 0 rgba(255,255,255,.04) inset, 0 14px 32px -16px rgba(0,0,0,.95)}
+
+  /* ===== top bar ===== */
+  .topbar{display:flex;align-items:center;gap:12px;padding:56px 18px 12px;position:relative;z-index:2}
+  .topbar .back{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);cursor:pointer;background:var(--surface);border:1px solid var(--line)}
+  .topbar .tt{flex:1;min-width:0}
+  .topbar .title{font-size:17px;font-weight:700;letter-spacing:-.2px;display:flex;align-items:center;gap:8px}
+  .topbar .sub{font-size:11px;color:var(--text-faint);margin-top:2px}
+  .topbar .actions{display:flex;gap:8px}
+  .iconbtn{width:36px;height:36px;border-radius:10px;display:flex;align-items:center;justify-content:center;color:var(--text-dim);cursor:pointer;background:var(--surface);border:1px solid var(--line);transition:color .2s,background .2s}
+  .iconbtn:hover{color:var(--text);background:var(--surface-2)}
+  .content{flex:1;overflow-y:auto;padding:4px 18px 16px;position:relative;z-index:2;scrollbar-width:none}
+  .content::-webkit-scrollbar{display:none}
+
+  .section{font-size:11px;font-weight:600;letter-spacing:.6px;color:var(--text-faint);text-transform:uppercase;margin:22px 0 10px;display:flex;align-items:center;justify-content:space-between}
+  .section a{color:var(--primary);font-size:11px;font-weight:500;letter-spacing:0;text-decoration:none;cursor:pointer}
+
+  /* ===== chat ===== */
+  .provider-pill{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim);padding:3px 10px;border-radius:8px;background:var(--surface);border:1px solid var(--line);cursor:pointer;margin-top:6px}
+  .ai-avatar{width:34px;height:34px;border-radius:50%;background:var(--surface-2);border:1px solid var(--line-strong);display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .ai-avatar svg{width:17px;height:17px;stroke:var(--primary)}
+  .msg{display:flex;gap:10px;margin-bottom:16px;animation:rise .4s ease both}
+  @keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  .bubble{padding:11px 14px;border-radius:14px;font-size:14px;line-height:1.65;max-width:78%}
+  .bubble.ai{background:var(--surface);border:1px solid var(--line);border-top-left-radius:5px}
+  .bubble.user{margin-left:auto;background:var(--primary);color:#fff;border-top-right-radius:5px}
+  .bubble .src{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--mint);margin-top:8px;padding:3px 8px;border-radius:7px;background:rgba(47,191,143,.08);border:1px solid rgba(47,191,143,.22)}
+  .bubble .src .ic{width:12px;height:12px}
+  .typing{display:inline-flex;gap:4px;padding:4px 2px}
+  .typing i{width:6px;height:6px;border-radius:50%;background:var(--text-dim);animation:blink 1.2s infinite}
+  .typing i:nth-child(2){animation-delay:.2s}.typing i:nth-child(3){animation-delay:.4s}
+  @keyframes blink{0%,80%,100%{opacity:.25}40%{opacity:1}}
+
+  .inputbar{position:sticky;bottom:0;padding:10px 18px 14px;background:linear-gradient(180deg,transparent,var(--bg) 40%);z-index:3}
+  .inputrow{display:flex;gap:10px;align-items:center}
+  .input{flex:1;display:flex;align-items:center;gap:8px;padding:12px 15px;border-radius:12px;font-size:14px;color:var(--text);background:var(--surface-2);border:1px solid var(--line-strong)}
+  .input span{color:var(--text-faint)}
+  .send{width:44px;height:44px;border-radius:12px;background:var(--primary);border:1px solid rgba(255,255,255,.08);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:transform .12s ease}
+  .send:active{transform:scale(.95)}
+  .send .ic{width:18px;height:18px}
+
+  /* ===== cards ===== */
+  .kbcards{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .kbcard{padding:15px;border-radius:var(--r);position:relative;overflow:hidden;cursor:pointer;background:var(--surface);border:1px solid var(--line);transition:transform .3s cubic-bezier(.22,1,.36,1),background .2s}
+  .kbcard:hover{transform:translateY(-1px);background:var(--surface-2)}
+  .kbcard .accent{position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--c,var(--primary))}
+  .kbcard h4{font-size:15px;font-weight:600;letter-spacing:-.2px}
+  .kbcard .meta{font-size:11px;color:var(--text-faint);margin-top:6px;line-height:1.6}
+  .kbcard .stat{display:flex;gap:16px;margin-top:14px;font-size:11px}
+  .kbcard .stat b{font-size:15px;font-weight:700;display:block;color:var(--text)}
+  .kbcard .stat div{color:var(--text-faint)}
+  .addcard{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;border-style:dashed;border-color:var(--line-strong);color:var(--text-faint);font-size:12px;background:transparent}
+  .addcard .plus{width:40px;height:40px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:var(--surface);border:1px solid var(--line);color:var(--text-dim)}
+  .doc{display:flex;align-items:center;gap:12px;padding:12px 14px;margin-bottom:10px}
+  .doc .ic{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .doc .ic svg{width:18px;height:18px}
+  .doc .t{flex:1;min-width:0}
+  .doc .t b{font-size:13.5px;font-weight:600;display:block}
+  .doc .t span{font-size:11px;color:var(--text-faint)}
+  .pct{width:34px;text-align:right;font-size:12px;color:var(--mint);font-weight:600}
+  .bar{height:4px;border-radius:2px;background:rgba(255,255,255,.08);margin-top:8px;overflow:hidden}
+  .bar i{display:block;height:100%;border-radius:2px;background:var(--primary);transition:width .6s cubic-bezier(.22,1,.36,1)}
+
+  /* ===== capability ===== */
+  .seg{display:flex;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:3px;gap:3px;position:relative}
+  .seg button{flex:1;padding:9px 0;border:none;background:transparent;color:var(--text-dim);font-size:13px;border-radius:9px;cursor:pointer;font-family:var(--font);position:relative;z-index:1;transition:color .2s}
+  .seg button.on{color:var(--text)}
+  .seg .thumb{position:absolute;top:3px;bottom:3px;left:3px;width:calc((100% - 6px)/3);border-radius:9px;background:var(--surface-3);box-shadow:inset 0 1px 0 rgba(255,255,255,.06);transition:transform .25s cubic-bezier(.22,1,.36,1)}
+  .caprow{display:flex;align-items:center;gap:12px;padding:13px 14px;margin-bottom:10px;cursor:pointer}
+  .caprow .ic{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .caprow .ic svg{width:18px;height:18px}
+  .caprow .t{flex:1;min-width:0}
+  .caprow .t b{font-size:13.5px;font-weight:600;display:block}
+  .caprow .t span{font-size:11px;color:var(--text-faint)}
+  .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+  .dot.ok{background:var(--mint)}
+  .dot.run{background:var(--cyan)}
+  .dot.run.pulse{animation:pulse 1.6s infinite}
+  .dot.warn{background:var(--warning)}
+  .dot.err{background:var(--danger)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  .toggle{width:40px;height:24px;border-radius:13px;background:var(--surface-3);position:relative;cursor:pointer;transition:.2s;flex-shrink:0;border:1px solid var(--line)}
+  .toggle.on{background:var(--primary)}
+  .toggle::after{content:'';position:absolute;top:2px;width:20px;height:20px;border-radius:50%;background:#fff;transition:left .2s cubic-bezier(.22,1,.36,1)}
+  .toggle.on::after{left:18px}.toggle::after{left:1px}
+  .chip{font-size:10px;padding:2px 8px;border-radius:6px;border:1px solid var(--line);color:var(--text-dim);background:var(--surface-2)}
+
+  /* ===== settings ===== */
+  .setrow{display:flex;align-items:center;gap:12px;padding:13px 14px;margin-bottom:10px;cursor:pointer}
+  .setrow .ic{width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .setrow .ic svg{width:18px;height:18px}
+  .setrow .t{flex:1}
+  .setrow .t b{font-size:14px;font-weight:600;display:block}
+  .setrow .t span{font-size:11px;color:var(--text-faint)}
+  .setrow .chev{color:var(--text-faint)}
+  .tier{display:flex;gap:8px;margin-top:4px}
+  .tier span{font-size:10px;padding:3px 9px;border-radius:7px;border:1px solid var(--line);color:var(--text-dim)}
+  .tier span.on{color:var(--text);border-color:var(--line-strong);background:var(--surface-2)}
+
+  /* ===== bottom nav (贴底) ===== */
+  .nav{display:flex;flex-shrink:0;z-index:3;background:var(--surface);border-top:1px solid var(--line);
+    padding-bottom:env(safe-area-inset-bottom)}
+  .navbar{flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;padding:9px 0;cursor:pointer;transition:color .2s;color:var(--text-faint)}
+  .navbar .nl{font-size:10px;letter-spacing:.2px}
+  .navbar .nm{width:40px;height:26px;border-radius:13px;display:flex;align-items:center;justify-content:center;transition:background .2s}
+  .navbar.on{color:var(--text)}
+  .navbar.on .nm{background:var(--surface-2)}
+  .navbar.on svg{stroke:var(--primary)}
+
+  /* screens */
+  .screens{flex:1;position:relative;min-height:0;background:var(--bg)}
+  .screen{position:absolute;inset:0;display:none;flex-direction:column;background:var(--bg)}
+  .screen.active{display:flex;animation:screenin .25s ease}
+  @keyframes screenin{from{opacity:0}to{opacity:1}}
+
+  /* detail push */
+  .detail{position:absolute;inset:0;z-index:20;display:none;flex-direction:column;background:var(--bg);
+    transform:translateX(100%);transition:transform .3s cubic-bezier(.22,1,.36,1)}
+  .detail.open{display:flex;transform:translateX(0)}
+
+  .field{margin-bottom:16px}
+  .field label{font-size:11px;font-weight:600;letter-spacing:.4px;color:var(--text-dim);display:block;margin-bottom:7px}
+  .field .input{display:flex;align-items:center;gap:8px;padding:11px 13px;border-radius:10px;background:var(--surface);border:1px solid var(--line-strong);font-size:14px;color:var(--text)}
+  .field input{flex:1;background:transparent;border:none;outline:none;color:var(--text);font-size:14px;font-family:var(--font)}
+  .field input::placeholder{color:var(--text-faint)}
+  .field .hint{font-size:11px;color:var(--text-faint);margin-top:6px;line-height:1.6}
+
+  .btn{display:flex;align-items:center;justify-content:center;gap:8px;padding:12px;border-radius:11px;font-size:14px;font-weight:600;cursor:pointer;border:1px solid transparent;font-family:var(--font);transition:transform .12s ease}
+  .btn:active{transform:scale(.98)}
+  .btn.primary{background:var(--primary);color:#fff}
+  .btn.ghost{background:var(--surface);border-color:var(--line);color:var(--text-dim)}
+  .btn.danger{background:rgba(229,72,77,.08);border-color:rgba(229,72,77,.25);color:var(--danger)}
+  .btn .ic{width:16px;height:16px}
+
+  .statrow{display:flex;gap:12px;margin-bottom:20px}
+  .statbox{flex:1;padding:14px;border-radius:var(--r);text-align:center}
+  .statbox b{font-size:20px;font-weight:700;display:block;letter-spacing:-.3px}
+  .statbox span{font-size:11px;color:var(--text-faint)}
+
+  .docrow{display:flex;align-items:center;gap:12px;padding:12px;border-radius:var(--r);margin-bottom:8px}
+  .docrow .ic{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .docrow .ic svg{width:16px;height:16px}
+  .docrow .t{flex:1;min-width:0}
+  .docrow .t b{font-size:13px;font-weight:600;display:block}
+  .docrow .t span{font-size:11px;color:var(--text-faint)}
+  .docrow .chk{color:var(--mint)}
+
+  .overlay{position:absolute;inset:0;z-index:30;display:none;background:rgba(0,0,0,.5);opacity:0;transition:opacity .25s}
+  .overlay.on{display:block;opacity:1}
+  .sheet{position:absolute;left:0;right:0;bottom:0;z-index:31;background:var(--surface);border-radius:18px 18px 0 0;padding:8px 18px 28px;transform:translateY(100%);transition:transform .3s cubic-bezier(.22,1,.36,1);border-top:1px solid var(--line-strong);max-height:86%;overflow-y:auto;scrollbar-width:none}
+  .sheet::-webkit-scrollbar{display:none}
+  .sheet.on{transform:translateY(0)}
+  .sheet .grip{width:40px;height:4px;border-radius:2px;background:rgba(255,255,255,.14);margin:4px auto 16px}
+  .sheet h3{font-size:16px;font-weight:700;letter-spacing:-.2px;margin-bottom:4px}
+  .sheet .sub{font-size:12px;color:var(--text-faint);margin-bottom:18px}
+
+  .enumrow{display:flex;align-items:center;gap:12px;padding:12px;border-radius:var(--r);margin-bottom:8px;cursor:pointer}
+  .enumrow .ic{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+  .enumrow .ic svg{width:17px;height:17px}
+  .enumrow .t{flex:1}
+  .enumrow .t b{font-size:13.5px;font-weight:600;display:block}
+  .enumrow .t span{font-size:11px;color:var(--text-faint)}
+  .enumrow .radio{width:18px;height:18px;border-radius:50%;border:2px solid rgba(255,255,255,.2);flex-shrink:0}
+  .enumrow .radio.on{border-color:var(--primary);position:relative}
+  .enumrow .radio.on::after{content:'';position:absolute;inset:3px;border-radius:50%;background:var(--primary)}
+
+  .recent-pill{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--text-dim);padding:3px 10px;border-radius:8px;background:var(--surface);border:1px solid var(--line)}
+</style>
+</head>
+<body>
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <symbol id="ic-message" viewBox="0 0 24 24"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></symbol>
+    <symbol id="ic-book" viewBox="0 0 24 24"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></symbol>
+    <symbol id="ic-zap" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></symbol>
+    <symbol id="ic-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+    <symbol id="ic-plus" viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></symbol>
+    <symbol id="ic-more" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"/><circle cx="12" cy="5" r="1"/><circle cx="12" cy="19" r="1"/></symbol>
+    <symbol id="ic-back" viewBox="0 0 24 24"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></symbol>
+    <symbol id="ic-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></symbol>
+    <symbol id="ic-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></symbol>
+    <symbol id="ic-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></symbol>
+    <symbol id="ic-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></symbol>
+    <symbol id="ic-key" viewBox="0 0 24 24"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></symbol>
+    <symbol id="ic-check" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></symbol>
+    <symbol id="ic-chev-r" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></symbol>
+    <symbol id="ic-refresh" viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></symbol>
+    <symbol id="ic-trash" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></symbol>
+    <symbol id="ic-cloud" viewBox="0 0 24 24"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></symbol>
+    <symbol id="ic-cpu" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></symbol>
+    <symbol id="ic-star" viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></symbol>
+    <symbol id="ic-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></symbol>
+    <symbol id="ic-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></symbol>
+    <symbol id="ic-finger" viewBox="0 0 24 24"><path d="M12 11a5 5 0 0 1 5 5m-5-5a5 5 0 0 0-5 5m5-5v3m0 0a8 8 0 0 1-3 6.24M17 16a8 8 0 0 1-6.24 6.94M12 22a8 8 0 0 1-2-6.24M12 11v-3m0 0a5 5 0 0 1 5-5m-5 5a5 5 0 0 0-5-5"/></symbol>
+    <symbol id="ic-sliders" viewBox="0 0 24 24"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></symbol>
+    <symbol id="ic-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></symbol>
+    <symbol id="ic-prism" viewBox="0 0 24 24"><path d="M12 3 21 19H3L12 3Z"/><path d="M12 9v3l3 3"/><circle cx="12" cy="8" r="1"/></symbol>
+    <symbol id="ic-send" viewBox="0 0 24 24"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></symbol>
+    <symbol id="ic-folder" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
+    <symbol id="ic-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></symbol>
+    <symbol id="ic-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></symbol>
+  </defs>
+</svg>
+
+<div class="stage-head">
+  <h1>Prism · 手机端个人 AI Agent 平台</h1>
+  <p>深空玻璃肌理 v0.4 · 去 AI 味。移除星点/光晕/渐变霓虹，表面实体化，导航贴底，动画收敛为克制微交互。</p>
+  <div class="badges">
+    <span class="badge">实体表面</span><span class="badge">导航贴底</span><span class="badge">克制色彩</span>
+    <span class="badge">真实图标</span><span class="badge">微动效</span><span class="badge">配置详情</span>
+  </div>
+</div>
+
+<div class="phone">
+  <div class="notch"></div>
+  <div class="viewport">
+    <div class="screens">
+      <!-- CHAT -->
+      <div class="screen active" id="scr-chat">
+        <div class="topbar">
+          <div class="tt">
+            <div class="title">Prism</div>
+            <div class="provider-pill"><span class="dot ok" style="width:6px;height:6px"></span> OpenAI · GPT-4o </div>
+          </div>
+          <div class="actions">
+            <div class="iconbtn"><svg class="ic"><use href="#ic-message"/></svg></div>
+            <div class="iconbtn"><svg class="ic"><use href="#ic-plus"/></svg></div>
+          </div>
+        </div>
+        <div class="content">
+          <div class="msg">
+            <div class="ai-avatar"><svg class="ic"><use href="#ic-prism"/></svg></div>
+            <div class="bubble ai">已检索到你的「工作」知识库，核心结论来自 3 篇文档。<br><br><span class="src"><svg class="ic"><use href="#ic-file"/></svg> Q3规划.pdf · p.12</span></div>
+          </div>
+          <div class="msg"><div class="bubble user">帮我总结这些文档的要点</div></div>
+          <div class="msg">
+            <div class="ai-avatar"><svg class="ic"><use href="#ic-prism"/></svg></div>
+            <div class="bubble ai">正在调用 MCP 检索知识库…<div class="typing"><i></i><i></i><i></i></div></div>
+          </div>
+        </div>
+        <div class="inputbar">
+          <div class="inputrow">
+            <div class="input"><span>输入问题，@知识库 检索…</span></div>
+            <button class="send"><svg class="ic"><use href="#ic-send"/></svg></button>
+          </div>
+        </div>
+      </div>
+
+      <!-- KNOWLEDGE -->
+      <div class="screen" id="scr-kb">
+        <div class="topbar">
+          <div class="tt">
+            <div class="title">知识库</div>
+            <div class="sub">3 个库 · 128 文档 · 4,502 分片</div>
+          </div>
+          <div class="actions"><div class="iconbtn" onclick="openSheet('import-sheet')"><svg class="ic"><use href="#ic-upload"/></svg></div></div>
+        </div>
+        <div class="content">
+          <div class="section">知识库 <a onclick="openDetail('kb-detail')">查看配置</a></div>
+          <div class="kbcards">
+            <div class="kbcard" style="--c:var(--primary)" onclick="openDetail('kb-detail')"><div class="accent"></div><h4>工作</h4><div class="meta">62 文档 · 2,134 分片<br>最近更新 2 分钟前</div><div class="stat"><div><b>100%</b>已索引</div><div><b>38</b>引用</div></div></div>
+            <div class="kbcard" style="--c:var(--cyan)" onclick="openDetail('kb-detail')"><div class="accent"></div><h4>学习</h4><div class="meta">41 文档 · 1,588 分片<br>含 PDF / 笔记</div><div class="stat"><div><b>100%</b>已索引</div><div><b>21</b>引用</div></div></div>
+            <div class="kbcard" style="--c:var(--mint)" onclick="openDetail('kb-detail')"><div class="accent"></div><h4>个人</h4><div class="meta">25 文档 · 780 分片<br>最近更新 1 天前</div><div class="stat"><div><b>64%</b>已索引</div><div><b>9</b>引用</div></div></div>
+            <div class="kbcard addcard card" onclick="openSheet('import-sheet')" style="border-style:dashed"><div class="plus"><svg class="ic"><use href="#ic-plus"/></svg></div>导入新文档</div>
+          </div>
+          <div class="section">最近导入</div>
+          <div class="doc card" onclick="openDetail('kb-detail')">
+            <div class="ic" style="background:rgba(110,98,255,.12);color:#9a90ff"><svg class="ic"><use href="#ic-file"/></svg></div>
+            <div class="t"><b>Q3产品规划.pdf</b><span>工作 · 昨晚导入</span><div class="bar"><i style="width:100%"></i></div></div>
+            <div class="pct">100%</div>
+          </div>
+          <div class="doc card" onclick="openDetail('kb-detail')">
+            <div class="ic" style="background:rgba(34,199,224,.12);color:#6fd8e8"><svg class="ic"><use href="#ic-file"/></svg></div>
+            <div class="t"><b>机器学习笔记.xlsx</b><span>学习 · 正在分片</span><div class="bar"><i style="width:64%"></i></div></div>
+            <div class="pct" style="color:var(--cyan)">64%</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CAPABILITIES -->
+      <div class="screen" id="scr-cap">
+        <div class="topbar">
+          <div class="tt"><div class="title">能力中枢</div><div class="sub">MCP · Skills · 记忆</div></div>
+          <div class="actions"><div class="iconbtn"><svg class="ic"><use href="#ic-settings"/></svg></div></div>
+        </div>
+        <div class="content">
+          <div class="seg" id="cap-seg">
+            <div class="thumb" id="cap-thumb"></div>
+            <button class="on" data-cap="mcp">MCP 工具</button>
+            <button data-cap="skill">Skills</button>
+            <button data-cap="mem">记忆</button>
+          </div>
+          <div id="cap-mcp">
+            <div class="section">本地内置 · 6</div>
+            <div class="caprow card"><div class="ic" style="background:rgba(110,98,255,.12);color:#9a90ff"><svg class="ic"><use href="#ic-folder"/></svg></div><div class="t"><b>Filesystem</b><span>本地文件系统</span></div><span class="dot ok"></span><div class="toggle on"></div></div>
+            <div class="caprow card"><div class="ic" style="background:rgba(34,199,224,.12);color:#6fd8e8"><svg class="ic"><use href="#ic-link"/></svg></div><div class="t"><b>Fetch</b><span>网页抓取</span></div><span class="dot run pulse"></span><div class="toggle on"></div></div>
+            <div class="caprow card"><div class="ic" style="background:rgba(47,191,143,.12);color:#66d4ae"><svg class="ic"><use href="#ic-cpu"/></svg></div><div class="t"><b>Memory</b><span>记忆读写</span></div><span class="dot ok"></span><div class="toggle on"></div></div>
+            <div class="section">远程模板 · 9 <a onclick="openSheet('mcp-sheet')">+ 自定义</a></div>
+            <div class="caprow card" onclick="openSheet('mcp-sheet')"><div class="ic" style="background:rgba(110,98,255,.12);color:#9a90ff"><svg class="ic"><use href="#ic-zap"/></svg></div><div class="t"><b>GitHub</b><span>已连接 · 填 Key 激活</span></div><span class="dot warn"></span><div class="toggle on"></div></div>
+            <div class="caprow card" onclick="openSheet('mcp-sheet')"><div class="ic" style="background:rgba(217,154,43,.12);color:#e8bd6a"><svg class="ic"><use href="#ic-book"/></svg></div><div class="t"><b>Notion</b><span>需配置 Token</span></div><span class="dot err"></span><div class="toggle"></div></div>
+            <div class="caprow card" onclick="openSheet('mcp-sheet')"><div class="ic" style="background:rgba(34,199,224,.12);color:#6fd8e8"><svg class="ic"><use href="#ic-search"/></svg></div><div class="t"><b>Context7</b><span>需配置 API Key</span></div><span class="dot err"></span><div class="toggle"></div></div>
+          </div>
+          <div id="cap-skill" style="display:none">
+            <div class="section">已安装 · 5 <a onclick="openSheet('skill-install')">+ 安装</a></div>
+            <div class="caprow card" onclick="openDetail('skill-detail')"><div class="ic" style="background:rgba(110,98,255,.12);color:#9a90ff"><svg class="ic"><use href="#ic-message"/></svg></div><div class="t"><b>智能翻译</b><span>本地 · 中英互译</span></div><span class="chip">已启用</span><div class="toggle on"></div></div>
+            <div class="caprow card" onclick="openDetail('skill-detail')"><div class="ic" style="background:rgba(34,199,224,.12);color:#6fd8e8"><svg class="ic"><use href="#ic-clock"/></svg></div><div class="t"><b>会议纪要</b><span>远程 · 自动摘要</span></div><span class="chip">已启用</span><div class="toggle on"></div></div>
+            <div class="caprow card" onclick="openDetail('skill-detail')"><div class="ic" style="background:rgba(47,191,143,.12);color:#66d4ae"><svg class="ic"><use href="#ic-check"/></svg></div><div class="t"><b>代码审查</b><span>本地 · AI Code Review</span></div><span class="chip">已启用</span><div class="toggle on"></div></div>
+            <div class="caprow card" onclick="openDetail('skill-detail')"><div class="ic" style="background:rgba(217,154,43,.12);color:#e8bd6a"><svg class="ic"><use href="#ic-grid"/></svg></div><div class="t"><b>知识整理</b><span>远程 · 结构化管理</span></div><span class="chip">已停用</span><div class="toggle"></div></div>
+          </div>
+          <div id="cap-mem" style="display:none">
+            <div class="section">三层记忆</div>
+            <div class="caprow card" style="flex-direction:column;align-items:flex-start;gap:10px">
+              <div style="display:flex;align-items:center;gap:10px;width:100%"><div class="ic" style="background:rgba(110,98,255,.12);color:#9a90ff"><svg class="ic"><use href="#ic-message"/></svg></div><div class="t"><b>L1 · 会话内</b></div></div>
+              <div style="font-size:12px;color:var(--text-dim);line-height:1.6">滑动窗口 + 每 10 轮摘要压缩<br><span style="color:var(--text-faint)">当前会话已压缩 2 次</span></div>
+            </div>
+            <div class="caprow card" style="flex-direction:column;align-items:flex-start;gap:10px">
+              <div style="display:flex;align-items:center;gap:10px;width:100%"><div class="ic" style="background:rgba(34,199,224,.12);color:#6fd8e8"><svg class="ic"><use href="#ic-star"/></svg></div><div class="t"><b>L2 · 跨会话</b></div></div>
+              <div style="font-size:12px;color:var(--text-dim);line-height:1.6">向量化历史 · 按话题 top-3 检索<br><span style="color:var(--text-faint)">最近主题：Prism 设计 / 知识库</span></div>
+            </div>
+            <div class="caprow card" style="flex-direction:column;align-items:flex-start;gap:10px">
+              <div style="display:flex;align-items:center;gap:10px;width:100%"><div class="ic" style="background:rgba(47,191,143,.12);color:#66d4ae"><svg class="ic"><use href="#ic-prism"/></svg></div><div class="t"><b>L3 · 用户画像</b></div></div>
+              <div style="font-size:12px;color:var(--text-dim);line-height:1.6">偏好：简洁回答 · 中文优先 · 技术向<br><span class="recent-pill" style="margin-top:4px">2 项显式 · 7 项隐式</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SETTINGS -->
+      <div class="screen" id="scr-set">
+        <div class="topbar"><div class="tt"><div class="title">设置</div><div class="sub">偏好 · 安全 · 设备</div></div></div>
+        <div class="content">
+          <div class="section">模型与端点</div>
+          <div class="setrow card" onclick="openDetail('provider-list')"><div class="ic" style="background:rgba(110,98,255,.12);color:#9a90ff"><svg class="ic"><use href="#ic-zap"/></svg></div><div class="t"><b>Provider 配置</b><span>OpenAI / Anthropic / Ollama …</span></div><svg class="ic chev"><use href="#ic-chev-r"/></svg></div>
+          <div class="setrow card" onclick="openDetail('provider-edit')"><div class="ic" style="background:rgba(47,191,143,.12);color:#66d4ae"><svg class="ic"><use href="#ic-key"/></svg></div><div class="t"><b>API Key</b><span>Keystore 加密 · 已启用</span></div><svg class="ic chev"><use href="#ic-chev-r"/></svg></div>
+          <div class="section">隐私与安全</div>
+          <div class="setrow card"><div class="ic" style="background:rgba(34,199,224,.12);color:#6fd8e8"><svg class="ic"><use href="#ic-finger"/></svg></div><div class="t"><b>生物识别解锁</b><span>可选二次解锁</span></div><div class="toggle on"></div></div>
+          <div class="section">设备档位</div>
+          <div class="setrow card"><div class="ic" style="background:rgba(217,154,43,.12);color:#e8bd6a"><svg class="ic"><use href="#ic-sliders"/></svg></div><div class="t"><b>性能档位</b><span>自动识别 · 8GB RAM</span><div class="tier"><span>极简</span><span class="on">标准</span><span>全功能</span></div></div><svg class="ic chev"><use href="#ic-chev-r"/></svg></div>
+          <div class="section">关于</div>
+          <div class="setrow card"><div class="ic" style="background:var(--surface-2);color:var(--text-dim)"><svg class="ic"><use href="#ic-info"/></svg></div><div class="t"><b>关于 Prism</b><span>v0.1 · 零后端</span></div><svg class="ic chev"><use href="#ic-chev-r"/></svg></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DETAIL: 知识库 -->
+    <div class="detail" id="kb-detail">
+      <div class="topbar">
+        <div class="back" onclick="closeDetail('kb-detail')"><svg class="ic"><use href="#ic-back"/></svg></div>
+        <div class="tt"><div class="title">工作</div><div class="sub">分片状态 · 检索配置</div></div>
+        <div class="actions"><div class="iconbtn"><svg class="ic"><use href="#ic-more"/></svg></div></div>
+      </div>
+      <div class="content">
+        <div class="statrow">
+          <div class="statbox card"><b>2,134</b><span>总分片</span></div>
+          <div class="statbox card"><b>100%</b><span>已索引</span></div>
+          <div class="statbox card"><b>0</b><span>待分片</span></div>
+        </div>
+        <div class="section">文档 · 62</div>
+        <div class="docrow card"><div class="ic" style="background:rgba(110,98,255,.12);color:#9a90ff"><svg class="ic"><use href="#ic-file"/></svg></div><div class="t"><b>Q3产品规划.pdf</b><span>2,134 分片 · 已索引</span></div><svg class="ic chk"><use href="#ic-check"/></svg></div>
+        <div class="docrow card"><div class="ic" style="background:rgba(34,199,224,.12);color:#6fd8e8"><svg class="ic"><use href="#ic-file"/></svg></div><div class="t"><b>竞品分析.docx</b><span>1,204 分片 · 已索引</span></div><svg class="ic chk"><use href="#ic-check"/></svg></div>
+        <div class="section">检索设置</div>
+        <div class="field"><label>检索 Top-K</label><div class="input"><input value="5" type="number"></div><div class="hint">召回最相关的分片数量，影响回答精度与上下文成本。</div></div>
+        <div class="setrow card" style="cursor:default"><div class="ic" style="background:rgba(47,191,143,.12);color:#66d4ae"><svg class="ic"><use href="#ic-shield"/></svg></div><div class="t"><b>相似度阈值</b><span>低于阈值的分片不参与检索</span></div><div class="toggle on"></div></div>
+        <div style="height:16px"></div>
+        <button class="btn ghost" onclick="openSheet('import-sheet')"><svg class="ic"><use href="#ic-upload"/></svg> 导入文档</button>
+        <div style="height:10px"></div>
+        <button class="btn danger"><svg class="ic"><use href="#ic-trash"/></svg> 清空知识库</button>
+      </div>
+    </div>
+
+    <!-- DETAIL: Provider 列表 -->
+    <div class="detail" id="provider-list">
+      <div class="topbar">
+        <div class="back" onclick="closeDetail('provider-list')"><svg class="ic"><use href="#ic-back"/></svg></div>
+        <div class="tt"><div class="title">Provider 配置</div><div class="sub">BYOK 模型端点</div></div>
+        <div class="actions"><div class="iconbtn"><svg class="ic"><use href="#ic-plus"/></svg></div></div>
+      </div>
+      <div class="content">
+        <div class="section">已配置 · 4</div>
+        <div class="caprow card" onclick="openDetail('provider-edit')"><div class="ic" style="background:rgba(110,98,255,.12);color:#9a90ff"><svg class="ic"><use href="#ic-zap"/></svg></div><div class="t"><b>OpenAI</b><span>GPT-4o · 已连接</span></div><span class="dot ok"></span><svg class="ic chev"><use href="#ic-chev-r"/></svg></div>
+        <div class="caprow card" onclick="openDetail('provider-edit')"><div class="ic" style="background:rgba(34,199,224,.12);color:#6fd8e8"><svg class="ic"><use href="#ic-message"/></svg></div><div class="t"><b>Anthropic</b><span>Claude 3.5 · 未启用</span></div><span class="dot warn"></span><svg class="ic chev"><use href="#ic-chev-r"/></svg></div>
+        <div class="caprow card" onclick="openDetail('provider-edit')"><div class="ic" style="background:rgba(47,191,143,.12);color:#66d4ae"><svg class="ic"><use href="#ic-cpu"/></svg></div><div class="t"><b>Ollama</b><span>本地 · 127.0.0.1:11434</span></div><span class="dot ok"></span><svg class="ic chev"><use href="#ic-chev-r"/></svg></div>
+        <div class="caprow card" onclick="openDetail('provider-edit')"><div class="ic" style="background:rgba(217,154,43,.12);color:#e8bd6a"><svg class="ic"><use href="#ic-star"/></svg></div><div class="t"><b>Moonshot</b><span>Kimi · 需配置 Key</span></div><span class="dot err"></span><svg class="ic chev"><use href="#ic-chev-r"/></svg></div>
+      </div>
+    </div>
+
+    <!-- DETAIL: Provider 编辑 -->
+    <div class="detail" id="provider-edit">
+      <div class="topbar">
+        <div class="back" onclick="closeDetail('provider-edit')"><svg class="ic"><use href="#ic-back"/></svg></div>
+        <div class="tt"><div class="title" id="pe-title">OpenAI</div><div class="sub">端点 · 模型 · 密钥</div></div>
+        <div class="actions"><div class="iconbtn"><svg class="ic"><use href="#ic-more"/></svg></div></div>
+      </div>
+      <div class="content">
+        <div class="field"><label>Base URL</label><div class="input"><span style="color:var(--text-faint)">https://</span><input value="api.openai.com/v1"></div></div>
+        <div class="field"><label>模型</label><div class="input"><input value="gpt-4o"></div></div>
+        <div class="field"><label>Temperature</label><div class="input"><input value="0.7" type="number"></div></div>
+        <div class="field"><label>API Key</label><div class="input"><svg class="ic" style="width:15px;height:15px;color:var(--text-dim)"><use href="#ic-key"/></svg><input value="sk-••••••••••••••" type="password"></div><div class="hint">密钥经 Android Keystore 加密存储，禁止明文落盘。</div></div>
+        <div style="height:8px"></div>
+        <button class="btn primary"><svg class="ic"><use href="#ic-refresh"/></svg> 测试连接</button>
+        <div style="height:10px"></div>
+        <button class="btn ghost"><svg class="ic"><use href="#ic-check"/></svg> 保存</button>
+      </div>
+    </div>
+
+    <!-- DETAIL: Skill -->
+    <div class="detail" id="skill-detail">
+      <div class="topbar">
+        <div class="back" onclick="closeDetail('skill-detail')"><svg class="ic"><use href="#ic-back"/></svg></div>
+        <div class="tt"><div class="title">智能翻译</div><div class="sub">Skill 详情</div></div>
+        <div class="actions"><div class="iconbtn"><svg class="ic"><use href="#ic-more"/></svg></div></div>
+      </div>
+      <div class="content">
+        <div class="caprow card" style="cursor:default"><div class="ic" style="background:rgba(110,98,255,.12);color:#9a90ff"><svg class="ic"><use href="#ic-message"/></svg></div><div class="t"><b>智能翻译</b><span>本地 · 中英互译</span></div><span class="chip">已启用</span></div>
+        <div class="section">说明</div>
+        <div style="font-size:13px;color:var(--text-dim);line-height:1.7">在对话中自动识别中英文，提供高质量互译，支持术语表与正式/口语风格切换。</div>
+        <div class="section">来源</div>
+        <div class="caprow card" style="cursor:default"><div class="ic" style="background:var(--surface-2);color:var(--text-dim)"><svg class="ic"><use href="#ic-folder"/></svg></div><div class="t"><b>本地内置</b><span>随 App 分发 · 无需联网</span></div></div>
+        <div class="section">参数</div>
+        <div class="field"><label>目标语言</label><div class="input"><input value="中文（简体）"></div></div>
+        <div class="field"><label>风格</label><div class="input"><input value="正式"></div></div>
+        <div style="height:8px"></div>
+        <div class="setrow card" style="cursor:default"><div class="ic" style="background:rgba(110,98,255,.12);color:#9a90ff"><svg class="ic"><use href="#ic-zap"/></svg></div><div class="t"><b>启用 Skill</b></div><div class="toggle on"></div></div>
+      </div>
+    </div>
+
+    <!-- SHEET: MCP -->
+    <div class="overlay" id="mcp-sheet-ov" onclick="closeSheet('mcp-sheet')"></div>
+    <div class="sheet" id="mcp-sheet">
+      <div class="grip"></div>
+      <h3>GitHub</h3>
+      <div class="sub">MCP Server 连接配置</div>
+      <div class="field"><label>传输类型</label><div class="input"><input value="SSE → HTTP"></div><div class="hint">stdio 用于本地，SSE/HTTP 用于远程服务。</div></div>
+      <div class="field"><label>Base URL</label><div class="input"><input value="https://mcp.github.com/sse"></div></div>
+      <div class="field"><label>Token / API Key</label><div class="input"><svg class="ic" style="width:15px;height:15px;color:var(--text-faint)"><use href="#ic-key"/></svg><input value="ghp_••••••••••••••" type="password"></div><div class="hint">令牌仅存于本机 Keystore，上传至服务端。</div></div>
+      <div class="field"><label>Schema 校验</label><div class="input"><span class="dot ok"></span><span style="color:var(--mint);font-size:13px">已通过 · tools/list 返回 12 项</span></div></div>
+      <button class="btn primary" onclick="closeSheet('mcp-sheet')"><svg class="ic"><use href="#ic-refresh"/></svg> 测试连接</button>
+      <div style="height:10px"></div>
+      <div class="setrow card" style="cursor:default"><div class="ic" style="background:rgba(110,98,255,.12);color:#9a90ff"><svg class="ic"><use href="#ic-zap"/></svg></div><div class="t"><b>启用 Server</b></div><div class="toggle on"></div></div>
+      <div style="height:6px"></div>
+      <button class="btn danger" style="width:100%"><svg class="ic"><use href="#ic-trash"/></svg> 移除连接</button>
+    </div>
+
+    <!-- SHEET: 导入 -->
+    <div class="overlay" id="import-sheet-ov" onclick="closeSheet('import-sheet')"></div>
+    <div class="sheet" id="import-sheet">
+      <div class="grip"></div>
+      <h3>导入文档</h3>
+      <div class="sub">选择文件类型，自动完成分片与索引</div>
+      <div class="section" style="margin-top:0">支持格式</div>
+      <div class="enumrow card" onclick="this.querySelector('.radio').classList.add('on')"><div class="ic" style="background:rgba(110,98,255,.12);color:#9a90ff"><svg class="ic"><use href="#ic-file"/></svg></div><div class="t"><b>PDF 文档</b><span>PDF · 保留排版</span></div><div class="radio"></div></div>
+      <div class="enumrow card" onclick="this.querySelector('.radio').classList.add('on')"><div class="ic" style="background:rgba(34,199,224,.12);color:#6fd8e8"><svg class="ic"><use href="#ic-file"/></svg></div><div class="t"><b>Office 文档</b><span>DOCX / XLSX / PPTX</span></div><div class="radio"></div></div>
+      <div class="enumrow card" onclick="this.querySelector('.radio').classList.add('on')"><div class="ic" style="background:rgba(47,191,143,.12);color:#66d4ae"><svg class="ic"><use href="#ic-file"/></svg></div><div class="t"><b>文本 / Markdown</b><span>MD / TXT</span></div><div class="radio"></div></div>
+      <div style="height:8px"></div>
+      <button class="btn primary" style="width:100%"><svg class="ic"><use href="#ic-upload"/></svg> 选择文件</button>
+    </div>
+
+    <!-- SHEET: Skill 安装 -->
+    <div class="overlay" id="skill-install-ov" onclick="closeSheet('skill-install')"></div>
+    <div class="sheet" id="skill-install">
+      <div class="grip"></div>
+      <h3>安装 Skill</h3>
+      <div class="sub">从 URL 或本地清单安装</div>
+      <div class="field"><label>来源 URL</label><div class="input"><input placeholder="https://…/skill.json"></div></div>
+      <div class="setrow card" style="cursor:default"><div class="ic" style="background:var(--surface-2);color:var(--text-dim)"><svg class="ic"><use href="#ic-folder"/></svg></div><div class="t"><b>本地文件</b><span>选择 skill.json</span></div><svg class="ic chev"><use href="#ic-chev-r"/></svg></div>
+      <div style="height:8px"></div>
+      <button class="btn primary" style="width:100%"><svg class="ic"><use href="#ic-download"/></svg> 安装</button>
+    </div>
+
+    <!-- BOTTOM NAV (贴底) -->
+    <div class="nav">
+      <div class="navbar on" data-nav="chat"><div class="nm"><svg class="ic"><use href="#ic-message"/></svg></div><div class="nl">聊天</div></div>
+      <div class="navbar" data-nav="kb"><div class="nm"><svg class="ic"><use href="#ic-book"/></svg></div><div class="nl">知识库</div></div>
+      <div class="navbar" data-nav="cap"><div class="nm"><svg class="ic"><use href="#ic-zap"/></svg></div><div class="nl">能力</div></div>
+      <div class="navbar" data-nav="set"><div class="nm"><svg class="ic"><use href="#ic-settings"/></svg></div><div class="nl">设置</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  document.querySelectorAll('.navbar').forEach(n=>n.addEventListener('click',()=>{
+    document.querySelectorAll('.navbar').forEach(x=>x.classList.remove('on'));
+    document.querySelectorAll('.screen').forEach(x=>x.classList.remove('active'));
+    n.classList.add('on');
+    document.getElementById('scr-'+n.dataset.nav).classList.add('active');
+  }));
+
+  const segBtns=document.querySelectorAll('#cap-seg button');
+  const thumb=document.getElementById('cap-thumb');
+  function moveThumb(i){
+    const w=document.querySelector('#cap-seg').offsetWidth;
+    thumb.style.transform='translateX('+(i*w/3)+'px)';
+  }
+  segBtns.forEach((b,i)=>b.addEventListener('click',()=>{
+    segBtns.forEach(x=>x.classList.remove('on')); b.classList.add('on');
+    ['mcp','skill','mem'].forEach(k=>document.getElementById('cap-'+k).style.display=(k===b.dataset.cap?'':'none'));
+    moveThumb(i);
+  }));
+  requestAnimationFrame(()=>moveThumb(0));
+
+  document.querySelectorAll('.toggle').forEach(t=>t.addEventListener('click',e=>{e.stopPropagation();t.classList.toggle('on')}));
+
+  function openDetail(id){document.getElementById(id).classList.add('open');}
+  function closeDetail(id){document.getElementById(id).classList.remove('open');}
+  function openSheet(id){document.getElementById(id).classList.add('on');document.getElementById(id+'-ov').classList.add('on');}
+  function closeSheet(id){document.getElementById(id).classList.remove('on');document.getElementById(id+'-ov').classList.remove('on');}
+</script>
+</body>
+</html>

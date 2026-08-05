@@ -20,6 +20,10 @@ app/objectbox-jni-*.so
 app/objectbox-jni-*.dylib
 app/objectbox-jni-*.jnilib
 
+# ObjectBox schema 备份文件（生成器产物，不入版本控制）
+# 注：default.json 必须入库（BR-build-005），仅排除 .bak 备份
+app/objectbox-models/*.bak
+
 # IDE
 .idea/
 *.iml
@@ -50,3 +54,4 @@ target/
 
 # 性能/测试产物
 perf/baselines/*.bin
+.emulator/

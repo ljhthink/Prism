@@ -41,6 +41,23 @@ android {
     buildFeatures {
         compose = true
     }
+
+    // 性能基准可复跑（DEF-02）：默认跳过；传 -PignorePerformanceTests=false 时注入系统属性使基准运行。
+    testOptions {
+        unitTests.all { test ->
+            val ignorePerf = project.findProperty("ignorePerformanceTests")?.toString()
+            if (ignorePerf == "false") {
+                test.systemProperty("prism.runPerformanceTests", "true")
+            }
+        }
+    }
+
+    // 临时配置：禁用 lint 崩溃检测器（已知工具链问题，US-005 验证后仍保留以维持 Typecheck）
+    // 背景：Kotlin 2.1.0 产 metadata v2.1.0，lint 内置 kotlinx-metadata-jvm 仅支持 v2.0.0，
+    // ComposableCoroutineCreationDetector 解析含协程的测试文件时崩溃。非 US-005 代码缺陷。
+    lint {
+        disable += "CoroutineCreationDuringComposition"
+    }
 }
 
 dependencies {
@@ -52,8 +69,12 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
+    implementation(libs.androidx.compose.material.icons.extended)
+    implementation(libs.androidx.navigation.compose)
+    implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.tink.android)
     implementation(libs.androidx.datastore.preferences)
+    implementation(libs.lottie.compose)
     debugImplementation(libs.androidx.ui.tooling)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

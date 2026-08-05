@@ -3,8 +3,8 @@ package io.prism.data
 import io.objectbox.Box
 import io.objectbox.BoxStore
 import org.junit.After
+import org.junit.Assume
 import org.junit.Before
-import org.junit.Ignore
 import org.junit.Test
 import java.io.File
 
@@ -12,10 +12,9 @@ import java.io.File
  * KnowledgeChunk CRUD 性能基准测试（ac-verifier 补充，US-002 性能基线）。
  *
  * 生成 put/get/remove 操作的 p50/p95/p99 延迟初版基线。
- * 标记 @Ignore 以避免在常规 CI 中运行；手动运行获取基线数据：
+ * 默认跳过（DEF-02 修复）；手动运行获取基线数据：
  *   .\gradlew.bat testDebugUnitTest --tests "*.KnowledgeChunkPerformanceBenchmark" -PignorePerformanceTests=false
  */
-@Ignore("性能基准测试，手动运行；基线已记录于 docs/reports/perf/")
 class KnowledgeChunkPerformanceBenchmark {
 
     private lateinit var boxStore: BoxStore
@@ -30,6 +29,12 @@ class KnowledgeChunkPerformanceBenchmark {
 
     @Before
     fun setUp() {
+        // 仅当 Gradle 传入 -PignorePerformanceTests=false（注入 prism.runPerformanceTests=true）时运行；
+        // 否则整类跳过。
+        Assume.assumeTrue(
+            "性能基准默认跳过；运行: testDebugUnitTest ... -PignorePerformanceTests=false",
+            System.getProperty("prism.runPerformanceTests") == "true"
+        )
         tempDir = kotlin.io.path.createTempDirectory(prefix = "objectbox-perf-").toFile()
         boxStore = MyObjectBox.builder().directory(tempDir).build()
         box = boxStore.boxFor(KnowledgeChunk::class.java)
@@ -37,8 +42,9 @@ class KnowledgeChunkPerformanceBenchmark {
 
     @After
     fun tearDown() {
-        boxStore.close()
-        tempDir.deleteRecursively()
+        // Assume 失败（跳过）时字段未初始化，需判空避免二次异常
+        if (::boxStore.isInitialized) boxStore.close()
+        if (::tempDir.isInitialized) tempDir.deleteRecursively()
     }
 
     @Test

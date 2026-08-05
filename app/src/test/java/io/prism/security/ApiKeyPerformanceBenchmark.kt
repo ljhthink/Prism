@@ -2,7 +2,8 @@ package io.prism.security
 
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
-import org.junit.Ignore
+import org.junit.Assume
+import org.junit.Before
 import org.junit.Test
 
 /**
@@ -11,15 +12,25 @@ import org.junit.Test
  * 测量 encrypt / decrypt / saveApiKey / readApiKey 延迟（p50/p95/p99）。
  * 使用 RecordingCryptoService（纯 JVM Tink AEAD AES-256-GCM）。
  *
- * @Ignore 标注：手动运行，避免拖慢常规 CI。运行时移除 @Ignore 或用 -Dtest.include=Performance 执行。
+ * 默认跳过（DEF-02 迁移）；手动运行获取基线数据：
+ *   .\gradlew.bat testDebugUnitTest --tests "*.ApiKeyPerformanceBenchmark" -PignorePerformanceTests=false
  */
 class ApiKeyPerformanceBenchmark {
 
     private val iterations = 500
     private val warmupIterations = 50
 
+    @Before
+    fun skipUnlessEnabled() {
+        // 仅当 Gradle 传入 -PignorePerformanceTests=false（注入 prism.runPerformanceTests=true）时运行；
+        // 否则整类跳过。
+        Assume.assumeTrue(
+            "性能基准默认跳过；运行: testDebugUnitTest ... -PignorePerformanceTests=false",
+            System.getProperty("prism.runPerformanceTests") == "true"
+        )
+    }
+
     @Test
-    @Ignore("性能基准测试，手动运行")
     fun benchmark_encrypt() {
         val crypto = RecordingCryptoService()
         val plaintext = "sk-test-api-key-for-benchmark-1234567890".toByteArray(Charsets.UTF_8)
@@ -36,7 +47,6 @@ class ApiKeyPerformanceBenchmark {
     }
 
     @Test
-    @Ignore("性能基准测试，手动运行")
     fun benchmark_decrypt() {
         val crypto = RecordingCryptoService()
         val plaintext = "sk-test-api-key-for-benchmark-1234567890".toByteArray(Charsets.UTF_8)
@@ -56,7 +66,6 @@ class ApiKeyPerformanceBenchmark {
     }
 
     @Test
-    @Ignore("性能基准测试，手动运行")
     fun benchmark_saveApiKey() = runTest {
         val dataStore = FakePreferenceDataStore()
         val crypto = RecordingCryptoService()
@@ -75,7 +84,6 @@ class ApiKeyPerformanceBenchmark {
     }
 
     @Test
-    @Ignore("性能基准测试，手动运行")
     fun benchmark_readApiKey() = runTest {
         val dataStore = FakePreferenceDataStore()
         val crypto = RecordingCryptoService()

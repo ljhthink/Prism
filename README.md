@@ -4,7 +4,7 @@
 
 ## 项目状态
 
-🚧 **M0 脚手架 + M1 数据层 + 安全层已完成（US-001/US-002/US-003 通过 guardrail 审查 + ac-verifier 验收），推进 M1 BYOK 聊天核心**（2026-08-02）
+🚧 **M0 脚手架 + M1 数据层 + 安全层 + BYOK Provider 配置已完成（US-001~US-004 通过 guardrail 审查 + ac-verifier 验收），推进 M1 BYOK 聊天 UI 骨架（US-005）**（2026-08-02）
 
 - 平台：仅 Android（API 26+，Android 8.0+）
 - 算力：纯云端 BYOK（用户自配 OpenAI/Claude/Ollama 等端点）
@@ -26,6 +26,8 @@
 
 - [docs/decisions/](docs/decisions/README.md) —— 架构决策记录
   - [ADR-001 Prism 技术栈与架构选型](docs/decisions/ADR-001-prism-tech-stack.md)（Accepted）
+  - [ADR-002 Prism 聊天 UI 架构（US-005）](docs/decisions/ADR-002-prism-chat-ui-architecture.md)（Proposed）
+  - [ADR-003 Provider 配置详情页接入（设置模块）](docs/decisions/ADR-003-prism-provider-config-settings.md)（Accepted）
 
 ### Reference（参考 / 报告）
 
@@ -41,12 +43,21 @@
   - [2026-08-02-us001-m0-scaffold-guardrail.md](docs/reports/2026-08-02-us001-m0-scaffold-guardrail.md) —— US-001 M0 脚手架安全与质量审计（guardrail-enforcer，三轮）
   - [2026-08-02-us002-objectbox-guardrail.md](docs/reports/2026-08-02-us002-objectbox-guardrail.md) —— US-002 ObjectBox 安全与质量审计（guardrail-enforcer）
   - [2026-08-02-us003-apikey-guardrail.md](docs/reports/2026-08-02-us003-apikey-guardrail.md) —— US-003 API Key 加密存储安全与质量审计（guardrail-enforcer）
+  - [2026-08-02-us004-provider-config-guardrail.md](docs/reports/2026-08-02-us004-provider-config-guardrail.md) —— US-004 Provider 配置数据模型安全与质量审计（guardrail-enforcer）
   - [2026-08-02-us001-m0-scaffold-acceptance.md](docs/reports/2026-08-02-us001-m0-scaffold-acceptance.md) —— US-001 M0 脚手架验收测试（ac-verifier）
   - [2026-08-02-us002-objectbox-acceptance.md](docs/reports/2026-08-02-us002-objectbox-acceptance.md) —— US-002 ObjectBox 数据库基础验收测试（ac-verifier）
   - [2026-08-02-us003-apikey-acceptance.md](docs/reports/2026-08-02-us003-apikey-acceptance.md) —— US-003 API Key 加密存储验收测试（ac-verifier）
+  - [2026-08-02-us004-provider-config-acceptance.md](docs/reports/2026-08-02-us004-provider-config-acceptance.md) —— US-004 Provider 配置数据模型验收测试（ac-verifier）
+  - [2026-08-05-ui-config-guardrail.md](docs/reports/2026-08-05-ui-config-guardrail.md) —— v0.4 UI 配置弹层安全与质量审计（guardrail-enforcer，两轮）
+  - [2026-08-05-ui-config-acceptance.md](docs/reports/2026-08-05-ui-config-acceptance.md) —— v0.4 UI 配置弹层验收测试（ac-verifier）
+  - [2026-08-05-settings-provider-guardrail.md](docs/reports/2026-08-05-settings-provider-guardrail.md) —— Provider 配置详情页接入安全与质量审计（guardrail-enforcer，两轮）
+  - [2026-08-05-settings-provider-acceptance.md](docs/reports/2026-08-05-settings-provider-acceptance.md) —— Provider 配置详情页接入验收测试（ac-verifier）
+  - [2026-08-05-settings-provider-guardrail-round2.md](docs/reports/2026-08-05-settings-provider-guardrail-round2.md) —— Provider 配置详情页接入增量安全与质量审计（guardrail-enforcer，R2）
+  - [2026-08-05-settings-provider-acceptance-round2.md](docs/reports/2026-08-05-settings-provider-acceptance-round2.md) —— Provider 配置详情页接入增量验收测试（ac-verifier，R2）
   - [性能基线](docs/reports/perf/) —— 性能基线报告目录
     - [2026-08-02-us002-objectbox-crud-baseline.md](docs/reports/perf/2026-08-02-us002-objectbox-crud-baseline.md) —— US-002 ObjectBox CRUD 性能基线
     - [2026-08-02-us003-apikey-baseline.md](docs/reports/perf/2026-08-02-us003-apikey-baseline.md) —— US-003 API Key 加密存储性能基线
+    - [2026-08-02-us004-provider-config-baseline.md](docs/reports/perf/2026-08-02-us004-provider-config-baseline.md) —— US-004 Provider 配置数据模型性能基线
 
 ### 运维
 
