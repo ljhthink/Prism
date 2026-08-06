@@ -78,6 +78,7 @@
   - [2026-08-06-us009-filesystem-mcp-acceptance.md](docs/reports/2026-08-06-us009-filesystem-mcp-acceptance.md) —— US-009 Filesystem MCP Server 验收测试（ac-verifier，通过）
   - [2026-08-06-us010-remote-templates-guardrail.md](docs/reports/2026-08-06-us010-remote-templates-guardrail.md) —— US-010 预设远程 MCP Server 模板安全与质量审计（guardrail-enforcer，条件通过 → 复审通过）
   - [2026-08-06-us010-remote-templates-acceptance.md](docs/reports/2026-08-06-us010-remote-templates-acceptance.md) —— US-010 预设远程 MCP Server 模板验收测试（ac-verifier，通过）
+  - [2026-08-06-m0m2-milestone-audit.md](docs/reports/2026-08-06-m0m2-milestone-audit.md) —— M0-M2 首期里程碑交付审计（functional-validation-auditor，通过）
   - [性能基线](docs/reports/perf/) —— 性能基线报告目录
     - [2026-08-02-us002-objectbox-crud-baseline.md](docs/reports/perf/2026-08-02-us002-objectbox-crud-baseline.md) —— US-002 ObjectBox CRUD 性能基线
     - [2026-08-02-us003-apikey-baseline.md](docs/reports/perf/2026-08-02-us003-apikey-baseline.md) —— US-003 API Key 加密存储性能基线
