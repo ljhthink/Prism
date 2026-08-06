@@ -8,7 +8,8 @@ package io.prism.data
  * 对应 [io.prism.security.ApiKeyRepository] 中存储的加密 API Key。
  *
  * **形态 B（内置本地 Server，零配置）**：Filesystem / Fetch / Memory / Sequential Thinking / Time / 跨 App，共 6 个。
- * **形态 A（预设远程 Server 模板，用户填 Key 一键添加）**：GitHub / Notion / Context7，共 3 个（完整 9 个见 ADR-001 3.6，本期演示子集）。
+ * **形态 A（预设远程 Server 模板，用户填 Key 一键添加）**：GitHub / Notion / Context7 / Slack / Sentry /
+ * Stripe / Asana / Brave / Exa，共 9 个（ADR-001 3.6）。
  *
  * ADR-001 3.6：MCP 预设方案（形态 A+B 组合，零后端）。
  */
@@ -24,7 +25,7 @@ object McpServerPresets {
         McpServerConfig(name = "跨 App 调用", serverType = McpServerType.LOCAL, baseUrl = "")
     )
 
-    /** 预设远程 Server 模板 —— 用户填 Key 一键添加。 */
+    /** 预设远程 Server 模板 —— 用户填 Key 一键添加（端点经官方文档核实，2026-08-06）。 */
     private val remote = listOf(
         McpServerConfig(
             name = "GitHub",
@@ -44,6 +45,42 @@ object McpServerPresets {
             baseUrl = "https://mcp.context7.com/mcp",
             apiKeyRef = "context7",
             headers = mapOf("CONTEXT7_API_KEY_HEADER" to "CONTEXT7_API_KEY")
+        ),
+        McpServerConfig(
+            name = "Slack",
+            serverType = McpServerType.REMOTE,
+            baseUrl = "https://mcp.slack.com/mcp",
+            apiKeyRef = "slack"
+        ),
+        McpServerConfig(
+            name = "Sentry",
+            serverType = McpServerType.REMOTE,
+            baseUrl = "https://mcp.sentry.dev/mcp",
+            apiKeyRef = "sentry"
+        ),
+        McpServerConfig(
+            name = "Stripe",
+            serverType = McpServerType.REMOTE,
+            baseUrl = "https://mcp.stripe.com",
+            apiKeyRef = "stripe"
+        ),
+        McpServerConfig(
+            name = "Asana",
+            serverType = McpServerType.REMOTE,
+            baseUrl = "https://mcp.asana.com/v2/mcp",
+            apiKeyRef = "asana"
+        ),
+        McpServerConfig(
+            name = "Brave",
+            serverType = McpServerType.REMOTE,
+            baseUrl = "https://mcp.brave.com/mcp",
+            apiKeyRef = "brave"
+        ),
+        McpServerConfig(
+            name = "Exa",
+            serverType = McpServerType.REMOTE,
+            baseUrl = "https://mcp.exa.ai/mcp",
+            apiKeyRef = "exa"
         )
     )
 

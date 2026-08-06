@@ -148,8 +148,8 @@
         "Typecheck passes"
       ],
       "priority": 10,
-      "passes": false,
-      "notes": "ADR-001 形态 A 预设模板。"
+      "passes": true,
+      "notes": "ADR-001 形态 A 预设模板。验收通过：docs/reports/2026-08-06-us010-remote-templates-acceptance.md。"
     }
   ]
 }

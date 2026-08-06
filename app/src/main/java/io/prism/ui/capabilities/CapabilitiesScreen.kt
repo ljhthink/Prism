@@ -28,6 +28,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -200,16 +201,49 @@ private fun McpPanel(
 
         SectionHeader("远程模板 · ${remote.size}", "+ 自定义")
         if (remote.isEmpty()) EmptySection("暂无远程 Server，点击下方预设一键添加")
-        remote.forEach { McpRow(it, Modifier.padding(horizontal = 20.dp), onClick = { onServerClick(it) }, onToggle = { checked -> viewModel.setEnabled(it.id, checked) }) }
+        remote.forEach { RemoteMcpRow(it, viewModel, Modifier.padding(horizontal = 20.dp), onClick = { onServerClick(it) }) }
 
-        // 预设快捷添加（基于 McpServerPresets）
+        // 预设快捷添加（基于 McpServerPresets；本地零配置直接创建，远程预设填 Key 后添加）
         SectionHeader("从预设添加", "模板")
         CapabilitiesViewModel.presets.forEach { preset ->
             PresetRow(preset, Modifier.padding(horizontal = 20.dp), onClick = {
-                viewModel.createFromPreset(preset)
+                if (preset.serverType == McpServerType.LOCAL) {
+                    viewModel.createFromPreset(preset)
+                } else {
+                    viewModel.startPresetEdit(preset)
+                }
             })
         }
     }
+}
+
+/**
+ * 远程 Server 行 —— 在 [McpRow] 基础上叠加连接状态观测（US-010）。
+ *
+ * 仅当 Server 已启用时才观测连接状态（[CapabilitiesViewModel.observeConnectionStatus]），
+ * 避免对未启用 / 未配置的 Server 发起无谓的网络握手；未启用时回退默认启停指示。
+ */
+@Composable
+private fun RemoteMcpRow(
+    server: McpServerConfig,
+    viewModel: CapabilitiesViewModel,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val status: CapabilitiesViewModel.ConnectionStatus? = if (server.isEnabled) {
+        // key 含 baseUrl：编辑后 baseUrl 变化时重建 Flow，避免状态徽章陈旧（guardrail L-01）
+        val flow = remember(server.id, server.baseUrl, server.isEnabled) { viewModel.observeConnectionStatus(server) }
+        flow.collectAsState(initial = CapabilitiesViewModel.ConnectionStatus.Connecting).value
+    } else {
+        null
+    }
+    McpRow(
+        server = server,
+        modifier = modifier,
+        onClick = onClick,
+        onToggle = { checked -> viewModel.setEnabled(server.id, checked) },
+        connectionStatus = status
+    )
 }
 
 /** 单个 MCP Server 行（点击打开配置）。 */
@@ -218,7 +252,8 @@ private fun McpRow(
     server: McpServerConfig,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
-    onToggle: (Boolean) -> Unit
+    onToggle: (Boolean) -> Unit,
+    connectionStatus: CapabilitiesViewModel.ConnectionStatus? = null
 ) {
     PrismCard(
         modifier = modifier
@@ -245,7 +280,12 @@ private fun McpRow(
                 Text(text = server.name.ifEmpty { "未命名 Server" }, color = PrismText, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
                 Text(text = server.baseUrl.ifEmpty { "本地内置 · 零配置" }, color = PrismTextFaint, fontSize = 11.sp)
             }
-            PrismStatusDot(if (server.isEnabled) PrismDotState.OK else PrismDotState.ERR)
+            // 远程 Server 已启用时展示连接状态（连接中/已连接/错误）；否则展示启停指示
+            if (connectionStatus != null) {
+                ConnectionStatusBadge(connectionStatus)
+            } else {
+                PrismStatusDot(if (server.isEnabled) PrismDotState.OK else PrismDotState.ERR)
+            }
             // 本地内建 Server（零配置）无需 baseUrl 即可启用；远程 Server 需 baseUrl（guardrail M2）
             PrismSwitch(
                 checked = server.isEnabled,
@@ -253,6 +293,30 @@ private fun McpRow(
                 enabled = server.serverType == McpServerType.LOCAL || server.baseUrl.isNotBlank()
             )
         }
+    }
+}
+
+/** 连接状态徽章（US-010：连接中 / 已连接 · N 工具 / 连接失败）。 */
+@Composable
+private fun ConnectionStatusBadge(status: CapabilitiesViewModel.ConnectionStatus) {
+    when (status) {
+        is CapabilitiesViewModel.ConnectionStatus.Connecting -> Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(12.dp), strokeWidth = 1.5.dp)
+            Text(text = "连接中", color = PrismTextFaint, fontSize = 10.sp)
+        }
+        is CapabilitiesViewModel.ConnectionStatus.Connected -> Text(
+            text = "已连接 · ${status.toolCount}",
+            color = PrismMint,
+            fontSize = 10.sp
+        )
+        is CapabilitiesViewModel.ConnectionStatus.Error -> Text(
+            text = "连接失败",
+            color = PrismDanger,
+            fontSize = 10.sp
+        )
     }
 }
 
@@ -475,8 +539,12 @@ private fun McpConfigSheet(config: McpServerConfig, viewModel: CapabilitiesViewM
             enabled = canSave,
             onClick = {
                 if (!canSave) { showValidation = true; return@PrismButton }
-                // 先落盘 API Key（加密存储，明文不落盘），再保存 Server 配置
-                viewModel.saveApiKey(draft.apiKeyRef, apiKey)
+                // 先落盘 API Key（加密存储，明文不落盘），再保存 Server 配置。
+                // 仅当用户新填入 Key 才落盘：编辑既有远程 Server 时 apiKey 字段初始为空，
+                // 若无条件覆盖会清空已存密钥（guardrail M-01）；留空则保留原密钥。
+                if (apiKey.isNotBlank()) {
+                    viewModel.saveApiKey(draft.apiKeyRef, apiKey)
+                }
                 viewModel.saveServer(draft)
             }
         )

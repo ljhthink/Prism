@@ -12,6 +12,7 @@ import io.prism.security.RecordingCryptoService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.resetMain
@@ -199,6 +200,62 @@ class CapabilitiesViewModelTest {
 
         val retrieved = apiKeyRepository.readApiKey("context7").first()
         assertEquals("sk-secret-value", retrieved)
+    }
+
+    // ==================== US-010 远程预设加载 ====================
+
+    @Test
+    fun `remote presets contains 9 templates`() = runTest(mainDispatcher) {
+        val names = McpServerPresets.remotePresets.map { it.name }.toSet()
+        assertEquals(9, names.size)
+        assertEquals(
+            setOf("GitHub", "Notion", "Slack", "Sentry", "Stripe", "Asana", "Brave", "Exa", "Context7"),
+            names
+        )
+    }
+
+    @Test
+    fun `startPresetEdit selects preset draft with id zero`() = runTest(mainDispatcher) {
+        val vm = createViewModel()
+        val preset = McpServerPresets.all.first { it.name == "Context7" }
+
+        vm.startPresetEdit(preset)
+
+        val draft = requireNotNull(vm.selectedServer.value)
+        assertEquals("新建草稿应为 id=0", 0L, draft.id)
+        assertEquals(preset.name, draft.name)
+        assertEquals(preset.serverType, draft.serverType)
+        assertEquals(preset.baseUrl, draft.baseUrl)
+        assertEquals(preset.apiKeyRef, draft.apiKeyRef)
+        assertEquals(preset.headers, draft.headers)
+    }
+
+    @Test
+    fun `observeConnectionStatus emits connected with tool count`() = runTest(mainDispatcher) {
+        toolProvider.tools = listOf("read_file", "write_file")
+        val config = McpServerConfig(name = "FS", baseUrl = "https://fs.mcp")
+
+        val statuses = CapabilitiesViewModel.observeConnectionStatus(config, toolProvider).toList()
+
+        assertEquals(
+            listOf(
+                CapabilitiesViewModel.ConnectionStatus.Connecting,
+                CapabilitiesViewModel.ConnectionStatus.Connected(2)
+            ),
+            statuses
+        )
+    }
+
+    @Test
+    fun `observeConnectionStatus emits error when listTools returns empty`() = runTest(mainDispatcher) {
+        toolProvider.tools = emptyList()
+        val config = McpServerConfig(name = "FS", baseUrl = "https://fs.mcp")
+
+        val statuses = CapabilitiesViewModel.observeConnectionStatus(config, toolProvider).toList()
+
+        assertEquals(2, statuses.size)
+        assertEquals(CapabilitiesViewModel.ConnectionStatus.Connecting, statuses[0])
+        assertTrue("空工具应判定为连接失败", statuses[1] is CapabilitiesViewModel.ConnectionStatus.Error)
     }
 
     /** 可注入的假 [McpToolProvider]，用于测试连接成功 / 失败路径。 */
