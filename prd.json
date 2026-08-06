@@ -1,7 +1,7 @@
 {
   "project": "Prism",
-  "branchName": "ralph/prism-foundation",
-  "description": "Prism 手机端 AI 聊天 Agent 应用 —— M0 脚手架 + M1 BYOK 聊天核心 + M2 MCP Client 首期任务分解。依 ADR-001 技术栈：原生 Kotlin + Jetpack Compose + MCP Kotlin SDK 0.12.0 + ObjectBox 5.4.2 + ONNX Runtime + Android Keystore。每个故事可在单次迭代完成。",
+  "branchName": "ralph/prism-m3-rag",
+  "description": "Prism 手机端 AI 聊天 Agent 应用 —— M0 脚手架 + M1 BYOK 聊天核心 + M2 MCP Client 已完成（US-001~010 passes=true）；M3 个人知识库 RAG（US-011~019）进行中。依 ADR-001/ADR-007 技术栈：原生 Kotlin + Jetpack Compose + MCP Kotlin SDK 0.12.0 + ObjectBox 5.4.2（HNSW 向量搜索）+ onnxruntime-android 1.27.0 + Apache POI 5.5.1 + Android Keystore。每个故事可在单次迭代完成。",
   "userStories": [
     {
       "id": "US-001",
@@ -150,6 +150,142 @@
       "priority": 10,
       "passes": true,
       "notes": "ADR-001 形态 A 预设模板。验收通过：docs/reports/2026-08-06-us010-remote-templates-acceptance.md。"
+    },
+    {
+      "id": "US-011",
+      "title": "依赖落地 + KnowledgeChunk 向量索引",
+      "description": "作为开发者，我需要为 M3 RAG 落地技术栈依赖并建立向量索引，以便后续检索。",
+      "acceptanceCriteria": [
+        "libs.versions.toml 新增 onnxruntime-android 1.27.0 与 poi-ooxml 5.5.1",
+        "app/build.gradle.kts 引入依赖并启用 multiDexEnabled",
+        "KnowledgeChunk.embedding 加 @HnswIndex(dimensions=384, distanceType=COSINE) 注解",
+        "nearestNeighbors 近邻查询单元测试通过（含 embedding=null 不参与检索）",
+        "Typecheck passes"
+      ],
+      "priority": 11,
+      "passes": true,
+      "notes": "ADR-007 5.1/5.2/5.3 依赖落地。向量存储复用 ObjectBox 5.4.2 原生 HNSW。验收通过：docs/reports/2026-08-06-us011-deps-vectorindex-acceptance.md。ac-verifier 提示：US-017 检索模块需对 query 维度做显式校验（==384）。"
+    },
+    {
+      "id": "US-012",
+      "title": "实现文档解析器",
+      "description": "作为用户，我希望导入的 PDF/DOCX/XLSX/MD/TXT 文档能被解析为纯文本，以便进入知识库。",
+      "acceptanceCriteria": [
+        "DocumentParser 接口 + 按格式分发实现",
+        "PDF 用 Apache PDFBox pdfbox:3.0.8 抽取文本（PDFTextStripper）",
+        "DOCX/XLSX 用 Apache POI poi-ooxml 5.5.1 抽取文本",
+        "MD/TXT 用自研解析器",
+        "解析单元测试通过（各格式文本抽取正确）",
+        "Typecheck passes"
+      ],
+      "priority": 12,
+      "passes": true,
+      "notes": "ADR-007 5.3。PDF 用 PDFBox 3.0.8（PdfTextStripper）替代 PdfRenderer（PdfRenderer 仅渲染位图无文本 API），规避 pymupdf AGPL。验收通过：docs/reports/2026-08-06-us012-document-parser-acceptance.md（6/6 AC，27+14 用例）。guardrail 有条件通过（G-01 FORMULA 缓存值已修复）。硬门禁：G-03 单文件上限(≤20MB)+流式读取须在 US-016 摄入管线强制落地。"
+    },
+    {
+      "id": "US-013",
+      "title": "实现文本切片器",
+      "description": "作为用户，我希望长文档被切分为可检索的片段，以便精确检索。",
+      "acceptanceCriteria": [
+        "Chunker 支持可配置 chunkSize 与 overlap",
+        "切片保持段落边界优先，避免在句子中间截断",
+        "切片单元测试通过（边界、空输入、超长输入）",
+        "Typecheck passes"
+      ],
+      "priority": 13,
+      "passes": true,
+      "notes": "PRD US-003 验收 2：切片（可配置 chunk size/overlap）。段落边界优先+句子/词边界回退+overlap 跨段落衔接（guardrail G-1 决策）。G-2 句号孤儿/G-3 词边界已修复。验收通过：docs/reports/2026-08-06-us013-chunker-acceptance.md（4/4 AC，15+10 用例，O(n) 性能基线）。"
+    },
+    {
+      "id": "US-014",
+      "title": "实现端侧嵌入引擎",
+      "description": "作为用户，我希望文档片段能在设备本地被嵌入为向量，以便语义检索。",
+      "acceptanceCriteria": [
+        "onnxruntime-android 加载 assets 中的 all-MiniLM-L6-v2 ONNX INT8 模型",
+        "embed(text) 将文本编码为 384 维向量",
+        "模型按需加载，闲置 5 分钟后卸载释放内存",
+        "嵌入单元测试通过（维度正确、向量一致）",
+        "Typecheck passes"
+      ],
+      "priority": 14,
+      "passes": true,
+      "notes": "ADR-007 5.2。模型打包入 APK（用户已确认）。guardrial-enforcer 两轮审查（TKN-US014-EMBEDDING-001 阻断 → TKN-US014-EMBEDDING-002 通过，G-01 并发竞态阻断级已修复：embed 全程持锁 BR-concurrency-002）+ ac-verifier 验收（TKN-US014-EMBEDDING-AC-001，5/5 AC 通过，29 嵌入测试 + 4 perf 基准，全量 379 测试 0 失败）。AC-1 真机 AssetManager / AC-3 native 内存释放因无模拟器受限通过（与 US-002~008 同模式），待 US-018 真机补测。验收报告：docs/reports/2026-08-07-us014-embedding-acceptance.md。性能基线：docs/reports/perf/2026-08-07-us014-embedding-baseline.md（embed p99 短文本 2ms / 长文本 14ms）。"
+    },
+    {
+      "id": "US-015",
+      "title": "实现知识库分库数据模型",
+      "description": "作为用户，我希望知识库支持分库管理（如工作/学习），以便按库组织文档。",
+      "acceptanceCriteria": [
+        "KnowledgeBase 实体（id/name/createdAt）关联 KnowledgeChunk",
+        "KnowledgeBaseRepository 分库 CRUD",
+        "KnowledgeChunk 关联所属库字段",
+        "分库 CRUD 单元测试通过",
+        "Typecheck passes"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": "PRD US-003 验收 5：分库管理。"
+    },
+    {
+      "id": "US-016",
+      "title": "实现摄入管线",
+      "description": "作为用户，我希望导入文档后自动完成解析→切片→嵌入→入库，以便生成可检索知识库。",
+      "acceptanceCriteria": [
+        "IngestionPipeline：解析→切片→嵌入→写入指定库",
+        "摄入进度与错误可观察",
+        "嵌入为 null 的片段不建索引并提示",
+        "摄入管线集成测试通过",
+        "Typecheck passes"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": "PRD US-003 验收 2：摄入→切片→嵌入→入库全链路。"
+    },
+    {
+      "id": "US-017",
+      "title": "实现向量检索",
+      "description": "作为用户，我希望对话时能检索到最相关的文档片段，以便 AI 回答有依据。",
+      "acceptanceCriteria": [
+        "top-k 检索（默认 k=5，可配置）基于 nearestNeighbors",
+        "支持指定库或全库检索",
+        "检索结果含相似度分数与来源（文件/片段位置）",
+        "检索单元测试通过（含空库、无匹配）",
+        "Typecheck passes"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": "PRD US-003 验收 3/5。4GB 低端机小批次 top-k=3。"
+    },
+    {
+      "id": "US-018",
+      "title": "实现知识库管理 UI",
+      "description": "作为用户，我希望在 App 内管理知识库、导入文档并查看进度，以便使用 RAG。",
+      "acceptanceCriteria": [
+        "知识库列表页显示分库",
+        "支持创建/删除分库",
+        "支持导入文档（解析→摄入进度展示）",
+        "摄入失败与未建索引提示",
+        "Typecheck passes"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": "PRD US-003 验收 5/7。4GB 低端机小批次模式。"
+    },
+    {
+      "id": "US-019",
+      "title": "实现 RAG 对话集成",
+      "description": "作为用户，我希望对话时 AI 检索知识库并标注引用来源，以便降低幻觉。",
+      "acceptanceCriteria": [
+        "对话时检索 top-k 片段注入 prompt",
+        "可指定库或全库检索",
+        "AI 回答标注引用来源（文件名+片段位置）",
+        "无引用时主动说明",
+        "集成测试通过",
+        "Typecheck passes"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": "PRD US-003 验收 3/4。强制引用来源防幻觉。"
     }
   ]
 }

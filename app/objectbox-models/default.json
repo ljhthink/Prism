@@ -27,7 +27,9 @@
         {
           "id": "4:6709763702067591942",
           "name": "embedding",
-          "type": 28
+          "indexId": "1:2432317062331387289",
+          "type": 28,
+          "flags": 8
         }
       ],
       "relations": []
@@ -137,7 +139,7 @@
     }
   ],
   "lastEntityId": "3:8462063586024992104",
-  "lastIndexId": "0:0",
+  "lastIndexId": "1:2432317062331387289",
   "lastRelationId": "0:0",
   "lastSequenceId": "0:0",
   "modelVersion": 5,

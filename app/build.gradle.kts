@@ -18,6 +18,8 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+        // M3 引入 Apache POI（poi-ooxml）后方法数/引用数可能超限，启用 Multidex（ADR-007 5.3）
+        multiDexEnabled = true
     }
 
     buildTypes {
@@ -91,6 +93,10 @@ dependencies {
     // 内置 Filesystem MCP Server（US-009）：本地 Server 承载进程内工具（ADR-006 5.1）
     implementation(libs.mcp.kotlin.sdk.server)
     implementation(libs.androidx.documentfile)
+    // M3 RAG（ADR-007）：端侧嵌入运行时（onnxruntime-android，MIT）+ 文档解析（Apach POI，Apache 2.0）
+    implementation(libs.onnxruntime.android)
+    implementation(libs.poi.ooxml)
+    implementation(libs.pdfbox)
     debugImplementation(libs.androidx.ui.tooling)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
@@ -99,4 +105,6 @@ dependencies {
     testImplementation(libs.ktor.server.core)
     testImplementation(libs.ktor.server.netty)
     testImplementation(libs.ktor.server.sse)
+    // US-014：JVM 单测用 onnxruntime（纯 JVM 版，含桌面原生库）替代 onnxruntime-android AAR
+    testImplementation(libs.onnxruntime)
 }

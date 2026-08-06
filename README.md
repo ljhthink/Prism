@@ -6,6 +6,13 @@
 
 🚧 **M0 脚手架 + M1 数据层 + 安全层 + BYOK Provider 配置 + 聊天 UI + 流式请求 + Provider 切换 + M2 MCP Client + M2 内置 Filesystem MCP Server + 预设远程 MCP Server 模板加载已完成（US-001~US-010 通过 guardrail 审查 + ac-verifier 验收）**（2026-08-06）
 
+**M3 个人知识库 RAG 进行中（US-011~US-019，ADR-007 技术栈已定）**
+
+- US-011 依赖落地 + KnowledgeChunk 向量索引 ✅（guardrail + ac-verifier 通过）
+- US-012 文档解析器（PDF/DOCX/XLSX/MD/TXT）✅（guardrail 有条件通过 + ac-verifier 通过）
+- US-013 文本切片器（段落边界优先 + overlap）✅（guardrail + ac-verifier 通过）
+- US-014 端侧嵌入引擎（onnxruntime-android + all-MiniLM-L6-v2 INT8）✅（guardrial 两轮 + ac-verifier 通过，G-01 并发竞态阻断已修复）
+
 - 平台：仅 Android（API 26+，Android 8.0+）
 - 算力：纯云端 BYOK（用户自配 OpenAI/Claude/Ollama 等端点）
 - 商业模式：个人开源免费 + 自发布（GitHub Releases / F-Droid / PGY）
@@ -31,6 +38,7 @@
   - [ADR-004 Prism Provider 流式请求（US-006/US-007）](docs/decisions/ADR-004-prism-provider-streaming.md)（Accepted）
   - [ADR-005 MCP Kotlin SDK Client 集成（US-008）](docs/decisions/ADR-005-mcp-client-integration.md)（Accepted）
   - [ADR-006 内置 Filesystem MCP Server（US-009）](docs/decisions/ADR-006-filesystem-mcp-server.md)（Accepted）
+  - [ADR-007 M3 个人知识库 RAG 技术栈（US-003）](docs/decisions/ADR-007-m3-rag-tech-stack.md)（Proposed）
 
 ### Reference（参考 / 报告）
 
@@ -79,10 +87,21 @@
   - [2026-08-06-us010-remote-templates-guardrail.md](docs/reports/2026-08-06-us010-remote-templates-guardrail.md) —— US-010 预设远程 MCP Server 模板安全与质量审计（guardrail-enforcer，条件通过 → 复审通过）
   - [2026-08-06-us010-remote-templates-acceptance.md](docs/reports/2026-08-06-us010-remote-templates-acceptance.md) —— US-010 预设远程 MCP Server 模板验收测试（ac-verifier，通过）
   - [2026-08-06-m0m2-milestone-audit.md](docs/reports/2026-08-06-m0m2-milestone-audit.md) —— M0-M2 首期里程碑交付审计（functional-validation-auditor，通过）
+  - [2026-08-06-m3-rag-tech-selection.md](docs/reports/2026-08-06-m3-rag-tech-selection.md) —— M3 个人知识库 RAG 技术选型对比（tech-selection-researcher）
+  - [2026-08-06-us011-deps-vectorindex-guardrail.md](docs/reports/2026-08-06-us011-deps-vectorindex-guardrail.md) —— US-011 依赖落地 + 向量索引安全与质量审计（guardrail-enforcer，通过）
+  - [2026-08-06-us011-deps-vectorindex-acceptance.md](docs/reports/2026-08-06-us011-deps-vectorindex-acceptance.md) —— US-011 依赖落地 + 向量索引验收测试（ac-verifier，通过）
+  - [2026-08-06-us012-document-parser-guardrail.md](docs/reports/2026-08-06-us012-document-parser-guardrail.md) —— US-012 文档解析器安全与质量审计（guardrail-enforcer，有条件通过）
+  - [2026-08-06-us012-document-parser-acceptance.md](docs/reports/2026-08-06-us012-document-parser-acceptance.md) —— US-012 文档解析器验收测试（ac-verifier，通过）
+  - [2026-08-06-us013-chunker-guardrail.md](docs/reports/2026-08-06-us013-chunker-guardrail.md) —— US-013 文本切片器安全与质量审计（guardrail-enforcer，通过）
+  - [2026-08-06-us013-chunker-acceptance.md](docs/reports/2026-08-06-us013-chunker-acceptance.md) —— US-013 文本切片器验收测试（ac-verifier，通过）
+  - [2026-08-07-us014-embedding-guardrail.md](docs/reports/2026-08-07-us014-embedding-guardrail.md) —— US-014 端侧嵌入引擎安全与质量审计（guardrail-enforcer，第一轮阻断，G-01 并发竞态）
+  - [2026-08-07-us014-embedding-guardrail-round2.md](docs/reports/2026-08-07-us014-embedding-guardrail-round2.md) —— US-014 端侧嵌入引擎修复复审（guardrail-enforcer，第二轮通过，G-01~G-15 修复）
+  - [2026-08-07-us014-embedding-acceptance.md](docs/reports/2026-08-07-us014-embedding-acceptance.md) —— US-014 端侧嵌入引擎验收测试（ac-verifier，通过，5/5 AC）
   - [性能基线](docs/reports/perf/) —— 性能基线报告目录
     - [2026-08-02-us002-objectbox-crud-baseline.md](docs/reports/perf/2026-08-02-us002-objectbox-crud-baseline.md) —— US-002 ObjectBox CRUD 性能基线
     - [2026-08-02-us003-apikey-baseline.md](docs/reports/perf/2026-08-02-us003-apikey-baseline.md) —— US-003 API Key 加密存储性能基线
     - [2026-08-02-us004-provider-config-baseline.md](docs/reports/perf/2026-08-02-us004-provider-config-baseline.md) —— US-004 Provider 配置数据模型性能基线
+    - [2026-08-07-us014-embedding-baseline.md](docs/reports/perf/2026-08-07-us014-embedding-baseline.md) —— US-014 端侧嵌入引擎性能基线（初版，JVM）
 
 ### 运维
 

@@ -33,6 +33,17 @@
 - 适用场景：dev
 - 状态：active
 
+#### BR-error-handling-005: 显式关闭资源的异常处理须保证状态置位
+
+- 类别：error-handling
+- 规则：`close()`/`unload()` 等显式关闭原生资源的方法，若 `close` 抛异常被捕获并重新抛出，其后的「置 null/标记已关闭」语句不会执行，导致对象残留已关闭引用、下次重复关闭。必须将「置 null」移入 `finally`，或在 `try` 之前/之内先置 null，保证无论 close 成功与否状态一致。
+- 反例：`try { s.close() } catch (e: Exception) { throw Wrapped(e) }; session = null` —— 抛异常时 session 不置 null
+- 正例：`session = null; try { s.close() } catch (e: Exception) { throw Wrapped(e) }`，或 `try { s.close() } finally { session = null }`
+- 来源：US-014 嵌入引擎审查（TKN-US014-EMBEDDING-001，G-02 高危发现）
+- 添加日期：2026-08-07
+- 适用场景：dev
+- 状态：active（ac-verifier TKN-US014-EMBEDDING-AC-001 确认 G-02 修复有效，2026-08-07 转 active）
+
 ### security
 
 #### BR-security-001: data class 含数组字段必须覆盖 equals/hashCode
@@ -91,6 +102,17 @@
 - 添加日期：2026-08-02
 - 适用场景：dev
 - 状态：active
+
+#### BR-concurrency-002: 生命周期资源的并发访问须覆盖 close 路径
+
+- 类别：concurrency
+- 规则：当类持有需显式关闭的原生/重型资源（如 ONNX `OrtSession`、数据库连接、IO 句柄）并以锁保护生命周期时，若 `embed`/`run` 等使用方法在 `ensureLoaded` 返回后释放锁再使用资源引用，则 `close()` 可在并发窗口内关闭资源，导致 use-after-close。必须：要么将使用方法整体纳入锁（串行化可接受时），要么用引用计数/读写锁使 `close` 等待活跃使用完成。仅在注释中声明线程安全而实现未覆盖 close 并发路径视为契约违反。
+- 反例：`fun embed() { val s = ensureLoaded() /* 锁内返回后释放 */; s.run(inputs) /* 锁外 */ }`，`fun close() = lock.withLock { session?.close(); session=null }` —— close 可在 s.run 前关闭 session
+- 正例：`fun embed() = lock.withLock { val s = ensureLoadedLocked(); s.run(inputs) }`，或引用计数保证 close 等待 activeCount==0
+- 来源：US-014 嵌入引擎审查（TKN-US014-EMBEDDING-001，G-01 阻断级发现）
+- 添加日期：2026-08-07
+- 适用场景：dev
+- 状态：active（ac-verifier TKN-US014-EMBEDDING-AC-001 确认 G-01 修复有效，2 并发测试通过，2026-08-07 转 active）
 
 ### interface
 
@@ -248,3 +270,6 @@
 | 2026-08-06 | ac-verifier | 验收通过，无新规则 | US-007 Provider 切换验收（TKN-US007-ACCEPTANCE-001）：prd.json 五条 AC 满足，SSE 首字延迟 p99 +1.7% 无回退，安全通过，回归 157 用例 0 失败 |
 | 2026-08-06 | guardrail-enforcer | 新增 BR-testing-002 + BR-testing-003 | US-008 MCP 集成测试审查（TKN-MCP-CLIENT-GUARDRAIL-005）：Q1「先启动资源再断言」在 try 外、Q2 测试 HttpClient 未逐项对齐生产、Q3 stopServers 未逐项容错 |
 | 2026-08-06 | ac-verifier | 验收通过，无新规则 | US-008 MCP Client 复验（TKN-MCP-CLIENT-AC-002）：DEF-001/GAP-001/GAP-002 三项闭合，AC-1~AC-5 全部通过，lintDebug BUILD SUCCESSFUL，回归 214 用例 0 失败 |
+| 2026-08-07 | guardrail-enforcer | 提议 BR-concurrency-002 + BR-error-handling-005 | US-014 嵌入引擎审查（TKN-US014-EMBEDDING-001）：372 测试通过、Typecheck 通过，无阻断级安全漏洞（无注入/密钥/RCE），但 G-01 并发 use-after-close 竞态违反接口线程安全契约定为阻断；G-02/G-03/G-04 高危、G-05/G-06/G-07 中危。主 Agent 须修复后重新提交审查 |
+| 2026-08-07 | guardrail-enforcer | 复审通过，BR 规则验证修复有效 | US-014 R2 复审（TKN-US014-EMBEDDING-002）：G-01~G-15 修复项正确，未引入新阻断/高危缺陷，建议 BR-concurrency-002 / BR-error-handling-005 转 active |
+| 2026-08-07 | ac-verifier | 验收通过，BR 规则转 active | US-014 验收（TKN-US014-EMBEDDING-AC-001）：5/5 AC 通过，29 嵌入测试 + 4 perf 基准通过，全量 379 测试 0 失败。确认 G-01（2 并发测试）/ G-02（先置 null 再 close）修复有效，BR-concurrency-002 / BR-error-handling-005 状态 proposed → active |
