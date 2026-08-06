@@ -5,7 +5,7 @@
   "entities": [
     {
       "id": "1:1823920831452556342",
-      "lastPropertyId": "4:6709763702067591942",
+      "lastPropertyId": "5:3538805690684898002",
       "name": "KnowledgeChunk",
       "properties": [
         {
@@ -30,6 +30,11 @@
           "indexId": "1:2432317062331387289",
           "type": 28,
           "flags": 8
+        },
+        {
+          "id": "5:3538805690684898002",
+          "name": "knowledgeBaseId",
+          "type": 6
         }
       ],
       "relations": []
@@ -136,9 +141,33 @@
         }
       ],
       "relations": []
+    },
+    {
+      "id": "4:130754586657942467",
+      "lastPropertyId": "3:7519189275052970890",
+      "name": "KnowledgeBase",
+      "properties": [
+        {
+          "id": "1:9053407254125240656",
+          "name": "id",
+          "type": 6,
+          "flags": 1
+        },
+        {
+          "id": "2:955281942790576528",
+          "name": "name",
+          "type": 9
+        },
+        {
+          "id": "3:7519189275052970890",
+          "name": "createdAt",
+          "type": 6
+        }
+      ],
+      "relations": []
     }
   ],
-  "lastEntityId": "3:8462063586024992104",
+  "lastEntityId": "4:130754586657942467",
   "lastIndexId": "1:2432317062331387289",
   "lastRelationId": "0:0",
   "lastSequenceId": "0:0",

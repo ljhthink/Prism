@@ -12,6 +12,7 @@
 - US-012 文档解析器（PDF/DOCX/XLSX/MD/TXT）✅（guardrail 有条件通过 + ac-verifier 通过）
 - US-013 文本切片器（段落边界优先 + overlap）✅（guardrail + ac-verifier 通过）
 - US-014 端侧嵌入引擎（onnxruntime-android + all-MiniLM-L6-v2 INT8）✅（guardrial 两轮 + ac-verifier 通过，G-01 并发竞态阻断已修复）
+- US-015 知识库分库数据模型（KnowledgeBase 实体 + Repository CRUD + 级联删除）✅（guardrail 两轮 + ac-verifier 通过，G-01 HNSW Query.remove bug #1209 已规避）
 
 - 平台：仅 Android（API 26+，Android 8.0+）
 - 算力：纯云端 BYOK（用户自配 OpenAI/Claude/Ollama 等端点）
@@ -39,6 +40,7 @@
   - [ADR-005 MCP Kotlin SDK Client 集成（US-008）](docs/decisions/ADR-005-mcp-client-integration.md)（Accepted）
   - [ADR-006 内置 Filesystem MCP Server（US-009）](docs/decisions/ADR-006-filesystem-mcp-server.md)（Accepted）
   - [ADR-007 M3 个人知识库 RAG 技术栈（US-003）](docs/decisions/ADR-007-m3-rag-tech-stack.md)（Proposed）
+  - [ADR-008 M3 知识库分库数据模型（US-015）](docs/decisions/ADR-008-m3-knowledgebase-model.md)（Proposed）
 
 ### Reference（参考 / 报告）
 
@@ -97,6 +99,10 @@
   - [2026-08-07-us014-embedding-guardrail.md](docs/reports/2026-08-07-us014-embedding-guardrail.md) —— US-014 端侧嵌入引擎安全与质量审计（guardrail-enforcer，第一轮阻断，G-01 并发竞态）
   - [2026-08-07-us014-embedding-guardrail-round2.md](docs/reports/2026-08-07-us014-embedding-guardrail-round2.md) —— US-014 端侧嵌入引擎修复复审（guardrail-enforcer，第二轮通过，G-01~G-15 修复）
   - [2026-08-07-us014-embedding-acceptance.md](docs/reports/2026-08-07-us014-embedding-acceptance.md) —— US-014 端侧嵌入引擎验收测试（ac-verifier，通过，5/5 AC）
+  - [2026-08-07-us015-data-archaeology.md](docs/reports/2026-08-07-us015-data-archaeology.md) —— US-015 知识库分库数据模型源码考古（code-archaeologist，简化版）
+  - [2026-08-07-us015-knowledgebase-model-guardrail.md](docs/reports/2026-08-07-us015-knowledgebase-model-guardrail.md) —— US-015 知识库分库数据模型安全与质量审计（guardrail-enforcer，有条件通过，G-01 HNSW Query.remove 已知 bug 风险）
+  - [2026-08-07-us015-knowledgebase-model-guardrail-round2.md](docs/reports/2026-08-07-us015-knowledgebase-model-guardrail-round2.md) —— US-015 知识库分库数据模型修复复审（guardrail-enforcer，第二轮通过，G-01~G-05 修复）
+  - [2026-08-07-us015-knowledgebase-model-acceptance.md](docs/reports/2026-08-07-us015-knowledgebase-model-acceptance.md) —— US-015 知识库分库数据模型验收测试（ac-verifier，通过，5/5 AC，31 单元测试 + 全量 410 回归 0 失败）
   - [性能基线](docs/reports/perf/) —— 性能基线报告目录
     - [2026-08-02-us002-objectbox-crud-baseline.md](docs/reports/perf/2026-08-02-us002-objectbox-crud-baseline.md) —— US-002 ObjectBox CRUD 性能基线
     - [2026-08-02-us003-apikey-baseline.md](docs/reports/perf/2026-08-02-us003-apikey-baseline.md) —— US-003 API Key 加密存储性能基线

@@ -223,8 +223,8 @@
         "Typecheck passes"
       ],
       "priority": 15,
-      "passes": false,
-      "notes": "PRD US-003 验收 5：分库管理。"
+      "passes": true,
+      "notes": "PRD US-003 验收 5：分库管理。ADR-008 5.1~5.4。guardrail-enforcer 两轮审查（TKN-US015-GUARDRAIL-001 有条件通过 G-01 HNSW Query.remove bug #1209 + G-02 Query 未 close → TKN-US015-GUARDRAIL-002 通过 G-01~G-05 全修复）+ ac-verifier 验收（TKN-US015-AC-001，5/5 AC 通过，31 单元测试 + 6 极端场景 + 全量 410 回归 0 失败，性能基线 remove p99 42ms）。HNSW 删除策略：findIds() + Box.remove(*ids) 规避 #1209。验收报告：docs/reports/2026-08-07-us015-knowledgebase-model-acceptance.md。"
     },
     {
       "id": "US-016",

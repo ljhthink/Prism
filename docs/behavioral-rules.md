@@ -114,6 +114,17 @@
 - 适用场景：dev
 - 状态：active（ac-verifier TKN-US014-EMBEDDING-AC-001 确认 G-01 修复有效，2 并发测试通过，2026-08-07 转 active）
 
+#### BR-concurrency-003: HNSW 向量索引实体的批量删除禁用 Query.remove()
+
+- 类别：concurrency
+- 规则：对带 `@HnswIndex` 向量索引的 ObjectBox 实体（如 `KnowledgeChunk`），批量删除时**禁用 `Query.remove()`**（nativeRemove 路径），因其命中 objectbox-java#1209（`IllegalStateException: Vector is missing for neighbor to repair`，截至 5.4.2 未确认修复）。必须改用 `Query.findIds()` 查 id + `Box.remove(*ids)`（vararg Long）走 Box native 路径删除。同时 `findIds()` 后用 `use {}` 关闭 Query 释放 native 句柄。级联删除仍须在 `runInTx` 事务内保证原子性。
+- 反例：`chunkBox.query().equal(KnowledgeChunk_.knowledgeBaseId, id).build().remove()` —— 走 Query.nativeRemove，HNSW 索引下可能抛 IllegalStateException
+- 正例：`val ids = chunkBox.query().equal(KnowledgeChunk_.knowledgeBaseId, id).build().use { it.findIds() }; if (ids.isNotEmpty()) chunkBox.remove(*ids)` —— 走 Box native 路径，规避 #1209
+- 来源：US-015 知识库分库数据模型审查（TKN-US015-GUARDRAIL-001，G-01 HIGH 发现；TKN-US015-GUARDRAIL-002 修复验证通过；ac-verifier TKN-US015-AC-001 确认 500 chunk 规模不触发 #1209）
+- 添加日期：2026-08-07
+- 适用场景：dev
+- 状态：active
+
 ### interface
 
 #### BR-interface-001: UI 设计必须用户审核通过后方可实现
