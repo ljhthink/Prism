@@ -88,6 +88,9 @@ dependencies {
     implementation(libs.ktor.serialization.kotlinx.json)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.mcp.kotlin.sdk.client)
+    // 内置 Filesystem MCP Server（US-009）：本地 Server 承载进程内工具（ADR-006 5.1）
+    implementation(libs.mcp.kotlin.sdk.server)
+    implementation(libs.androidx.documentfile)
     debugImplementation(libs.androidx.ui.tooling)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
@@ -96,6 +99,4 @@ dependencies {
     testImplementation(libs.ktor.server.core)
     testImplementation(libs.ktor.server.netty)
     testImplementation(libs.ktor.server.sse)
-    // 真实 MCP Server 集成测试（ADR-005 5.6：嵌入式 Ktor Netty 起 Streamable HTTP 端点）
-    testImplementation(libs.mcp.kotlin.sdk.server)
 }

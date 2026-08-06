@@ -127,7 +127,7 @@ class CapabilitiesViewModel(
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val app = this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY] as PrismApplication
-                CapabilitiesViewModel(app.mcpServerRepository, app.mcpClientManager, app.apiKeyRepository)
+                CapabilitiesViewModel(app.mcpServerRepository, app.mcpToolProviderDispatcher, app.apiKeyRepository)
             }
         }
 

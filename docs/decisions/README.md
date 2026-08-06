@@ -11,6 +11,7 @@
 | ADR-003 | Provider 配置详情页接入（设置模块） | Proposed | 2026-08-05 | [ADR-003-prism-provider-config-settings.md](ADR-003-prism-provider-config-settings.md) |
 | ADR-004 | OpenAI 兼容 Provider 流式请求（US-006/US-007） | Accepted | 2026-08-05 | [ADR-004-prism-provider-streaming.md](ADR-004-prism-provider-streaming.md) |
 | ADR-005 | MCP Kotlin SDK Client 集成（US-008） | Accepted | 2026-08-06 | [ADR-005-mcp-client-integration.md](ADR-005-mcp-client-integration.md) |
+| ADR-006 | 内置 Filesystem MCP Server（US-009） | Accepted | 2026-08-06 | [ADR-006-filesystem-mcp-server.md](ADR-006-filesystem-mcp-server.md) |
 
 ## ADR 生命周期
 

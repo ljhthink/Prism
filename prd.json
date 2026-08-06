@@ -134,7 +134,7 @@
         "Typecheck passes"
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": "ADR-001 形态 B 内置 Server 之一。"
     },
     {
