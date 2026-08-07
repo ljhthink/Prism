@@ -13,6 +13,7 @@
 - US-013 文本切片器（段落边界优先 + overlap）✅（guardrail + ac-verifier 通过）
 - US-014 端侧嵌入引擎（onnxruntime-android + all-MiniLM-L6-v2 INT8）✅（guardrial 两轮 + ac-verifier 通过，G-01 并发竞态阻断已修复）
 - US-015 知识库分库数据模型（KnowledgeBase 实体 + Repository CRUD + 级联删除）✅（guardrail 两轮 + ac-verifier 通过，G-01 HNSW Query.remove bug #1209 已规避）
+- US-016 摄入管线（解析→切片→嵌入→入库 + Flow 进度观察 + 嵌入失败降级）✅（guardrail 两轮 + ac-verifier 通过，M1 InputStream 泄漏阻断已修复，BR-error-handling-006 转 active）
 
 - 平台：仅 Android（API 26+，Android 8.0+）
 - 算力：纯云端 BYOK（用户自配 OpenAI/Claude/Ollama 等端点）
@@ -103,11 +104,16 @@
   - [2026-08-07-us015-knowledgebase-model-guardrail.md](docs/reports/2026-08-07-us015-knowledgebase-model-guardrail.md) —— US-015 知识库分库数据模型安全与质量审计（guardrail-enforcer，有条件通过，G-01 HNSW Query.remove 已知 bug 风险）
   - [2026-08-07-us015-knowledgebase-model-guardrail-round2.md](docs/reports/2026-08-07-us015-knowledgebase-model-guardrail-round2.md) —— US-015 知识库分库数据模型修复复审（guardrail-enforcer，第二轮通过，G-01~G-05 修复）
   - [2026-08-07-us015-knowledgebase-model-acceptance.md](docs/reports/2026-08-07-us015-knowledgebase-model-acceptance.md) —— US-015 知识库分库数据模型验收测试（ac-verifier，通过，5/5 AC，31 单元测试 + 全量 410 回归 0 失败）
+  - [2026-08-07-us016-ingestion-archaeology.md](docs/reports/2026-08-07-us016-ingestion-archaeology.md) —— US-016 摄入管线源码考古（code-archaeologist，4 组件接口契约 + 8 项风险清单）
+  - [2026-08-07-us016-ingestion-pipeline-guardrail.md](docs/reports/2026-08-07-us016-ingestion-pipeline-guardrail.md) —— US-016 摄入管线安全与质量审计（guardrail-enforcer，第一轮有条件通过，M1 InputStream 泄漏阻断）
+  - [2026-08-07-us016-ingestion-pipeline-guardrail-round2.md](docs/reports/2026-08-07-us016-ingestion-pipeline-guardrail-round2.md) —— US-016 摄入管线修复复审（guardrail-enforcer，第二轮通过，M1 修复有效 + catch(IllegalArgumentException) 设计合理）
+  - [2026-08-07-us016-ingestion-pipeline-acceptance.md](docs/reports/2026-08-07-us016-ingestion-pipeline-acceptance.md) —— US-016 摄入管线验收测试（ac-verifier，通过，5/5 AC，28 测试 + 438 全量回归 0 失败，BR-error-handling-006 转 active）
   - [性能基线](docs/reports/perf/) —— 性能基线报告目录
     - [2026-08-02-us002-objectbox-crud-baseline.md](docs/reports/perf/2026-08-02-us002-objectbox-crud-baseline.md) —— US-002 ObjectBox CRUD 性能基线
     - [2026-08-02-us003-apikey-baseline.md](docs/reports/perf/2026-08-02-us003-apikey-baseline.md) —— US-003 API Key 加密存储性能基线
     - [2026-08-02-us004-provider-config-baseline.md](docs/reports/perf/2026-08-02-us004-provider-config-baseline.md) —— US-004 Provider 配置数据模型性能基线
     - [2026-08-07-us014-embedding-baseline.md](docs/reports/perf/2026-08-07-us014-embedding-baseline.md) —— US-014 端侧嵌入引擎性能基线（初版，JVM）
+    - [2026-08-07-us016-ingestion-pipeline-baseline.md](docs/reports/perf/2026-08-07-us016-ingestion-pipeline-baseline.md) —— US-016 摄入管线编排性能基线（初版，FakeEmbedder 100 chunk p99 735ms）
 
 ### 运维
 

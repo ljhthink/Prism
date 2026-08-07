@@ -47,6 +47,12 @@ dist/
 out/
 target/
 
+# JVM 崩溃日志（native crash dumps，如 ObjectBox JNI 崩溃）
+hs_err_pid*.log
+replay_pid*.log
+app/hs_err_pid*.log
+app/replay_pid*.log
+
 # 环境变量（CLAUDE.md 20.3，仅 .env.example 提交）
 .env
 .env.local

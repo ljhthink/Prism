@@ -156,6 +156,30 @@ class KnowledgeBaseRepository(private val boxStore: BoxStore) {
     }
 
     /**
+     * 将单个 [KnowledgeChunk] 写入指定知识库（US-016 摄入管线写入入口，ADR-009 5.2）。
+     *
+     * **设计**（ADR-009 5.2）：
+     * - KnowledgeChunk 无独立 Repository，由本类代管（US-015 既有模式）。
+     * - 入口校验 `knowledgeBaseId >= 0`，拒绝负数（纵深防御）。
+     * - `embedding = null` 时仍入库（content/title 可被 US-017 全文检索兜底），
+     *   HNSW 向量索引自动排除 null embedding（AC-3）。
+     * - 不刷新 `_knowledgeBases` Flow：chunk 增删不影响 KB 列表，但 [chunkCount] 反映新值。
+     *
+     * **事务边界**（ADR-009 5.5）：chunk 级独立 put，不强制文档级 `runInTx`。
+     * 嵌入是昂贵操作，文档级事务中途失败会丢失已嵌入结果。chunk 级 put 失败不影响已入库 chunk。
+     *
+     * @param chunk 待写入的分块（knowledgeBaseId 必须 >= 0）
+     * @return 写入后的 chunk id
+     * @throws IllegalArgumentException 当 chunk.knowledgeBaseId < 0 时
+     */
+    fun addChunk(chunk: KnowledgeChunk): Long {
+        require(chunk.knowledgeBaseId >= 0) {
+            "knowledgeBaseId 不能为负数（收到 ${chunk.knowledgeBaseId}）"
+        }
+        return chunkBox.put(chunk)
+    }
+
+    /**
      * 统计指定知识库下的 [KnowledgeChunk] 数量。
      *
      * 用于 UI 显示库的 chunk 计数（运行时聚合，ADR-008 5.1）。

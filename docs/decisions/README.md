@@ -14,6 +14,7 @@
 | ADR-006 | 内置 Filesystem MCP Server（US-009） | Accepted | 2026-08-06 | [ADR-006-filesystem-mcp-server.md](ADR-006-filesystem-mcp-server.md) |
 | ADR-007 | M3 个人知识库 RAG 技术栈（US-003） | Proposed | 2026-08-06 | [ADR-007-m3-rag-tech-stack.md](ADR-007-m3-rag-tech-stack.md) |
 | ADR-008 | M3 知识库分库数据模型（US-015） | Proposed | 2026-08-07 | [ADR-008-m3-knowledgebase-model.md](ADR-008-m3-knowledgebase-model.md) |
+| ADR-009 | M3 摄入管线编排（US-016） | Proposed | 2026-08-07 | [ADR-009-m3-ingestion-pipeline.md](ADR-009-m3-ingestion-pipeline.md) |
 
 ## ADR 生命周期
 

@@ -238,8 +238,8 @@
         "Typecheck passes"
       ],
       "priority": 16,
-      "passes": false,
-      "notes": "PRD US-003 验收 2：摄入→切片→嵌入→入库全链路。"
+      "passes": true,
+      "notes": "PRD US-003 验收 2：摄入→切片→嵌入→入库全链路。ADR-009 7 项决策（组件串联/写入路径/Flow 进度观察/嵌入失败降级/chunk 级事务/ensureActive 取消/input.use 关闭）。guardrail-enforcer 两轮审查（TKN-US016-GUARDRAIL-001 有条件通过 M1 InputStream 泄漏阻断 → TKN-US016-GUARDRAIL-002 通过 M1 修复有效 + 新增 catch(IllegalArgumentException) 设计合理）+ ac-verifier 验收（TKN-US016-AC-001，5/5 AC 通过，28 测试 + 438 全量回归 0 失败，BR-error-handling-006 proposed→active）。验收报告：docs/reports/2026-08-07-us016-ingestion-pipeline-acceptance.md。性能基线：docs/reports/perf/2026-08-07-us016-ingestion-pipeline-baseline.md（FakeEmbedder 100 chunk p99 735ms，生产预估 +N×100ms ONNX）。遗留：L1 ADR 5.7 描述同步、L2 US-018 Failed.throwable 安全映射、L3 chunk title 重复策略、L4 ObjectBox 写入失败测试受限。"
     },
     {
       "id": "US-017",

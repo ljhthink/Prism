@@ -44,6 +44,17 @@
 - 适用场景：dev
 - 状态：active（ac-verifier TKN-US014-EMBEDDING-AC-001 确认 G-02 修复有效，2026-08-07 转 active）
 
+#### BR-error-handling-006: 参数校验须在资源保护块内或之前先释放资源
+
+- 类别：error-handling
+- 规则：当方法接收需显式关闭的资源（如 `InputStream`/`OutputStream`/`Cursor`）并声明「由本方法负责关闭」时，若方法入口有 `require`/`check` 等参数校验，且该校验位于 `use {}`/`try-finally` 资源保护块**之前**，则校验失败抛异常时资源不会被关闭，违反关闭契约并导致句柄泄漏。必须满足以下之一：(1) 将参数校验移入资源保护块内（`use {}` 内部首行）；(2) 校验失败前显式 `close()` 资源再抛异常；(3) 用 `try-finally` 包裹整个方法体（含校验），`finally` 中关闭资源。仅依赖「调用方不应传入非法参数」不构成豁免——纵深防御要求资源所有者覆盖所有早退路径。
+- 反例：`fun ingest(input: InputStream, kbId: Long) = flow { require(kbId >= 0) { ... }; input.use { ... } }` —— `kbId < 0` 时 `require` 抛异常，`input` 未进入 `use {}`，泄漏
+- 正例：`fun ingest(input: InputStream, kbId: Long) = flow { if (kbId < 0) { input.close(); throw IllegalArgumentException(...) }; input.use { ... } }`，或 `input.use { require(kbId >= 0) { ... }; ... }`
+- 来源：US-016 摄入管线审查（TKN-US016-GUARDRAIL-001，M1 中高危发现）
+- 添加日期：2026-08-07
+- 适用场景：dev
+- 状态：proposed（待主 Agent 修复 M1 后确认转 active）
+
 ### security
 
 #### BR-security-001: data class 含数组字段必须覆盖 equals/hashCode
@@ -284,3 +295,5 @@
 | 2026-08-07 | guardrail-enforcer | 提议 BR-concurrency-002 + BR-error-handling-005 | US-014 嵌入引擎审查（TKN-US014-EMBEDDING-001）：372 测试通过、Typecheck 通过，无阻断级安全漏洞（无注入/密钥/RCE），但 G-01 并发 use-after-close 竞态违反接口线程安全契约定为阻断；G-02/G-03/G-04 高危、G-05/G-06/G-07 中危。主 Agent 须修复后重新提交审查 |
 | 2026-08-07 | guardrail-enforcer | 复审通过，BR 规则验证修复有效 | US-014 R2 复审（TKN-US014-EMBEDDING-002）：G-01~G-15 修复项正确，未引入新阻断/高危缺陷，建议 BR-concurrency-002 / BR-error-handling-005 转 active |
 | 2026-08-07 | ac-verifier | 验收通过，BR 规则转 active | US-014 验收（TKN-US014-EMBEDDING-AC-001）：5/5 AC 通过，29 嵌入测试 + 4 perf 基准通过，全量 379 测试 0 失败。确认 G-01（2 并发测试）/ G-02（先置 null 再 close）修复有效，BR-concurrency-002 / BR-error-handling-005 状态 proposed → active |
+| 2026-08-07 | guardrail-enforcer | 提议 BR-error-handling-006 | US-016 摄入管线审查（TKN-US016-GUARDRAIL-001）：无阻断级安全漏洞，协程取消语义正确（CancellationException 不被吞），但 M1 require 在 use{} 前导致 InputStream 资源泄漏（中高危，须修复后重新审查）。结论有条件通过。M2 Failed(throwable) 信息泄露（中危）、Q3 catch 缺注释（低危，违反 BR-error-handling-004）、Q6 测试未覆盖取消/写入失败 |
+| 2026-08-07 | guardrail-enforcer | 复审通过，BR-error-handling-006 待 ac-verifier 确认 | US-016 摄入管线复审（TKN-US016-GUARDRAIL-002）：M1 修复有效（require 失败前先 close input，测试验证 closed==true），M2 KDoc 安全约定到位，Q3 catch 注释符合 BR-error-handling-004，Q6 协程取消测试覆盖。新增 catch(IllegalArgumentException) 设计合理（与 CancellationException 互不继承，不破坏取消语义）。无回归，24 测试通过。结论通过，可进入 ac-verifier。BR-error-handling-006 proposed→待 ac-verifier 确认转 active |
