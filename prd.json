@@ -253,8 +253,8 @@
         "Typecheck passes"
       ],
       "priority": 17,
-      "passes": false,
-      "notes": "PRD US-003 验收 3/5。4GB 低端机小批次 top-k=3。"
+      "passes": true,
+      "notes": "PRD US-003 验收 3/5。4GB 低端机小批次 top-k=3。实现：KnowledgeBaseRepository.search + RetrievalResult 数据类（ADR-010 9 项决策）。验收：guardrail-enforcer 第一轮 Pass（5 低危建议 L1~L5 已全部处理）+ ac-verifier 通过（48 测试 0 失败，4/4 AC + 性能基线 p50<200us + 安全门禁 + 全量回归 0 失败）。性能基线 docs/reports/perf/2026-08-07-us017-retrieval-baseline.md。"
     },
     {
       "id": "US-018",
