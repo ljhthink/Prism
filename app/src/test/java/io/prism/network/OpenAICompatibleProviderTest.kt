@@ -357,6 +357,10 @@ class OpenAICompatibleProviderTest {
                             is StreamEvent.Delta -> gotDelta.complete(Unit)
                             StreamEvent.Done -> {}
                             is StreamEvent.Error -> emittedError.set(true)
+                            // M4 tool_calling 事件（ADR-014 5.1）：本测试不注入 tools，三分支不会触发。
+                            is StreamEvent.ToolCallStart,
+                            is StreamEvent.ToolCallDelta,
+                            is StreamEvent.ToolCallComplete -> {}
                         }
                     }
                 } catch (e: kotlinx.coroutines.CancellationException) {

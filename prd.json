@@ -1,7 +1,7 @@
 {
   "project": "Prism",
-  "branchName": "ralph/prism-m3-rag",
-  "description": "Prism 手机端 AI 聊天 Agent 应用 —— M0 脚手架 + M1 BYOK 聊天核心 + M2 MCP Client 已完成（US-001~010 passes=true）；M3 个人知识库 RAG（US-011~019）进行中。依 ADR-001/ADR-007 技术栈：原生 Kotlin + Jetpack Compose + MCP Kotlin SDK 0.12.0 + ObjectBox 5.4.2（HNSW 向量搜索）+ onnxruntime-android 1.27.0 + Apache POI 5.5.1 + Android Keystore。每个故事可在单次迭代完成。",
+  "branchName": "ralph/prism-m4-skills",
+  "description": "Prism 手机端 AI 聊天 Agent 应用 —— M0 脚手架 + M1 BYOK 聊天核心 + M2 MCP Client + M3 个人知识库 RAG 已完成（US-001~019 passes=true）；M4 Skills 系统（US-020~029）进行中。依 ADR-001/ADR-013/ADR-014 技术栈：原生 Kotlin + Jetpack Compose + MCP Kotlin SDK 0.12.0 + ObjectBox 5.4.2 + snakeyaml-engine-kmp 3.1（SKILL.md 解析）+ OpenAI tool_calling 流式协议。用户决策策略 C：Skill 可真正调用 MCP 工具。每个故事可在单次迭代完成。",
   "userStories": [
     {
       "id": "US-001",
@@ -286,6 +286,166 @@
       "priority": 19,
       "passes": true,
       "notes": "PRD US-003 验收 4/4。M3 个人知识库 RAG 全链路收尾。强制引用来源防幻觉。ADR-012 八项决策（RagContextBuilder 独立组件 / RagTarget 三态默认全库 / Citation 多引用 inline 标注 / ChatStreamProvider 接口扩展 systemPrompt+ragContext / 三级降级 EmbedFailed+NormalChat+Success / IO 线程 top-k=3 阈值 0.3 / _messages 原子 CAS / UI 文案修正）。code-archaeologist 考古（TKN-US019-ARCH-001，7 项风险清单 R-1~R-7 + 9 文件接口契约分析）。guardrail-enforcer 两轮审查（TKN-US019-RAG-GUARDRAIL-001 有条件通过 1 HIGH+4 MEDIUM → TKN-US019-RAG-GUARDRAIL-002 通过 G-01~G-05 全部修复有效：显式 try-catch 重抛 CancellationException BR-error-handling-007 / RagBuildResult sealed 三态 / Log.w 替代 simpleName appendDelta / SpecificLibrary init 校验 kbId>0 / 4 新测试补齐正向快乐路径 + 阈值过滤空 + SpecificLibrary 校验/检索 + 历史过滤器排除 aiId BR-interface-004）+ ac-verifier 验收（TKN-US019-RAG-ACCEPTANCE-001，5/6 AC 完全通过 AC-1/3/4/5/6，AC-2 数据层通过但 UI 入口 RagModeSelectorSheet「指定库」标「暂未开放」为已知 GAP 不阻断延后至后续 US，57 单元测试 + 519 全量回归 0 失败）。验收报告：docs/reports/2026-08-07-us019-rag-integration-acceptance.md。遗留：G-06 TypingIndicator 未区分检索/流式阶段 / G-07 SpecificLibrary kbId<=0 隐式容错测试已补齐 / R2-1 外层 runCatching 可改 try-catch 仅 catch Exception / R2-3 ADR-012 5.5 Toast→appendDelta 过渡方案待 Toast 基建（低危可延后）。"
+    },
+    {
+      "id": "US-020",
+      "title": "Skill 数据模型与 Repository",
+      "description": "作为开发者，我需要 Skill 持久化数据模型与 CRUD 仓库，以便管理本地/远程 Skill 的启用状态与来源元数据。",
+      "acceptanceCriteria": [
+        "定义 SkillConfig @Entity（id/name/displayName/source/sourceUri/skillDir/isEnabled/isInstalled/version/dependsOnMcpServers/createdAt/updatedAt），仿 McpServerConfig 模式",
+        "定义 SkillSource 常量（LOCAL_BUILTIN/LOCAL_USER/REMOTE）",
+        "定义 SkillManifest 内存数据类（name/description/version/userInvocable/disableModelInvocation/homepage/os/tools/systemPrompt/maxRounds/body）+ SkillToolDecl",
+        "SkillRepository CRUD（save/get/getAll/findByName/remove/removeAll/setEnabled）仿 McpServerRepository，dependsOnMcpServers 复用 StringListConverter",
+        "SkillRepository 单元测试通过（CRUD + setEnabled + findByName + removeAll）",
+        "Typecheck passes"
+      ],
+      "priority": 20,
+      "passes": true,
+      "notes": "M4 数据层基础。ADR-013 5.1 双层模型（SkillConfig 持久化 + SkillManifest 内存）。考古报告集成点 2 确认照搬 McpServerRepository 模式。P1 常规风险。Phase A 验收通过（TKN-M4-PHASEA-ACCEPTANCE-001，6/6 AC，12 单元测试）。"
+    },
+    {
+      "id": "US-021",
+      "title": "SKILL.md 解析器（snakeyaml-engine-kmp）",
+      "description": "作为开发者，我需要解析 SKILL.md 文件（YAML frontmatter + Markdown body），以便从 Skill 目录加载 manifest。",
+      "acceptanceCriteria": [
+        "libs.versions.toml + app/build.gradle.kts 引入 snakeyaml-engine-kmp 3.1 依赖",
+        "实现 SkillManifestParser（splitFrontmatter + yaml 解析 + mapNodeToManifest + validate），frontmatter 用 Yaml 解析为 YamlMap 再映射",
+        "校验 name slug 格式 ^[a-z0-9-]{1,64}$ + description 非空 ≤160 字符，失败抛 SkillParseException",
+        "解析器单元测试通过（标准 frontmatter / 缺失 frontmatter / body 提取 / slug 校验失败 / description 超长 / 嵌套 metadata）",
+        "Typecheck passes"
+      ],
+      "priority": 21,
+      "passes": false,
+      "notes": "M4 解析层。ADR-013 5.2。charleskorn/kaml 已归档，改用 snakeyaml-engine-kmp（活跃维护，KMP 原生）。tech-selection-researcher TKN-M4-TOOLCALLING-RESEARCH-001 选型。P2 跨模块（新依赖）。"
+    },
+    {
+      "id": "US-022",
+      "title": "Skill 注册中心与内置预设",
+      "description": "作为用户，我希望启动时自动扫描加载内置与已安装 Skill，以便 AI 能根据 Skill 描述自动选择调用。",
+      "acceptanceCriteria": [
+        "实现 SkillRegistry（scanAndSync 启动扫描 + scanBuiltin assets + scanDirectory user/remote + syncToRepository + enabledSkills + StateFlow 暴露）",
+        "在 assets/skills/builtin/ 下放置 5 个内置 Skill（translator/code-reviewer/meeting-notes/summarizer/rewriter），每个含 SKILL.md",
+        "PrismApplication 新增 skillRepository + skillRegistry by lazy 依赖",
+        "启动扫描在 IO 协程执行不阻塞 UI，扫描结果同步 SkillConfig 表（新增入库/缺失标记 isInstalled=false）",
+        "SkillRegistry 单元测试通过（扫描 + 同步 + enabledSkills 过滤）",
+        "Typecheck passes"
+      ],
+      "priority": 22,
+      "passes": false,
+      "notes": "M4 注册层。ADR-013 5.3/5.8。3 纯 prompt Skill + 2 工具调用 Skill 验证两条路径。考古报告集成点 1 确认 by lazy DI 模式。P2 跨模块。"
+    },
+    {
+      "id": "US-023",
+      "title": "StreamEvent 与 ChatStreamProvider 接口扩展（tool_calling）",
+      "description": "作为开发者，我需要扩展流式接口支持 tool_calling，以便 Skill 可声明工具供 LLM 调用。",
+      "acceptanceCriteria": [
+        "StreamEvent 新增 ToolCallStart/ToolCallDelta/ToolCallComplete 三个子类（Provider 中立，arguments 已解析为 Map）",
+        "定义 ToolDefinition（type+function{name,description,parameters}）+ ToolChoice sealed（Auto/Required/Specific/None）",
+        "ChatStreamProvider.streamChat 新增 tools + toolChoice 可选参数（默认 null 向后兼容）",
+        "ChatMessage 新增 Role.TOOL + toolCallId + toolName + toolCalls 字段，Role.toRequestRole 扩展 TOOL→tool",
+        "现有调用零改动（向后兼容），全量回归测试通过",
+        "Typecheck passes"
+      ],
+      "priority": 23,
+      "passes": true,
+      "notes": "M4 接口层。ADR-014 5.1/5.2/5.6。Provider 中立设计，未来 Anthropic 适配无需改 StreamEvent。BR-interface-004 历史过滤器需扩展保留 tool 消息。P2 跨模块。Phase A 验收通过（TKN-M4-PHASEA-ACCEPTANCE-001，5/6 AC + AC-4 有条件通过：Role.TOOL Fail Fast 裁定为 ADR-014 5.6 分阶段决策，Phase C US-024 补完整 TOOL→tool 映射）。"
+    },
+    {
+      "id": "US-024",
+      "title": "OpenAICompatibleProvider tool_calling 协议实现",
+      "description": "作为开发者，我需要实现 OpenAI tool_calls 流式协议，以便 LLM 返回的工具调用能被解析执行。",
+      "acceptanceCriteria": [
+        "ChatCompletionRequest 扩展 tools/toolChoice/parallelToolCalls 字段，MessageBody 扩展 toolCallId/toolCalls",
+        "buildRequestBody 扩展：注入 tools + tool result 回灌（role=tool 消息携带 toolCallId）",
+        "delta 状态机：pendingToolCalls Map<index,Accumulator> 跨 chunk 拼接 arguments，finish_reason=tool_calls 时 JSON.parse 发射 ToolCallComplete",
+        "JSON 解析失败降级为 Error 事件不崩溃，CancellationException 重抛（BR-error-handling-007）",
+        "单元测试通过（单 tool_call delta 拼接 / 多并行 tool_call / finish_reason 触发 / 不完整 JSON 降级 / tool result 回灌请求体）",
+        "Typecheck passes"
+      ],
+      "priority": 24,
+      "passes": false,
+      "notes": "M4 协议层。ADR-014 5.3。OpenAI arguments 是 JSON string 增量片段需跨 chunk 按 index 拼接。strict mode + parallel_tool_calls=false。P2 跨模块。"
+    },
+    {
+      "id": "US-025",
+      "title": "SkillExecutor 工具执行回路",
+      "description": "作为用户，我希望 Skill 调用工具时经用户确认并执行，工具结果回灌给 LLM 继续生成。",
+      "acceptanceCriteria": [
+        "实现 SkillExecutor（executeToolCall 单次执行 + executeLoop 回路编排 maxRounds 默认 10）",
+        "executeToolCall：用户确认（复用 UiConfirmationGate）→ 查找 MCP Server → callTool 超时 30s → 命名空间隔离去前缀 skillName__toolName",
+        "executeLoop：循环 streamChat → ToolCallComplete 触发执行 → tool result 回灌 → 继续生成，maxRounds 超限强制终止",
+        "CancellationException 重抛（BR-error-handling-007），失败/超时/拒绝信息回灌给 LLM 降级",
+        "SkillExecutor 单元测试通过（确认通过执行 / 拒绝回灌 / 超时回灌 / maxRounds 终止 / 命名空间去前缀）",
+        "Typecheck passes"
+      ],
+      "priority": 25,
+      "passes": false,
+      "notes": "M4 执行层。ADR-014 5.4/5.5。复用 McpToolProviderDispatcher + UiConfirmationGate。考古报告集成点 5 确认 MCP 基建已完整未接入对话流。P2 跨模块。"
+    },
+    {
+      "id": "US-026",
+      "title": "ConversationViewModel Skill 注入与工具执行回路集成",
+      "description": "作为用户，我希望对话时 AI 能根据启用的 Skill 自动调用工具并基于结果继续生成，Skill 失败不影响主对话。",
+      "acceptanceCriteria": [
+        "systemPrompt 合并：RAG grounding rules + Skill systemPrompt + Skill 索引（description），避免 prompt 膨胀",
+        "tools 构建：enabledSkills.flatMap → ToolDefinition，命名空间隔离 skillName__toolName",
+        "工具执行回路集成：有 tools 时调用 SkillExecutor.executeLoop，无 tools 时普通 streamChat",
+        "降级策略：tool_calling 失败（400 不支持/执行异常）退化为普通对话，用户始终能得到 AI 回复",
+        "_messages.update 原子 CAS（BR-concurrency-004），历史过滤器保留 tool 消息（BR-interface-004）",
+        "集成测试通过（Skill 注入 / 工具调用回路 / 降级 / 历史过滤）",
+        "Typecheck passes"
+      ],
+      "priority": 26,
+      "passes": false,
+      "notes": "M4 集成层。ADR-013 5.4 + ADR-014 5.7。ConversationViewModel Factory 扩展注入 skillRegistry + skillExecutor。考古报告集成点 4 RAG 双通道合并策略。P2 跨模块。"
+    },
+    {
+      "id": "US-027",
+      "title": "Skills 管理 UI 重构",
+      "description": "作为用户，我希望在能力页管理 Skill（启用/禁用/查看详情），而非看到静态硬编码列表。",
+      "acceptanceCriteria": [
+        "新建 SkillsViewModel（skills StateFlow + selectedSkill + executionState sealed），仿 CapabilitiesViewModel",
+        "CapabilitiesScreen Skills 段重构：删除硬编码 skills 列表，改为 viewModel.skills.collectAsState() 动态渲染",
+        "SkillRow enabled 开关调用 viewModel.setEnabled(id, enabled) 落库，SectionHeader 动态计数",
+        "点击 Skill 打开 PrismSheet 详情弹层（展示 manifest + body 摘要）",
+        "SkillsViewModel + UI 单元测试通过（启用切换 / 详情展示 / 动态计数）",
+        "Typecheck passes"
+      ],
+      "priority": 27,
+      "passes": false,
+      "notes": "M4 UI 层。ADR-013 5.5。考古报告集成点 3 R-1 静态硬编码须从零重建。无需新增路由（CAPABILITIES Tab 内 CapSegment.SKILLS）。P1 常规。"
+    },
+    {
+      "id": "US-028",
+      "title": "远程 Skill 下载（标准校验）",
+      "description": "作为用户，我希望通过 URL 下载远程 Skill，并通过安全校验后安装。",
+      "acceptanceCriteria": [
+        "实现 SkillDownloader：URL 校验（仅 https + 主机非空 + .skill.md/.zip 扩展）+ HTTP 下载（Content-Length ≤10MB + Content-Type 校验 + 30s 超时）",
+        "内容校验：.zip 解压含 SKILL.md + zip slip 防护（解压路径不超出目标目录），.skill.md 直接解析",
+        "SkillManifestParser 沙箱解析（snakeyaml 默认禁用任意类构造）+ 必填字段 + slug 校验",
+        "入库：复制到 filesDir/skills/remote/{name}/ + SkillConfig 写入 source=REMOTE + scanAndSync 刷新",
+        "SkillDownloader 单元测试通过（合法 URL / http 拒绝 / 超大拒绝 / zip slip 拦截 / 解析失败拒绝）",
+        "Typecheck passes"
+      ],
+      "priority": 28,
+      "passes": false,
+      "notes": "M4 远程层。ADR-013 5.6 用户决策标准校验。不要求签名验证（零后端体验差）。BR-security-003 CRLF 防御。P2 跨模块。"
+    },
+    {
+      "id": "US-029",
+      "title": "Skill 执行可观测",
+      "description": "作为用户，我希望查看 Skill 执行记录（耗时/状态/工具调用链），以便调试与审计。",
+      "acceptanceCriteria": [
+        "定义 SkillExecutionRecord @Entity（id/skillConfigId/skillName/startedAt/finishedAt/durationMs/status/toolCalls/errorMessage/outputPreview）+ ToolCallRecord + ExecutionStatus",
+        "SkillExecutionRepository CRUD（save/getBySkill/最近 10 条）",
+        "SkillExecutor 执行时记录 SkillExecutionRecord（成功/失败/取消）",
+        "Skill 详情页展示最近 10 次执行记录（开始时间/耗时/状态/工具调用链可展开）",
+        "SkillExecutionRepository + UI 单元测试通过（记录写入 / 按技能查询 / 状态映射）",
+        "Typecheck passes"
+      ],
+      "priority": 29,
+      "passes": false,
+      "notes": "M4 可观测层。ADR-013 5.7。执行记录持久化到 ObjectBox 跨会话审计。P1 常规。"
     }
   ]
 }

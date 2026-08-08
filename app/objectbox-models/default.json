@@ -165,9 +165,78 @@
         }
       ],
       "relations": []
+    },
+    {
+      "id": "5:5658915561082424760",
+      "lastPropertyId": "12:2462113479344531503",
+      "name": "SkillConfig",
+      "properties": [
+        {
+          "id": "1:1820952117874185884",
+          "name": "id",
+          "type": 6,
+          "flags": 1
+        },
+        {
+          "id": "2:3826974289117608724",
+          "name": "name",
+          "type": 9
+        },
+        {
+          "id": "3:4311306949988441030",
+          "name": "displayName",
+          "type": 9
+        },
+        {
+          "id": "4:5017958602185915026",
+          "name": "source",
+          "type": 9
+        },
+        {
+          "id": "5:814541091084047993",
+          "name": "sourceUri",
+          "type": 9
+        },
+        {
+          "id": "6:1758126299160547535",
+          "name": "skillDir",
+          "type": 9
+        },
+        {
+          "id": "7:4843965869849986931",
+          "name": "isEnabled",
+          "type": 1
+        },
+        {
+          "id": "8:8240832760384567000",
+          "name": "isInstalled",
+          "type": 1
+        },
+        {
+          "id": "9:3306282334898834916",
+          "name": "version",
+          "type": 9
+        },
+        {
+          "id": "10:395376675288365782",
+          "name": "dependsOnMcpServers",
+          "type": 9
+        },
+        {
+          "id": "11:4794112438053382167",
+          "name": "createdAt",
+          "type": 6
+        },
+        {
+          "id": "12:2462113479344531503",
+          "name": "updatedAt",
+          "type": 6
+        }
+      ],
+      "relations": []
     }
   ],
-  "lastEntityId": "4:130754586657942467",
+  "lastEntityId": "5:5658915561082424760",
   "lastIndexId": "1:2432317062331387289",
   "lastRelationId": "0:0",
   "lastSequenceId": "0:0",

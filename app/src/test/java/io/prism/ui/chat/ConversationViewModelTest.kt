@@ -9,6 +9,8 @@ import io.prism.data.ProviderConfigRepository
 import io.prism.embedding.Embedder
 import io.prism.network.ChatStreamProvider
 import io.prism.network.StreamEvent
+import io.prism.network.ToolChoice
+import io.prism.network.ToolDefinition
 import io.prism.rag.RagContextBuilder
 import io.prism.rag.RagTarget
 import io.prism.ui.model.ChatMessage
@@ -590,7 +592,9 @@ private class FakeChatStreamProvider(private val events: List<StreamEvent>) : Ch
         config: ProviderConfig,
         messages: List<ChatMessage>,
         systemPrompt: String?,
-        ragContext: String?
+        ragContext: String?,
+        tools: List<ToolDefinition>?,
+        toolChoice: ToolChoice?
     ): Flow<StreamEvent> = flow { events.forEach { emit(it) } }
 }
 
@@ -605,7 +609,9 @@ private class RecordingChatStreamProvider(private val events: List<StreamEvent>)
         config: ProviderConfig,
         messages: List<ChatMessage>,
         systemPrompt: String?,
-        ragContext: String?
+        ragContext: String?,
+        tools: List<ToolDefinition>?,
+        toolChoice: ToolChoice?
     ): Flow<StreamEvent> {
         receivedConfigs += config
         receivedMessages += messages
@@ -624,7 +630,9 @@ private class MultiRoundRecordingProvider(private val eventSequences: List<List<
         config: ProviderConfig,
         messages: List<ChatMessage>,
         systemPrompt: String?,
-        ragContext: String?
+        ragContext: String?,
+        tools: List<ToolDefinition>?,
+        toolChoice: ToolChoice?
     ): Flow<StreamEvent> {
         receivedMessages += messages
         val events = eventSequences[call.coerceAtMost(eventSequences.size - 1)]

@@ -8,6 +8,8 @@
 
 **M3 个人知识库 RAG 全部完成并通过里程碑交付审计（US-011~US-019，ADR-007~012 全部 Accepted，有条件通过，M3-001 打包修复已验证）**（2026-08-09）
 
+🚧 **M4 Skills 系统开发中（US-020~US-029，ADR-013/014 Proposed）**（2026-08-09 进行中）—— Skill 数据模型 / SKILL.md 解析 / 注册中心 / tool_calling 接口 / 工具执行回路 / Skills 管理 UI / 远程下载 / 执行可观测
+
 - US-011 依赖落地 + KnowledgeChunk 向量索引 ✅（guardrail + ac-verifier 通过）
 - US-012 文档解析器（PDF/DOCX/XLSX/MD/TXT）✅（guardrail 有条件通过 + ac-verifier 通过）
 - US-013 文本切片器（段落边界优先 + overlap）✅（guardrail + ac-verifier 通过）
@@ -49,6 +51,8 @@
   - [ADR-010 M3 向量检索（US-017）](docs/decisions/ADR-010-m3-vector-retrieval.md)（Accepted）
   - [ADR-011 M3 知识库管理 UI 架构（US-018）](docs/decisions/ADR-011-m3-knowledgebase-ui.md)（Accepted）
   - [ADR-012 M3 RAG 对话集成架构（US-019）](docs/decisions/ADR-012-m3-rag-conversation-integration.md)（Accepted）
+  - [ADR-013 M4 Skills 系统架构（US-004）](docs/decisions/ADR-013-m4-skills-system-architecture.md)（Proposed）
+  - [ADR-014 M4 LLM tool_calling 接口扩展（US-023~US-025）](docs/decisions/ADR-014-m4-toolcalling-interface.md)（Proposed）
 
 ### Reference（参考 / 报告）
 
@@ -128,6 +132,11 @@
   - [2026-08-07-us019-rag-integration-guardrail-round2.md](docs/reports/2026-08-07-us019-rag-integration-guardrail-round2.md) —— US-019 RAG 对话集成修复复审（guardrail-enforcer，第二轮通过，G-01~G-05 全部修复有效）
   - [2026-08-07-us019-rag-integration-acceptance.md](docs/reports/2026-08-07-us019-rag-integration-acceptance.md) —— US-019 RAG 对话集成验收测试（ac-verifier，通过，5/6 AC 完全通过 AC-2 UI 入口已知 GAP 不阻断，57 单元测试 + 519 全量回归 0 失败，BR-error-handling-007 / BR-interface-004 转 active）
   - [2026-08-07-m3-milestone-audit.md](docs/reports/2026-08-07-m3-milestone-audit.md) —— M3 个人知识库 RAG 里程碑交付审计（functional-validation-auditor，有条件通过，M3-001 打包修复已验证，限期项已同步）
+  - [2026-08-09-m4-skills-archaeology.md](docs/reports/2026-08-09-m4-skills-archaeology.md) —— M4 Skills 系统集成点源码考古（code-archaeologist，6 集成点 + 10 项风险清单）
+  - [2026-08-09-m4-toolcalling-tech-selection.md](docs/reports/2026-08-09-m4-toolcalling-tech-selection.md) —— M4 Skills 系统 LLM tool_calling 接口扩展技术选型对比（tech-selection-researcher）
+  - [2026-08-09-m4-phaseA-impact-selfcheck.md](docs/reports/2026-08-09-m4-phaseA-impact-selfcheck.md) —— M4 Phase A 基础层变更影响自检（主 Agent，5 项契约变更 + 6 调用方 + Role.TOOL bug 修复）
+  - [2026-08-09-m4-phaseA-guardrail.md](docs/reports/2026-08-09-m4-phaseA-guardrail.md) —— M4 Phase A 基础层安全与质量审计（guardrail-enforcer，通过，G-01 Log.w 修复 + BR-naming-001 提议）
+  - [2026-08-09-m4-phaseA-acceptance.md](docs/reports/2026-08-09-m4-phaseA-acceptance.md) —— M4 Phase A 基础层验收测试（ac-verifier，通过，US-020 6/6 + US-023 5/6+1 有条件，556 回归 0 失败）
   - [性能基线](docs/reports/perf/) —— 性能基线报告目录
     - [2026-08-02-us002-objectbox-crud-baseline.md](docs/reports/perf/2026-08-02-us002-objectbox-crud-baseline.md) —— US-002 ObjectBox CRUD 性能基线
     - [2026-08-02-us003-apikey-baseline.md](docs/reports/perf/2026-08-02-us003-apikey-baseline.md) —— US-003 API Key 加密存储性能基线

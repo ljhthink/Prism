@@ -197,6 +197,11 @@ class ConversationViewModel(
                         appendDelta(aiId, "\n\n⚠️ ${event.message}")
                         _isTyping.value = false
                     }
+                    // M4 tool_calling 事件（ADR-014 5.1）：Phase A 不注入 tools，这三分支不会触发。
+                    // Phase D（US-026）将实现工具执行回路：ToolCallComplete → 用户确认 → 执行 → 结果回灌。
+                    is StreamEvent.ToolCallStart,
+                    is StreamEvent.ToolCallDelta,
+                    is StreamEvent.ToolCallComplete -> Unit  // no-op，Phase D 接管
                 }
             }
         }

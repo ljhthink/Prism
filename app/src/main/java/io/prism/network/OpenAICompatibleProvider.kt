@@ -1,5 +1,6 @@
 package io.prism.network
 
+import android.util.Log
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.ClientRequestException
 import io.ktor.client.plugins.sse.SSEClientException
@@ -63,18 +64,32 @@ class OpenAICompatibleProvider(
      * - [ragContext] 非空时，作为独立 user 消息插在最后一条 user 消息前（RAG context 必须在用户问题之前，
      *   让模型把 context 与 question 关联）
      *
+     * **M4 Phase A 接口对齐**（ADR-014 5.2）：override 签名新增 [tools] / [toolChoice] 参数以满足
+     * [ChatStreamProvider] 契约。**Phase A 仅对齐签名，不序列化 tools 到请求体**——tool_calling 的
+     * 请求序列化与流式 delta 状态机解析属 Phase C（US-024）。当前所有调用方均传 null（默认），
+     * 故行为与 US-019 完全一致（向后兼容）。非 null tools 在 Phase A 会被忽略，Phase C 将完整实现。
+     *
      * @param config 目标 Provider 配置（含 baseUrl / apiKeyRef / headers / models）
      * @param messages 对话历史（[ChatMessage] 转换为请求体消息）
      * @param systemPrompt system 消息内容（可选，RAG grounding rules）；null 时不注入
      * @param ragContext RAG context 文本（可选，知识库片段拼接）；null 时不注入
+     * @param tools 工具定义列表（M4，Phase A 接受但暂不序列化；Phase C US-024 实现）
+     * @param toolChoice 工具选择策略（M4，Phase A 接受但暂不序列化；Phase C US-024 实现）
      * @return [StreamEvent] 流：增量 [StreamEvent.Delta] → 结束 [StreamEvent.Done] / 错误 [StreamEvent.Error]
      */
     override fun streamChat(
         config: ProviderConfig,
         messages: List<ChatMessage>,
         systemPrompt: String?,
-        ragContext: String?
+        ragContext: String?,
+        tools: List<ToolDefinition>?,
+        toolChoice: ToolChoice?
     ): Flow<StreamEvent> = flow {
+        // G-01 修复（guardrail TKN-M4-PHASEA-GUARDRAIL-001）：Phase A 接受 tools/toolChoice 但不序列化，
+        // 非 null 时发 Log.w 使中间态可观测，避免「静默降级」（Phase C US-024 实现完整 tool_calling）。
+        if (tools != null) {
+            Log.w(TAG, "tools 非空但 Phase A 未实现 tool_calling 序列化，已忽略（Phase C US-024 实现）")
+        }
         val endpoint = buildEndpoint(config.baseUrl)
         val apiKey = if (config.apiKeyRef.isNotBlank()) {
             apiKeyRepository.readApiKeyOnce(config.apiKeyRef)
@@ -235,6 +250,7 @@ class OpenAICompatibleProvider(
     }
 
     private companion object {
+        const val TAG = "OpenAICompatibleProvider"
         const val DONE_MARKER = "[DONE]"
         const val SYSTEM_ROLE = "system"
         const val USER_ROLE = "user"
@@ -268,5 +284,20 @@ private data class Choice(val delta: Delta = Delta())
 @Serializable
 private data class Delta(val content: String? = null)
 
-/** 将 UI 层 [Role] 映射为 OpenAI 请求角色。 */
-private fun Role.toRequestRole(): String = if (this == Role.USER) "user" else "assistant"
+/**
+ * 将 UI 层 [Role] 映射为 OpenAI 请求角色。
+ *
+ * **M4 Phase A 边界**（ADR-014 5.6）：[Role.TOOL] 暂不支持——OpenAI tool 结果消息需
+ * `role="tool"` + `tool_call_id` 字段，而当前 [MessageBody] 仅有 role+content，无法携带
+ * `tool_call_id`。完整 TOOL 序列化属 Phase C/D（US-024/US-026 重构 buildRequestBody）。
+ *
+ * Phase A 不产生 TOOL 消息（Phase D 才回灌工具结果），此处对 TOOL **Fail Fast** 抛出
+ * [IllegalStateException]，避免静默映射为 "assistant" 导致请求语义错误（Karpathy: 显式暴露假设）。
+ */
+private fun Role.toRequestRole(): String = when (this) {
+    Role.USER -> "user"
+    Role.ASSISTANT -> "assistant"
+    Role.TOOL -> throw IllegalStateException(
+        "Role.TOOL 序列化未在 Phase A 实现，将在 Phase C/D (US-024/US-026) 支持"
+    )
+}

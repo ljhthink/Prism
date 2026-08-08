@@ -7,7 +7,16 @@
 
 ### naming
 
-（暂无规则，待累积）
+#### BR-naming-001: enum 新增值时所有 if-else 二分匹配必须改为 when 穷尽 + 新值 Fail Fast
+
+- 类别：naming / error-handling
+- 规则：Kotlin enum 新增枚举值时，所有对该 enum 的 `if-else` 二分匹配（如 `if (this == X) ... else ...`）必须改为 `when (this)` 穷尽匹配，且新值分支必须显式处理（实现或 Fail Fast 抛异常），让编译器强制覆盖新分支。禁止用 `else` 兜底掩盖新值未处理。这样新增枚举值时编译器会立即在所有消费点报错，避免静默映射到错误分支。
+- 反例：`fun Role.toRequestRole() = if (this == Role.USER) "user" else "assistant"` —— 新增 Role.TOOL 静默映射为 "assistant"，请求语义错误
+- 正例：`fun Role.toRequestRole() = when (this) { Role.USER -> "user"; Role.ASSISTANT -> "assistant"; Role.TOOL -> throw IllegalStateException("Role.TOOL 序列化尚未实现") }`
+- 来源：M4 Phase A Role.TOOL 静默映射 bug 修复（TKN-M4-PHASEA-GUARDRAIL-001，主 Agent 自查发现 + guardrail 确认修复正确）
+- 添加日期：2026-08-09
+- 适用场景：dev
+- 状态：active（ac-verifier TKN-M4-PHASEA-ACCEPTANCE-001 验证通过，2026-08-09 转 active）
 
 ### error-handling
 
@@ -337,3 +346,5 @@
 | 2026-08-07 | guardrail-enforcer | 复审通过，BR 规则待 ac-verifier 确认 | US-019 RAG 对话集成审查 round 2（TKN-US019-RAG-GUARDRAIL-002）：G-01~G-05 修复有效（显式 try-catch 重抛 CancellationException / RagBuildResult sealed 三态 / Log.w 替代 simpleName appendDelta / SpecificLibrary init 校验 / 4 新测试），无新增阻断/高危/中危，3 LOW 建议（R2-1/R2-2/R2-3）不阻断。建议 BR-error-handling-007 / BR-interface-004 转 active |
 | 2026-08-07 | ac-verifier | 验收通过，BR-error-handling-007 + BR-interface-004 转 active | US-019 RAG 对话集成验收（TKN-US019-RAG-ACCEPTANCE-001）：5/6 AC 完全通过（AC-1/3/4/5/6），AC-2 数据层通过但 UI 入口为已知 GAP（不阻断，延后至后续 US）。57 单元测试 + 519 全量回归 0 失败。确认 G-01（CancellationException 重抛）/ G-02（RagBuildResult sealed）/ G-04（SpecificLibrary init 校验）修复有效，BR-error-handling-007 / BR-interface-004 proposed → active |
 | 2026-08-09 | functional-validation-auditor | M3 里程碑审计同步 BR-006 状态 | M3 里程碑交付审计（TKN-M3-MILESTONE-AUDIT-001）：BR-error-handling-006 在 US-016 acceptance 已确认转 active，但 behavioral-rules.md 状态字段仍为 proposed（审计 §C.1 偏差 M3-004）。本次同步状态字段 proposed → active，与 US-016 acceptance 报告一致 |
+| 2026-08-09 | guardrail-enforcer | 提议 BR-naming-001 | M4 Phase A 基础层审查（TKN-M4-PHASEA-GUARDRAIL-001）：556 测试通过、Typecheck 通过，无阻断级安全漏洞（无注入/密钥/RCE）。Role.TOOL 静默映射 bug 已由主 Agent 自查修复（if-else → when 穷尽 + Fail Fast）。G-01 中危（tools 静默忽略，强建议加 Log.w）、G-02~G-05 低危建议项。结论通过，可进入 ac-verifier。BR-naming-001 proposed→待 ac-verifier 确认转 active |
+| 2026-08-09 | ac-verifier | 验收通过，BR-naming-001 转 active | M4 Phase A 基础层验收（TKN-M4-PHASEA-ACCEPTANCE-001）：US-020 6/6 AC 通过，US-023 5/6 通过 + AC-4 有条件通过（Fail Fast 裁定为 ADR-014 5.6 分阶段决策，Phase C US-024 补完整 TOOL→"tool" 映射）。SkillRepositoryTest 12 测试 + 全量 556 回归 0 失败。G-01 Log.w 修复有效。BR-naming-001 proposed → active（规则验证通过，未触发反例模式） |
