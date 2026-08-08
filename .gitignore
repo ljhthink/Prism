@@ -13,6 +13,7 @@ keystore/
 
 # Kotlin
 *.kotlin_metadata
+.kotlin/
 
 # ObjectBox JNI 本地库（BR-build-004，构建期下载，不入版本控制）
 app/objectbox-jni-*.dll

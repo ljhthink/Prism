@@ -53,7 +53,7 @@
 - 来源：US-016 摄入管线审查（TKN-US016-GUARDRAIL-001，M1 中高危发现）
 - 添加日期：2026-08-07
 - 适用场景：dev
-- 状态：proposed（待主 Agent 修复 M1 后确认转 active）
+- 状态：active（ac-verifier TKN-US016-AC-001 确认 M1 修复有效，2026-08-07 转 active；M3 里程碑审计 TKN-M3-MILESTONE-AUDIT-001 同步状态字段）
 
 #### BR-error-handling-007: 协程代码中禁止用 runCatching 吞 CancellationException
 
@@ -336,3 +336,4 @@
 | 2026-08-07 | guardrail-enforcer | 提议 BR-error-handling-007 + BR-interface-004 | US-019 RAG 对话集成审查 round 1（TKN-US019-RAG-GUARDRAIL-001）：1 HIGH（G-01 runCatching 吞 CancellationException）+ 4 MEDIUM（G-02 embed 失败静默 / G-03 simpleName 暴露 / G-04 SpecificLibrary 无校验 / G-05 正向测试缺失）。结论有条件通过 |
 | 2026-08-07 | guardrail-enforcer | 复审通过，BR 规则待 ac-verifier 确认 | US-019 RAG 对话集成审查 round 2（TKN-US019-RAG-GUARDRAIL-002）：G-01~G-05 修复有效（显式 try-catch 重抛 CancellationException / RagBuildResult sealed 三态 / Log.w 替代 simpleName appendDelta / SpecificLibrary init 校验 / 4 新测试），无新增阻断/高危/中危，3 LOW 建议（R2-1/R2-2/R2-3）不阻断。建议 BR-error-handling-007 / BR-interface-004 转 active |
 | 2026-08-07 | ac-verifier | 验收通过，BR-error-handling-007 + BR-interface-004 转 active | US-019 RAG 对话集成验收（TKN-US019-RAG-ACCEPTANCE-001）：5/6 AC 完全通过（AC-1/3/4/5/6），AC-2 数据层通过但 UI 入口为已知 GAP（不阻断，延后至后续 US）。57 单元测试 + 519 全量回归 0 失败。确认 G-01（CancellationException 重抛）/ G-02（RagBuildResult sealed）/ G-04（SpecificLibrary init 校验）修复有效，BR-error-handling-007 / BR-interface-004 proposed → active |
+| 2026-08-09 | functional-validation-auditor | M3 里程碑审计同步 BR-006 状态 | M3 里程碑交付审计（TKN-M3-MILESTONE-AUDIT-001）：BR-error-handling-006 在 US-016 acceptance 已确认转 active，但 behavioral-rules.md 状态字段仍为 proposed（审计 §C.1 偏差 M3-004）。本次同步状态字段 proposed → active，与 US-016 acceptance 报告一致 |

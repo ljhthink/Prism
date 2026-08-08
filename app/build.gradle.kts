@@ -67,6 +67,18 @@ android {
         disable += "StateFlowValueCalledInComposition"
         disable += "FlowOperatorInvokedInComposition"
     }
+
+    // M3 审计 M3-001 修复（TKN-M3-MILESTONE-AUDIT-001 阻断项）：
+    // US-014 引入 PDFBox 3.0.8 后，pdfbox / fontbox / pdfbox-io / log4j-api 四个 jar 都含
+    // META-INF/DEPENDENCIES 文件，AGP mergeDebugJavaResource 阶段因路径冲突打包失败。
+    // 排除该重复资源文件即可（META-INF/DEPENDENCIES 仅是 jar 元数据，运行时不需要）。
+    // 修复前：`gradlew assembleDebug` 在 mergeDebugJavaResource 失败，APK 无法打包。
+    // 修复后：APK 正常打包，US-014~US-019 真机可验证。
+    packaging {
+        resources {
+            excludes += "META-INF/DEPENDENCIES"
+        }
+    }
 }
 
 dependencies {

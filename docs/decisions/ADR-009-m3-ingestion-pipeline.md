@@ -5,8 +5,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | Proposed |
-| 日期 | 2026-08-07 |
+| 状态 | Accepted |
+| 日期 | 2026-08-07（Proposed → Accepted 2026-08-09，M3 里程碑审计 TKN-M3-MILESTONE-AUDIT-001 同步） |
 | 决策者 | 主 Agent（基于 code-archaeologist 考古报告 TKN-US016-ARCH-001 + web-access 调研 + sequential-thinking 推演） |
 | 关联文档 | [ADR-007](ADR-007-m3-rag-tech-stack.md) / [ADR-008](ADR-008-m3-knowledgebase-model.md) / [PRD.md](../PRD.md) US-003 / [prd.json](../../prd.json) US-016 |
 | 上游调研 | [US-016 摄入管线源码考古报告](../reports/2026-08-07-us016-ingestion-archaeology.md) + web-access RAG 摄入管线最佳实践调研（LlamaIndex IngestionPipeline / Kotlin 协程取消官方文档，2026-08-07） |

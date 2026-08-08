@@ -5,8 +5,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | Proposed |
-| 日期 | 2026-08-07 |
+| 状态 | Accepted |
+| 日期 | 2026-08-07（Proposed → Accepted 2026-08-09，M3 里程碑审计 TKN-M3-MILESTONE-AUDIT-001 同步） |
 | 决策者 | 主 Agent（基于 code-archaeologist 考古报告 + 用户确认） |
 | 关联文档 | [ADR-008](ADR-008-m3-knowledgebase-model.md) / [ADR-009](ADR-009-m3-ingestion-pipeline.md) / [ADR-010](ADR-010-m3-vector-retrieval.md) / [PRD.md](../PRD.md) US-003 / [prd.json](../../prd.json) US-018 |
 | 上游调研 | [US-018 知识库管理 UI 源码考古报告](../reports/2026-08-07-us018-kb-ui-archaeology.md) |

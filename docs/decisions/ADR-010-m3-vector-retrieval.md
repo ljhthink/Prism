@@ -5,8 +5,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | Proposed |
-| 日期 | 2026-08-07 |
+| 状态 | Accepted |
+| 日期 | 2026-08-07（Proposed → Accepted 2026-08-09，M3 里程碑审计 TKN-M3-MILESTONE-AUDIT-001 同步） |
 | 决策者 | 主 Agent（基于 code-archaeologist 考古报告 TKN-US017-ARCH-001 + web-access 调研 + sequential-thinking 推演 + 探针测试实证） |
 | 关联文档 | [ADR-007](ADR-007-m3-rag-tech-stack.md) 5.4 / [ADR-008](ADR-008-m3-knowledgebase-model.md) 5.2/5.3 / [ADR-009](ADR-009-m3-ingestion-pipeline.md) 5.2 / [PRD.md](../PRD.md) US-003 / [prd.json](../../prd.json) US-017 |
 | 上游调研 | [US-017 检索源码考古报告](../reports/2026-08-07-us017-retrieval-archaeology.md) + web-access ObjectBox nearestNeighbors+equal 组合调研（2026-08-07） + 探针测试 [ProbeNearestNeighborsWithEqualTest.kt](../../app/src/test/java/io/prism/data/ProbeNearestNeighborsWithEqualTest.kt) 5 用例全通过 |

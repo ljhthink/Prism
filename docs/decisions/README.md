@@ -12,11 +12,11 @@
 | ADR-004 | OpenAI 兼容 Provider 流式请求（US-006/US-007） | Accepted | 2026-08-05 | [ADR-004-prism-provider-streaming.md](ADR-004-prism-provider-streaming.md) |
 | ADR-005 | MCP Kotlin SDK Client 集成（US-008） | Accepted | 2026-08-06 | [ADR-005-mcp-client-integration.md](ADR-005-mcp-client-integration.md) |
 | ADR-006 | 内置 Filesystem MCP Server（US-009） | Accepted | 2026-08-06 | [ADR-006-filesystem-mcp-server.md](ADR-006-filesystem-mcp-server.md) |
-| ADR-007 | M3 个人知识库 RAG 技术栈（US-003） | Proposed | 2026-08-06 | [ADR-007-m3-rag-tech-stack.md](ADR-007-m3-rag-tech-stack.md) |
-| ADR-008 | M3 知识库分库数据模型（US-015） | Proposed | 2026-08-07 | [ADR-008-m3-knowledgebase-model.md](ADR-008-m3-knowledgebase-model.md) |
-| ADR-009 | M3 摄入管线编排（US-016） | Proposed | 2026-08-07 | [ADR-009-m3-ingestion-pipeline.md](ADR-009-m3-ingestion-pipeline.md) |
-| ADR-010 | M3 向量检索（US-017） | Proposed | 2026-08-07 | [ADR-010-m3-vector-retrieval.md](ADR-010-m3-vector-retrieval.md) |
-| ADR-011 | M3 知识库管理 UI 架构（US-018） | Proposed | 2026-08-07 | [ADR-011-m3-knowledgebase-ui.md](ADR-011-m3-knowledgebase-ui.md) |
+| ADR-007 | M3 个人知识库 RAG 技术栈（US-003） | Accepted | 2026-08-06 | [ADR-007-m3-rag-tech-stack.md](ADR-007-m3-rag-tech-stack.md) |
+| ADR-008 | M3 知识库分库数据模型（US-015） | Accepted | 2026-08-07 | [ADR-008-m3-knowledgebase-model.md](ADR-008-m3-knowledgebase-model.md) |
+| ADR-009 | M3 摄入管线编排（US-016） | Accepted | 2026-08-07 | [ADR-009-m3-ingestion-pipeline.md](ADR-009-m3-ingestion-pipeline.md) |
+| ADR-010 | M3 向量检索（US-017） | Accepted | 2026-08-07 | [ADR-010-m3-vector-retrieval.md](ADR-010-m3-vector-retrieval.md) |
+| ADR-011 | M3 知识库管理 UI 架构（US-018） | Accepted | 2026-08-07 | [ADR-011-m3-knowledgebase-ui.md](ADR-011-m3-knowledgebase-ui.md) |
 | ADR-012 | M3 RAG 对话集成架构（US-019） | Accepted | 2026-08-07 | [ADR-012-m3-rag-conversation-integration.md](ADR-012-m3-rag-conversation-integration.md) |
 
 ## ADR 生命周期
