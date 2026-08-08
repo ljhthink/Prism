@@ -268,8 +268,8 @@
         "Typecheck passes"
       ],
       "priority": 18,
-      "passes": false,
-      "notes": "PRD US-003 验收 5/7。4GB 低端机小批次模式。"
+      "passes": true,
+      "notes": "PRD US-003 验收 5/7。4GB 低端机小批次模式。ADR-011 7 项决策（保留一级 Tab 改造 Mock→真实 / PrismApplication 暴露 5 个 lazy 依赖 / UiState 单一聚合 + IngestionEvent 收集 / SAF OpenDocument + ContentResolver / Failed.throwable 安全映射 / 默认库独立入口 / StateFlow conflate 节流）。code-archaeologist 考古（TKN-US018-ARCH-001，12 项风险清单 R-1~R-12）。guardrail-enforcer 两轮审查（TKN-US018-GUARDRAIL-001 有条件通过 G-01~G-04 中危须修复 → TKN-US018-GUARDRAIL-002 通过 G-01~G-05 全部修复有效：状态原子性 _uiState.update CAS / Failed 日志 BR-error-handling-004 / catch 不静默吞 / createLibrary+deleteLibrary 统一 try-catch 兜底）+ ac-verifier 验收（TKN-US018-AC-001，5/5 AC 通过，35 单元测试 + 524 全量回归 0 失败，R2-1 日志措辞 simpleName 修复有效）。验收报告：docs/reports/2026-08-07-us018-kb-ui-acceptance.md。遗留：G-06 测试调度器 / G-07 文件名 fallback / G-08 Factory KDoc 措辞（低危可延后）。"
     },
     {
       "id": "US-019",

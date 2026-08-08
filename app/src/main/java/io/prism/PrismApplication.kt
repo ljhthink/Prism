@@ -10,13 +10,19 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.sse.SSE
 import io.objectbox.BoxStore
+import io.prism.data.KnowledgeBaseRepository
 import io.prism.data.McpServerRepository
 import io.prism.data.MyObjectBox
 import io.prism.data.ProviderConfigRepository
+import io.prism.document.Chunker
+import io.prism.document.DocumentParserRegistry
+import io.prism.embedding.Embedder
+import io.prism.embedding.EmbedderFactory
 import io.prism.fs.FilesystemMcpServer
 import io.prism.fs.FilesystemRootStore
 import io.prism.fs.SafFileAccess
 import io.prism.fs.UiConfirmationGate
+import io.prism.ingestion.IngestionPipeline
 import io.prism.network.LocalMcpToolProvider
 import io.prism.network.McpClientManager
 import io.prism.network.McpToolProvider
@@ -162,6 +168,55 @@ class PrismApplication : Application() {
         McpToolProviderDispatcher(localMcpToolProvider, mcpClientManager)
     }
 
+    /**
+     * 知识库分库仓库（US-015，ADR-008）—— 管理 KnowledgeBase CRUD 与级联删除。
+     *
+     * US-018 知识库管理 UI 经 [io.prism.ui.knowledge.KnowledgeBaseViewModel] 注入使用。
+     */
+    val knowledgeBaseRepository: KnowledgeBaseRepository by lazy { KnowledgeBaseRepository(boxStore) }
+
+    /**
+     * 文档解析器注册表（US-012，ADR-007 5.3）—— 按扩展名分发到 PDF/Office/Plain 解析器。
+     *
+     * 无状态组件，可安全跨协程复用。
+     */
+    val documentParserRegistry: DocumentParserRegistry by lazy { DocumentParserRegistry() }
+
+    /**
+     * 文本切片器（US-013，ADR-007 5.4）—— 段落边界优先 + overlap。
+     *
+     * 参数选型（ADR-011 5.2）：chunkSize=512（256–1024 中位默认），overlap=64（chunkSize/8，符合 RAG 最佳实践）。
+     * 无状态组件，可安全跨协程复用。
+     */
+    val chunker: Chunker by lazy { Chunker(chunkSize = DEFAULT_CHUNK_SIZE, overlap = DEFAULT_CHUNK_OVERLAP) }
+
+    /**
+     * 端侧嵌入引擎（US-014，ADR-007 5.2）—— onnxruntime-android 加载 all-MiniLM-L6-v2 INT8 模型。
+     *
+     * 经 [EmbedderFactory.create] 从 `assets/models/` 加载 ONNX 模型（~23MB）与 BERT 词表（~226KB）。
+     * 首次访问时延迟初始化，加载耗时 ~200ms，仅在用户首次进入知识库 Tab 时发生。
+     *
+     * **生命周期**（BR-concurrency-002）：OnnxEmbedder 全程持锁，单例化复用避免重复加载模型；
+     * 协程取消时单次 embed ~100ms 不可中断，最坏延迟可接受。
+     */
+    val embedder: Embedder by lazy {
+        assets.open(EmbedderFactory.DEFAULT_MODEL_PATH).use { modelInput ->
+            assets.open(EmbedderFactory.DEFAULT_VOCAB_PATH).use { vocabInput ->
+                EmbedderFactory.create(modelInput, vocabInput)
+            }
+        }
+    }
+
+    /**
+     * 摄入管线（US-016，ADR-009）—— 串联 解析→切片→嵌入→写入 全链路。
+     *
+     * 由 [io.prism.ui.knowledge.KnowledgeBaseViewModel] 调用 `ingest()` 触发文档导入，
+     * 返回 `Flow<IngestionEvent>` 供 ViewModel collect 观察进度。
+     */
+    val ingestionPipeline: IngestionPipeline by lazy {
+        IngestionPipeline(documentParserRegistry, chunker, embedder, knowledgeBaseRepository)
+    }
+
     override fun onCreate() {
         super.onCreate()
         boxStore = MyObjectBox.builder()
@@ -191,4 +246,22 @@ class PrismApplication : Application() {
 
     /** 文件系统授权根目录 DataStore 进程级单例（ADR-006 5.3）。 */
     private val Context.filesystemRootsDataStore by preferencesDataStore(name = "prism_filesystem_roots")
+
+    companion object {
+        /**
+         * 默认切片大小（字符数，ADR-011 5.2）。
+         *
+         * ADR-007 5.4 推荐 256–1024 token 范围，512 为中位默认值。
+         * all-MiniLM-L6-v2 最大输入 256 token，超出会被截断；512 字符约对应 200–300 token，
+         * 在嵌入模型窗口内且保留充分上下文。
+         */
+        private const val DEFAULT_CHUNK_SIZE = 512
+
+        /**
+         * 默认切片重叠（字符数，ADR-011 5.2）。
+         *
+         * overlap = chunkSize / 8 ≈ 64，符合 RAG 最佳实践（保留上下文衔接又不过度冗余）。
+         */
+        private const val DEFAULT_CHUNK_OVERLAP = 64
+    }
 }

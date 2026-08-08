@@ -136,6 +136,17 @@
 - 适用场景：dev
 - 状态：active
 
+#### BR-concurrency-004: MutableStateFlow 跨协程并发写必须用 update 原子 CAS，禁止 `value = value.copy(...)`
+
+- 类别：concurrency
+- 规则：`MutableStateFlow.value` 的 setter 本身是原子的，但 `_state.value = _state.value.copy(...)` 是「读 → 改 → 写」三步**非原子**序列。当存在多个协程并发写同一 `MutableStateFlow`（如 ViewModel 的 init 块在 Main 协程 `collect { ... }` 与 `viewModelScope.launch(Dispatchers.IO) { ... }` 的 IO 协程同时写 `_uiState`）时，后写者会覆盖先写者基于已过期值的修改，导致 lost update（库列表/chunkCounts/ingestionState 短暂回退到旧值，UI 不一致）。必须改用 `MutableStateFlow.update { current -> current.copy(...) }`，其内部为 CAS 自旋循环，保证 read-modify-write 原子性。
+- 反例：`_uiState.value = _uiState.value.copy(ingestionState = Running(...))` —— Main 协程与 IO 协程并发写时，IO 协程基于过期的 `_uiState.value` copy 后覆盖 Main 协程刚写入的 libraries/chunkCounts，导致状态回退
+- 正例：`_uiState.update { it.copy(ingestionState = Running(...)) }` —— CAS 自旋，读到最新值再修改，无 lost update
+- 来源：US-018 知识库管理 UI 审查（TKN-US018-GUARDRAIL-001，G-01 中危发现；TKN-US018-GUARDRAIL-002 修复验证通过；ac-verifier TKN-US018-AC-001 确认 35 测试 + 524 全量回归 0 失败）
+- 添加日期：2026-08-07
+- 适用场景：dev
+- 状态：active（ac-verifier TKN-US018-AC-001 确认 G-01 修复有效，2026-08-07 转 active）
+
 ### interface
 
 #### BR-interface-001: UI 设计必须用户审核通过后方可实现
@@ -297,3 +308,6 @@
 | 2026-08-07 | ac-verifier | 验收通过，BR 规则转 active | US-014 验收（TKN-US014-EMBEDDING-AC-001）：5/5 AC 通过，29 嵌入测试 + 4 perf 基准通过，全量 379 测试 0 失败。确认 G-01（2 并发测试）/ G-02（先置 null 再 close）修复有效，BR-concurrency-002 / BR-error-handling-005 状态 proposed → active |
 | 2026-08-07 | guardrail-enforcer | 提议 BR-error-handling-006 | US-016 摄入管线审查（TKN-US016-GUARDRAIL-001）：无阻断级安全漏洞，协程取消语义正确（CancellationException 不被吞），但 M1 require 在 use{} 前导致 InputStream 资源泄漏（中高危，须修复后重新审查）。结论有条件通过。M2 Failed(throwable) 信息泄露（中危）、Q3 catch 缺注释（低危，违反 BR-error-handling-004）、Q6 测试未覆盖取消/写入失败 |
 | 2026-08-07 | guardrail-enforcer | 复审通过，BR-error-handling-006 待 ac-verifier 确认 | US-016 摄入管线复审（TKN-US016-GUARDRAIL-002）：M1 修复有效（require 失败前先 close input，测试验证 closed==true），M2 KDoc 安全约定到位，Q3 catch 注释符合 BR-error-handling-004，Q6 协程取消测试覆盖。新增 catch(IllegalArgumentException) 设计合理（与 CancellationException 互不继承，不破坏取消语义）。无回归，24 测试通过。结论通过，可进入 ac-verifier。BR-error-handling-006 proposed→待 ac-verifier 确认转 active |
+| 2026-08-07 | guardrail-enforcer | 提议 BR-concurrency-004 | US-018 知识库管理 UI 审查（TKN-US018-GUARDRAIL-001）：32 测试通过、Typecheck 通过，无阻断级安全漏洞，但 G-01 StateFlow 非原子 RMW 并发 lost update（中危）+ G-02~G-05 中危须修复。结论有条件通过 |
+| 2026-08-07 | guardrail-enforcer | 复审通过，BR-concurrency-004 待 ac-verifier 确认 | US-018 R2 复审（TKN-US018-GUARDRAIL-002）：G-01~G-05 修复有效（_uiState.update 原子 CAS / Failed logger.log / catch 不静默吞 / createLibrary+deleteLibrary 统一 try-catch），无回归，0 阻断/0 高危/0 中危，仅 R2-1 低危建议。建议 BR-concurrency-004 proposed→待 ac-verifier 确认转 active |
+| 2026-08-07 | ac-verifier | 验收通过，BR-concurrency-004 转 active | US-018 知识库管理 UI 验收（TKN-US018-AC-001）：5/5 AC 通过，35 单元测试 + 524 全量回归 0 失败，R2-1 日志措辞 simpleName 修复有效。确认 G-01（_uiState.update CAS）修复有效，BR-concurrency-004 proposed → active |

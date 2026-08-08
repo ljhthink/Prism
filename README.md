@@ -15,6 +15,7 @@
 - US-015 知识库分库数据模型（KnowledgeBase 实体 + Repository CRUD + 级联删除）✅（guardrail 两轮 + ac-verifier 通过，G-01 HNSW Query.remove bug #1209 已规避）
 - US-016 摄入管线（解析→切片→嵌入→入库 + Flow 进度观察 + 嵌入失败降级）✅（guardrail 两轮 + ac-verifier 通过，M1 InputStream 泄漏阻断已修复，BR-error-handling-006 转 active）
 - US-017 向量检索（HNSW nearestNeighbors top-k + 分库过滤 + 相似度转换 + 来源解析）✅（guardrail 一轮 Pass + ac-verifier 通过，48 测试 0 失败 + JVM 性能基线 p50<200us，5 低危建议 L1~L5 已处理）
+- US-018 知识库管理 UI（KnowledgeBaseViewModel UiState + SAF OpenDocument 导入 + IngestionEvent 收集 + 状态原子性 + 错误安全映射）✅（guardrail 两轮 + ac-verifier 通过，G-01~G-05 修复有效，35 单元测试 + 524 全量回归 0 失败）
 
 - 平台：仅 Android（API 26+，Android 8.0+）
 - 算力：纯云端 BYOK（用户自配 OpenAI/Claude/Ollama 等端点）
@@ -45,6 +46,7 @@
   - [ADR-008 M3 知识库分库数据模型（US-015）](docs/decisions/ADR-008-m3-knowledgebase-model.md)（Proposed）
   - [ADR-009 M3 摄入管线编排（US-016）](docs/decisions/ADR-009-m3-ingestion-pipeline.md)（Proposed）
   - [ADR-010 M3 向量检索（US-017）](docs/decisions/ADR-010-m3-vector-retrieval.md)（Proposed）
+  - [ADR-011 M3 知识库管理 UI 架构（US-018）](docs/decisions/ADR-011-m3-knowledgebase-ui.md)（Proposed）
 
 ### Reference（参考 / 报告）
 
@@ -113,6 +115,10 @@
   - [2026-08-07-us016-ingestion-pipeline-acceptance.md](docs/reports/2026-08-07-us016-ingestion-pipeline-acceptance.md) —— US-016 摄入管线验收测试（ac-verifier，通过，5/5 AC，28 测试 + 438 全量回归 0 失败，BR-error-handling-006 转 active）
   - [2026-08-07-us017-retrieval-archaeology.md](docs/reports/2026-08-07-us017-retrieval-archaeology.md) —— US-017 向量检索源码考古（code-archaeologist，9 项风险清单 + nearestNeighbors+equal 组合零先例预警）
   - [2026-08-07-us017-retrieval-guardrail.md](docs/reports/2026-08-07-us017-retrieval-guardrail.md) —— US-017 向量检索安全与质量审计（guardrail-enforcer，通过，0 阻断/0 高危/5 低危建议）
+  - [2026-08-07-us018-kb-ui-archaeology.md](docs/reports/2026-08-07-us018-kb-ui-archaeology.md) —— US-018 知识库管理 UI 源码考古（code-archaeologist，12 项风险清单 R-1~R-12）
+  - [2026-08-07-us018-kb-ui-guardrail.md](docs/reports/2026-08-07-us018-kb-ui-guardrail.md) —— US-018 知识库管理 UI 安全与质量审计（guardrail-enforcer，第一轮有条件通过，G-01~G-04 须修复）
+  - [2026-08-07-us018-kb-ui-guardrail-round2.md](docs/reports/2026-08-07-us018-kb-ui-guardrail-round2.md) —— US-018 知识库管理 UI 修复复审（guardrail-enforcer，第二轮通过，G-01~G-05 全部修复有效）
+  - [2026-08-07-us018-kb-ui-acceptance.md](docs/reports/2026-08-07-us018-kb-ui-acceptance.md) —— US-018 知识库管理 UI 验收测试（ac-verifier，通过，5/5 AC，35 单元测试 + 524 全量回归 0 失败，R2-1 日志措辞修复有效）
   - [性能基线](docs/reports/perf/) —— 性能基线报告目录
     - [2026-08-02-us002-objectbox-crud-baseline.md](docs/reports/perf/2026-08-02-us002-objectbox-crud-baseline.md) —— US-002 ObjectBox CRUD 性能基线
     - [2026-08-02-us003-apikey-baseline.md](docs/reports/perf/2026-08-02-us003-apikey-baseline.md) —— US-003 API Key 加密存储性能基线

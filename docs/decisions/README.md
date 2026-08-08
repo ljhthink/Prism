@@ -16,6 +16,7 @@
 | ADR-008 | M3 知识库分库数据模型（US-015） | Proposed | 2026-08-07 | [ADR-008-m3-knowledgebase-model.md](ADR-008-m3-knowledgebase-model.md) |
 | ADR-009 | M3 摄入管线编排（US-016） | Proposed | 2026-08-07 | [ADR-009-m3-ingestion-pipeline.md](ADR-009-m3-ingestion-pipeline.md) |
 | ADR-010 | M3 向量检索（US-017） | Proposed | 2026-08-07 | [ADR-010-m3-vector-retrieval.md](ADR-010-m3-vector-retrieval.md) |
+| ADR-011 | M3 知识库管理 UI 架构（US-018） | Proposed | 2026-08-07 | [ADR-011-m3-knowledgebase-ui.md](ADR-011-m3-knowledgebase-ui.md) |
 
 ## ADR 生命周期
 
