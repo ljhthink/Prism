@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.prism.data.ProviderConfig
+import io.prism.rag.RagTarget
 import io.prism.ui.components.PrismAvatar
 import io.prism.ui.components.PrismButton
 import io.prism.ui.components.PrismButtonVariant
@@ -62,6 +63,7 @@ import io.prism.ui.components.PrismSheet
 import io.prism.ui.components.PrismSheetHost
 import io.prism.ui.components.PrismTopBar
 import io.prism.ui.components.PrismTopBarAction
+import io.prism.ui.model.Citation
 import io.prism.ui.model.ChatMessage
 import io.prism.ui.model.Role
 import io.prism.ui.theme.PrismCyan
@@ -80,9 +82,14 @@ import io.prism.ui.theme.PrismTextFaint
  *
  * 布局（自上而下）：
  * 1. 顶栏 [PrismTopBar]：主标题「Prism」+ 当前 Provider 副标题 + 新会话 / 能力操作
- * 2. 消息列表：AI 玻璃气泡（含引用胶囊）/ 用户靛蓝渐变气泡，入场上浮 + 瀑布错峰
- * 3. 打字指示：AI 回复中三点呼吸 + 「正在调用 MCP 检索知识库…」
- * 4. 玻璃胶囊输入框 + 靛蓝渐变圆形发送钮（带光晕）
+ * 2. Provider 选择器胶囊 + RAG 模式切换胶囊（US-019）
+ * 3. 消息列表：AI 玻璃气泡（含引用胶囊列表）/ 用户靛蓝渐变气泡，入场上浮 + 瀑布错峰
+ * 4. 打字指示：AI 回复中三点呼吸 + 状态文案（RAG 开启时显示「正在检索知识库…」）
+ * 5. 玻璃胶囊输入框 + 靛蓝渐变圆形发送钮（带光晕）
+ *
+ * **US-019 文案修正**（ADR-012 5.8，修复 R-7）：
+ * - TypingIndicator 文案从「正在调用 MCP 检索知识库…」改为按 RAG 状态切换
+ * - MessageInputBar 占位符从「输入问题，@知识库 检索…」改为「输入问题…」（移除未实现语法）
  */
 @Composable
 fun ConversationScreen(
@@ -92,7 +99,9 @@ fun ConversationScreen(
     val isTyping by viewModel.isTyping.collectAsState()
     val activeProvider by viewModel.activeProvider.collectAsState()
     val providers by viewModel.providers.collectAsState()
+    val ragTarget by viewModel.ragTarget.collectAsState()
     var providerSelectorVisible by remember { mutableStateOf(false) }
+    var ragSelectorVisible by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
 
@@ -107,11 +116,24 @@ fun ConversationScreen(
                 }
             )
 
-            // Provider 选择器胶囊（US-007）：点击弹出切换列表
-            ProviderChip(
-                name = activeProvider?.name,
-                onClick = { providerSelectorVisible = true }
-            )
+            // Provider 选择器 + RAG 模式切换器并排（US-007 + US-019）
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ProviderChip(
+                    name = activeProvider?.name,
+                    onClick = { providerSelectorVisible = true },
+                    modifier = Modifier.weight(1f)
+                )
+                RagModeChip(
+                    target = ragTarget,
+                    onClick = { ragSelectorVisible = true }
+                )
+            }
 
             LazyColumn(
                 state = listState,
@@ -125,7 +147,7 @@ fun ConversationScreen(
                     MessageBubble(message)
                 }
                 if (isTyping) {
-                    item { TypingIndicator() }
+                    item { TypingIndicator(isRagOn = ragTarget !is RagTarget.Off) }
                 }
             }
 
@@ -148,15 +170,23 @@ fun ConversationScreen(
                 onClose = { providerSelectorVisible = false }
             )
         }
+
+        // RAG 模式切换弹层（US-019）
+        PrismSheetHost(visible = ragSelectorVisible, onDismiss = { ragSelectorVisible = false }) {
+            RagModeSelectorSheet(
+                current = ragTarget,
+                onSelect = { viewModel.setRagTarget(it); ragSelectorVisible = false },
+                onClose = { ragSelectorVisible = false }
+            )
+        }
     }
 }
 
 /** 当前 Provider 胶囊 —— 点击弹出切换列表（US-007）。 */
 @Composable
-private fun ProviderChip(name: String?, onClick: () -> Unit) {
+private fun ProviderChip(name: String?, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Row(
-        modifier = Modifier
-            .padding(horizontal = 20.dp)
+        modifier = modifier
             .clip(RoundedCornerShape(10.dp))
             .background(PrismPanel2)
             .border(1.dp, PrismLine, RoundedCornerShape(10.dp))
@@ -174,10 +204,115 @@ private fun ProviderChip(name: String?, onClick: () -> Unit) {
             text = name ?: "选择 Provider",
             color = if (name != null) PrismText else PrismTextDim,
             fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(text = "切换 ▾", color = PrismTextFaint, fontSize = 10.sp)
+    }
+}
+
+/**
+ * RAG 模式切换胶囊（US-019，ADR-012 5.2/5.8）。
+ *
+ * 三态显示：全库（默认，薄荷色）/ 指定库（薄荷色 + 库 id）/ 关闭（灰色）。
+ */
+@Composable
+private fun RagModeChip(target: RagTarget, onClick: () -> Unit) {
+    val (label, accent) = when (target) {
+        RagTarget.Off -> "RAG 关" to PrismTextFaint
+        RagTarget.AllLibraries -> "RAG 全库" to PrismMint
+        is RagTarget.SpecificLibrary -> "RAG #${target.kbId}" to PrismMint
+    }
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(PrismPanel2)
+            .border(1.dp, PrismLine, RoundedCornerShape(10.dp))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(text = "◉", color = accent, fontSize = 12.sp)
+        Text(
+            text = label,
+            color = accent,
+            fontSize = 12.sp,
             fontWeight = FontWeight.SemiBold
         )
-        Spacer(Modifier.weight(1f))
-        Text(text = "切换 ▾", color = PrismTextFaint, fontSize = 10.sp)
+    }
+}
+
+/** RAG 模式切换弹层（US-019，ADR-012 5.2）。 */
+@Composable
+private fun RagModeSelectorSheet(
+    current: RagTarget,
+    onSelect: (RagTarget) -> Unit,
+    onClose: () -> Unit
+) {
+    PrismSheet(
+        title = "RAG 检索模式",
+        subtitle = "对话时检索知识库并标注引用来源（默认全库检索）"
+    ) {
+        RagModeOption(
+            label = "全库检索",
+            description = "跨所有知识库检索 top-3 片段",
+            selected = current is RagTarget.AllLibraries,
+            onClick = { onSelect(RagTarget.AllLibraries) }
+        )
+        Spacer(Modifier.height(8.dp))
+        RagModeOption(
+            label = "关闭 RAG",
+            description = "普通对话，不检索知识库",
+            selected = current is RagTarget.Off,
+            onClick = { onSelect(RagTarget.Off) }
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "提示：指定库检索将通过知识库管理页选择具体库后启用（暂未开放）",
+            color = PrismTextFaint,
+            fontSize = 11.sp
+        )
+        Spacer(Modifier.height(16.dp))
+        PrismButton(text = "关闭", variant = PrismButtonVariant.Ghost, onClick = onClose)
+    }
+}
+
+/** RAG 模式选项行（US-019）。 */
+@Composable
+private fun RagModeOption(label: String, description: String, selected: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(PrismPanel2)
+            .border(
+                1.dp,
+                if (selected) PrismMint.copy(alpha = 0.4f) else PrismLine,
+                RoundedCornerShape(12.dp)
+            )
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(text = "◉", color = if (selected) PrismMint else PrismTextFaint, fontSize = 14.sp)
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = label, color = PrismText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(text = description, color = PrismTextFaint, fontSize = 11.sp)
+        }
+        if (selected) {
+            Text(text = "当前", color = PrismMint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        }
     }
 }
 
@@ -233,7 +368,7 @@ private fun ProviderSelectorSheet(
  * 单个消息气泡（入场上浮 + 透明度）。
  *
  * - 用户消息：右侧，靛蓝紫渐变 + 指向侧 6dp 圆角
- * - AI 消息：左侧，玻璃气泡 + [PrismAvatar] + 引用来源胶囊（[ChatMessage.source]）
+ * - AI 消息：左侧，玻璃气泡 + [PrismAvatar] + 引用来源胶囊列表（[ChatMessage.sources]，US-019）
  */
 @Composable
 private fun MessageBubble(message: ChatMessage) {
@@ -288,8 +423,16 @@ private fun MessageBubble(message: ChatMessage) {
                             lineHeight = 23.sp,
                             modifier = Modifier.padding(horizontal = 15.dp, vertical = 11.dp)
                         )
-                        message.source?.let { src ->
-                            SourceChip(src, Modifier.padding(start = 15.dp, bottom = 10.dp))
+                        // 引用来源列表（US-019，ADR-012 5.3）：检索阶段已附在 AI 占位消息上
+                        if (message.sources.isNotEmpty()) {
+                            Column(
+                                modifier = Modifier.padding(start = 15.dp, end = 15.dp, bottom = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                message.sources.forEach { citation ->
+                                    SourceChip(citation = citation)
+                                }
+                            }
                         }
                     }
                 }
@@ -298,9 +441,16 @@ private fun MessageBubble(message: ChatMessage) {
     }
 }
 
-/** 引用来源胶囊（薄荷色 + 边框，US-003 防幻觉 UI 呈现）。 */
+/**
+ * 引用来源胶囊（薄荷色 + 边框，US-003/US-019 防幻觉 UI 呈现）。
+ *
+ * **US-019 变更**：从单 String 改为接收 [Citation]，显示「[来源N] 文档名 #片段号」。
+ * citation.chunkIndex 为 null 时省略片段号（解析失败容错）。
+ */
 @Composable
-private fun SourceChip(text: String, modifier: Modifier = Modifier) {
+private fun SourceChip(citation: Citation, modifier: Modifier = Modifier) {
+    val chunkPart = citation.chunkIndex?.let { " #$it" } ?: ""
+    val text = "[来源${citation.index}] ${citation.documentTitle}$chunkPart"
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(8.dp))
@@ -319,10 +469,15 @@ private fun SourceChip(text: String, modifier: Modifier = Modifier) {
     }
 }
 
-/** AI 打字指示 —— 三点呼吸 + 状态文案。 */
+/**
+ * AI 打字指示 —— 三点呼吸 + 状态文案（US-019 文案修正，ADR-012 5.8 修复 R-7）。
+ *
+ * @param isRagOn RAG 是否开启；true 显示「正在检索知识库…」，false 显示「正在思考…」
+ */
 @Composable
-private fun TypingIndicator() {
+private fun TypingIndicator(isRagOn: Boolean) {
     val transition = rememberInfiniteTransition(label = "typing")
+    val statusText = if (isRagOn) "正在检索知识库…" else "正在思考…"
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.Bottom
@@ -352,7 +507,7 @@ private fun TypingIndicator() {
                     }
                 }
                 Text(
-                    text = "正在调用 MCP 检索知识库…",
+                    text = statusText,
                     color = PrismTextFaint,
                     fontSize = 11.sp,
                     modifier = Modifier.padding(top = 8.dp)
@@ -385,7 +540,7 @@ private fun MessageInputBar(
         ) {
             if (value.isEmpty()) {
                 Text(
-                    text = "输入问题，@知识库 检索…",
+                    text = "输入问题…",
                     color = PrismTextFaint,
                     fontSize = 14.sp
                 )

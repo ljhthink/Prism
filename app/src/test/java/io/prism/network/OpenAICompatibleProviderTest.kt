@@ -400,6 +400,89 @@ class OpenAICompatibleProviderTest {
         assertTrue("stream 应始终为 true", body.contains("\"stream\":true"))
     }
 
+    // ==================== US-019 system prompt / ragContext 注入测试 ====================
+
+    @Test
+    fun `buildRequestBody prepends system message when systemPrompt provided`() {
+        val config = ProviderConfig(name = "X", baseUrl = "http://h", apiKeyRef = "", models = listOf("gpt"))
+        val messages = listOf(
+            ChatMessage(id = 0, role = Role.USER, content = "你好", timestamp = 0)
+        )
+
+        val body = provider.buildRequestBody(config, messages, systemPrompt = "你是助手")
+
+        assertTrue("应包含 system 角色", body.contains("\"role\":\"system\""))
+        assertTrue("应包含 systemPrompt 内容", body.contains("你是助手"))
+        // system 消息应排在 user 消息之前
+        val systemIdx = body.indexOf("\"role\":\"system\"")
+        val userIdx = body.indexOf("\"role\":\"user\"")
+        assertTrue("system 消息应在 user 消息之前", systemIdx < userIdx)
+    }
+
+    @Test
+    fun `buildRequestBody skips system message when systemPrompt is null or blank`() {
+        val config = ProviderConfig(name = "X", baseUrl = "http://h", apiKeyRef = "", models = listOf("gpt"))
+        val messages = listOf(ChatMessage(id = 0, role = Role.USER, content = "你好", timestamp = 0))
+
+        val bodyNull = provider.buildRequestBody(config, messages, systemPrompt = null)
+        assertFalse("null systemPrompt 不应注入 system 消息", bodyNull.contains("\"role\":\"system\""))
+
+        val bodyBlank = provider.buildRequestBody(config, messages, systemPrompt = "   ")
+        assertFalse("空白 systemPrompt 不应注入 system 消息", bodyBlank.contains("\"role\":\"system\""))
+    }
+
+    @Test
+    fun `buildRequestBody inserts ragContext before last user message`() {
+        val config = ProviderConfig(name = "X", baseUrl = "http://h", apiKeyRef = "", models = listOf("gpt"))
+        val messages = listOf(
+            ChatMessage(id = 0, role = Role.USER, content = "历史问题", timestamp = 0),
+            ChatMessage(id = 1, role = Role.ASSISTANT, content = "历史回答", timestamp = 0),
+            ChatMessage(id = 2, role = Role.USER, content = "本轮问题", timestamp = 0)
+        )
+
+        val body = provider.buildRequestBody(config, messages, ragContext = "知识库片段")
+
+        // 应包含 ragContext 内容
+        assertTrue("应包含 ragContext 内容", body.contains("知识库片段"))
+        // ragContext 应在「本轮问题」之前、在「历史回答」之后
+        val ragIdx = body.indexOf("知识库片段")
+        val lastUserIdx = body.lastIndexOf("本轮问题")
+        val assistantIdx = body.indexOf("历史回答")
+        assertTrue("ragContext 应在最后一条 user 消息之前", ragIdx < lastUserIdx)
+        assertTrue("ragContext 应在 assistant 消息之后", ragIdx > assistantIdx)
+    }
+
+    @Test
+    fun `buildRequestBody appends ragContext at end when no user message exists`() {
+        // 异常路径：messages 中无 user 消息，ragContext 直接追加到末尾
+        val config = ProviderConfig(name = "X", baseUrl = "http://h", apiKeyRef = "", models = listOf("gpt"))
+        val messages = listOf(ChatMessage(id = 0, role = Role.ASSISTANT, content = "仅 AI 消息", timestamp = 0))
+
+        val body = provider.buildRequestBody(config, messages, ragContext = "context")
+
+        assertTrue("无 user 消息时仍应包含 ragContext", body.contains("context"))
+    }
+
+    @Test
+    fun `buildRequestBody injects both system and ragContext when both provided`() {
+        val config = ProviderConfig(name = "X", baseUrl = "http://h", apiKeyRef = "", models = listOf("gpt"))
+        val messages = listOf(ChatMessage(id = 0, role = Role.USER, content = "问题", timestamp = 0))
+
+        val body = provider.buildRequestBody(
+            config, messages,
+            systemPrompt = "sys",
+            ragContext = "rag"
+        )
+
+        val sysIdx = body.indexOf("\"role\":\"system\"")
+        val ragIdx = body.indexOf("rag")
+        val userIdx = body.lastIndexOf("问题")
+        assertTrue("应有 system 消息", sysIdx >= 0)
+        assertTrue("应有 ragContext", ragIdx >= 0)
+        assertTrue("system 在 ragContext 之前", sysIdx < ragIdx)
+        assertTrue("ragContext 在最后一条 user 消息之前", ragIdx < userIdx)
+    }
+
     @Test
     fun `parseChunkData handles oversized content`() {
         val big = "t".repeat(100_000)

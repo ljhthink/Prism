@@ -58,11 +58,23 @@ class OpenAICompatibleProvider(
     /**
      * 发起流式对话请求。
      *
+     * **US-019 扩展**（ADR-012 5.4）：新增 [systemPrompt] / [ragContext] 可选参数。
+     * - [systemPrompt] 非空时，在 messages 列表最前插入 `MessageBody("system", systemPrompt)`
+     * - [ragContext] 非空时，作为独立 user 消息插在最后一条 user 消息前（RAG context 必须在用户问题之前，
+     *   让模型把 context 与 question 关联）
+     *
      * @param config 目标 Provider 配置（含 baseUrl / apiKeyRef / headers / models）
      * @param messages 对话历史（[ChatMessage] 转换为请求体消息）
+     * @param systemPrompt system 消息内容（可选，RAG grounding rules）；null 时不注入
+     * @param ragContext RAG context 文本（可选，知识库片段拼接）；null 时不注入
      * @return [StreamEvent] 流：增量 [StreamEvent.Delta] → 结束 [StreamEvent.Done] / 错误 [StreamEvent.Error]
      */
-    override fun streamChat(config: ProviderConfig, messages: List<ChatMessage>): Flow<StreamEvent> = flow {
+    override fun streamChat(
+        config: ProviderConfig,
+        messages: List<ChatMessage>,
+        systemPrompt: String?,
+        ragContext: String?
+    ): Flow<StreamEvent> = flow {
         val endpoint = buildEndpoint(config.baseUrl)
         val apiKey = if (config.apiKeyRef.isNotBlank()) {
             apiKeyRepository.readApiKeyOnce(config.apiKeyRef)
@@ -81,7 +93,7 @@ class OpenAICompatibleProvider(
                     ?: customAuthHeader(config.headers)?.let { header(HttpHeaders.Authorization, it) }
                 // 合并自定义头，Authorization / Content-Type 以本请求为准
                 applyCustomHeaders(this, config.headers)
-                setBody(buildRequestBody(config, messages))
+                setBody(buildRequestBody(config, messages, systemPrompt, ragContext))
             }) {
                 incoming.collect { event ->
                     val data = event.data ?: return@collect
@@ -120,9 +132,45 @@ class OpenAICompatibleProvider(
     internal fun buildAuthHeader(apiKey: String?): String? =
         apiKey?.takeIf { it.isNotBlank() }?.let { "Bearer $it" }
 
-    /** 序列化请求体（model / messages / stream=true）。取首个模型，空则回退空串交服务端校验。 */
-    internal fun buildRequestBody(config: ProviderConfig, messages: List<ChatMessage>): String {
-        val requestMessages = messages.map { MessageBody(it.role.toRequestRole(), it.content) }
+    /**
+     * 序列化请求体（model / messages / stream=true）。取首个模型，空则回退空串交服务端校验。
+     *
+     * **US-019 注入规则**（ADR-012 5.4）：
+     * - [systemPrompt] 非空：在 messages 最前插入 `MessageBody("system", systemPrompt)`
+     * - [ragContext] 非空：作为独立 user 消息插在**最后一条 user 消息之前**。
+     *   选择「最后一条 user 消息之前」而非「messages 末尾」的原因：messages 末尾一定是用户本轮问题
+     *   （ConversationViewModel.sendMessage 已保证），RAG context 须紧贴用户问题之前，让模型
+     *   把 context 与 question 关联（OpenAI Chat Completions 不持久化状态，每轮重发完整序列）。
+     * - 两者为空时维持原行为（向后兼容，既有调用零改动）。
+     *
+     * **测试覆盖**：[OpenAICompatibleProviderTest] 含 system 注入 / ragContext 注入 / 两者均注入 /
+     * 均不注入四个分支单元测试。
+     */
+    internal fun buildRequestBody(
+        config: ProviderConfig,
+        messages: List<ChatMessage>,
+        systemPrompt: String? = null,
+        ragContext: String? = null
+    ): String {
+        val requestMessages = buildList {
+            // 1. system 消息前置（若有）
+            if (!systemPrompt.isNullOrBlank()) {
+                add(MessageBody(SYSTEM_ROLE, systemPrompt))
+            }
+            // 2. 转换对话历史
+            messages.forEach { add(MessageBody(it.role.toRequestRole(), it.content)) }
+            // 3. ragContext 插在最后一条 user 消息之前（若有）
+            if (!ragContext.isNullOrBlank()) {
+                val lastUserIndex = indexOfLast { it.role == USER_ROLE }
+                if (lastUserIndex == -1) {
+                    // 无 user 消息（异常路径）：直接追加 context 到末尾，由服务端处理
+                    add(MessageBody(USER_ROLE, ragContext))
+                } else {
+                    // 在最后一条 user 消息前插入 context user 消息
+                    add(lastUserIndex, MessageBody(USER_ROLE, ragContext))
+                }
+            }
+        }
         val body = ChatCompletionRequest(
             model = config.models.firstOrNull() ?: "",
             messages = requestMessages,
@@ -188,10 +236,12 @@ class OpenAICompatibleProvider(
 
     private companion object {
         const val DONE_MARKER = "[DONE]"
+        const val SYSTEM_ROLE = "system"
+        const val USER_ROLE = "user"
     }
 }
 
-/** 请求体消息（role + content）。 */
+/** 请求体消息（role + content）。role 由 [Role.toRequestRole] 或 system/ragContext 注入产生。 */
 @Serializable
 private data class MessageBody(val role: String, val content: String)
 

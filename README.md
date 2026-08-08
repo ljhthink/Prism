@@ -6,7 +6,7 @@
 
 🚧 **M0 脚手架 + M1 数据层 + 安全层 + BYOK Provider 配置 + 聊天 UI + 流式请求 + Provider 切换 + M2 MCP Client + M2 内置 Filesystem MCP Server + 预设远程 MCP Server 模板加载已完成（US-001~US-010 通过 guardrail 审查 + ac-verifier 验收）**（2026-08-06）
 
-**M3 个人知识库 RAG 进行中（US-011~US-019，ADR-007 技术栈已定）**
+**M3 个人知识库 RAG 全部完成（US-011~US-019，ADR-007 技术栈已定）**（2026-08-07）
 
 - US-011 依赖落地 + KnowledgeChunk 向量索引 ✅（guardrail + ac-verifier 通过）
 - US-012 文档解析器（PDF/DOCX/XLSX/MD/TXT）✅（guardrail 有条件通过 + ac-verifier 通过）
@@ -16,6 +16,7 @@
 - US-016 摄入管线（解析→切片→嵌入→入库 + Flow 进度观察 + 嵌入失败降级）✅（guardrail 两轮 + ac-verifier 通过，M1 InputStream 泄漏阻断已修复，BR-error-handling-006 转 active）
 - US-017 向量检索（HNSW nearestNeighbors top-k + 分库过滤 + 相似度转换 + 来源解析）✅（guardrail 一轮 Pass + ac-verifier 通过，48 测试 0 失败 + JVM 性能基线 p50<200us，5 低危建议 L1~L5 已处理）
 - US-018 知识库管理 UI（KnowledgeBaseViewModel UiState + SAF OpenDocument 导入 + IngestionEvent 收集 + 状态原子性 + 错误安全映射）✅（guardrail 两轮 + ac-verifier 通过，G-01~G-05 修复有效，35 单元测试 + 524 全量回归 0 失败）
+- US-019 RAG 对话集成（RagContextBuilder + RagTarget 三态 + ChatStreamProvider 接口扩展 systemPrompt/ragContext + Citation 多引用 inline 标注 + 三级降级 RagBuildResult sealed + 历史过滤器排除 aiId）✅（guardrail 两轮 + ac-verifier 通过，5/6 AC 完全通过 AC-2 UI 入口已知 GAP 不阻断，57 单元测试 + 519 全量回归 0 失败，BR-error-handling-007 / BR-interface-004 转 active）
 
 - 平台：仅 Android（API 26+，Android 8.0+）
 - 算力：纯云端 BYOK（用户自配 OpenAI/Claude/Ollama 等端点）
@@ -47,6 +48,7 @@
   - [ADR-009 M3 摄入管线编排（US-016）](docs/decisions/ADR-009-m3-ingestion-pipeline.md)（Proposed）
   - [ADR-010 M3 向量检索（US-017）](docs/decisions/ADR-010-m3-vector-retrieval.md)（Proposed）
   - [ADR-011 M3 知识库管理 UI 架构（US-018）](docs/decisions/ADR-011-m3-knowledgebase-ui.md)（Proposed）
+  - [ADR-012 M3 RAG 对话集成架构（US-019）](docs/decisions/ADR-012-m3-rag-conversation-integration.md)（Accepted）
 
 ### Reference（参考 / 报告）
 
@@ -119,6 +121,11 @@
   - [2026-08-07-us018-kb-ui-guardrail.md](docs/reports/2026-08-07-us018-kb-ui-guardrail.md) —— US-018 知识库管理 UI 安全与质量审计（guardrail-enforcer，第一轮有条件通过，G-01~G-04 须修复）
   - [2026-08-07-us018-kb-ui-guardrail-round2.md](docs/reports/2026-08-07-us018-kb-ui-guardrail-round2.md) —— US-018 知识库管理 UI 修复复审（guardrail-enforcer，第二轮通过，G-01~G-05 全部修复有效）
   - [2026-08-07-us018-kb-ui-acceptance.md](docs/reports/2026-08-07-us018-kb-ui-acceptance.md) —— US-018 知识库管理 UI 验收测试（ac-verifier，通过，5/5 AC，35 单元测试 + 524 全量回归 0 失败，R2-1 日志措辞修复有效）
+  - [2026-08-07-us019-rag-integration-archaeology.md](docs/reports/2026-08-07-us019-rag-integration-archaeology.md) —— US-019 RAG 对话集成源码考古（code-archaeologist，7 项风险清单 + 9 文件接口契约分析）
+  - [2026-08-07-us019-rag-integration-impact-selfcheck.md](docs/reports/2026-08-07-us019-rag-integration-impact-selfcheck.md) —— US-019 RAG 对话集成变更影响自检 v1+v2（含 G-01~G-05 修复后二次自检，CLAUDE.md 7.2.5）
+  - [2026-08-07-us019-rag-integration-guardrail.md](docs/reports/2026-08-07-us019-rag-integration-guardrail.md) —— US-019 RAG 对话集成安全与质量审计 round 1（guardrail-enforcer，有条件通过，1 HIGH + 4 MEDIUM）
+  - [2026-08-07-us019-rag-integration-guardrail-round2.md](docs/reports/2026-08-07-us019-rag-integration-guardrail-round2.md) —— US-019 RAG 对话集成修复复审（guardrail-enforcer，第二轮通过，G-01~G-05 全部修复有效）
+  - [2026-08-07-us019-rag-integration-acceptance.md](docs/reports/2026-08-07-us019-rag-integration-acceptance.md) —— US-019 RAG 对话集成验收测试（ac-verifier，通过，5/6 AC 完全通过 AC-2 UI 入口已知 GAP 不阻断，57 单元测试 + 519 全量回归 0 失败，BR-error-handling-007 / BR-interface-004 转 active）
   - [性能基线](docs/reports/perf/) —— 性能基线报告目录
     - [2026-08-02-us002-objectbox-crud-baseline.md](docs/reports/perf/2026-08-02-us002-objectbox-crud-baseline.md) —— US-002 ObjectBox CRUD 性能基线
     - [2026-08-02-us003-apikey-baseline.md](docs/reports/perf/2026-08-02-us003-apikey-baseline.md) —— US-003 API Key 加密存储性能基线

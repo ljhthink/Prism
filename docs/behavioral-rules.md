@@ -55,6 +55,17 @@
 - 适用场景：dev
 - 状态：proposed（待主 Agent 修复 M1 后确认转 active）
 
+#### BR-error-handling-007: 协程代码中禁止用 runCatching 吞 CancellationException
+
+- 类别：error-handling / concurrency
+- 规则：在 Kotlin 协程代码（suspend 函数 / `withContext` 块 / Flow collect / `viewModelScope.launch` 内）中，`runCatching { }` 会捕获所有 `Throwable`（含 `CancellationException`），破坏结构化并发的取消传播，导致协程取消不传播、资源泄漏、测试假阳性。必须改用显式 `try-catch`，且 `catch (e: CancellationException) { throw e }` 必须在 `catch (e: Exception)` 之前（CancellationException 继承自 IllegalStateException 而非 Exception 之外的类，但 JVM 异常匹配按声明顺序，先匹配 CancellationException 才能正确重抛）。若必须用 `runCatching`，须在 `getOrElse` / `onFailure` 中先检查并重抛 `CancellationException`。**例外**：外层 `runCatching { suspendFn() }.getOrElse { e -> if (e is CancellationException) throw e; ... }` 形式可接受，但建议优先用 try-catch 仅 `catch (e: Exception)` 避免 `Error` 被吞。
+- 反例：`val v = runCatching { suspendingApi.call() }.getOrElse { return null }` —— 协程取消时 `CancellationException` 被吞，取消不传播；亦违反 BR-error-handling-004 静默吞异常
+- 正例：`val v = try { suspendingApi.call() } catch (e: CancellationException) { throw e } catch (e: Exception) { return null }`，或外层 `runCatching { ... }.getOrElse { e -> if (e is CancellationException) throw e; null }`
+- 来源：US-019 RAG 对话集成审查（TKN-US019-RAG-GUARDRAIL-001，G-01 HIGH 发现）
+- 添加日期：2026-08-07
+- 适用场景：dev
+- 状态：active（ac-verifier TKN-US019-RAG-ACCEPTANCE-001 确认 G-01 修复有效，2026-08-07 转 active）
+
 ### security
 
 #### BR-security-001: data class 含数组字段必须覆盖 equals/hashCode
@@ -170,6 +181,17 @@
 - 添加日期：2026-08-06
 - 适用场景：dev
 - 状态：active
+
+#### BR-interface-004: 请求历史过滤必须同时排除当前 aiId 与所有空 content 的 assistant 消息
+
+- 类别：interface
+- 规则：构造对话请求历史时，过滤条件必须同时满足：(1) 排除当前正在生成的 AI 消息（按 `id` 精确匹配），即使其 content 因降级提示（如「⚠️ 知识库检索失败，已降级为普通对话」）已非空——本轮待生成目标不应进 history，且降级提示不应被 Provider 当作上一轮 AI 回复；(2) 排除所有空 content 的 assistant 消息（BR-interface-003）。两者用 `||` 互补，不可仅用其一。仅排除当前 aiId 会漏过历史空 AI 消息；仅排除空 content 会漏过当前非空降级提示消息。
+- 反例：`_messages.value.filterNot { it.id == aiId }` —— 历史遗留空 AI 消息仍入请求体；或 `filterNot { it.role == Role.ASSISTANT && it.content.isEmpty() }` —— embed 失败降级提示非空，仍入请求体被 Provider 当作上一轮 AI 回复（语义错误）
+- 正例：`_messages.value.filterNot { it.id == aiId || (it.role == Role.ASSISTANT && it.content.isEmpty()) }`
+- 来源：US-019 RAG 对话集成审查（TKN-US019-RAG-GUARDRAIL-001，G-02 配套修复 + ac-verifier TKN-US019-RAG-ACCEPTANCE-001 确认；guardrail 倒逼发现的 v1 潜在 bug）
+- 添加日期：2026-08-07
+- 适用场景：dev
+- 状态：active（ac-verifier TKN-US019-RAG-ACCEPTANCE-001 确认修复有效，2026-08-07 转 active）
 
 ### ops
 
@@ -311,3 +333,6 @@
 | 2026-08-07 | guardrail-enforcer | 提议 BR-concurrency-004 | US-018 知识库管理 UI 审查（TKN-US018-GUARDRAIL-001）：32 测试通过、Typecheck 通过，无阻断级安全漏洞，但 G-01 StateFlow 非原子 RMW 并发 lost update（中危）+ G-02~G-05 中危须修复。结论有条件通过 |
 | 2026-08-07 | guardrail-enforcer | 复审通过，BR-concurrency-004 待 ac-verifier 确认 | US-018 R2 复审（TKN-US018-GUARDRAIL-002）：G-01~G-05 修复有效（_uiState.update 原子 CAS / Failed logger.log / catch 不静默吞 / createLibrary+deleteLibrary 统一 try-catch），无回归，0 阻断/0 高危/0 中危，仅 R2-1 低危建议。建议 BR-concurrency-004 proposed→待 ac-verifier 确认转 active |
 | 2026-08-07 | ac-verifier | 验收通过，BR-concurrency-004 转 active | US-018 知识库管理 UI 验收（TKN-US018-AC-001）：5/5 AC 通过，35 单元测试 + 524 全量回归 0 失败，R2-1 日志措辞 simpleName 修复有效。确认 G-01（_uiState.update CAS）修复有效，BR-concurrency-004 proposed → active |
+| 2026-08-07 | guardrail-enforcer | 提议 BR-error-handling-007 + BR-interface-004 | US-019 RAG 对话集成审查 round 1（TKN-US019-RAG-GUARDRAIL-001）：1 HIGH（G-01 runCatching 吞 CancellationException）+ 4 MEDIUM（G-02 embed 失败静默 / G-03 simpleName 暴露 / G-04 SpecificLibrary 无校验 / G-05 正向测试缺失）。结论有条件通过 |
+| 2026-08-07 | guardrail-enforcer | 复审通过，BR 规则待 ac-verifier 确认 | US-019 RAG 对话集成审查 round 2（TKN-US019-RAG-GUARDRAIL-002）：G-01~G-05 修复有效（显式 try-catch 重抛 CancellationException / RagBuildResult sealed 三态 / Log.w 替代 simpleName appendDelta / SpecificLibrary init 校验 / 4 新测试），无新增阻断/高危/中危，3 LOW 建议（R2-1/R2-2/R2-3）不阻断。建议 BR-error-handling-007 / BR-interface-004 转 active |
+| 2026-08-07 | ac-verifier | 验收通过，BR-error-handling-007 + BR-interface-004 转 active | US-019 RAG 对话集成验收（TKN-US019-RAG-ACCEPTANCE-001）：5/6 AC 完全通过（AC-1/3/4/5/6），AC-2 数据层通过但 UI 入口为已知 GAP（不阻断，延后至后续 US）。57 单元测试 + 519 全量回归 0 失败。确认 G-01（CancellationException 重抛）/ G-02（RagBuildResult sealed）/ G-04（SpecificLibrary init 校验）修复有效，BR-error-handling-007 / BR-interface-004 proposed → active |
