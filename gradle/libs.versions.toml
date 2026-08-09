@@ -20,6 +20,10 @@ documentfile = "1.0.1"
 onnxruntime = "1.27.0"
 poiOoxml = "5.5.1"
 pdfbox = "3.0.8"
+# M4 Skills 系统（ADR-013 5.2）：SKILL.md frontmatter 解析
+# 选型依据：charleskorn/kaml 已归档（2025-11-30），改用底层引擎 snakeyaml-engine-kmp
+# 活跃维护（最后提交 2026-08-08），KMP 原生，Apache 2.0
+snakeyamlEngineKmp = "4.0.1"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -55,6 +59,7 @@ onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime
 onnxruntime = { group = "com.microsoft.onnxruntime", name = "onnxruntime", version.ref = "onnxruntime" }
 poi-ooxml = { group = "org.apache.poi", name = "poi-ooxml", version.ref = "poiOoxml" }
 pdfbox = { group = "org.apache.pdfbox", name = "pdfbox", version.ref = "pdfbox" }
+snakeyaml-engine-kmp = { group = "it.krzeminski", name = "snakeyaml-engine-kmp", version.ref = "snakeyamlEngineKmp" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

@@ -10,6 +10,11 @@
 
 🚧 **M4 Skills 系统开发中（US-020~US-029，ADR-013/014 Proposed）**（2026-08-09 进行中）—— Skill 数据模型 / SKILL.md 解析 / 注册中心 / tool_calling 接口 / 工具执行回路 / Skills 管理 UI / 远程下载 / 执行可观测
 
+- US-020 Skill 数据模型（SkillConfig 实体 + SkillRepository CRUD）✅（Phase A，guardrail + ac-verifier 通过）
+- US-023 StreamEvent/ChatStreamProvider 接口扩展预留 ✅（Phase A，guardrail + ac-verifier 通过，BR-naming-001 转 active）
+- US-021 SKILL.md 解析器（snakeyaml-engine-kmp 4.0.1 + 安全 LoadSettings + frontmatter 校验）✅（Phase B，guardrail 三轮 + ac-verifier 两轮通过，BR-security-004 转 active）
+- US-022 SkillRegistry（扫描/去重/同步/过滤 + 5 内置 Skill + PrismApplication 集成）✅（Phase B，guardrail 三轮 + ac-verifier 两轮通过，AC-5 受限→完全通过，BR-testing-004 转 active，629 回归 0 失败）
+
 - US-011 依赖落地 + KnowledgeChunk 向量索引 ✅（guardrail + ac-verifier 通过）
 - US-012 文档解析器（PDF/DOCX/XLSX/MD/TXT）✅（guardrail 有条件通过 + ac-verifier 通过）
 - US-013 文本切片器（段落边界优先 + overlap）✅（guardrail + ac-verifier 通过）
@@ -137,6 +142,12 @@
   - [2026-08-09-m4-phaseA-impact-selfcheck.md](docs/reports/2026-08-09-m4-phaseA-impact-selfcheck.md) —— M4 Phase A 基础层变更影响自检（主 Agent，5 项契约变更 + 6 调用方 + Role.TOOL bug 修复）
   - [2026-08-09-m4-phaseA-guardrail.md](docs/reports/2026-08-09-m4-phaseA-guardrail.md) —— M4 Phase A 基础层安全与质量审计（guardrail-enforcer，通过，G-01 Log.w 修复 + BR-naming-001 提议）
   - [2026-08-09-m4-phaseA-acceptance.md](docs/reports/2026-08-09-m4-phaseA-acceptance.md) —— M4 Phase A 基础层验收测试（ac-verifier，通过，US-020 6/6 + US-023 5/6+1 有条件，556 回归 0 失败）
+  - [2026-08-09-m4-phaseB-impact-selfcheck.md](docs/reports/2026-08-09-m4-phaseB-impact-selfcheck.md) —— M4 Phase B 变更影响自检（主 Agent，含四轮自检：初检 + G 项修复 + R2-1 修复 + 回退补 SkillRegistryTest）
+  - [2026-08-09-m4-phaseB-guardrail.md](docs/reports/2026-08-09-m4-phaseB-guardrail.md) —— M4 Phase B 安全与质量审计 round 1（guardrail-enforcer，通过 7G）
+  - [2026-08-09-m4-phaseB-guardrail-round2.md](docs/reports/2026-08-09-m4-phaseB-guardrail-round2.md) —— M4 Phase B 安全与质量审计 round 2（guardrail-enforcer，通过 R2-1 深度限制补强）
+  - [2026-08-09-m4-phaseB-guardrail-round3.md](docs/reports/2026-08-09-m4-phaseB-guardrail-round3.md) —— M4 Phase B 安全与质量审计 round 3（guardrail-enforcer，回退修复复审通过）
+  - [2026-08-09-m4-phaseB-acceptance.md](docs/reports/2026-08-09-m4-phaseB-acceptance.md) —— M4 Phase B 验收测试 round 1（ac-verifier，受限通过，AC-5 受限根因：SkillRegistryTest 缺失）
+  - [2026-08-09-m4-phaseB-acceptance-round2.md](docs/reports/2026-08-09-m4-phaseB-acceptance-round2.md) —— M4 Phase B 验收测试 round 2（ac-verifier，完全通过，AC-5 升级 + BR-testing-004 转 active + 629 回归 0 失败）
   - [性能基线](docs/reports/perf/) —— 性能基线报告目录
     - [2026-08-02-us002-objectbox-crud-baseline.md](docs/reports/perf/2026-08-02-us002-objectbox-crud-baseline.md) —— US-002 ObjectBox CRUD 性能基线
     - [2026-08-02-us003-apikey-baseline.md](docs/reports/perf/2026-08-02-us003-apikey-baseline.md) —— US-003 API Key 加密存储性能基线

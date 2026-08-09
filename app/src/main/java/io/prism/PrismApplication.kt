@@ -31,6 +31,9 @@ import io.prism.network.OpenAICompatibleProvider
 import io.prism.security.ApiKeyRepository
 import io.prism.security.CryptoService
 import io.prism.security.KeystoreCryptoService
+import io.prism.data.SkillRepository
+import io.prism.skill.SkillRegistry
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -217,6 +220,28 @@ class PrismApplication : Application() {
         IngestionPipeline(documentParserRegistry, chunker, embedder, knowledgeBaseRepository)
     }
 
+    /**
+     * Skill 配置仓库（US-020，ADR-013 5.1）—— 管理 [io.prism.data.SkillConfig] 的 CRUD。
+     *
+     * 仿 [McpServerRepository] 模式，提供 [kotlinx.coroutines.flow.StateFlow] 供 UI 订阅。
+     * Skill 允许多个并存启用（不需要单激活不变式），每个 Skill 独立 [io.prism.data.SkillConfig.isEnabled]。
+     */
+    val skillRepository: SkillRepository by lazy { SkillRepository(boxStore) }
+
+    /**
+     * Skill 注册中心（US-022，ADR-013 5.3）—— 扫描加载源 + 同步仓库 + 暴露已加载 Skill。
+     *
+     * 在 [onCreate] 中触发 [SkillRegistry.scanAndSync]（IO 协程，不阻塞 UI）：
+     * 1. 扫描 `assets/skills/builtin/` 内置预设
+     * 2. 扫描 `filesDir/skills/user/` 用户自建
+     * 3. 扫描 `filesDir/skills/remote/` 远程下载
+     * 4. 同步到 [skillRepository]（新增/更新/标记缺失）
+     * 5. 刷新 [SkillRegistry.skills] StateFlow
+     *
+     * 单个 Skill 解析失败不影响其他 Skill（隔离失败，记录日志）。
+     */
+    val skillRegistry: SkillRegistry by lazy { SkillRegistry(this, skillRepository) }
+
     override fun onCreate() {
         super.onCreate()
         boxStore = MyObjectBox.builder()
@@ -231,6 +256,19 @@ class PrismApplication : Application() {
                         safFileAccess.addRoot(name, Uri.parse(uri))
                     }
                 }
+            }
+        }
+        // M4 Skills（ADR-013 5.3）：启动时扫描加载源并同步 SkillConfig 表
+        // 失败不阻断启动（容错），单个 Skill 解析失败已在 SkillRegistry 内隔离
+        // G-01 修复（BR-error-handling-007）：显式 try-catch，CancellationException 必须重抛，
+        // 避免破坏结构化并发的取消传播（appScope 实际不会被取消，但规则合规性要求）
+        appScope.launch {
+            try {
+                skillRegistry.scanAndSync()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.e("PrismApplication", "Skill scanAndSync failed", e)
             }
         }
     }

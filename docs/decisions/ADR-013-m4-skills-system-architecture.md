@@ -103,28 +103,29 @@ data class SkillToolDecl(
 
 ### 5.2 SKILL.md 解析器：snakeyaml-engine-kmp + SkillManifestParser
 
-**依赖**：
+**依赖**（版本经 Maven Central 验证，2026-08-09）：
 
 ```toml
 # libs.versions.toml
 [versions]
-snakeyaml-engine-kmp = "3.1"
+snakeyamlEngineKmp = "4.0.1"
 
 [libraries]
-snakeyaml-engine-kmp = { group = "it.krzeminski", name = "snakeyaml-engine-kmp", version.ref = "snakeyaml-engine-kmp" }
+snakeyaml-engine-kmp = { group = "it.krzeminski", name = "snakeyaml-engine-kmp", version.ref = "snakeyamlEngineKmp" }
 ```
 
-**解析器设计**：
+**解析器设计**（实际实现，包名 `it.krzeminski.snakeyaml.engine.kmp.api`）：
 
 ```kotlin
 // SkillManifestParser.kt
 object SkillManifestParser {
-    private val yaml = Yaml(defaultToNull = false)
+    private val NAME_REGEX = Regex("^[a-z0-9-]{1,64}$")
+    private const val DESCRIPTION_MAX_LENGTH = 160
 
     /**
      * 解析 SKILL.md 文件：分离 YAML frontmatter 与 Markdown body。
-     * frontmatter 用 snakeyaml-engine-kmp 解析为 YamlMap，再映射到 SkillManifest。
-     * body 保持原始 Markdown 文本。
+     * frontmatter 用 snakeyaml-engine-kmp [Load] 解析为原生 Map<String, Any?>，
+     * 再映射到 SkillManifest。
      *
      * @param content SKILL.md 文件全文
      * @return 解析结果，含 SkillManifest + body
@@ -133,28 +134,42 @@ object SkillManifestParser {
     fun parse(content: String): ParseResult {
         val (frontmatterText, body) = splitFrontmatter(content)
             ?: throw SkillParseException("Missing YAML frontmatter (---...---)")
-        val yamlNode = yaml.parseToJson(frontmatterText) // 解析为 YamlNode
-        val manifest = mapNodeToManifest(yamlNode)
+        // Load 每次创建新实例（非线程安全，单次使用）
+        val data: Any? = Load(LoadSettings()).loadOne(frontmatterText)
+        val map = (data as? Map<String, Any?>)
+            ?: throw SkillParseException("Frontmatter must be a YAML mapping")
+        val manifest = mapToManifest(map).copy(body = body)
         validate(manifest)
         return ParseResult(manifest, body)
     }
 
     private fun validate(manifest: SkillManifest) {
-        require(manifest.name.matches(Regex("^[a-z0-9-]{1,64}$"))) {
+        require(manifest.name.matches(NAME_REGEX)) {
             "name must be 1-64 lowercase letters, digits, or hyphens"
         }
         require(manifest.description.isNotBlank()) { "description must not be blank" }
-        require(manifest.description.length <= 160) { "description must be <= 160 chars" }
+        require(manifest.description.length <= DESCRIPTION_MAX_LENGTH) {
+            "description must be <= $DESCRIPTION_MAX_LENGTH chars"
+        }
     }
 }
 ```
 
+> **ADR 修订说明**（2026-08-09）：原文本示意 `Yaml(defaultToNull = false).parseToJson(...)`，
+> 该 API 假设有误（kaml 风格，snakeyaml-engine-kmp 实际无 `Yaml` 类）。
+> 实际 API 为 `Load(LoadSettings()).loadOne(string): Any?`，返回原生 Kotlin 类型
+> （`Map<String, Any?>`、`List<*>`、`String`、`Int`、`Boolean`）。
+> 版本从原 3.1 更新为 4.0.1（Maven Central 最新）。意图与决策不变。
+
 **理由**：
 
 - snakeyaml-engine-kmp 是 kaml 底层引擎，活跃维护，KMP 原生（避免 kaml 归档风险）
-- 不集成 kotlinx.serialization（snakeyaml-engine-kmp 提供 `YamlNode` 树，手动映射 <50 行，frontmatter 结构简单）
-- 保守解析：仅支持扁平 key-value + list + 单行 metadata（OpenClaw 嵌入式解析器约束）
+- 不集成 kotlinx.serialization（snakeyaml-engine-kmp 的 `Load.loadOne()` 返回原生 Map，手动映射 <200 行）
+- `StandardConstructor` 默认仅构造标准 YAML 类型（Map/List/String/Int/Boolean），**不构造任意 Java 类**（沙箱化，满足 5.6 安全要求）
+- `LoadSettings` 限制内容规模，防 YAML billion laughs 攻击
+- 保守解析：仅支持扁平 key-value + list + 嵌套 parameters（OpenClaw 嵌入式解析器约束）
 - 校验在解析时完成（fail-fast），避免运行时错误
+- `toJsonElement()` 辅助函数将原生 `Any?` 递归转换为 `JsonElement`（供 `SkillToolDecl.parameters` 使用）
 
 ### 5.3 Skill 注册中心与加载器：SkillRegistry + 启动扫描
 
@@ -180,8 +195,7 @@ class SkillRegistry(
 
     data class SkillEntry(
         val config: SkillConfig,
-        val manifest: SkillManifest,
-        val body: String
+        val manifest: SkillManifest
     )
 
     /** 启动时扫描所有加载源，同步 SkillConfig 表 */
@@ -193,15 +207,24 @@ class SkillRegistry(
         discovered += scanDirectory(File(context.filesDir, "skills/user"), SkillSource.LOCAL_USER)
         // 3. 扫描远程下载（filesDir/skills/remote）
         discovered += scanDirectory(File(context.filesDir, "skills/remote"), SkillSource.REMOTE)
-        // 4. 同步到 SkillConfig 表（新增/更新/标记缺失）
-        syncToRepository(discovered)
-        _skills.value = discovered
+        // 4. 按优先级去重（LOCAL_USER > REMOTE > LOCAL_BUILTIN）
+        val deduped = dedupByPriority(discovered)
+        // 5. 同步到 SkillConfig 表（新增/更新/标记缺失）
+        syncToRepository(deduped)
+        // 6. 合并持久化状态（继承 isEnabled）后刷新 StateFlow
+        _skills.value = mergeWithPersistedState(deduped)
     }
 
-    /** 获取所有已启用的 Skill（供 ConversationViewModel 注入） */
-    fun enabledSkills(): List<SkillEntry> = _skills.value.filter { it.config.isEnabled }
+    /** 获取所有已启用且已安装的 Skill（供 ConversationViewModel 注入） */
+    fun enabledSkills(): List<SkillEntry> =
+        _skills.value.filter { it.config.isEnabled && it.config.isInstalled }
 }
 ```
+
+> **ADR 修订说明**（2026-08-09）：原稿 `SkillEntry` 含 `body: String` 字段，实际实现将其合并到
+> `manifest.body`（[SkillManifest] 已含 body 字段，避免重复存储）。同步修订 `scanAndSync` 流程，
+> 显式列出 `dedupByPriority` 与 `mergeWithPersistedState` 步骤，并修正 `enabledSkills` 过滤条件
+> 为 `isEnabled && isInstalled`。意图与决策不变。
 
 **理由**：
 

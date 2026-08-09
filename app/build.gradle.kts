@@ -48,11 +48,17 @@ android {
     }
 
     // 性能基准可复跑（DEF-02）：默认跳过；传 -PignorePerformanceTests=false 时注入系统属性使基准运行。
+    // US-022 AC-5 补强（2026-08-09）：isReturnDefaultValues = true 让 android.util.Log 等 stub
+    // 静态方法在纯 JVM 单元测试中返回默认值（0/null）而非抛 "not mocked" RuntimeException，
+    // 使 SkillRegistry 等含 Log 调用的纯逻辑可在不引入 Robolectric/Mockito 的情况下测试。
     testOptions {
-        unitTests.all { test ->
-            val ignorePerf = project.findProperty("ignorePerformanceTests")?.toString()
-            if (ignorePerf == "false") {
-                test.systemProperty("prism.runPerformanceTests", "true")
+        unitTests {
+            isReturnDefaultValues = true
+            all { test ->
+                val ignorePerf = project.findProperty("ignorePerformanceTests")?.toString()
+                if (ignorePerf == "false") {
+                    test.systemProperty("prism.runPerformanceTests", "true")
+                }
             }
         }
     }
@@ -109,6 +115,8 @@ dependencies {
     implementation(libs.onnxruntime.android)
     implementation(libs.poi.ooxml)
     implementation(libs.pdfbox)
+    // M4 Skills（ADR-013 5.2）：SKILL.md frontmatter YAML 解析（snakeyaml-engine-kmp，Apache 2.0）
+    implementation(libs.snakeyaml.engine.kmp)
     debugImplementation(libs.androidx.ui.tooling)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

@@ -121,6 +121,19 @@
 - 适用场景：dev
 - 状态：active
 
+#### BR-security-004: YAML 解析必须显式配置 LoadSettings 安全参数 + 递归遍历须有深度限制
+
+- 类别：security
+- 规则：使用 snakeyaml-engine-kmp `Load` 解析 YAML 时,必须通过 `LoadSettings(...)` 命名参数**显式**配置安全参数(不依赖默认值,以文档化安全意图并防御未来默认值变更),至少包含:`allowRecursiveKeys = false`(禁止循环引用,防下游递归遍历 StackOverflowError)、`maxAliasesForCollections = 50`(限制别名展开,防 billion laughs 攻击)、`codePointLimit`(限制单文档大小)。注:snakeyaml-engine-kmp 4.0.1 的 `LoadSettings` 是 **immutable data class**(非 builder 模式),`allowRecursiveKeys` 默认值即 `false`(本规则要求**显式**设置以纵深防御)。此外,任何递归遍历解析后 Java 对象图的函数(如 `toJsonElement`)必须实现深度限制(如 `require(depth < MAX_DEPTH)`),作为二级防护防止深层嵌套(非循环)导致栈溢出。
+- 反例 1：`Load(LoadSettings()).loadOne(yaml)` —— 依赖默认值,未文档化安全意图
+- 反例 2：`fun toJsonElement(v: Any?): JsonElement = when(v) { is Map<*,*> -> buildJsonObject { v.forEach { (k,v) -> put(k as String, toJsonElement(v)) } }; ... }` —— 递归无深度限制,深层嵌套 YAML 导致 StackOverflowError
+- 正例 1：`Load(LoadSettings(allowRecursiveKeys = false, maxAliasesForCollections = 50, codePointLimit = 1024*1024)).loadOne(yaml)` —— 显式配置安全参数
+- 正例 2：`fun toJsonElement(v: Any?, depth: Int = 0): JsonElement { require(depth < MAX_DEPTH) { "..." }; return when(v) { is Map<*,*> -> buildJsonObject { v.forEach { (k,v) -> put(k as String, toJsonElement(v, depth+1)) } }; ... } }` —— 递归有深度限制
+- 来源：M4 Phase B 审查(TKN-M4-PHASEB-GUARDRAIL-001,G-02/G-07 中危发现 + R2-1 测试补强)
+- 添加日期：2026-08-09
+- 适用场景：dev
+- 状态：active（ac-verifier TKN-M4-PHASEB-ACCEPTANCE-002 确认转 active，2026-08-09。规则文本已修订纠正 3 处事实错误 + 实现符合正例 + 4 测试验证防护有效）
+
 ### concurrency
 
 #### BR-concurrency-001: 多步骤数据库状态变更必须使用事务保证原子性
@@ -241,6 +254,19 @@
 - 适用场景：dev
 - 状态：active
 
+#### BR-testing-004: 新模块设计应考虑纯 JVM 可测性，构造器避免访问 Android Context stub API
+
+- 类别：testing
+- 规则：新模块（如 Repository / Registry / Manager）设计时，构造器**禁止**访问 Android `Context` 的 stub API（如 `context.filesDir` / `context.assets` / `context.getSharedPreferences`），因为这些 API 在纯 JVM 单元测试中抛 "not mocked" RuntimeException，阻断测试构造。必须满足以下之一：(1) 将 Context 依赖推迟到方法内部（如 `scanAndSync()` 内构造 `File(context.filesDir, ...)`），构造器仅存储 Context 引用；(2) 将纯逻辑提取到 `companion object` 标记 `internal`，不依赖实例状态/Context，可在纯 JVM 测试中直接验证；(3) 通过构造器参数注入路径/目录（`File` 或 `String`）而非 Context。此外，含 `android.util.Log` 调用的纯 JVM 测试必须在 `app/build.gradle.kts` 配置 `testOptions.unitTests.isReturnDefaultValues = true`，让 Log 等 stub 静态方法返回默认值（0/null）而非抛异常。**目标**：核心业务逻辑（去重/同步/合并/过滤）应有纯 JVM 单元测试覆盖，不依赖 Robolectric/Instrumented test。
+- 反例 1：`class SkillRegistry(context: Context, ...) { private val userDir = File(context.filesDir, "skills/user") }` —— 构造器访问 `filesDir`，纯 JVM 测试构造实例即抛 Stub 异常
+- 反例 2：`class Foo(context: Context) { fun scan() { Log.w(TAG, "x"); ... } }` + 测试未配 `isReturnDefaultValues` —— Log.w 抛 "not mocked" RuntimeException
+- 正例 1：`class SkillRegistry(context: Context, ...) { suspend fun scanAndSync() { val userDir = File(context.filesDir, "skills/user"); ... } }` —— filesDir 推迟到方法内
+- 正例 2：`companion object { internal fun dedupByPriority(entries: List<Entry>): List<Entry> = ... }` —— 纯函数提取到 companion，测试直接 `SkillRegistry.dedupByPriority(...)`
+- 来源：M4 Phase B 第三轮审查（TKN-M4-PHASEB-GUARDRAIL-003，主 Agent Q2 自我反思 + ac-verifier TKN-M4-PHASEB-ACCEPTANCE-002 受限通过根因：SkillRegistryTest 缺失）
+- 添加日期：2026-08-09
+- 适用场景：dev
+- 状态：active（ac-verifier TKN-M4-PHASEB-ACCEPTANCE-003 §7 确认转 active，2026-08-09。规则可执行 + 非重复 + SkillRegistry 重构后实现符合全部 4 条要求 + 39 测试验证规则精神）
+
 #### BR-ui-001: Compose 状态持有可变列表时禁止原地改值
 
 - 类别：testing
@@ -348,3 +374,4 @@
 | 2026-08-09 | functional-validation-auditor | M3 里程碑审计同步 BR-006 状态 | M3 里程碑交付审计（TKN-M3-MILESTONE-AUDIT-001）：BR-error-handling-006 在 US-016 acceptance 已确认转 active，但 behavioral-rules.md 状态字段仍为 proposed（审计 §C.1 偏差 M3-004）。本次同步状态字段 proposed → active，与 US-016 acceptance 报告一致 |
 | 2026-08-09 | guardrail-enforcer | 提议 BR-naming-001 | M4 Phase A 基础层审查（TKN-M4-PHASEA-GUARDRAIL-001）：556 测试通过、Typecheck 通过，无阻断级安全漏洞（无注入/密钥/RCE）。Role.TOOL 静默映射 bug 已由主 Agent 自查修复（if-else → when 穷尽 + Fail Fast）。G-01 中危（tools 静默忽略，强建议加 Log.w）、G-02~G-05 低危建议项。结论通过，可进入 ac-verifier。BR-naming-001 proposed→待 ac-verifier 确认转 active |
 | 2026-08-09 | ac-verifier | 验收通过，BR-naming-001 转 active | M4 Phase A 基础层验收（TKN-M4-PHASEA-ACCEPTANCE-001）：US-020 6/6 AC 通过，US-023 5/6 通过 + AC-4 有条件通过（Fail Fast 裁定为 ADR-014 5.6 分阶段决策，Phase C US-024 补完整 TOOL→"tool" 映射）。SkillRepositoryTest 12 测试 + 全量 556 回归 0 失败。G-01 Log.w 修复有效。BR-naming-001 proposed → active（规则验证通过，未触发反例模式） |
+| 2026-08-09 | ac-verifier | 验收受限通过，BR-security-004 转 active | M4 Phase B 验收（TKN-M4-PHASEB-ACCEPTANCE-002）：US-021 5/5 AC 通过，US-022 5/6 通过 + AC-5 受限通过（SkillRegistryTest.kt 不存在，受限根因为 Android Context 构造期依赖 + 无 Robolectric/Mockito 测试基础设施，附 3 项 Phase C 强制条件）。SkillManifestParserTest 33 测试 + 全量 589 回归 0 失败（独立核实）。性能基线：parse 典型 1KB p50<1ms。安全：YAML 注入 4 项 + 敏感信息泄露 6 项全部通过。BR-security-004 proposed → active（规则文本已修订纠正 3 处事实错误 + 实现符合正例 + 4 测试验证防护有效） |
