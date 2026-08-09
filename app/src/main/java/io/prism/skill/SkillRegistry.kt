@@ -20,7 +20,7 @@ import java.io.File
  * 2. 解析每个 Skill 的 SKILL.md，构建 [SkillEntry]（[SkillConfig] + [SkillManifest]）
  * 3. 同步到 [SkillRepository]（新增入库 / 更新版本 / 标记缺失）
  * 4. 暴露 [skills] StateFlow 供 UI 订阅
- * 5. 提供 [enabledSkills] 供 ConversationViewModel 注入
+ * 5. 提供 [enabledSkills] 供 ConversationViewModel 注入（实现 [SkillToolSource] 接口）
  *
  * **加载源优先级**（对齐 OpenClaw 6 层，ADR-013 5.3）：
  * 1. 用户自建 `filesDir/skills/user/`（最高）
@@ -46,11 +46,15 @@ import java.io.File
  * - [Companion.filterEnabledSkills]：已启用过滤
  * 仅 [scanBuiltin]（依赖 AssetManager）受限于纯 JVM 测试环境，按项目惯例受限通过。
  *
+ * **M4 Phase D 可测性补强**：`class` 标记 `open` + [enabledSkills] 标记 `open`，
+ * 实现 [SkillToolSource] 函数式接口；ConversationViewModel 依赖 [SkillToolSource] 接口
+ * 而非具体类，使集成测试可注入简单 lambda stub（无需 Context / BoxStore / SkillRepository）。
+ *
  * @param context Android Context（用于 AssetManager 与 filesDir）
  * @param skillRepository Skill 配置仓库
  * @param ioDispatcher IO 协程调度器（可注入便于测试）
  */
-class SkillRegistry(
+open class SkillRegistry(
     private val context: Context,
     private val skillRepository: SkillRepository,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
@@ -133,9 +137,13 @@ class SkillRegistry(
     /**
      * 获取所有已启用的 Skill（供 ConversationViewModel 注入，ADR-013 5.4）。
      *
+     * **M4 Phase D 可测性补强**：本方法标记 `open`，并抽取 [SkillToolSource] 函数式接口，
+     * ConversationViewModel 依赖接口（[SkillToolSource]）而非具体类，
+     * 使集成测试可注入简单 stub（无需 Android Context / BoxStore / SkillRepository 协作）。
+     *
      * @return 已启用且已安装的 [SkillEntry] 列表
      */
-    fun enabledSkills(): List<SkillEntry> = Companion.filterEnabledSkills(_skills.value)
+    open fun enabledSkills(): List<SkillEntry> = Companion.filterEnabledSkills(_skills.value)
 
     /**
      * 扫描内置预设 Skill（`assets/skills/builtin/`）。

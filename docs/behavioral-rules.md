@@ -75,6 +75,19 @@
 - 适用场景：dev
 - 状态：active（ac-verifier TKN-US019-RAG-ACCEPTANCE-001 确认 G-01 修复有效，2026-08-07 转 active）
 
+#### BR-error-handling-008: 上游 Error 事件 message 透传给用户可见 UI 时必须经过脱敏
+
+- 类别：error-handling / security
+- 规则：当上游组件（Provider、Executor、Pipeline 等）通过 `StreamEvent.Error(message)` 或类似机制向上层传递错误信息，且该 message 最终会展示给用户（如追加到聊天消息 content、显示在 Toast/Dialog）时，**必须**经过脱敏处理（CWE-209 信息泄露纵深防御）。脱敏须包含：(1) 长度截断（如 ≤200 字符，防止超长错误污染对话历史）；(2) 路径脱敏（将 `/xxx/yyy` 或 `\xxx\yyy` 替换为 `<path>`，避免内部文件系统路径泄露）。推荐**双层防御**：第一层在错误产生点（如 SkillExecutor catch 块）应用 `sanitizeErrorMessage`，第二层在 UI 边界（如 ViewModel handleStreamEvent）应用 `sanitizeUiErrorMessage`，覆盖未来新增 Provider 可能透传原始异常 message 的风险。**例外**：上游已使用固定文案（非 `e.message` 拼接）的 Error 事件可免第二层脱敏，但第一层仍建议保留。空白字符串 message 应回退为通用安全文案（如"未知错误"）。
+- 反例 1：`catch (e: Exception) { onEvent(StreamEvent.Error("failed: ${e.message}")) }` —— `e.message` 可能含 HTTP 响应体/内部 URL/文件路径，直接透传给用户
+- 反例 2：`is StreamEvent.Error -> appendDelta(aiId, "\n\n⚠️ ${event.message}")` —— UI 边界未做脱敏，依赖上游"应该已经脱敏"的假设
+- 正例 1：`catch (e: Exception) { val safeMsg = sanitizeErrorMessage(e.message) ?: e.javaClass.simpleName; onEvent(StreamEvent.Error("failed: $safeMsg")) }` —— 错误产生点脱敏
+- 正例 2：`is StreamEvent.Error -> { val safeMsg = sanitizeUiErrorMessage(event.message); appendDelta(aiId, "\n\n⚠️ $safeMsg") }` —— UI 边界第二层防御
+- 来源：M4 Phase D 审查（TKN-M4-PHASED-GUARDRAIL-001，M-1 中危发现 CWE-209；TKN-M4-PHASED-GUARDRAIL-002 确认修复有效；TKN-M4-PHASED-ACCEPTANCE-001 确认集成测试中双层脱敏有效）
+- 添加日期：2026-08-09
+- 适用场景：dev
+- 状态：active（ac-verifier TKN-M4-PHASED-ACCEPTANCE-001 确认 M-1 双层脱敏在集成测试中有效，2026-08-09 转 active）
+
 ### security
 
 #### BR-security-001: data class 含数组字段必须覆盖 equals/hashCode

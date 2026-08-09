@@ -23,6 +23,7 @@ import io.prism.security.FakePreferenceDataStore
 import io.prism.security.RecordingCryptoService
 import io.prism.ui.model.ChatMessage
 import io.prism.ui.model.Role
+import io.prism.ui.model.ToolCallRef
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.awaitCancellation
@@ -42,6 +43,8 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * OpenAICompatibleProvider 单元 + 集成测试（ADR-004 4.7）。
@@ -149,46 +152,57 @@ class OpenAICompatibleProviderTest {
         assertEquals("Bearer custom", provider.customAuthHeader(mapOf("authorization" to "Bearer custom")))
     }
 
-    // ==================== SSE 解析纯函数 ====================
+    // ==================== SSE 解析纯函数（parseChunk + chunkToEvents） ====================
 
-    @Test
-    fun `parseChunkData maps delta content`() {
-        val ev = provider.parseChunkData("""{"choices":[{"delta":{"content":"你"}}]}""")
-        assertEquals(StreamEvent.Delta("你"), ev)
+    /** 辅助：将 SSE data 解析为事件列表（parseChunk + chunkToEvents 两步）。 */
+    private fun parseToEvents(data: String): List<StreamEvent> {
+        val chunk = provider.parseChunk(data) ?: return emptyList()
+        return provider.chunkToEvents(chunk, mutableMapOf(), testJson)
     }
 
     @Test
-    fun `parseChunkData maps DONE marker`() {
-        assertEquals(StreamEvent.Done, provider.parseChunkData("[DONE]"))
+    fun `parseChunk maps delta content via chunkToEvents`() {
+        val events = parseToEvents("""{"choices":[{"delta":{"content":"你"}}]}""")
+        assertEquals(listOf(StreamEvent.Delta("你")), events)
     }
 
     @Test
-    fun `parseChunkData maps empty choices to done`() {
-        assertEquals(StreamEvent.Done, provider.parseChunkData("""{"choices":[]}"""))
+    fun `parseChunk returns null for DONE marker`() {
+        // [DONE] 由 streamChat collect 闭包在调用 parseChunk 前拦截，parseChunk 内部也防御性返回 null
+        assertNull(provider.parseChunk("[DONE]"))
     }
 
     @Test
-    fun `parseChunkData ignores mid-stream usage snapshot not terminate`() {
-        assertNull(
-            provider.parseChunkData(
-                """{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"""
-            )
+    fun `parseChunk maps empty choices to Done via chunkToEvents`() {
+        val events = parseToEvents("""{"choices":[]}""")
+        assertEquals(listOf(StreamEvent.Done), events)
+    }
+
+    @Test
+    fun `parseChunk ignores mid-stream usage snapshot not terminate`() {
+        // 带 usage 的空 choices 是中段快照，chunkToEvents 不发射 Done（usage != null）
+        val events = parseToEvents(
+            """{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":5,"total_tokens":8}}"""
         )
+        assertTrue("中段 usage 快照不应发射任何事件", events.isEmpty())
     }
 
     @Test
-    fun `parseChunkData ignores non content and malformed chunks`() {
-        assertNull(provider.parseChunkData("""{"choices":[{"delta":{}}]}"""))
-        assertNull(provider.parseChunkData("not-json"))
-        assertNull(provider.parseChunkData("""{"choices":[{"delta":{"content":"   "}}]}"""))
+    fun `parseChunk ignores non content and malformed chunks`() {
+        // 空 delta（无 content/toolCalls）→ chunkToEvents 返回空列表
+        assertTrue(parseToEvents("""{"choices":[{"delta":{}}]}""").isEmpty())
+        // 非 JSON → parseChunk 返回 null → 空列表
+        assertTrue(parseToEvents("not-json").isEmpty())
+        // 空白 content 被 chunkToEvents 忽略（isNullOrBlank 检查）
+        assertTrue(parseToEvents("""{"choices":[{"delta":{"content":"   "}}]}""").isEmpty())
     }
 
     @Test
-    fun `parseChunkData ignores unknown fields like reasoning_content`() {
-        val ev = provider.parseChunkData(
+    fun `parseChunk ignores unknown fields like reasoning_content`() {
+        val events = parseToEvents(
             """{"choices":[{"delta":{"content":"思考","reasoning_content":"hidden"}}]}"""
         )
-        assertEquals(StreamEvent.Delta("思考"), ev)
+        assertEquals(listOf(StreamEvent.Delta("思考")), events)
     }
 
     // ==================== 端到端：真实 Ktor SSE 服务器 ====================
@@ -488,14 +502,14 @@ class OpenAICompatibleProviderTest {
     }
 
     @Test
-    fun `parseChunkData handles oversized content`() {
+    fun `parseChunk handles oversized content`() {
         val big = "t".repeat(100_000)
-        val ev = provider.parseChunkData("""{"choices":[{"delta":{"content":"$big"}}]}""")
-        assertEquals(StreamEvent.Delta(big), ev)
+        val events = parseToEvents("""{"choices":[{"delta":{"content":"$big"}}]}""")
+        assertEquals(listOf(StreamEvent.Delta(big)), events)
     }
 
     @Test
-    fun `parseChunkData keeps injection and control payloads as plain delta`() {
+    fun `parseChunk keeps injection and control payloads as plain delta`() {
         val payloads = listOf(
             "<script>alert(1)</script>",
             "'; DROP TABLE users; --",
@@ -505,13 +519,13 @@ class OpenAICompatibleProviderTest {
         )
         for (p in payloads) {
             val quoted = testJson.encodeToString(JsonElement.serializer(), JsonPrimitive(p))
-            val ev = provider.parseChunkData("""{"choices":[{"delta":{"content":$quoted}}]}""")
-            assertTrue("应安全解析为 Delta 而非崩溃: ${p.take(20)}", ev is StreamEvent.Delta)
+            val events = parseToEvents("""{"choices":[{"delta":{"content":$quoted}}]}""")
+            assertTrue("应安全解析为 Delta 而非崩溃: ${p.take(20)}", events.size == 1 && events[0] is StreamEvent.Delta)
         }
     }
 
     @Test
-    fun `parseChunkData ignores malformed and type-unsafe chunks`() {
+    fun `parseChunk ignores malformed and type-unsafe chunks`() {
         val malformed = listOf(
             """{"choices":[{"delta":{"content":"unterminated""",
             """{"choices":["string-not-object"]}""",
@@ -520,22 +534,22 @@ class OpenAICompatibleProviderTest {
             ""
         )
         for (m in malformed) {
-            assertNull("应忽略坏 chunk 不崩溃: ${m.take(30)}", provider.parseChunkData(m))
+            assertNull("应忽略坏 chunk 不崩溃: ${m.take(30)}", provider.parseChunk(m))
         }
     }
 
     @Test
-    fun `parseChunkData picks first choice content when multiple`() {
-        val ev = provider.parseChunkData(
+    fun `parseChunk picks first choice content when multiple`() {
+        val events = parseToEvents(
             """{"choices":[{"delta":{"content":"first"}},{"delta":{"content":"second"}}]}"""
         )
-        assertEquals(StreamEvent.Delta("first"), ev)
+        assertEquals(listOf(StreamEvent.Delta("first")), events)
     }
 
     @Test
-    fun `parseChunkData handles whitespace-only content after delta`() {
+    fun `parseChunk handles whitespace-only content after delta`() {
         // 空白 content 应忽略（不产生空 Delta），但流不终止
-        assertNull(provider.parseChunkData("""{"choices":[{"delta":{"content":" "}}]}"""))
+        assertTrue(parseToEvents("""{"choices":[{"delta":{"content":" "}}]}""").isEmpty())
     }
 
     @Test
@@ -616,6 +630,462 @@ class OpenAICompatibleProviderTest {
         } finally {
             server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
         }
+    }
+
+    @Test
+    fun `streamChat parses tool_calls delta sequence end-to-end against real server`() = runBlocking {
+        // E2E（ac-verifier 补充）：真实 Ktor SSE 服务器发送 tool_calls delta 序列，
+        // 验证客户端从 SSE → parseChunk → chunkToEvents 状态机 → StreamEvent 完整路径
+        val server = embeddedServer(Netty, port = 0) {
+            install(io.ktor.server.sse.SSE)
+            routing {
+                route("/chat/completions", HttpMethod.Post) {
+                    sse {
+                        // delta1: id + name + arguments 片段1
+                        sendChunk("""{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_e2e","function":{"name":"read_file","arguments":"{\"path\""}}]}}]}""")
+                        // delta2: arguments 片段2
+                        sendChunk("""{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"/tmp\"}"}}]}}]}""")
+                        // finish_reason=tool_calls 触发完成
+                        sendChunk("""{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}""")
+                        sendChunk("[DONE]")
+                    }
+                }
+            }
+        }
+        server.start(wait = false)
+        try {
+            val port = server.engine.resolvedConnectors().first().port
+            val config = ProviderConfig(
+                name = "OpenAI", baseUrl = "http://127.0.0.1:$port",
+                apiKeyRef = "openai", models = listOf("gpt-4o")
+            )
+            val events = provider.streamChat(config, sampleMessages()).toList()
+
+            // 应收到 ToolCallStart + ToolCallDelta(>=2) + ToolCallComplete + Done
+            val starts = events.filterIsInstance<StreamEvent.ToolCallStart>()
+            assertEquals("应收到 1 个 ToolCallStart", 1, starts.size)
+            assertEquals("call_e2e", starts.single().toolCallId)
+            assertEquals("read_file", starts.single().toolName)
+            assertEquals(0, starts.single().index)
+
+            assertTrue("应收到至少 2 个 ToolCallDelta", events.filterIsInstance<StreamEvent.ToolCallDelta>().size >= 2)
+
+            val completes = events.filterIsInstance<StreamEvent.ToolCallComplete>()
+            assertEquals("应收到 1 个 ToolCallComplete", 1, completes.size)
+            assertEquals("call_e2e", completes.single().toolCallId)
+            assertEquals("read_file", completes.single().toolName)
+            assertEquals("/tmp", completes.single().arguments["path"])
+
+            assertTrue("应收到 Done", events.any { it is StreamEvent.Done })
+            assertTrue("不应有 Error", events.none { it is StreamEvent.Error })
+        } finally {
+            server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
+        }
+    }
+
+    // ==================== M1 补齐：tool_calling 核心逻辑单元测试（guardrail M1） ====================
+    // 覆盖 processToolCallDeltas / completeToolCalls / chunkToEvents 状态机 / toolChoiceToJson /
+    // buildRequestBody tools 序列化 / role=tool 回灌 / assistant tool_calls 回放（ADR-014 5.3）
+
+    @Test
+    fun `chunkToEvents accumulates tool_call arguments across chunks and completes on finish_reason`() {
+        // 验证跨 chunk 拼接 + finish_reason=tool_calls 触发 ToolCallComplete（M1 核心场景）
+        val state = mutableMapOf<Int, ToolCallAccumulator>()
+        // chunk1: id + name + arguments 片段1
+        val chunk1 = provider.parseChunk(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"read_file","arguments":"{\"path\""}}]}}]}"""
+        )!!
+        val events1 = provider.chunkToEvents(chunk1, state, testJson)
+        // chunk1 应发射 ToolCallStart（首次见到 name）+ ToolCallDelta（arguments 片段）
+        assertTrue("chunk1 应发射 ToolCallStart", events1.any { it is StreamEvent.ToolCallStart })
+        assertTrue("chunk1 应发射 ToolCallDelta", events1.any { it is StreamEvent.ToolCallDelta })
+        val start1 = events1.filterIsInstance<StreamEvent.ToolCallStart>().single()
+        assertEquals("call_1", start1.toolCallId)
+        assertEquals("read_file", start1.toolName)
+        assertEquals(0, start1.index)
+
+        // chunk2: 仅 arguments 片段2（无 id/name）
+        val chunk2 = provider.parseChunk(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":\"/tmp\"}"}}]}}]}"""
+        )!!
+        val events2 = provider.chunkToEvents(chunk2, state, testJson)
+        // chunk2 不应再发射 ToolCallStart（已发射过）
+        assertTrue("chunk2 不应重复发射 ToolCallStart", events2.none { it is StreamEvent.ToolCallStart })
+        // chunk2 应发射 ToolCallDelta
+        assertTrue("chunk2 应发射 ToolCallDelta", events2.any { it is StreamEvent.ToolCallDelta })
+        // chunk2 无 finish_reason，不发射 ToolCallComplete
+        assertTrue("chunk2 不应发射 ToolCallComplete", events2.none { it is StreamEvent.ToolCallComplete })
+
+        // chunk3: 携带 finish_reason=tool_calls 触发完成
+        val chunk3 = provider.parseChunk(
+            """{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"""
+        )!!
+        val events3 = provider.chunkToEvents(chunk3, state, testJson)
+        val complete = events3.filterIsInstance<StreamEvent.ToolCallComplete>().single()
+        assertEquals("call_1", complete.toolCallId)
+        assertEquals("read_file", complete.toolName)
+        assertEquals("/tmp", complete.arguments["path"])
+        // 完成后 state 应清空
+        assertTrue("完成后 state 应清空", state.isEmpty())
+    }
+
+    @Test
+    fun `processToolCallDeltas emits ToolCallStart only once per index`() {
+        // 验证 ToolCallStart 仅在首次见到 name 时发射一次（startEmitted 标志）
+        val state = mutableMapOf<Int, ToolCallAccumulator>()
+        val chunk1 = provider.parseChunk(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"tool_a","arguments":"{"}}]}}]}"""
+        )!!
+        provider.chunkToEvents(chunk1, state, testJson)
+        // 第二个 chunk 携带 name（重复）+ arguments 片段
+        val chunk2 = provider.parseChunk(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"tool_a","arguments":"}"}}]}}]}"""
+        )!!
+        val events2 = provider.chunkToEvents(chunk2, state, testJson)
+        // 不应重复发射 ToolCallStart
+        assertTrue("不应重复发射 ToolCallStart", events2.none { it is StreamEvent.ToolCallStart })
+        // 应发射 ToolCallDelta
+        assertEquals(1, events2.filterIsInstance<StreamEvent.ToolCallDelta>().size)
+    }
+
+    @Test
+    fun `processToolCallDeltas isolates parallel tool_calls by index`() {
+        // 验证并行 tool_call 的 index 隔离（同一 chunk 内两个 index）
+        val state = mutableMapOf<Int, ToolCallAccumulator>()
+        val deltas = listOf(
+            ToolCallDeltaWire(index = 0, id = "call_1", function = FunctionDeltaWire(name = "tool_a")),
+            ToolCallDeltaWire(index = 1, id = "call_2", function = FunctionDeltaWire(name = "tool_b"))
+        )
+        val events = provider.processToolCallDeltas(state, deltas)
+        val starts = events.filterIsInstance<StreamEvent.ToolCallStart>()
+        assertEquals("应发射两个 ToolCallStart", 2, starts.size)
+        assertTrue("应含 index=0 tool_a", starts.any { it.index == 0 && it.toolName == "tool_a" })
+        assertTrue("应含 index=1 tool_b", starts.any { it.index == 1 && it.toolName == "tool_b" })
+        assertEquals("state 应有两个累加器", 2, state.size)
+        assertEquals("call_1", state[0]?.id)
+        assertEquals("call_2", state[1]?.id)
+    }
+
+    @Test
+    fun `processToolCallDeltas handles out-of-order index across chunks`() {
+        // 验证乱序 index：先收到 index=1，再收到 index=0
+        val state = mutableMapOf<Int, ToolCallAccumulator>()
+        val chunk1 = provider.parseChunk(
+            """{"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_2","function":{"name":"tool_b"}}]}}]}"""
+        )!!
+        provider.chunkToEvents(chunk1, state, testJson)
+        val chunk2 = provider.parseChunk(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"tool_a"}}]}}]}"""
+        )!!
+        provider.chunkToEvents(chunk2, state, testJson)
+        assertEquals(2, state.size)
+        assertEquals("call_1", state[0]?.id)
+        assertEquals("call_2", state[1]?.id)
+    }
+
+    @Test
+    fun `completeToolCalls emits ToolCallComplete with empty args when arguments blank`() {
+        // 验证空 arguments 时返回 emptyMap（不崩溃）
+        val state = mutableMapOf(
+            0 to ToolCallAccumulator(id = "call_1", name = "tool", arguments = StringBuilder())
+        )
+        val events = provider.completeToolCalls(state, testJson)
+        val complete = events.filterIsInstance<StreamEvent.ToolCallComplete>().single()
+        assertEquals("call_1", complete.toolCallId)
+        assertEquals("tool", complete.toolName)
+        assertTrue("空 arguments 应为 emptyMap", complete.arguments.isEmpty())
+    }
+
+    @Test
+    fun `completeToolCalls degrades malformed JSON arguments to Error`() {
+        // 验证不完整 JSON 降级为 Error（R1 缓解）
+        val state = mutableMapOf(
+            0 to ToolCallAccumulator(
+                id = "call_1", name = "tool", arguments = StringBuilder("{broken")
+            )
+        )
+        val events = provider.completeToolCalls(state, testJson)
+        assertTrue(
+            "应发射解析失败 Error",
+            events.any { it is StreamEvent.Error && it.message.contains("工具参数解析失败") }
+        )
+        assertTrue("不应发射 ToolCallComplete", events.none { it is StreamEvent.ToolCallComplete })
+    }
+
+    @Test
+    fun `completeToolCalls degrades missing id to Error (M2)`() {
+        // M2 防御：id 缺失时降级为 Error，避免回灌空 tool_call_id 导致下游 400
+        val state = mutableMapOf(
+            0 to ToolCallAccumulator(
+                id = "", name = "read_file", arguments = StringBuilder("{\"path\":\"/tmp\"}")
+            )
+        )
+        val events = provider.completeToolCalls(state, testJson)
+        assertTrue(
+            "应发射 id 缺失 Error",
+            events.any { it is StreamEvent.Error && it.message.contains("工具调用 id 缺失") }
+        )
+        assertTrue("不应发射 ToolCallComplete", events.none { it is StreamEvent.ToolCallComplete })
+    }
+
+    @Test
+    fun `completeToolCalls uses unknown placeholder when id and name both missing`() {
+        // M2 边界：id 和 name 都缺失时，Error 文案使用 <unknown> 占位
+        val state = mutableMapOf(
+            0 to ToolCallAccumulator(id = "", name = "", arguments = StringBuilder("{}"))
+        )
+        val events = provider.completeToolCalls(state, testJson)
+        val error = events.filterIsInstance<StreamEvent.Error>().single()
+        assertTrue("应含 <unknown> 占位", error.message.contains("<unknown>"))
+    }
+
+    @Test
+    fun `completeToolCalls handles mixed valid and invalid tool_calls in same batch`() {
+        // 验证同一批中部分有效、部分无效（id 缺失）时，有效部分仍正常发射
+        val state = mutableMapOf(
+            0 to ToolCallAccumulator(id = "call_1", name = "tool_a", arguments = StringBuilder("{\"k\":\"v\"}")),
+            1 to ToolCallAccumulator(id = "", name = "tool_b", arguments = StringBuilder("{}"))
+        )
+        val events = provider.completeToolCalls(state, testJson)
+        // 应有 1 个 ToolCallComplete（index=0）+ 1 个 Error（index=1 id 缺失）
+        val completes = events.filterIsInstance<StreamEvent.ToolCallComplete>()
+        val errors = events.filterIsInstance<StreamEvent.Error>()
+        assertEquals(1, completes.size)
+        assertEquals(1, errors.size)
+        assertEquals("call_1", completes.single().toolCallId)
+        assertTrue(errors.single().message.contains("工具调用 id 缺失"))
+    }
+
+    @Test
+    fun `toolChoiceToJson serializes Auto branch`() {
+        // toolChoiceToJson 4 分支序列化（ADR-014 5.3.1）
+        assertEquals("\"auto\"", provider.toolChoiceToJson(ToolChoice.Auto).toString())
+    }
+
+    @Test
+    fun `toolChoiceToJson serializes Required branch`() {
+        assertEquals("\"required\"", provider.toolChoiceToJson(ToolChoice.Required).toString())
+    }
+
+    @Test
+    fun `toolChoiceToJson serializes None branch`() {
+        assertEquals("\"none\"", provider.toolChoiceToJson(ToolChoice.None).toString())
+    }
+
+    @Test
+    fun `toolChoiceToJson serializes Specific branch to nested object`() {
+        val json = provider.toolChoiceToJson(ToolChoice.Specific("my_tool"))
+        assertEquals(
+            """{"type":"function","function":{"name":"my_tool"}}""",
+            json.toString()
+        )
+    }
+
+    @Test
+    fun `buildRequestBody serializes tools and tool_choice when provided`() {
+        // 验证 tools 非空时序列化 tools + tool_choice + parallel_tool_calls=false
+        val config = ProviderConfig(name = "X", baseUrl = "http://h", apiKeyRef = "", models = listOf("gpt"))
+        val messages = listOf(ChatMessage(id = 0, role = Role.USER, content = "hi", timestamp = 0))
+        val tools = listOf(
+            ToolDefinition(
+                type = "function",
+                function = ToolDefinition.FunctionDef(
+                    name = "read_file",
+                    description = "Read a file",
+                    parameters = buildJsonObject { put("type", "object") }
+                )
+            )
+        )
+        val body = provider.buildRequestBody(config, messages, tools = tools, toolChoice = ToolChoice.Auto)
+        assertTrue("应包含 tools 字段", body.contains("\"tools\""))
+        assertTrue("应包含工具名 read_file", body.contains("read_file"))
+        assertTrue("应包含 tool_choice auto", body.contains("\"tool_choice\":\"auto\""))
+        assertTrue("parallel_tool_calls 应为 false", body.contains("\"parallel_tool_calls\":false"))
+    }
+
+    @Test
+    fun `buildRequestBody omits tools fields when tools null for backward compat`() {
+        // 验证 tools=null 时不序列化 tools/tool_choice/parallel_tool_calls（向后兼容）
+        val config = ProviderConfig(name = "X", baseUrl = "http://h", apiKeyRef = "", models = listOf("gpt"))
+        val messages = listOf(ChatMessage(id = 0, role = Role.USER, content = "hi", timestamp = 0))
+        val body = provider.buildRequestBody(config, messages, tools = null, toolChoice = null)
+        assertFalse("不应包含 tools 字段", body.contains("\"tools\""))
+        assertFalse("不应包含 tool_choice 字段", body.contains("\"tool_choice\""))
+        assertFalse("不应包含 parallel_tool_calls 字段", body.contains("\"parallel_tool_calls\""))
+    }
+
+    @Test
+    fun `buildRequestBody serializes role tool message with tool_call_id for backpropagation`() {
+        // 验证 role=TOOL 消息回灌（携带 tool_call_id）+ assistant tool_calls 回放
+        val config = ProviderConfig(name = "X", baseUrl = "http://h", apiKeyRef = "", models = listOf("gpt"))
+        val messages = listOf(
+            ChatMessage(id = 0, role = Role.USER, content = "read file", timestamp = 0),
+            ChatMessage(
+                id = 1, role = Role.ASSISTANT, content = "", timestamp = 0,
+                toolCalls = listOf(
+                    ToolCallRef(
+                        id = "call_1", type = "function",
+                        functionName = "read_file", arguments = "{\"path\":\"/tmp\"}"
+                    )
+                )
+            ),
+            ChatMessage(
+                id = 2, role = Role.TOOL, content = "file content", timestamp = 0,
+                toolCallId = "call_1", toolName = "read_file"
+            )
+        )
+        val body = provider.buildRequestBody(config, messages)
+        assertTrue("应包含 role tool", body.contains("\"role\":\"tool\""))
+        assertTrue("应包含 tool_call_id", body.contains("\"tool_call_id\":\"call_1\""))
+        assertTrue("应包含 assistant tool_calls 回放", body.contains("\"tool_calls\""))
+        assertTrue("应包含 function name read_file", body.contains("read_file"))
+        assertTrue("应包含 tool result content", body.contains("file content"))
+    }
+
+    @Test
+    fun `buildRequestBody serializes assistant null content when only tool_calls present`() {
+        // 验证 assistant 空 content + 非空 toolCalls 时 content=null（OpenAI 允许）
+        val config = ProviderConfig(name = "X", baseUrl = "http://h", apiKeyRef = "", models = listOf("gpt"))
+        val messages = listOf(
+            ChatMessage(id = 0, role = Role.USER, content = "q", timestamp = 0),
+            ChatMessage(
+                id = 1, role = Role.ASSISTANT, content = "", timestamp = 0,
+                toolCalls = listOf(
+                    ToolCallRef(id = "call_1", functionName = "t", arguments = "{}")
+                )
+            )
+        )
+        val body = provider.buildRequestBody(config, messages)
+        // assistant 消息的 content 应为 null（空字符串时 toMessageBody 转为 null）
+        assertTrue("应含 assistant 角色", body.contains("\"role\":\"assistant\""))
+        // 不应含空字符串 content（应为 null）
+        assertTrue("应含 tool_calls 字段", body.contains("\"tool_calls\""))
+    }
+
+    @Test
+    fun `chunkToEvents ignores tool_calls delta with null function`() {
+        // 边界：tool_calls delta 携带 index 但 function=null（不应崩溃）
+        val state = mutableMapOf<Int, ToolCallAccumulator>()
+        val chunk = provider.parseChunk(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1"}]}}]}"""
+        )!!
+        val events = provider.chunkToEvents(chunk, state, testJson)
+        // function=null 时不发射 ToolCallStart（无 name），不发射 ToolCallDelta（无 arguments）
+        assertTrue("无 function 不应发射 ToolCallStart", events.none { it is StreamEvent.ToolCallStart })
+        assertTrue("无 function 不应发射 ToolCallDelta", events.none { it is StreamEvent.ToolCallDelta })
+        // 但 state 应记录 index（id 已存）
+        assertEquals("call_1", state[0]?.id)
+    }
+
+    // ==================== ac-verifier 补充：极端/边缘场景（主 Agent 盲区） ====================
+
+    @Test
+    fun `chunkToEvents handles oversized arguments across multiple chunks`() {
+        // 超长 arguments：100KB JSON 跨 3 chunk 拼接，验证 StringBuilder 高效拼接 + JSON.parse 正确
+        val state = mutableMapOf<Int, ToolCallAccumulator>()
+        val bigValue = "a".repeat(100_000) // 100KB 纯字母（无特殊字符，无需 JSON 转义）
+        // chunk1: id + name + arguments 片段1 ({"data":")
+        val chunk1 = provider.parseChunk(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_big","function":{"name":"big_tool","arguments":"{\"data\":\""}}]}}]}"""
+        )!!
+        provider.chunkToEvents(chunk1, state, testJson)
+        // chunk2: arguments 片段2 (100000 个 a)
+        val chunk2 = provider.parseChunk(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"$bigValue"}}]}}]}"""
+        )!!
+        provider.chunkToEvents(chunk2, state, testJson)
+        // chunk3: arguments 片段3 ("})
+        val chunk3 = provider.parseChunk(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"}"}}]}}]}"""
+        )!!
+        provider.chunkToEvents(chunk3, state, testJson)
+        // finish_reason=tool_calls 触发完成
+        val finishChunk = provider.parseChunk(
+            """{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"""
+        )!!
+        val events = provider.chunkToEvents(finishChunk, state, testJson)
+        val complete = events.filterIsInstance<StreamEvent.ToolCallComplete>().single()
+        assertEquals("call_big", complete.toolCallId)
+        assertEquals("big_tool", complete.toolName)
+        assertEquals("100KB arguments 应正确解析", bigValue, complete.arguments["data"])
+        assertTrue("state 应清空", state.isEmpty())
+    }
+
+    @Test
+    fun `chunkToEvents preserves state when finish_reason missing`() {
+        // 极端场景：有 tool_calls delta 但无 finish_reason=tool_calls → 不发射 Complete，state 保留
+        val state = mutableMapOf<Int, ToolCallAccumulator>()
+        val chunk = provider.parseChunk(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"tool","arguments":"{}"}}]}}]}"""
+        )!!
+        val events = provider.chunkToEvents(chunk, state, testJson)
+        // 应发射 ToolCallStart + ToolCallDelta，但不发射 ToolCallComplete
+        assertTrue("应发射 ToolCallStart", events.any { it is StreamEvent.ToolCallStart })
+        assertTrue("不应发射 ToolCallComplete（无 finish_reason）", events.none { it is StreamEvent.ToolCallComplete })
+        // state 应保留（未清空，等待后续 finish_reason chunk）
+        assertEquals("state 应保留", 1, state.size)
+        assertEquals("call_1", state[0]?.id)
+    }
+
+    @Test
+    fun `chunkToEvents degrades missing id to Error end-to-end via finish_reason`() {
+        // M2 端到端验证：通过 chunkToEvents 触发 id 缺失场景（非标准 Provider 不携带 tool_call id）
+        val state = mutableMapOf<Int, ToolCallAccumulator>()
+        // delta 不携带 id（模拟非标准 Provider，如 Ollama 旧版）
+        val chunk1 = provider.parseChunk(
+            """{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"tool_no_id","arguments":"{}"}}]}}]}"""
+        )!!
+        val events1 = provider.chunkToEvents(chunk1, state, testJson)
+        // 首个 delta 有 name → 发射 ToolCallStart（id 为空字符串）
+        assertTrue("应发射 ToolCallStart（即使 id 为空）", events1.any { it is StreamEvent.ToolCallStart })
+        // finish_reason=tool_calls 触发 completeToolCalls
+        val chunk2 = provider.parseChunk(
+            """{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"""
+        )!!
+        val events2 = provider.chunkToEvents(chunk2, state, testJson)
+        // 应发射 Error（id 缺失），不发射 ToolCallComplete
+        assertTrue(
+            "应发射 id 缺失 Error",
+            events2.any { it is StreamEvent.Error && it.message.contains("工具调用 id 缺失") }
+        )
+        assertTrue("不应发射 ToolCallComplete", events2.none { it is StreamEvent.ToolCallComplete })
+        // state 应清空
+        assertTrue("state 应清空", state.isEmpty())
+    }
+
+    @Test
+    fun `processToolCallDeltas handles 10 parallel tool_calls`() {
+        // 极端场景：10 个并行 tool_call（index 0-9），验证 state map 处理大量 index
+        val state = mutableMapOf<Int, ToolCallAccumulator>()
+        val deltas = (0..9).map { i ->
+            ToolCallDeltaWire(index = i, id = "call_$i", function = FunctionDeltaWire(name = "tool_$i"))
+        }
+        val events = provider.processToolCallDeltas(state, deltas)
+        assertEquals("应发射 10 个 ToolCallStart", 10, events.filterIsInstance<StreamEvent.ToolCallStart>().size)
+        assertEquals("state 应有 10 个累加器", 10, state.size)
+        for (i in 0..9) {
+            assertEquals("call_$i", state[i]?.id)
+            assertEquals("tool_$i", state[i]?.name)
+        }
+    }
+
+    @Test
+    fun `completeToolCalls handles nested JSON arguments`() {
+        // 极端场景：嵌套 JSON arguments（Map/List/Boolean/Number 混合），验证 jsonElementToMap 递归正确
+        val state = mutableMapOf(
+            0 to ToolCallAccumulator(
+                id = "call_1", name = "tool",
+                arguments = StringBuilder("""{"outer":{"inner":"value","list":[1,2,3]},"flag":true,"count":42}""")
+            )
+        )
+        val events = provider.completeToolCalls(state, testJson)
+        val complete = events.filterIsInstance<StreamEvent.ToolCallComplete>().single()
+        assertEquals("call_1", complete.toolCallId)
+        assertEquals("tool", complete.toolName)
+        // 验证嵌套结构被正确解析
+        assertTrue("outer 应为 Map", complete.arguments["outer"] is Map<*, *>)
+        assertTrue("flag 应为 true", complete.arguments["flag"] == true)
+        assertTrue("count 应为 42", complete.arguments["count"] == 42)
     }
 
     private fun sampleMessages() = listOf(

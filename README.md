@@ -14,6 +14,9 @@
 - US-023 StreamEvent/ChatStreamProvider 接口扩展预留 ✅（Phase A，guardrail + ac-verifier 通过，BR-naming-001 转 active）
 - US-021 SKILL.md 解析器（snakeyaml-engine-kmp 4.0.1 + 安全 LoadSettings + frontmatter 校验）✅（Phase B，guardrail 三轮 + ac-verifier 两轮通过，BR-security-004 转 active）
 - US-022 SkillRegistry（扫描/去重/同步/过滤 + 5 内置 Skill + PrismApplication 集成）✅（Phase B，guardrail 三轮 + ac-verifier 两轮通过，AC-5 受限→完全通过，BR-testing-004 转 active，629 回归 0 失败）
+- US-024 OpenAICompatibleProvider tool_calling 协议（tool_calls delta 状态机 + ToolCallAccumulator + StreamEvent 6 子类）✅（Phase C，guardrail 两轮 + ac-verifier 通过，6/6 AC，726 回归 0 失败，性能基线建立）
+- US-025 SkillExecutor 工具执行回路（maxRounds 10 + 用户确认 + 30s 超时 + namespace 前缀剥离 + 错误回灌）✅（Phase C，guardrail 两轮 + ac-verifier 通过，6/6 AC，M-1 sanitizeErrorMessage 信息脱敏 + 6 处 Log.w 结构化日志）
+- US-026 ConversationViewModel Skill 注入与工具执行回路集成（buildTools + mergeSystemPrompt + executeWithToolLoop + handleStreamEvent + syncToolMessages + AtomicLong idGenerator + R-4 历史过滤器）✅（Phase D，guardrail 两轮 + ac-verifier 通过，7/7 AC，M-1/M-3 修复有效，M-2 异常路径补 3 测试验证通过，757 回归 0 失败，BR-error-handling-008 转 active）
 
 - US-011 依赖落地 + KnowledgeChunk 向量索引 ✅（guardrail + ac-verifier 通过）
 - US-012 文档解析器（PDF/DOCX/XLSX/MD/TXT）✅（guardrail 有条件通过 + ac-verifier 通过）
@@ -148,6 +151,17 @@
   - [2026-08-09-m4-phaseB-guardrail-round3.md](docs/reports/2026-08-09-m4-phaseB-guardrail-round3.md) —— M4 Phase B 安全与质量审计 round 3（guardrail-enforcer，回退修复复审通过）
   - [2026-08-09-m4-phaseB-acceptance.md](docs/reports/2026-08-09-m4-phaseB-acceptance.md) —— M4 Phase B 验收测试 round 1（ac-verifier，受限通过，AC-5 受限根因：SkillRegistryTest 缺失）
   - [2026-08-09-m4-phaseB-acceptance-round2.md](docs/reports/2026-08-09-m4-phaseB-acceptance-round2.md) —— M4 Phase B 验收测试 round 2（ac-verifier，完全通过，AC-5 升级 + BR-testing-004 转 active + 629 回归 0 失败）
+  - [2026-08-09-m4-phaseC-archaeology.md](docs/reports/2026-08-09-m4-phaseC-archaeology.md) —— M4 Phase C 源码考古（code-archaeologist，OpenAICompatibleProvider + SkillExecutor 集成点分析）
+  - [2026-08-09-m4-phaseC-impact-selfcheck.md](docs/reports/2026-08-09-m4-phaseC-impact-selfcheck.md) —— M4 Phase C 变更影响自检（首轮，US-024+US-025 blast-radius）
+  - [2026-08-09-m4-phaseC-guardrail.md](docs/reports/2026-08-09-m4-phaseC-guardrail.md) —— M4 Phase C 安全与质量审计 round 1（guardrail-enforcer，有条件通过，4 中风险 M1-M4）
+  - [2026-08-09-m4-phaseC-impact-selfcheck-v2.md](docs/reports/2026-08-09-m4-phaseC-impact-selfcheck-v2.md) —— M4 Phase C 修复二次自检（M2/M3/M4 修复 + M1 测试补齐，713 回归 0 失败）
+  - [2026-08-09-m4-phaseC-guardrail-v2.md](docs/reports/2026-08-09-m4-phaseC-guardrail-v2.md) —— M4 Phase C 安全与质量审计 round 2（guardrail-enforcer，通过，0 阻断/0 高危/0 中风险）
+  - [2026-08-09-m4-phaseC-acceptance.md](docs/reports/2026-08-09-m4-phaseC-acceptance.md) —— M4 Phase C 验收测试（ac-verifier，US-024 6/6 + US-025 6/6 AC 通过，726 回归 0 失败，性能基线建立）
+  - [2026-08-09-m4-phaseD-archaeology.md](docs/reports/2026-08-09-m4-phaseD-archaeology.md) —— M4 Phase D 集成模式源码考古（code-archaeologist，简化版，executeLoop onEvent 融合 + idGenerator 冲突 2 项关键结论）
+  - [2026-08-09-m4-phaseD-impact-selfcheck.md](docs/reports/2026-08-09-m4-phaseD-impact-selfcheck.md) —— M4 Phase D 变更影响自检（主 Agent，P2 跨模块，构造器向后兼容 + open 可测性补强 + 750 回归 0 失败）
+  - [2026-08-09-m4-phaseD-guardrail.md](docs/reports/2026-08-09-m4-phaseD-guardrail.md) —— M4 Phase D 安全与质量审计 round 1（guardrail-enforcer，通过，3 中危 M-1/M-2/M-3）
+  - [2026-08-09-m4-phaseD-guardrail-round2.md](docs/reports/2026-08-09-m4-phaseD-guardrail-round2.md) —— M4 Phase D 安全与质量审计 round 2（guardrail-enforcer，通过，M-1/M-3 修复有效）
+  - [2026-08-09-m4-phaseD-acceptance.md](docs/reports/2026-08-09-m4-phaseD-acceptance.md) —— M4 Phase D 验收测试（ac-verifier，通过，7/7 AC，M-2 异常路径补 3 测试，757 回归 0 失败）
   - [性能基线](docs/reports/perf/) —— 性能基线报告目录
     - [2026-08-02-us002-objectbox-crud-baseline.md](docs/reports/perf/2026-08-02-us002-objectbox-crud-baseline.md) —— US-002 ObjectBox CRUD 性能基线
     - [2026-08-02-us003-apikey-baseline.md](docs/reports/perf/2026-08-02-us003-apikey-baseline.md) —— US-003 API Key 加密存储性能基线

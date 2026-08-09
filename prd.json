@@ -363,8 +363,8 @@
         "Typecheck passes"
       ],
       "priority": 24,
-      "passes": false,
-      "notes": "M4 协议层。ADR-014 5.3。OpenAI arguments 是 JSON string 增量片段需跨 chunk 按 index 拼接。strict mode + parallel_tool_calls=false。P2 跨模块。"
+      "passes": true,
+      "notes": "M4 协议层。ADR-014 5.3。OpenAI arguments 是 JSON string 增量片段需跨 chunk 按 index 拼接。strict mode + parallel_tool_calls=false。P2 跨模块。Phase C 验收通过（TKN-M4-PHASEC-ACCEPTANCE-001，6/6 AC，guardrail 二次审查通过 TKN-M4-PHASEC-GUARDRAIL-002）。M2 修复：completeToolCalls 防御 tool_call id 缺失。"
     },
     {
       "id": "US-025",
@@ -379,8 +379,8 @@
         "Typecheck passes"
       ],
       "priority": 25,
-      "passes": false,
-      "notes": "M4 执行层。ADR-014 5.4/5.5。复用 McpToolProviderDispatcher + UiConfirmationGate。考古报告集成点 5 确认 MCP 基建已完整未接入对话流。P2 跨模块。"
+      "passes": true,
+      "notes": "M4 执行层。ADR-014 5.4/5.5。复用 McpToolProviderDispatcher + UiConfirmationGate。考古报告集成点 5 确认 MCP 基建已完整未接入对话流。P2 跨模块。Phase C 验收通过（TKN-M4-PHASEC-ACCEPTANCE-001，6/6 AC，guardrail 二次审查通过）。M3 修复：sanitizeErrorMessage 信息脱敏（CWE-209）。M4 修复：6 处 catch 块添加 Log.w 结构化日志（BR-error-handling-004）。"
     },
     {
       "id": "US-026",
@@ -396,8 +396,8 @@
         "Typecheck passes"
       ],
       "priority": 26,
-      "passes": false,
-      "notes": "M4 集成层。ADR-013 5.4 + ADR-014 5.7。ConversationViewModel Factory 扩展注入 skillRegistry + skillExecutor。考古报告集成点 4 RAG 双通道合并策略。P2 跨模块。"
+      "passes": true,
+      "notes": "M4 集成层。ADR-013 5.4 + ADR-014 5.7。ConversationViewModel Factory 扩展注入 skillRegistry + skillExecutor。考古报告集成点 4 RAG 双通道合并策略。P2 跨模块。Phase D 验收通过（TKN-M4-PHASED-ACCEPTANCE-001，7/7 AC，guardrail 两轮通过，M-1/M-3 修复有效，M-2 异常路径补 3 测试验证通过，757 回归 0 失败，BR-error-handling-008 转 active）。AC-4 受限通过：R-5 已知限制（StreamEvent.Error 不携带 statusCode，400 精确降级推迟 Phase E）。"
     },
     {
       "id": "US-027",

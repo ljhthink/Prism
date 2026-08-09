@@ -23,12 +23,20 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 
 /**
- * OpenAI 兼容 Provider 的流式请求实现（ADR-004 4.3）。
+ * OpenAI 兼容 Provider 的流式请求实现（ADR-004 4.3 / ADR-014 5.3）。
  *
  * 负责将 [ProviderConfig] 组装为 `/v1/chat/completions` 的 SSE 请求并消费流式响应，
  * 将解析结果以 [StreamEvent] 流暴露给调用方。
@@ -37,16 +45,23 @@ import kotlinx.serialization.json.JsonElement
  * - 端点：`baseUrl.trimEnd('/') + "/chat/completions"`
  * - 鉴权：`Authorization: Bearer <apiKeyRef 明文>`（无 key 时跳过）
  * - 自定义头：合并 [ProviderConfig.headers]，不覆盖 Authorization / Content-Type
- * - 请求体：`model` / `messages` / `stream=true`
+ * - 请求体：`model` / `messages` / `stream=true`，M4 新增 `tools` / `tool_choice` / `parallel_tool_calls`
+ *
+ * **M4 Phase C tool_calling**（ADR-014 5.3）：
+ * - [buildRequestBody] 扩展：注入 tools + tool result 回灌（role=tool 携带 tool_call_id）+
+ *   assistant tool_calls 回放
+ * - delta 状态机：[parseChunk] 纯解析 → [chunkToEvents] 纯状态机处理（text delta +
+ *   pendingToolCalls 跨 chunk 拼接 + finish_reason=tool_calls 触发 [StreamEvent.ToolCallComplete]）
+ * - JSON 解析失败降级为 [StreamEvent.Error] 不崩溃；CancellationException 重抛（BR-error-handling-007）
+ *
+ * **可测性**（ADR-004 4.7 / BR-testing-004）：SSE 客户端要求引擎声明 SSECapability，
+ * MockEngine 不支持。故将请求组装与 SSE 解析抽离为 `internal` 纯函数
+ * （[buildEndpoint] / [buildAuthHeader] / [buildRequestBody] / [applyCustomHeaders] /
+ * [parseChunk] / [chunkToEvents] / [processToolCallDeltas] / [completeToolCalls]），
+ * 单元测试直接覆盖核心逻辑；端到端流式路径由真实 Ktor SSE 服务器集成测试验证。
  *
  * **错误处理**：网络异常、鉴权失败、流中断统一发射 [StreamEvent.Error]，不外抛。
  * 结束 chunk 空 `choices[]` 视为流结束，发射 [StreamEvent.Done]，不崩溃。
- *
- * **可测性**（ADR-004 4.7）：Ktor 的 SSE 客户端插件要求引擎声明 `SSECapability`，
- * 而 `MockEngine` 不支持该能力（且因 `internal constructor` 无法在 kapt 下子类化）。
- * 因此将请求组装与 SSE 解析抽离为 `internal` 纯函数（[buildEndpoint] / [buildAuthHeader] /
- * [buildRequestBody] / [applyCustomHeaders] / [parseChunkData]），单元测试直接覆盖核心逻辑；
- * 端到端流式路径由真实 Ktor SSE 服务器集成测试验证。
  */
 class OpenAICompatibleProvider(
     private val httpClient: HttpClient,
@@ -61,21 +76,19 @@ class OpenAICompatibleProvider(
      *
      * **US-019 扩展**（ADR-012 5.4）：新增 [systemPrompt] / [ragContext] 可选参数。
      * - [systemPrompt] 非空时，在 messages 列表最前插入 `MessageBody("system", systemPrompt)`
-     * - [ragContext] 非空时，作为独立 user 消息插在最后一条 user 消息前（RAG context 必须在用户问题之前，
-     *   让模型把 context 与 question 关联）
+     * - [ragContext] 非空时，作为独立 user 消息插在最后一条 user 消息前（RAG context 必须在用户问题之前）
      *
-     * **M4 Phase A 接口对齐**（ADR-014 5.2）：override 签名新增 [tools] / [toolChoice] 参数以满足
-     * [ChatStreamProvider] 契约。**Phase A 仅对齐签名，不序列化 tools 到请求体**——tool_calling 的
-     * 请求序列化与流式 delta 状态机解析属 Phase C（US-024）。当前所有调用方均传 null（默认），
-     * 故行为与 US-019 完全一致（向后兼容）。非 null tools 在 Phase A 会被忽略，Phase C 将完整实现。
+     * **M4 Phase C tool_calling**（ADR-014 5.3）：[tools] / [toolChoice] 非空时序列化到请求体，
+     * 流式响应经 [chunkToEvents] 状态机解析 tool_calls delta，发射 [StreamEvent.ToolCallStart] /
+     * [StreamEvent.ToolCallDelta] / [StreamEvent.ToolCallComplete]。null 时行为与 US-019 一致（向后兼容）。
      *
      * @param config 目标 Provider 配置（含 baseUrl / apiKeyRef / headers / models）
-     * @param messages 对话历史（[ChatMessage] 转换为请求体消息）
+     * @param messages 对话历史（[ChatMessage] 转换为请求体消息，含 role=tool 结果回灌）
      * @param systemPrompt system 消息内容（可选，RAG grounding rules）；null 时不注入
      * @param ragContext RAG context 文本（可选，知识库片段拼接）；null 时不注入
-     * @param tools 工具定义列表（M4，Phase A 接受但暂不序列化；Phase C US-024 实现）
-     * @param toolChoice 工具选择策略（M4，Phase A 接受但暂不序列化；Phase C US-024 实现）
-     * @return [StreamEvent] 流：增量 [StreamEvent.Delta] → 结束 [StreamEvent.Done] / 错误 [StreamEvent.Error]
+     * @param tools 工具定义列表（M4，null 时不序列化 tools 字段，向后兼容）
+     * @param toolChoice 工具选择策略（M4，null 时不序列化 tool_choice 字段）
+     * @return [StreamEvent] 流：增量 [StreamEvent.Delta] / 工具调用事件 / 结束 [StreamEvent.Done] / 错误 [StreamEvent.Error]
      */
     override fun streamChat(
         config: ProviderConfig,
@@ -85,11 +98,6 @@ class OpenAICompatibleProvider(
         tools: List<ToolDefinition>?,
         toolChoice: ToolChoice?
     ): Flow<StreamEvent> = flow {
-        // G-01 修复（guardrail TKN-M4-PHASEA-GUARDRAIL-001）：Phase A 接受 tools/toolChoice 但不序列化，
-        // 非 null 时发 Log.w 使中间态可观测，避免「静默降级」（Phase C US-024 实现完整 tool_calling）。
-        if (tools != null) {
-            Log.w(TAG, "tools 非空但 Phase A 未实现 tool_calling 序列化，已忽略（Phase C US-024 实现）")
-        }
         val endpoint = buildEndpoint(config.baseUrl)
         val apiKey = if (config.apiKeyRef.isNotBlank()) {
             apiKeyRepository.readApiKeyOnce(config.apiKeyRef)
@@ -97,36 +105,43 @@ class OpenAICompatibleProvider(
             null
         }
 
+        // tool_calling 跨 chunk 状态：index → 累加器。flow{} 作用域内单协程访问（flowOn IO），无需同步。
+        val pendingToolCalls = mutableMapOf<Int, ToolCallAccumulator>()
         var terminated = false
         try {
             httpClient.sse(endpoint, {
                 method = HttpMethod.Post
                 contentType(ContentType.Application.Json)
                 // 鉴权头优先级：apiKeyRef 明文 > 自定义 Authorization 头。
-                // apiKeyRef 为空时回退使用自定义 Authorization 头，避免无任何鉴权头（CR-06 残留，发现 4）
                 buildAuthHeader(apiKey)?.let { header(HttpHeaders.Authorization, it) }
                     ?: customAuthHeader(config.headers)?.let { header(HttpHeaders.Authorization, it) }
-                // 合并自定义头，Authorization / Content-Type 以本请求为准
                 applyCustomHeaders(this, config.headers)
-                setBody(buildRequestBody(config, messages, systemPrompt, ragContext))
+                setBody(buildRequestBody(config, messages, systemPrompt, ragContext, tools, toolChoice))
             }) {
                 incoming.collect { event ->
                     val data = event.data ?: return@collect
-                    val parsed = parseChunkData(data) ?: return@collect
-                    if (parsed is StreamEvent.Done) terminated = true
-                    emit(parsed)
+                    // [DONE] 终止标记（非 JSON），直接发射 Done
+                    if (data == DONE_MARKER) {
+                        terminated = true
+                        emit(StreamEvent.Done)
+                        return@collect
+                    }
+                    val chunk = parseChunk(data) ?: return@collect
+                    val events = chunkToEvents(chunk, pendingToolCalls, json)
+                    for (e in events) {
+                        if (e is StreamEvent.Done) terminated = true
+                        emit(e)
+                    }
                 }
             }
         } catch (e: CancellationException) {
-            // 协程取消必须重新抛出，不得吞掉（结构化并发，CR-01）
+            // 协程取消必须重新抛出，不得吞掉（结构化并发，CR-01 / BR-error-handling-007）
             throw e
         } catch (e: SSEClientException) {
-            // SSE 插件对非 200 响应一律抛 SSEClientException（无论 expectSuccess 值），
-            // 从 response 读取状态码区分 401 鉴权失败与其他 4xx（US-007 LOW 修复）。
+            // SSE 插件对非 200 响应一律抛 SSEClientException，从 response 读取状态码区分 401 与其他 4xx。
             emit(mapHttpError(e.response?.status?.value ?: -1))
             return@flow
         } catch (e: ClientRequestException) {
-            // 兜底：非 SSE 路径（或未来非流式请求）的 4xx 仍按状态码映射。
             emit(mapHttpError(e.response.status.value))
             return@flow
         } catch (e: Exception) {
@@ -138,7 +153,7 @@ class OpenAICompatibleProvider(
         if (!terminated) emit(StreamEvent.Done)
     }.flowOn(Dispatchers.IO)
 
-    // ==================== 可测试纯函数（ADR-004 4.7） ====================
+    // ==================== 可测试纯函数（ADR-004 4.7 / BR-testing-004） ====================
 
     /** 拼接 chat/completions 端点，去除尾部斜杠。 */
     internal fun buildEndpoint(baseUrl: String): String = baseUrl.trimEnd('/') + "/chat/completions"
@@ -148,48 +163,54 @@ class OpenAICompatibleProvider(
         apiKey?.takeIf { it.isNotBlank() }?.let { "Bearer $it" }
 
     /**
-     * 序列化请求体（model / messages / stream=true）。取首个模型，空则回退空串交服务端校验。
+     * 序列化请求体（model / messages / stream=true + M4 tools / tool_choice / parallel_tool_calls）。
      *
      * **US-019 注入规则**（ADR-012 5.4）：
      * - [systemPrompt] 非空：在 messages 最前插入 `MessageBody("system", systemPrompt)`
-     * - [ragContext] 非空：作为独立 user 消息插在**最后一条 user 消息之前**。
-     *   选择「最后一条 user 消息之前」而非「messages 末尾」的原因：messages 末尾一定是用户本轮问题
-     *   （ConversationViewModel.sendMessage 已保证），RAG context 须紧贴用户问题之前，让模型
-     *   把 context 与 question 关联（OpenAI Chat Completions 不持久化状态，每轮重发完整序列）。
-     * - 两者为空时维持原行为（向后兼容，既有调用零改动）。
+     * - [ragContext] 非空：作为独立 user 消息插在**最后一条 user 消息之前**
      *
-     * **测试覆盖**：[OpenAICompatibleProviderTest] 含 system 注入 / ragContext 注入 / 两者均注入 /
-     * 均不注入四个分支单元测试。
+     * **M4 Phase C tool_calling 注入**（ADR-014 5.3）：
+     * - [tools] 非空：序列化 `tools` 字段 + `tool_choice`（[toolChoiceToJson]）+ `parallel_tool_calls=false`
+     * - role=tool 消息：[MessageBody] 携带 `tool_call_id`（关联 LLM 返回的 tool_call）
+     * - role=assistant 且 toolCalls 非空：[MessageBody] 携带 `tool_calls` 数组（回放 OpenAI 结构）
+     * - assistant 空 content + 非空 toolCalls：content 序列化为 null（OpenAI 允许 assistant 消息 null content + tool_calls）
+     *
+     * @param tools 工具定义（null 时不序列化 tools 字段，向后兼容）
+     * @param toolChoice 工具选择策略（null 时不序列化 tool_choice 字段）
      */
     internal fun buildRequestBody(
         config: ProviderConfig,
         messages: List<ChatMessage>,
         systemPrompt: String? = null,
-        ragContext: String? = null
+        ragContext: String? = null,
+        tools: List<ToolDefinition>? = null,
+        toolChoice: ToolChoice? = null
     ): String {
         val requestMessages = buildList {
             // 1. system 消息前置（若有）
             if (!systemPrompt.isNullOrBlank()) {
-                add(MessageBody(SYSTEM_ROLE, systemPrompt))
+                add(MessageBody(role = SYSTEM_ROLE, content = systemPrompt))
             }
-            // 2. 转换对话历史
-            messages.forEach { add(MessageBody(it.role.toRequestRole(), it.content)) }
+            // 2. 转换对话历史（含 role=tool 结果回灌 + assistant tool_calls 回放）
+            messages.forEach { add(it.toMessageBody()) }
             // 3. ragContext 插在最后一条 user 消息之前（若有）
             if (!ragContext.isNullOrBlank()) {
                 val lastUserIndex = indexOfLast { it.role == USER_ROLE }
                 if (lastUserIndex == -1) {
-                    // 无 user 消息（异常路径）：直接追加 context 到末尾，由服务端处理
-                    add(MessageBody(USER_ROLE, ragContext))
+                    add(MessageBody(role = USER_ROLE, content = ragContext))
                 } else {
-                    // 在最后一条 user 消息前插入 context user 消息
-                    add(lastUserIndex, MessageBody(USER_ROLE, ragContext))
+                    add(lastUserIndex, MessageBody(role = USER_ROLE, content = ragContext))
                 }
             }
         }
         val body = ChatCompletionRequest(
             model = config.models.firstOrNull() ?: "",
             messages = requestMessages,
-            stream = true
+            stream = true,
+            tools = tools,
+            toolChoice = toolChoice?.let { toolChoiceToJson(it) },
+            // strict mode 需 parallel_tool_calls=false（OpenAI 限制），且减少并行幻觉
+            parallelToolCalls = if (tools != null) false else null
         )
         return json.encodeToString(ChatCompletionRequest.serializer(), body)
     }
@@ -226,27 +247,184 @@ class OpenAICompatibleProvider(
     }
 
     /**
-     * 解析单个 SSE `data` 载荷为 [StreamEvent]；无法解析的 chunk 返回 null（忽略，不中断流）。
+     * 解析单个 SSE `data` 载荷为 [ChatCompletionChunk]；无法解析的 chunk 返回 null（忽略，不中断流）。
      *
-     * - `[DONE]` → [StreamEvent.Done]
-     * - 含非空 content delta → [StreamEvent.Delta]
-     * - 空 `choices[]` 且无 usage（真正的结束 chunk）→ [StreamEvent.Done]
-     * - 空 `choices[]` 但带 usage（中段 usage 快照）→ null（忽略，避免提前终止流，CR-03）
-     * - 其余（无 content / 非 JSON / 空白 content）→ null
+     * **注意**：本函数只做纯 JSON 解码，不映射 [StreamEvent]。`[DONE]` 终止标记由调用方
+     * （[streamChat] collect 闭包）在调用本函数前拦截处理。事件映射由 [chunkToEvents] 完成。
+     *
+     * - 合法 JSON chunk → [ChatCompletionChunk]（含 choices / usage / finish_reason / tool_calls）
+     * - `[DONE]` → null（调用方应先拦截，不应传入本函数）
+     * - 非 JSON / 解析失败 → null（忽略坏 chunk 不中断流）
      */
-    internal fun parseChunkData(data: String): StreamEvent? {
-        if (data == DONE_MARKER) return StreamEvent.Done
-        val chunk = try {
+    internal fun parseChunk(data: String): ChatCompletionChunk? {
+        if (data == DONE_MARKER) return null
+        return try {
             json.decodeFromString(ChatCompletionChunk.serializer(), data)
         } catch (e: Exception) {
             // 解析失败的非终止 chunk：忽略，避免单个坏 chunk 中断流
-            return null
+            null
         }
-        val delta = chunk.choices.firstOrNull()?.delta?.content
-        if (delta != null && delta.isNotBlank()) return StreamEvent.Delta(delta)
-        // 空 choices[]：无 usage 视为流结束；带 usage 为中段快照，忽略
-        if (chunk.choices.isEmpty() && chunk.usage == null) return StreamEvent.Done
-        return null
+    }
+
+    /**
+     * 将单个 [ChatCompletionChunk] 映射为 0..N 个 [StreamEvent]（纯函数，可测）。
+     *
+     * **处理顺序**：
+     * 1. text delta：`choices[0].delta.content` 非空且非空白 → [StreamEvent.Delta]
+     * 2. tool_calls delta 累加：`choices[0].delta.toolCalls` 经 [processToolCallDeltas] 累加到 [state]，
+     *    发射 [StreamEvent.ToolCallStart] / [StreamEvent.ToolCallDelta]
+     * 3. finish_reason == "tool_calls"：[completeToolCalls] 解析累加的 arguments，
+     *    发射 [StreamEvent.ToolCallComplete]（JSON 解析失败降级为 [StreamEvent.Error]）
+     * 4. 空 `choices[]`：无 usage 视为流结束 → [StreamEvent.Done]；带 usage 为中段快照 → 忽略（CR-03）
+     *
+     * @param state 跨 chunk 的 tool_call 累加状态（调用方持有，本函数原地修改）
+     * @param json 用于 arguments JSON 解析的 Json 实例
+     */
+    internal fun chunkToEvents(
+        chunk: ChatCompletionChunk,
+        state: MutableMap<Int, ToolCallAccumulator>,
+        json: Json
+    ): List<StreamEvent> {
+        val events = mutableListOf<StreamEvent>()
+        val choice = chunk.choices.firstOrNull()
+        // 1. text delta
+        val content = choice?.delta?.content
+        if (!content.isNullOrBlank()) events.add(StreamEvent.Delta(content))
+        // 2. tool_calls delta 累加
+        val toolCallDeltas = choice?.delta?.toolCalls
+        if (!toolCallDeltas.isNullOrEmpty()) {
+            events.addAll(processToolCallDeltas(state, toolCallDeltas))
+        }
+        // 3. finish_reason == "tool_calls" 触发完成
+        if (choice?.finishReason == FINISH_TOOL_CALLS) {
+            events.addAll(completeToolCalls(state, json))
+        }
+        // 4. 空 choices：无 usage = 流结束；带 usage = 中段快照忽略
+        if (chunk.choices.isEmpty() && chunk.usage == null) {
+            events.add(StreamEvent.Done)
+        }
+        return events
+    }
+
+    /**
+     * 处理 tool_calls delta 分片，累加到 [state] 并发射 [StreamEvent.ToolCallStart] / [ToolCallDelta]。
+     *
+     * OpenAI tool_calls delta 按 `index` 区分并行 tool_call，`function.name` 仅首个 delta 携带，
+     * `function.arguments` 是 JSON string 增量片段需跨 chunk 拼接。
+     *
+     * @param state index → 累加器（原地修改）
+     * @param deltas 单个 chunk 内的 tool_calls delta 列表
+     */
+    internal fun processToolCallDeltas(
+        state: MutableMap<Int, ToolCallAccumulator>,
+        deltas: List<ToolCallDeltaWire>
+    ): List<StreamEvent> {
+        val events = mutableListOf<StreamEvent>()
+        for (tc in deltas) {
+            val acc = state.getOrPut(tc.index) { ToolCallAccumulator() }
+            if (!tc.id.isNullOrEmpty()) acc.id = tc.id
+            tc.function?.name?.let { acc.name = it }
+            tc.function?.arguments?.let { acc.arguments.append(it) }
+            // 首次见到 name 时发射 ToolCallStart（UI 可立即展示"正在调用工具"）
+            if (acc.name.isNotEmpty() && !acc.startEmitted) {
+                events.add(StreamEvent.ToolCallStart(acc.id, acc.name, tc.index))
+                acc.startEmitted = true
+            }
+            // 每个 arguments 片段发射 ToolCallDelta（UI 可实时展示参数构建，可选）
+            tc.function?.arguments?.let {
+                events.add(StreamEvent.ToolCallDelta(acc.id, it))
+            }
+        }
+        return events
+    }
+
+    /**
+     * finish_reason == "tool_calls" 时，解析所有累加的 tool_call 并发射 [StreamEvent.ToolCallComplete]。
+     *
+     * **降级策略**（ADR-014 5.7 / guardrail M2 缓解）：
+     * - **id 缺失**：部分非标准 OpenAI 兼容端点（如 Ollama 旧版）可能不在 delta 携带 id。
+     *   OpenAI API 要求回灌 tool result 时 `tool_call_id` 非空，缺失会导致 400 拒绝。
+     *   此处检测 id 为空 → 发射 [StreamEvent.Error] 并跳过该 tool_call（不进入回灌回路）。
+     * - **arguments JSON 解析失败**：不完整 JSON 降级为 [StreamEvent.Error]（不崩溃，R1 缓解）。
+     *
+     * 完成后清空 [state]（同一批 tool_call 不重复发射）。
+     *
+     * @param state index → 累加器（完成后清空）
+     * @param json 用于 arguments JSON 解析
+     */
+    internal fun completeToolCalls(
+        state: MutableMap<Int, ToolCallAccumulator>,
+        json: Json
+    ): List<StreamEvent> {
+        val events = mutableListOf<StreamEvent>()
+        state.forEach { (_, acc) ->
+            // M2 防御：id 缺失时降级为 Error，避免回灌空 tool_call_id 导致下游 400
+            if (acc.id.isEmpty()) {
+                events.add(StreamEvent.Error("工具调用 id 缺失: ${acc.name.ifEmpty { "<unknown>" }}"))
+                return@forEach
+            }
+            val args: Map<String, Any?> = if (acc.arguments.isEmpty()) {
+                emptyMap()
+            } else {
+                try {
+                    val element = json.parseToJsonElement(acc.arguments.toString())
+                    // tool arguments 顶层必为 JSON object；jsonElementToMap 返回 Any? 需类型收敛
+                    @Suppress("UNCHECKED_CAST")
+                    jsonElementToMap(element) as? Map<String, Any?>
+                        ?: emptyMap()
+                } catch (e: Exception) {
+                    // 不完整 JSON 降级为 Error，不崩溃（ADR-014 5.7 / R1 缓解）
+                    events.add(StreamEvent.Error("工具参数解析失败: ${acc.name}"))
+                    return@forEach
+                }
+            }
+            events.add(StreamEvent.ToolCallComplete(acc.id, acc.name, args))
+        }
+        state.clear()
+        return events
+    }
+
+    /**
+     * 将 [ToolChoice] 转为 OpenAI `tool_choice` 字段的 JSON 表示（ADR-014 5.3.1）。
+     *
+     * - [ToolChoice.Auto] → `"auto"`
+     * - [ToolChoice.Required] → `"required"`
+     * - [ToolChoice.None] → `"none"`
+     * - [ToolChoice.Specific] → `{"type":"function","function":{"name":"..."}}`
+     */
+    internal fun toolChoiceToJson(choice: ToolChoice): JsonElement = when (choice) {
+        ToolChoice.Auto -> JsonPrimitive("auto")
+        ToolChoice.Required -> JsonPrimitive("required")
+        ToolChoice.None -> JsonPrimitive("none")
+        is ToolChoice.Specific -> buildJsonObject {
+            put("type", "function")
+            putJsonObject("function") { put("name", choice.name) }
+        }
+    }
+
+    /**
+     * 将 [ChatMessage] 转换为请求体 [MessageBody]（含 role=tool 结果 + assistant tool_calls 回放）。
+     *
+     * - USER → `MessageBody(role="user", content=msg.content)`
+     * - ASSISTANT → `MessageBody(role="assistant", content=非空?content:null, toolCalls=回放)`；
+     *   空 content + 非空 toolCalls 时 content=null（OpenAI 允许 assistant null content + tool_calls）
+     * - TOOL → `MessageBody(role="tool", content=msg.content, toolCallId=msg.toolCallId)`
+     */
+    private fun ChatMessage.toMessageBody(): MessageBody = when (role) {
+        Role.USER -> MessageBody(role = USER_ROLE, content = content)
+        Role.ASSISTANT -> {
+            val replay = toolCalls.takeIf { it.isNotEmpty() }?.map { ToolCallWire.fromRef(it) }
+            MessageBody(
+                role = ASSISTANT_ROLE,
+                content = content.takeIf { it.isNotEmpty() },
+                toolCalls = replay
+            )
+        }
+        Role.TOOL -> MessageBody(
+            role = TOOL_ROLE,
+            content = content,
+            toolCallId = toolCallId
+        )
     }
 
     private companion object {
@@ -254,50 +432,177 @@ class OpenAICompatibleProvider(
         const val DONE_MARKER = "[DONE]"
         const val SYSTEM_ROLE = "system"
         const val USER_ROLE = "user"
+        const val ASSISTANT_ROLE = "assistant"
+        const val TOOL_ROLE = "tool"
+        const val FINISH_TOOL_CALLS = "tool_calls"
     }
 }
 
-/** 请求体消息（role + content）。role 由 [Role.toRequestRole] 或 system/ragContext 注入产生。 */
-@Serializable
-private data class MessageBody(val role: String, val content: String)
+// ==================== OpenAI 线缆数据类（private，仅序列化用） ====================
 
-/** chat/completions 请求体（stream=true）。stream 无默认值，确保始终随请求序列化。 */
+/**
+ * 请求体消息。M4 Phase C 扩展：[content] 可空（assistant tool_call 消息可为 null），
+ * [toolCallId] role=tool 时必填，[toolCalls] role=assistant 回放 tool_calls 结构。
+ */
+@Serializable
+private data class MessageBody(
+    val role: String,
+    val content: String? = null,
+    @SerialName("tool_call_id") val toolCallId: String? = null,
+    @SerialName("tool_calls") val toolCalls: List<ToolCallWire>? = null
+)
+
+/**
+ * chat/completions 请求体（stream=true）。M4 Phase C 扩展 tools/tool_choice/parallel_tool_calls。
+ *
+ * `stream` 无默认值，确保始终随请求序列化。tools/toolChoice/parallelToolCalls 默认 null，
+ * null 时 kotlinx.serialization 默认不序列化该字段（向后兼容，既有调用零改动）。
+ */
 @Serializable
 private data class ChatCompletionRequest(
     val model: String,
     val messages: List<MessageBody>,
-    val stream: Boolean
+    val stream: Boolean,
+    val tools: List<ToolDefinition>? = null,
+    @SerialName("tool_choice") val toolChoice: JsonElement? = null,
+    @SerialName("parallel_tool_calls") val parallelToolCalls: Boolean? = null
 )
 
-/** 流式响应 chunk。usage 用于区分中段快照与真正结束 chunk（CR-03）。 */
+/**
+ * 流式响应 chunk。usage 用于区分中段快照与真正结束 chunk（CR-03）。
+ * M4 Phase C：choices 含 finish_reason 与 tool_calls delta。
+ *
+ * **可见性**：[internal] 因 [parseChunk] / [chunkToEvents] 是 internal 纯函数，
+ * 需在单元测试中直接构造与断言（BR-testing-004）。
+ */
 @Serializable
-private data class ChatCompletionChunk(
+internal data class ChatCompletionChunk(
     val choices: List<Choice> = emptyList(),
     val usage: JsonElement? = null
 )
 
-/** 单个 choice。 */
+/** 单个 choice。M4 Phase C 扩展 [finishReason]（tool_calls/stop/length）。 */
 @Serializable
-private data class Choice(val delta: Delta = Delta())
+internal data class Choice(
+    val delta: Delta = Delta(),
+    @SerialName("finish_reason") val finishReason: String? = null
+)
 
-/** 增量 token。 */
+/**
+ * 增量 token。M4 Phase C 扩展 [role]（首个 delta 携带 assistant 角色）与 [toolCalls]。
+ */
 @Serializable
-private data class Delta(val content: String? = null)
+internal data class Delta(
+    val content: String? = null,
+    val role: String? = null,
+    @SerialName("tool_calls") val toolCalls: List<ToolCallDeltaWire>? = null
+)
+
+/**
+ * tool_call delta 分片（OpenAI 流式协议）。按 [index] 区分并行 tool_call。
+ *
+ * @property index 并行 tool_call 索引（跨 chunk 同 index 累加）
+ * @property id 工具调用 id（仅首个 delta 携带，如 `call_xxx`）
+ * @property type 固定 `"function"`
+ * @property function 函数名与 arguments 分片
+ */
+@Serializable
+internal data class ToolCallDeltaWire(
+    val index: Int,
+    val id: String? = null,
+    val type: String? = null,
+    val function: FunctionDeltaWire? = null
+)
+
+/** tool_call delta 的函数名与 arguments 分片。arguments 是 JSON string 增量片段。 */
+@Serializable
+internal data class FunctionDeltaWire(
+    val name: String? = null,
+    val arguments: String? = null
+)
+
+/**
+ * assistant 消息回放的 tool_call 完整结构（非 delta）。用于构建下次请求时回放上一轮 tool_calls。
+ *
+ * @see io.prism.ui.model.ToolCallRef UI 层引用类型（构造器 [fromRef] 转换）
+ */
+@Serializable
+private data class ToolCallWire(
+    val id: String,
+    val type: String = "function",
+    val function: FunctionCallWire
+) {
+    companion object {
+        /** 从 UI 层 [ToolCallRef] 转换为线缆结构。 */
+        fun fromRef(ref: io.prism.ui.model.ToolCallRef): ToolCallWire = ToolCallWire(
+            id = ref.id,
+            type = ref.type,
+            function = FunctionCallWire(name = ref.functionName, arguments = ref.arguments)
+        )
+    }
+}
+
+/** tool_call 的函数名与完整 arguments（JSON string，回放时原样传递）。 */
+@Serializable
+private data class FunctionCallWire(
+    val name: String,
+    val arguments: String
+)
+
+// ==================== tool_call 状态机累加器（internal，可测） ====================
+
+/**
+ * tool_call 跨 chunk 累加器（ADR-014 5.3.2）。
+ *
+ * 每个 `index` 对应一个累加器，跨 chunk 累加 id/name/arguments。
+ * `arguments` 是 JSON string 增量片段拼接（finish_reason=tool_calls 时才 JSON.parse）。
+ *
+ * @property id 工具调用 id（首个 delta 携带）
+ * @property name 工具名（首个 delta 携带）
+ * @property arguments arguments JSON string 增量累加（StringBuilder 高效拼接）
+ * @property startEmitted 是否已发射 [StreamEvent.ToolCallStart]（避免重复发射）
+ */
+internal data class ToolCallAccumulator(
+    var id: String = "",
+    var name: String = "",
+    val arguments: StringBuilder = StringBuilder(),
+    var startEmitted: Boolean = false
+)
+
+// ==================== JSON 工具函数（internal，可测） ====================
+
+/**
+ * 将 [JsonElement] 递归转换为 Kotlin 原生 [Map]（用于 tool_call arguments 解析）。
+ *
+ * - [JsonObject] → `Map<String, Any?>`（递归）
+ * - [JsonArray] → `List<Any?>`（递归）
+ * - [JsonPrimitive] → String/Number/Boolean/null（按 isString 区分）
+ * - [JsonNull] → null
+ */
+internal fun jsonElementToMap(element: JsonElement): Any? = when (element) {
+    is JsonObject -> element.entries.associate { (k, v) -> k to jsonElementToMap(v) }
+    is JsonArray -> element.map { jsonElementToMap(it) }
+    is JsonPrimitive -> when {
+        element.isString -> element.content
+        element.content == "null" -> null
+        element.content == "true" -> true
+        element.content == "false" -> false
+        element.content.toIntOrNull() != null -> element.content.toInt()
+        element.content.toLongOrNull() != null -> element.content.toLong()
+        element.content.toDoubleOrNull() != null -> element.content.toDouble()
+        else -> element.content
+    }
+    JsonNull -> null
+}
 
 /**
  * 将 UI 层 [Role] 映射为 OpenAI 请求角色。
  *
- * **M4 Phase A 边界**（ADR-014 5.6）：[Role.TOOL] 暂不支持——OpenAI tool 结果消息需
- * `role="tool"` + `tool_call_id` 字段，而当前 [MessageBody] 仅有 role+content，无法携带
- * `tool_call_id`。完整 TOOL 序列化属 Phase C/D（US-024/US-026 重构 buildRequestBody）。
- *
- * Phase A 不产生 TOOL 消息（Phase D 才回灌工具结果），此处对 TOOL **Fail Fast** 抛出
- * [IllegalStateException]，避免静默映射为 "assistant" 导致请求语义错误（Karpathy: 显式暴露假设）。
+ * **M4 Phase C**（ADR-014 5.6）：[Role.TOOL] → `"tool"`，配合 [MessageBody.toolCallId]
+ * 携带 `tool_call_id`，实现工具结果回灌。Phase A 的 Fail Fast 占位已替换为完整映射。
  */
 private fun Role.toRequestRole(): String = when (this) {
     Role.USER -> "user"
     Role.ASSISTANT -> "assistant"
-    Role.TOOL -> throw IllegalStateException(
-        "Role.TOOL 序列化未在 Phase A 实现，将在 Phase C/D (US-024/US-026) 支持"
-    )
+    Role.TOOL -> "tool"
 }

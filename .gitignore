@@ -62,3 +62,11 @@ app/replay_pid*.log
 # 性能/测试产物
 perf/baselines/*.bin
 .emulator/
+
+# 一次性参考工件（CLAUDE.md 5.3 动态报告目录化）
+# docs/reports/ 下的 *.md 为 guardrail / ac-verifier / archaeology 等一次性汇报，
+# 不纳入长期手工维护，不提交远程（用户指示 2026-08-09）。
+# 例外：docs/reports/README.md（目录说明，CLAUDE.md 14.1 要求）
+# 注：docs/reports/perf/ 子目录不受影响（*.md 不递归匹配子目录）
+docs/reports/*.md
+!docs/reports/README.md

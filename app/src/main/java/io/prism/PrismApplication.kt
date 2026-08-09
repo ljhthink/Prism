@@ -242,6 +242,26 @@ class PrismApplication : Application() {
      */
     val skillRegistry: SkillRegistry by lazy { SkillRegistry(this, skillRepository) }
 
+    /**
+     * Skill 工具执行器（US-025，ADR-014 5.4）—— 编排「LLM 调工具 → 用户确认 → MCP 调用 → 结果回灌」回路。
+     *
+     * 依赖 [mcpToolProviderDispatcher]（接口 McpToolProvider 实现）+ [confirmationGate]（用户确认门禁），
+     * 不依赖 SkillRepository/SkillRegistry（tools + mcpServers 由调用方 Phase D ConversationViewModel 传入，
+     * per phaseC 考古报告 R8：单一职责）。
+     *
+     * **安全边界**（ADR-014 5.5）：
+     * - 用户确认：每个 tool_call 执行前通过 [confirmationGate]
+     * - 超时防护：单次 callTool 包装 withTimeout（默认 30s）
+     * - 循环防护：maxRounds=10 强制终止
+     * - 失败降级：错误/超时/拒绝信息回灌给 LLM
+     * - 命名空间隔离：tool name 格式 `skillName__toolName`，执行时去前缀
+     *
+     * 由 [io.prism.ui.chat.ConversationViewModel] 在 Phase D（US-026）注入使用。
+     */
+    val skillExecutor: io.prism.skill.SkillExecutor by lazy {
+        io.prism.skill.SkillExecutor(mcpToolProviderDispatcher, confirmationGate)
+    }
+
     override fun onCreate() {
         super.onCreate()
         boxStore = MyObjectBox.builder()
