@@ -50,6 +50,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import io.prism.PrismApplication
 import io.prism.data.McpServerConfig
 import io.prism.data.McpServerType
+import io.prism.data.SkillSource
 import io.prism.ui.components.PrismButton
 import io.prism.ui.components.PrismButtonVariant
 import io.prism.ui.components.PrismCard
@@ -76,37 +77,26 @@ import io.prism.ui.theme.PrismTextFaint
 /** 能力中枢分段。 */
 private enum class CapSegment(val label: String) { MCP("MCP 工具"), SKILLS("Skills"), MEMORY("记忆") }
 
-/** Skill。 */
-private data class PrismSkill(
-    val icon: String,
-    val name: String,
-    val origin: String,
-    val desc: String,
-    val enabled: Boolean,
-    val accent: Color
-)
-
-private val skills = listOf(
-    PrismSkill("✎", "智能翻译", "本地", "中英互译", true, PrismIndigo),
-    PrismSkill("⌂", "会议纪要", "远程", "自动摘要", true, PrismCyan),
-    PrismSkill("⌁", "代码审查", "本地", "AI Code Review", true, PrismMint),
-    PrismSkill("▣", "知识整理", "远程", "结构化管理", false, Color(0xFFFF9A5C))
-)
-
 /**
- * 能力中枢屏幕 —— 深空玻璃肌理（设计规范 v0.4 第 8.3 节，US-002/004/005/008）。
+ * 能力中枢屏幕 —— 深空玻璃肌理（设计规范 v0.4 第 8.3 节，US-002/004/005/008/027）。
  *
- * 顶部三段式（MCP 工具 / Skills / 记忆）。MCP 段接入 [CapabilitiesViewModel]，展示动态、
- * 可配置的 MCP Server（US-008）：点击 Server 行 → 配置弹层（Base URL / API Key / 自定义头 /
- * 测试连接 / 启用 / 删除）；点击预设模板 → 一键创建；点击「新建」→ 自定义 Server。
+ * 顶部三段式（MCP 工具 / Skills / 记忆）：
+ * - MCP 段接入 [CapabilitiesViewModel]，展示动态、可配置的 MCP Server（US-008）
+ * - Skills 段接入 [SkillsViewModel]，展示动态 Skill 列表 + 启停 + 详情弹层（US-027，ADR-013 5.5）
+ * - 记忆段为静态占位（M5 实现）
+ *
+ * 点击 MCP Server 行 → 配置弹层；点击 Skill 行 → 详情弹层（展示 manifest 元数据）。
  */
 @Composable
 fun CapabilitiesScreen(
-    viewModel: CapabilitiesViewModel = viewModel(factory = CapabilitiesViewModel.Factory)
+    viewModel: CapabilitiesViewModel = viewModel(factory = CapabilitiesViewModel.Factory),
+    skillsViewModel: SkillsViewModel = viewModel(factory = SkillsViewModel.Factory)
 ) {
     var segment by remember { mutableStateOf(CapSegment.MCP) }
     val servers by viewModel.servers.collectAsState()
     val selectedServer by viewModel.selectedServer.collectAsState()
+    val skills by skillsViewModel.skills.collectAsState()
+    val selectedSkill by skillsViewModel.selectedSkill.collectAsState()
 
     Box {
         LazyColumn(
@@ -163,7 +153,11 @@ fun CapabilitiesScreen(
                     enter = fadeIn() + slideInVertically { it / 4 },
                     exit = fadeOut()
                 ) {
-                    SkillsPanel(onSkillClick = { })
+                    SkillsPanel(
+                        skills = skills,
+                        onSkillClick = { skillsViewModel.selectSkill(it) },
+                        onToggle = { id, enabled -> skillsViewModel.setSkillEnabled(id, enabled) }
+                    )
                 }
             }
             item {
@@ -180,6 +174,16 @@ fun CapabilitiesScreen(
         // MCP Server 配置弹层
         PrismSheetHost(visible = selectedServer != null, onDismiss = { viewModel.selectServer(null) }) {
             selectedServer?.let { McpConfigSheet(it, viewModel) }
+        }
+
+        // Skill 详情弹层（US-027，ADR-013 5.5）—— 展示 manifest 元数据 + 启停开关
+        PrismSheetHost(visible = selectedSkill != null, onDismiss = { skillsViewModel.selectSkill(null) }) {
+            selectedSkill?.let {
+                SkillDetailSheet(
+                    skill = it,
+                    onToggle = { enabled -> skillsViewModel.setSkillEnabled(it.config.id, enabled) }
+                )
+            }
         }
     }
 }
@@ -578,19 +582,55 @@ private fun ValidationError(text: String) {
     )
 }
 
-/** Skills 面板。 */
+/**
+ * Skills 面板（US-027，ADR-013 5.5）—— 从 [SkillsViewModel.skills] 取动态数据。
+ *
+ * - 列表为空时展示空态占位（内置 Skill 扫描失败或无用户自建/远程 Skill 时）
+ * - 计数随实际 Skill 数量动态变化（修复 R-1：原硬编码 "已安装 · 5"）
+ * - 点击 Skill 行打开详情弹层
+ * - 启用/禁用开关落库（经 [SkillsViewModel.setSkillEnabled]）
+ */
 @Composable
-private fun SkillsPanel(onSkillClick: (PrismSkill) -> Unit) {
+private fun SkillsPanel(
+    skills: List<SkillUiModel>,
+    onSkillClick: (SkillUiModel) -> Unit,
+    onToggle: (Long, Boolean) -> Unit
+) {
     Column {
-        SectionHeader("已安装 · 5", "+ 安装")
-        skills.forEach { SkillRow(it, Modifier.padding(horizontal = 20.dp), onClick = { onSkillClick(it) }) }
+        SectionHeader("已安装 · ${skills.size}", "+ 安装")
+        if (skills.isEmpty()) {
+            EmptySection("暂无 Skill，启动时自动扫描内置预设；远程安装请点击右上角 +")
+        }
+        skills.forEach { skill ->
+            SkillRow(
+                skill = skill,
+                modifier = Modifier.padding(horizontal = 20.dp),
+                onClick = { onSkillClick(skill) },
+                onToggle = { enabled -> onToggle(skill.config.id, enabled) }
+            )
+        }
     }
 }
 
-/** 单个 Skill 行（点击打开详情）。 */
+/**
+ * 单个 Skill 行（点击打开详情，US-027）。
+ *
+ * - icon 与 accent 按 [SkillSource] 映射（与 [SkillsViewModel.toUiModel] 的 icon 映射对齐）
+ * - 启用状态实时取自 [SkillUiModel.config].isEnabled（不再用本地 remember state，
+ *   避免与持久化状态漂移，BR-concurrency-004）
+ * - 文件缺失（manifest==null）时降级展示"解析失败"，仍允许启停操作
+ * - 来源标签（内置/本地/远程）经 [sourceToLabel] 映射
+ */
 @Composable
-private fun SkillRow(skill: PrismSkill, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    var enabled by remember { mutableStateOf(skill.enabled) }
+private fun SkillRow(
+    skill: SkillUiModel,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+    onToggle: (Boolean) -> Unit
+) {
+    val accent = sourceToAccent(skill.config.source)
+    val sourceLabel = sourceToLabel(skill.config.source)
+    val desc = skill.manifest?.description ?: "解析失败（SKILL.md 缺失或格式错误）"
     PrismCard(
         modifier = modifier
             .fillMaxWidth()
@@ -605,24 +645,222 @@ private fun SkillRow(skill: PrismSkill, modifier: Modifier = Modifier, onClick: 
             Box(
                 modifier = Modifier
                     .size(40.dp)
-                    .background(skill.accent.copy(alpha = 0.15f), RoundedCornerShape(12.dp)),
+                    .background(accent.copy(alpha = 0.15f), RoundedCornerShape(12.dp)),
                 contentAlignment = Alignment.Center
             ) {
-                Text(text = skill.icon, color = skill.accent, fontSize = 17.sp)
+                Text(text = skill.icon, color = accent, fontSize = 17.sp)
             }
             Column(modifier = Modifier.weight(1f)) {
-                Text(text = skill.name, color = PrismText, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    text = "${skill.origin} · ${skill.desc}",
+                    text = skill.config.displayName.ifEmpty { skill.config.name },
+                    color = PrismText,
+                    fontSize = 13.5.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    text = "$sourceLabel · $desc",
                     color = PrismTextFaint,
                     fontSize = 11.sp
                 )
             }
-            StatusChip(if (enabled) "已启用" else "已停用", enabled)
-            PrismSwitch(checked = enabled, onCheckedChange = { enabled = it })
+            StatusChip(if (skill.config.isEnabled) "已启用" else "已停用", skill.config.isEnabled)
+            PrismSwitch(checked = skill.config.isEnabled, onCheckedChange = onToggle)
         }
     }
 }
+
+/**
+ * 按 [SkillSource] 映射 accent 色（UI 层职责，与 [SkillsViewModel.toUiModel] 的 icon 映射对齐）。
+ *
+ * internal 便于纯 JVM 单元测试（BR-testing-004）。
+ */
+internal fun sourceToAccent(source: String): Color = when (source) {
+    SkillSource.LOCAL_BUILTIN -> PrismCyan
+    SkillSource.LOCAL_USER -> PrismIndigo
+    SkillSource.REMOTE -> PrismMint
+    else -> PrismTextFaint
+}
+
+/**
+ * 按 [SkillSource] 映射展示标签。
+ *
+ * internal 便于纯 JVM 单元测试（BR-testing-004）。
+ */
+internal fun sourceToLabel(source: String): String = when (source) {
+    SkillSource.LOCAL_BUILTIN -> "内置"
+    SkillSource.LOCAL_USER -> "本地"
+    SkillSource.REMOTE -> "远程"
+    else -> "未知"
+}
+
+/**
+ * Skill 详情弹层（US-027，ADR-013 5.5）—— 展示 manifest 元数据 + 启停开关。
+ *
+ * **展示内容**：
+ * - 标题：displayName（fallback 到 slug name）
+ * - 副标题：来源标签 + 版本号
+ * - 描述（manifest.description，缺失时降级提示）
+ * - 指令正文（manifest.body，截断到 500 字符避免弹层过长）
+ * - 工具声明（manifest.tools，如有）
+ * - systemPrompt 片段（如有，截断到 200 字符）
+ * - 元数据：maxRounds / isInstalled / 时间戳
+ * - 启用/禁用开关（落库）
+ * - 执行记录占位（US-029 实现）
+ *
+ * **manifest==null 降级**：仅展示 config 信息 + "解析失败" 提示，仍允许启停。
+ */
+@Composable
+private fun SkillDetailSheet(
+    skill: SkillUiModel,
+    onToggle: (Boolean) -> Unit
+) {
+    val config = skill.config
+    val manifest = skill.manifest
+    val sourceLabel = sourceToLabel(config.source)
+    val versionText = manifest?.version?.let { "v$it" } ?: "v${config.version}"
+
+    PrismSheet(
+        title = config.displayName.ifEmpty { config.name },
+        subtitle = "$sourceLabel · $versionText"
+    ) {
+        // 描述
+        DetailSection("描述") {
+            Text(
+                text = manifest?.description ?: "解析失败（SKILL.md 缺失或格式错误）",
+                color = if (manifest != null) PrismTextDim else PrismDanger,
+                fontSize = 12.5.sp,
+                lineHeight = 18.sp
+            )
+        }
+        Spacer(Modifier.height(14.dp))
+
+        // 指令正文（截断到 500 字符，避免弹层过长）
+        if (manifest != null && manifest.body.isNotBlank()) {
+            DetailSection("指令") {
+                val body = if (manifest.body.length > BODY_PREVIEW_MAX_LEN) {
+                    manifest.body.take(BODY_PREVIEW_MAX_LEN) + "\n…（已截断，完整内容见 SKILL.md）"
+                } else {
+                    manifest.body
+                }
+                Text(
+                    text = body,
+                    color = PrismTextDim,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp
+                )
+            }
+            Spacer(Modifier.height(14.dp))
+        }
+
+        // 工具声明（如有）
+        if (manifest?.tools?.isNotEmpty() == true) {
+            DetailSection("工具 · ${manifest.tools.size}") {
+                manifest.tools.forEach { tool ->
+                    Text(
+                        text = "• ${tool.name}：${tool.description}",
+                        color = PrismTextDim,
+                        fontSize = 12.sp,
+                        lineHeight = 17.sp,
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+        }
+
+        // systemPrompt 片段（如有，截断到 200 字符）
+        if (manifest?.systemPrompt?.isNotBlank() == true) {
+            DetailSection("System Prompt") {
+                val prompt = if (manifest.systemPrompt.length > PROMPT_PREVIEW_MAX_LEN) {
+                    manifest.systemPrompt.take(PROMPT_PREVIEW_MAX_LEN) + "…"
+                } else {
+                    manifest.systemPrompt
+                }
+                Text(
+                    text = prompt,
+                    color = PrismTextDim,
+                    fontSize = 11.5.sp,
+                    lineHeight = 16.sp
+                )
+            }
+            Spacer(Modifier.height(14.dp))
+        }
+
+        // 元数据
+        DetailSection("元数据") {
+            MetadataRow("最大轮次", manifest?.maxRounds?.toString() ?: "10（默认）")
+            MetadataRow("安装状态", if (config.isInstalled) "已安装" else "未安装")
+            MetadataRow("创建时间", formatTimestamp(config.createdAt))
+            MetadataRow("更新时间", formatTimestamp(config.updatedAt))
+            if (config.dependsOnMcpServers.isNotEmpty()) {
+                MetadataRow("依赖 MCP", config.dependsOnMcpServers.joinToString(", "))
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+
+        // 启用/禁用开关
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(text = "启用该 Skill", color = PrismText, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            PrismSwitch(checked = config.isEnabled, onCheckedChange = onToggle)
+        }
+        Spacer(Modifier.height(12.dp))
+
+        // 执行记录占位（US-029 实现）
+        DetailSection("执行记录") {
+            Text(
+                text = "US-029 将展示最近 10 次执行记录",
+                color = PrismTextFaint,
+                fontSize = 11.sp
+            )
+        }
+    }
+}
+
+/** 详情区块标签。 */
+@Composable
+private fun DetailSection(label: String, content: @Composable () -> Unit) {
+    Text(
+        text = label,
+        color = PrismTextDim,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 0.4.sp,
+        modifier = Modifier.padding(bottom = 6.dp)
+    )
+    content()
+}
+
+/** 元数据键值行。 */
+@Composable
+private fun MetadataRow(key: String, value: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(text = key, color = PrismTextFaint, fontSize = 11.5.sp)
+        Text(text = value, color = PrismTextDim, fontSize = 11.5.sp)
+    }
+}
+
+/**
+ * 时间戳格式化（毫秒 → yyyy-MM-dd HH:mm）。
+ *
+ * internal 便于纯 JVM 单元测试（BR-testing-004）。
+ * 边界：ms <= 0 返回占位符 "—"（未设置时间戳的 SkillConfig）。
+ */
+internal fun formatTimestamp(ms: Long): String {
+    if (ms <= 0) return "—"
+    val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.getDefault())
+    return sdf.format(java.util.Date(ms))
+}
+
+/** Skill 详情弹层 body 预览最大长度（字符）。 */
+private const val BODY_PREVIEW_MAX_LEN = 500
+
+/** Skill 详情弹层 systemPrompt 预览最大长度（字符）。 */
+private const val PROMPT_PREVIEW_MAX_LEN = 200
 
 /** 状态徽章。 */
 @Composable
