@@ -506,8 +506,8 @@
         "Typecheck passes"
       ],
       "priority": 33,
-      "passes": false,
-      "notes": "M5 L2 跨会话。ADR-015 5.4。复用 M3 Embedder + US-030 MemoryRepository。防污染=核心设计约束。P2 跨模块。"
+      "passes": true,
+      "notes": "M5 L2 跨会话。ADR-015 5.4。复用 M3 Embedder + US-030 MemoryRepository。防污染=核心设计约束。P2 跨模块。2026-08-11 验收通过（TKN-M5-PHASEC-ACCEPTANCE-001）：6/6 AC 通过，58 专项测试 + 1105 全量回归 0 失败。"
     },
     {
       "id": "US-034",

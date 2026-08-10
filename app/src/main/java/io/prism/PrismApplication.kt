@@ -36,6 +36,7 @@ import io.prism.data.MemoryRepository
 import io.prism.data.SkillRepository
 import io.prism.data.UserProfileRepository
 import io.prism.memory.ConversationSummarizer
+import io.prism.memory.CrossSessionMemoryManager
 import io.prism.memory.MemoryConfigRepository
 import io.prism.memory.SlidingWindowMemoryManager
 import io.prism.skill.SkillRegistry
@@ -386,6 +387,22 @@ class PrismApplication : Application() {
      */
     val slidingWindowMemoryManager: SlidingWindowMemoryManager by lazy {
         SlidingWindowMemoryManager(conversationSummarizer, memoryConfigRepository)
+    }
+
+    /**
+     * L2 跨会话记忆管理器（US-033，ADR-015 5.4）—— 向量化存储 + top-k 检索 + 防污染。
+     *
+     * 依赖 [embedder]（M3 OnnxEmbedder，384 维向量）+ [memoryRepository]（Phase A 已实现）。
+     *
+     * **职责**：
+     * - 会话结束时 [io.prism.memory.CrossSessionMemoryManager.saveSessionMemories] 向量化存储关键对话
+     * - 新会话开始时 [io.prism.memory.CrossSessionMemoryManager.retrieveRelevantMemories] top-k 检索相关历史
+     * - [io.prism.memory.CrossSessionMemoryManager.formatMemoriesAsContext] 格式化为 systemPrompt section
+     *
+     * 由 [io.prism.ui.chat.ConversationViewModel]（US-035）在会话结束时和首条消息时调用。
+     */
+    val crossSessionMemoryManager: CrossSessionMemoryManager by lazy {
+        CrossSessionMemoryManager(embedder, memoryRepository)
     }
 
     override fun onCreate() {
