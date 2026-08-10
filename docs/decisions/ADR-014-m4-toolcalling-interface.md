@@ -5,13 +5,13 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | Proposed |
+| 状态 | Accepted |
 | 日期 | 2026-08-09 |
 | 决策者 | 主 Agent（基于 tech-selection-researcher 选型报告 TKN-M4-TOOLCALLING-RESEARCH-001 + code-archaeologist 考古报告 TKN-M4-SKILLS-ARCH-001 + 用户决策「策略 C 引入 tool_calling」） |
 | 关联文档 | [ADR-013](ADR-013-m4-skills-system-architecture.md) / [ADR-004](ADR-004-prism-provider-streaming.md) / [ADR-005](ADR-005-mcp-client-integration.md) / [ADR-006](ADR-006-filesystem-mcp-server.md) / [PRD.md](../PRD.md) US-004 / [prd.json](../../prd.json) US-023~US-025 |
 | 上游调研 | [M4 tool_calling 技术选型对比分析报告](../reports/2026-08-09-m4-toolcalling-tech-selection.md) |
 | 风险等级 | P2 跨模块（改动 ChatStreamProvider 接口 + StreamEvent sealed + OpenAICompatibleProvider 实现 + ConversationViewModel 工具执行回路） |
-| 审查闭环 | 待 guardrail-enforcer + ac-verifier |
+| 审查闭环 | Phase C~D 全部通过 guardrail-enforcer + ac-verifier（US-023~US-026，AC 全部通过，912 回归 0 失败）。2026-08-10 转 Accepted。 |
 
 ## 背景（Context）
 

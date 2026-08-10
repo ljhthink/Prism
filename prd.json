@@ -315,8 +315,8 @@
         "Typecheck passes"
       ],
       "priority": 21,
-      "passes": false,
-      "notes": "M4 解析层。ADR-013 5.2。charleskorn/kaml 已归档，改用 snakeyaml-engine-kmp（活跃维护，KMP 原生）。tech-selection-researcher TKN-M4-TOOLCALLING-RESEARCH-001 选型。P2 跨模块（新依赖）。"
+      "passes": true,
+      "notes": "M4 解析层。ADR-013 5.2。charleskorn/kaml 已归档，改用 snakeyaml-engine-kmp（活跃维护，KMP 原生）。tech-selection-researcher TKN-M4-TOOLCALLING-RESEARCH-001 选型。P2 跨模块（新依赖）。Phase B 验收通过（TKN-M4-PHASEB-ACCEPTANCE-002，guardrail 三轮通过）。"
     },
     {
       "id": "US-022",
@@ -331,8 +331,8 @@
         "Typecheck passes"
       ],
       "priority": 22,
-      "passes": false,
-      "notes": "M4 注册层。ADR-013 5.3/5.8。3 纯 prompt Skill + 2 工具调用 Skill 验证两条路径。考古报告集成点 1 确认 by lazy DI 模式。P2 跨模块。"
+      "passes": true,
+      "notes": "M4 注册层。ADR-013 5.3/5.8。3 纯 prompt Skill + 2 工具调用 Skill 验证两条路径。考古报告集成点 1 确认 by lazy DI 模式。P2 跨模块。Phase B 验收通过（TKN-M4-PHASEB-ACCEPTANCE-002，guardrail 三轮通过）。"
     },
     {
       "id": "US-023",
@@ -412,8 +412,8 @@
         "Typecheck passes"
       ],
       "priority": 27,
-      "passes": false,
-      "notes": "M4 UI 层。ADR-013 5.5。考古报告集成点 3 R-1 静态硬编码须从零重建。无需新增路由（CAPABILITIES Tab 内 CapSegment.SKILLS）。P1 常规。"
+      "passes": true,
+      "notes": "M4 UI 层。ADR-013 5.5。考古报告集成点 3 R-1 静态硬编码须从零重建。无需新增路由（CAPABILITIES Tab 内 CapSegment.SKILLS）。P1 常规。Phase E 验收通过（TKN-M4-PHASEE-US027-ACCEPTANCE-001，guardrail 两轮通过）。"
     },
     {
       "id": "US-028",
@@ -428,8 +428,8 @@
         "Typecheck passes"
       ],
       "priority": 28,
-      "passes": false,
-      "notes": "M4 远程层。ADR-013 5.6 用户决策标准校验。不要求签名验证（零后端体验差）。BR-security-003 CRLF 防御。P2 跨模块。"
+      "passes": true,
+      "notes": "M4 远程层。ADR-013 5.6 用户决策标准校验。不要求签名验证（零后端体验差）。BR-security-003 CRLF 防御。P2 跨模块。Phase E 验收通过（TKN-M4-PHASEE-US028-ACCEPTANCE-001，guardrail 两轮通过，6/6 AC，39 MockEngine 集成测试）。"
     },
     {
       "id": "US-029",
@@ -444,8 +444,8 @@
         "Typecheck passes"
       ],
       "priority": 29,
-      "passes": false,
-      "notes": "M4 可观测层。ADR-013 5.7。执行记录持久化到 ObjectBox 跨会话审计。P1 常规。"
+      "passes": true,
+      "notes": "M4 可观测层。ADR-013 5.7。执行记录持久化到 ObjectBox 跨会话审计。P1 常规。Phase E 验收通过（TKN-M4-PHASEE-US029-ACCEPTANCE-001，guardrail 两轮通过，6/6 AC，39 US-029 专项测试 + 10 边缘场景，912 回归 0 失败）。已知 GAP（M-3）：生产路径 ConversationViewModel 未传入 skillConfigId/skillName，端到端验证待 Phase D 接入。"
     }
   ]
 }

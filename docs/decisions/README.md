@@ -18,8 +18,8 @@
 | ADR-010 | M3 向量检索（US-017） | Accepted | 2026-08-07 | [ADR-010-m3-vector-retrieval.md](ADR-010-m3-vector-retrieval.md) |
 | ADR-011 | M3 知识库管理 UI 架构（US-018） | Accepted | 2026-08-07 | [ADR-011-m3-knowledgebase-ui.md](ADR-011-m3-knowledgebase-ui.md) |
 | ADR-012 | M3 RAG 对话集成架构（US-019） | Accepted | 2026-08-07 | [ADR-012-m3-rag-conversation-integration.md](ADR-012-m3-rag-conversation-integration.md) |
-| ADR-013 | M4 Skills 系统架构（US-004） | Proposed | 2026-08-09 | [ADR-013-m4-skills-system-architecture.md](ADR-013-m4-skills-system-architecture.md) |
-| ADR-014 | M4 LLM tool_calling 接口扩展（US-023~US-025） | Proposed | 2026-08-09 | [ADR-014-m4-toolcalling-interface.md](ADR-014-m4-toolcalling-interface.md) |
+| ADR-013 | M4 Skills 系统架构（US-004） | Accepted | 2026-08-09 | [ADR-013-m4-skills-system-architecture.md](ADR-013-m4-skills-system-architecture.md) |
+| ADR-014 | M4 LLM tool_calling 接口扩展（US-023~US-025） | Accepted | 2026-08-09 | [ADR-014-m4-toolcalling-interface.md](ADR-014-m4-toolcalling-interface.md) |
 
 ## ADR 生命周期
 

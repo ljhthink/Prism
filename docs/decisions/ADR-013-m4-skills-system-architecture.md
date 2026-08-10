@@ -5,13 +5,13 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | Proposed |
+| 状态 | Accepted |
 | 日期 | 2026-08-09 |
 | 决策者 | 主 Agent（基于 code-archaeologist 考古报告 TKN-M4-SKILLS-ARCH-001 + tech-selection-researcher 选型报告 TKN-M4-TOOLCALLING-RESEARCH-001 + web-access 调研 + 用户决策「策略 C 引入 tool_calling」+「标准校验」） |
 | 关联文档 | [ADR-001](ADR-001-prism-tech-stack.md) / [ADR-005](ADR-005-mcp-client-integration.md) / [ADR-006](ADR-006-filesystem-mcp-server.md) / [ADR-012](ADR-012-m3-rag-conversation-integration.md) / [ADR-014](ADR-014-m4-toolcalling-interface.md) / [PRD.md](../PRD.md) US-004 / [prd.json](../../prd.json) US-020~US-029 |
 | 上游调研 | [M4 Skills 集成点源码考古](../reports/2026-08-09-m4-skills-archaeology.md) / [M4 tool_calling 技术选型](../reports/2026-08-09-m4-toolcalling-tech-selection.md) / [OpenClaw 考古](../reports/2026-08-02-openclaw-archaeology.md) §2.1 |
 | 风险等级 | P3 重大（引入新依赖 snakeyaml-engine-kmp + 扩展 ChatStreamProvider 接口 + 新增工具执行回路 + 核心对话流改造） |
-| 审查闭环 | 待 guardrail-enforcer + ac-verifier |
+| 审查闭环 | Phase A~E 全部通过 guardrail-enforcer + ac-verifier（US-020~US-029，10/10 AC，912 回归 0 失败）。2026-08-10 转 Accepted。 |
 
 ## 背景（Context）
 
