@@ -1028,6 +1028,8 @@ private class FakeSkillExecutor(
         mcpServers: List<McpServerConfig>,
         maxRounds: Int,
         idGenerator: () -> Long,
+        skillConfigId: Long?,
+        skillName: String?,
         onEvent: (StreamEvent) -> Unit
     ): List<ChatMessage> {
         executeLoopCalled = true

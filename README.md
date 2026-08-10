@@ -162,6 +162,19 @@
   - [2026-08-09-m4-phaseD-guardrail.md](docs/reports/2026-08-09-m4-phaseD-guardrail.md) —— M4 Phase D 安全与质量审计 round 1（guardrail-enforcer，通过，3 中危 M-1/M-2/M-3）
   - [2026-08-09-m4-phaseD-guardrail-round2.md](docs/reports/2026-08-09-m4-phaseD-guardrail-round2.md) —— M4 Phase D 安全与质量审计 round 2（guardrail-enforcer，通过，M-1/M-3 修复有效）
   - [2026-08-09-m4-phaseD-acceptance.md](docs/reports/2026-08-09-m4-phaseD-acceptance.md) —— M4 Phase D 验收测试（ac-verifier，通过，7/7 AC，M-2 异常路径补 3 测试，757 回归 0 失败）
+  - [2026-08-09-m4-phaseE-archaeology.md](docs/reports/2026-08-09-m4-phaseE-archaeology.md) —— M4 Phase E 集成模式源码考古（code-archaeologist，SkillsViewModel + CapabilitiesScreen 集成点）
+  - [2026-08-09-m4-phaseE-us027-impact-selfcheck.md](docs/reports/2026-08-09-m4-phaseE-us027-impact-selfcheck.md) —— M4 Phase E US-027 变更影响自检（主 Agent）
+  - [2026-08-09-m4-phaseE-us027-guardrail.md](docs/reports/2026-08-09-m4-phaseE-us027-guardrail.md) —— M4 Phase E US-027 安全与质量审计 round 1（guardrail-enforcer）
+  - [2026-08-09-m4-phaseE-us027-guardrail-round2.md](docs/reports/2026-08-09-m4-phaseE-us027-guardrail-round2.md) —— M4 Phase E US-027 安全与质量审计 round 2（guardrail-enforcer）
+  - [2026-08-09-m4-phaseE-us027-acceptance.md](docs/reports/2026-08-09-m4-phaseE-us027-acceptance.md) —— M4 Phase E US-027 验收测试（ac-verifier）
+  - [2026-08-09-m4-phaseE-us028-impact-selfcheck.md](docs/reports/2026-08-09-m4-phaseE-us028-impact-selfcheck.md) —— M4 Phase E US-028 变更影响自检（主 Agent）
+  - [2026-08-09-m4-phaseE-us028-guardrail.md](docs/reports/2026-08-09-m4-phaseE-us028-guardrail.md) —— M4 Phase E US-028 安全与质量审计 round 1（guardrail-enforcer，10 项问题 P1×1/P2×3/P3×6）
+  - [2026-08-09-m4-phaseE-us028-guardrail-r2.md](docs/reports/2026-08-09-m4-phaseE-us028-guardrail-r2.md) —— M4 Phase E US-028 安全与质量审计 round 2（guardrail-enforcer，通过，P1-01 修复 + P2-01/02/03 修复）
+  - [2026-08-09-m4-phaseE-us028-acceptance.md](docs/reports/2026-08-09-m4-phaseE-us028-acceptance.md) —— M4 Phase E US-028 验收测试（ac-verifier，通过，6/6 AC，39 MockEngine 集成测试 + 42 纯函数，862 回归 0 失败）
+  - [2026-08-10-m4-phaseE-us029-impact-selfcheck.md](docs/reports/2026-08-10-m4-phaseE-us029-impact-selfcheck.md) —— M4 Phase E US-029 变更影响自检（主 Agent）
+  - [2026-08-10-m4-phaseE-us029-guardrail.md](docs/reports/2026-08-10-m4-phaseE-us029-guardrail.md) —— M4 Phase E US-029 安全与质量审计 round 1（guardrail-enforcer，有条件通过，M-1 须修复）
+  - [2026-08-10-m4-phaseE-us029-guardrail-r2.md](docs/reports/2026-08-10-m4-phaseE-us029-guardrail-r2.md) —— M4 Phase E US-029 安全与质量审计 round 2（guardrail-enforcer，通过，M-1 修复有效）
+  - [2026-08-10-m4-phaseE-us029-acceptance.md](docs/reports/2026-08-10-m4-phaseE-us029-acceptance.md) —— M4 Phase E US-029 验收测试（ac-verifier，通过，6/6 AC，39 US-029 专项测试 + 10 边缘场景，912 回归 0 失败）
   - [性能基线](docs/reports/perf/) —— 性能基线报告目录
     - [2026-08-02-us002-objectbox-crud-baseline.md](docs/reports/perf/2026-08-02-us002-objectbox-crud-baseline.md) —— US-002 ObjectBox CRUD 性能基线
     - [2026-08-02-us003-apikey-baseline.md](docs/reports/perf/2026-08-02-us003-apikey-baseline.md) —— US-003 API Key 加密存储性能基线

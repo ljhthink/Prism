@@ -97,6 +97,9 @@ fun CapabilitiesScreen(
     val selectedServer by viewModel.selectedServer.collectAsState()
     val skills by skillsViewModel.skills.collectAsState()
     val selectedSkill by skillsViewModel.selectedSkill.collectAsState()
+    val executionRecords by skillsViewModel.executionRecords.collectAsState()
+    val installState by skillsViewModel.installState.collectAsState()
+    var showInstallSheet by remember { mutableStateOf(false) }
 
     Box {
         LazyColumn(
@@ -156,7 +159,11 @@ fun CapabilitiesScreen(
                     SkillsPanel(
                         skills = skills,
                         onSkillClick = { skillsViewModel.selectSkill(it) },
-                        onToggle = { id, enabled -> skillsViewModel.setSkillEnabled(id, enabled) }
+                        onToggle = { id, enabled -> skillsViewModel.setSkillEnabled(id, enabled) },
+                        onInstallClick = {
+                            skillsViewModel.resetInstallState()
+                            showInstallSheet = true
+                        }
                     )
                 }
             }
@@ -176,14 +183,36 @@ fun CapabilitiesScreen(
             selectedServer?.let { McpConfigSheet(it, viewModel) }
         }
 
-        // Skill 详情弹层（US-027，ADR-013 5.5）—— 展示 manifest 元数据 + 启停开关
+        // Skill 详情弹层（US-027 / US-029，ADR-013 5.5 / 5.7）—— 展示 manifest 元数据 + 启停开关 + 最近 10 次执行记录
         PrismSheetHost(visible = selectedSkill != null, onDismiss = { skillsViewModel.selectSkill(null) }) {
             selectedSkill?.let {
                 SkillDetailSheet(
                     skill = it,
+                    executionRecords = executionRecords,
                     onToggle = { enabled -> skillsViewModel.setSkillEnabled(it.config.id, enabled) }
                 )
             }
+        }
+
+        // Skill 远程安装弹层（US-028，ADR-013 5.6）
+        PrismSheetHost(
+            visible = showInstallSheet,
+            onDismiss = {
+                // 安装进行中不允许 dismiss（防误触中断下载）
+                if (installState !is SkillsViewModel.InstallState.Installing) {
+                    showInstallSheet = false
+                    skillsViewModel.resetInstallState()
+                }
+            }
+        ) {
+            SkillInstallSheet(
+                state = installState,
+                onInstall = { url -> skillsViewModel.installFromUrl(url) },
+                onDismiss = {
+                    showInstallSheet = false
+                    skillsViewModel.resetInstallState()
+                }
+            )
         }
     }
 }
@@ -583,23 +612,25 @@ private fun ValidationError(text: String) {
 }
 
 /**
- * Skills 面板（US-027，ADR-013 5.5）—— 从 [SkillsViewModel.skills] 取动态数据。
+ * Skills 面板（US-027 / US-028，ADR-013 5.5 / 5.6）—— 从 [SkillsViewModel.skills] 取动态数据。
  *
  * - 列表为空时展示空态占位（内置 Skill 扫描失败或无用户自建/远程 Skill 时）
  * - 计数随实际 Skill 数量动态变化（修复 R-1：原硬编码 "已安装 · 5"）
  * - 点击 Skill 行打开详情弹层
  * - 启用/禁用开关落库（经 [SkillsViewModel.setSkillEnabled]）
+ * - US-028："+ 安装" action 可点击，触发远程安装弹层
  */
 @Composable
 private fun SkillsPanel(
     skills: List<SkillUiModel>,
     onSkillClick: (SkillUiModel) -> Unit,
-    onToggle: (Long, Boolean) -> Unit
+    onToggle: (Long, Boolean) -> Unit,
+    onInstallClick: () -> Unit
 ) {
     Column {
-        SectionHeader("已安装 · ${skills.size}", "+ 安装")
+        SectionHeader("已安装 · ${skills.size}", "+ 安装", onActionClick = onInstallClick)
         if (skills.isEmpty()) {
-            EmptySection("暂无 Skill，启动时自动扫描内置预设；远程安装请点击右上角 +")
+            EmptySection("暂无 Skill，启动时自动扫描内置预设；点击右上角 + 从 URL 安装")
         }
         skills.forEach { skill ->
             SkillRow(
@@ -694,7 +725,7 @@ internal fun sourceToLabel(source: String): String = when (source) {
 }
 
 /**
- * Skill 详情弹层（US-027，ADR-013 5.5）—— 展示 manifest 元数据 + 启停开关。
+ * Skill 详情弹层（US-027 / US-029，ADR-013 5.5 / 5.7）—— 展示 manifest 元数据 + 启停开关 + 执行记录。
  *
  * **展示内容**：
  * - 标题：displayName（fallback 到 slug name）
@@ -705,13 +736,18 @@ internal fun sourceToLabel(source: String): String = when (source) {
  * - systemPrompt 片段（如有，截断到 200 字符）
  * - 元数据：maxRounds / isInstalled / 时间戳
  * - 启用/禁用开关（落库）
- * - 执行记录占位（US-029 实现）
+ * - 执行记录（US-029）：最近 10 次，每条含开始时间 / 耗时 / 状态 / 可展开工具调用链
  *
  * **manifest==null 降级**：仅展示 config 信息 + "解析失败" 提示，仍允许启停。
+ *
+ * @param skill 当前选中的 Skill UI 模型
+ * @param executionRecords 该 Skill 的最近 10 次执行记录（按 startedAt 降序，来自 [SkillsViewModel.executionRecords]）
+ * @param onToggle 启用/禁用回调（落库）
  */
 @Composable
 private fun SkillDetailSheet(
     skill: SkillUiModel,
+    executionRecords: List<io.prism.data.SkillExecutionRecord>,
     onToggle: (Boolean) -> Unit
 ) {
     val config = skill.config
@@ -803,17 +839,214 @@ private fun SkillDetailSheet(
             Text(text = "启用该 Skill", color = PrismText, fontSize = 14.sp, modifier = Modifier.weight(1f))
             PrismSwitch(checked = config.isEnabled, onCheckedChange = onToggle)
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(16.dp))
 
-        // 执行记录占位（US-029 实现）
-        DetailSection("执行记录") {
+        // 执行记录（US-029，ADR-013 5.7）—— 最近 10 次 + 可展开工具调用链
+        DetailSection("执行记录 · ${executionRecords.size}") {
+            if (executionRecords.isEmpty()) {
+                Text(
+                    text = "暂无执行记录（启用该 Skill 后，对话中触发工具调用会自动记录）",
+                    color = PrismTextFaint,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp
+                )
+            } else {
+                executionRecords.forEach { record ->
+                    ExecutionRecordItem(record)
+                    Spacer(Modifier.height(8.dp))
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 单条执行记录项（US-029，ADR-013 5.7）。
+ *
+ * **展示**：
+ * - 第一行：状态徽章 + 开始时间 + 耗时 + 工具调用数
+ * - 第二行（可选）：错误信息（FAIL/CANCELLED 时展示，已脱敏）
+ * - 可展开工具调用链：点击展开后逐条展示 toolName / arguments / result / durationMs / status
+ *
+ * **状态色映射**（[executionStatusColor]）：
+ * - SUCCESS → PrismMint（薄荷绿）
+ * - FAIL → PrismDanger（警示红）
+ * - CANCELLED → PrismTextFaint（暗灰）
+ *
+ * @param record 单条执行记录
+ */
+@Composable
+private fun ExecutionRecordItem(record: io.prism.data.SkillExecutionRecord) {
+    var expanded by remember { mutableStateOf(false) }
+    val statusColor = executionStatusColor(record.status)
+    val statusLabel = executionStatusLabel(record.status)
+    val hasToolCalls = record.toolCalls.isNotEmpty()
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(PrismPanel)
+            .border(1.dp, PrismLine, RoundedCornerShape(10.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+    ) {
+        // 第一行：状态徽章 + 开始时间 + 耗时 + 工具调用数
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            StatusChip(text = statusLabel, active = record.status == io.prism.data.ExecutionStatus.SUCCESS)
             Text(
-                text = "US-029 将展示最近 10 次执行记录",
+                text = formatTimestamp(record.startedAt),
+                color = PrismTextDim,
+                fontSize = 11.sp,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = "${record.durationMs}ms",
                 color = PrismTextFaint,
                 fontSize = 11.sp
             )
+            if (hasToolCalls) {
+                Text(
+                    text = "· ${record.toolCalls.size} 工具",
+                    color = PrismTextFaint,
+                    fontSize = 11.sp
+                )
+            }
+        }
+        // 错误信息（FAIL/CANCELLED 时展示，已脱敏）
+        // 用局部 val 避免 smart cast 失败（errorMessage 是 var mutable property）
+        val errMsg = record.errorMessage
+        if (!errMsg.isNullOrBlank()) {
+            Text(
+                text = errMsg,
+                color = statusColor,
+                fontSize = 11.sp,
+                lineHeight = 15.sp,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+        }
+        // 可展开工具调用链
+        if (hasToolCalls) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { expanded = !expanded }
+                    ),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = if (expanded) "▼ 工具调用链" else "▶ 工具调用链",
+                    color = PrismIndigo,
+                    fontSize = 11.sp
+                )
+            }
+            AnimatedVisibility(visible = expanded) {
+                Column(modifier = Modifier.padding(top = 6.dp)) {
+                    record.toolCalls.forEachIndexed { index, tc ->
+                        ToolCallItem(tc, isLast = index == record.toolCalls.lastIndex)
+                    }
+                }
+            }
         }
     }
+}
+
+/**
+ * 单条工具调用项（[ExecutionRecordItem] 展开后的子项，US-029）。
+ *
+ * **展示**：toolName（含命名空间前缀） / 状态色点 / 耗时 / arguments（JSON，截断 200 字符）/ result（截断 200 字符）
+ *
+ * @param tc 工具调用记录
+ * @param isLast 是否最后一条（最后一条不渲染底部分隔）
+ */
+@Composable
+private fun ToolCallItem(tc: io.prism.data.ToolCallRecord, isLast: Boolean) {
+    val statusColor = executionStatusColor(tc.status)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = if (isLast) 0.dp else 8.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(statusColor)
+            )
+            Text(
+                text = tc.toolName,
+                color = PrismText,
+                fontSize = 11.5.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = "${tc.durationMs}ms",
+                color = PrismTextFaint,
+                fontSize = 10.5.sp
+            )
+        }
+        Text(
+            text = "args: ${tc.arguments.take(MAX_TOOL_ARG_PREVIEW_LEN)}",
+            color = PrismTextFaint,
+            fontSize = 10.5.sp,
+            lineHeight = 14.sp,
+            modifier = Modifier.padding(start = 12.dp, top = 2.dp)
+        )
+        Text(
+            text = "result: ${tc.result.take(MAX_TOOL_RESULT_PREVIEW_LEN)}",
+            color = PrismTextFaint,
+            fontSize = 10.5.sp,
+            lineHeight = 14.sp,
+            modifier = Modifier.padding(start = 12.dp, top = 2.dp)
+        )
+        if (!isLast) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 6.dp, start = 12.dp)
+                    .height(1.dp)
+                    .background(PrismLine)
+            )
+        }
+    }
+}
+
+/**
+ * 执行状态 → 展示色映射（US-029）。
+ *
+ * internal 便于纯 JVM 单元测试（BR-testing-004）。
+ */
+internal fun executionStatusColor(status: String): Color = when (status) {
+    io.prism.data.ExecutionStatus.SUCCESS -> PrismMint
+    io.prism.data.ExecutionStatus.FAIL -> PrismDanger
+    io.prism.data.ExecutionStatus.CANCELLED -> PrismTextFaint
+    else -> PrismTextFaint
+}
+
+/**
+ * 执行状态 → 中文标签映射（US-029）。
+ *
+ * internal 便于纯 JVM 单元测试（BR-testing-004）。
+ */
+internal fun executionStatusLabel(status: String): String = when (status) {
+    io.prism.data.ExecutionStatus.SUCCESS -> "成功"
+    io.prism.data.ExecutionStatus.FAIL -> "失败"
+    io.prism.data.ExecutionStatus.CANCELLED -> "已取消"
+    else -> "未知"
 }
 
 /** 详情区块标签。 */
@@ -828,6 +1061,100 @@ private fun DetailSection(label: String, content: @Composable () -> Unit) {
         modifier = Modifier.padding(bottom = 6.dp)
     )
     content()
+}
+
+/**
+ * Skill 远程安装弹层（US-028，ADR-013 5.6）。
+ *
+ * **交互流程**：
+ * 1. 用户输入 URL（必须 https，扩展名 .skill.md / .zip / .md）
+ * 2. 点击「安装」→ 触发 [onInstall] → state 变为 [InstallState.Installing]
+ * 3. 安装中：禁用输入框 + 按钮，展示 loading
+ * 4. 成功：展示 slug + 自动关闭弹层（[onDismiss]）
+ * 5. 失败：展示脱敏错误信息，允许重试
+ *
+ * **安全提示**：展示「标准校验」策略说明（https + 大小限制 + 沙箱解析 + zip slip 防护），
+ * 让用户了解安全边界。
+ *
+ * @param state 当前安装状态（来自 [SkillsViewModel.installState]）
+ * @param onInstall 安装回调，接收 URL
+ * @param onDismiss 关闭弹层回调（安装进行中由调用方阻止 dismiss）
+ */
+@Composable
+private fun SkillInstallSheet(
+    state: SkillsViewModel.InstallState,
+    onInstall: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var url by remember { mutableStateOf("") }
+    val isInstalling = state is SkillsViewModel.InstallState.Installing
+    // URL 输入校验：非空 + https 前缀（与 SkillDownloader.validateUrl 第一道防线对齐，UI 即时反馈）
+    val urlTrimmed = url.trim()
+    val urlValid = urlTrimmed.startsWith("https://") && urlTrimmed.length > 8
+    val canSubmit = urlValid && !isInstalling
+
+    PrismSheet(
+        title = "从 URL 安装 Skill",
+        subtitle = "标准校验 · https · ≤10MB · 沙箱解析"
+    ) {
+        PrismField(
+            label = "Skill URL",
+            value = url,
+            onValueChange = { if (!isInstalling) url = it },
+            placeholder = "https://example.com/skill.skill.md",
+            hint = "支持 .skill.md 单文件或 .zip 打包（含 SKILL.md）"
+        )
+        if (url.isNotEmpty() && !urlValid) {
+            ValidationError("URL 需以 https:// 开头")
+        }
+        Spacer(Modifier.height(12.dp))
+
+        // 安全策略说明（让用户了解校验边界）
+        Text(
+            text = "校验策略：仅 https · Content-Length ≤10MB · Content-Type 白名单 · " +
+                "ZIP slip 防护 · YAML 沙箱解析 · slug 格式校验 · 30s 超时",
+            color = PrismTextFaint,
+            fontSize = 10.5.sp,
+            lineHeight = 15.sp
+        )
+        Spacer(Modifier.height(16.dp))
+
+        // 状态展示
+        when (state) {
+            is SkillsViewModel.InstallState.Installing -> {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.5.dp)
+                    Text(text = "正在下载并校验…", color = PrismTextDim, fontSize = 12.sp)
+                }
+            }
+            is SkillsViewModel.InstallState.Success -> {
+                Text(text = "✓ 安装成功：${state.slug}", color = PrismMint, fontSize = 12.sp)
+            }
+            is SkillsViewModel.InstallState.Fail -> {
+                ValidationError(state.message)
+            }
+            is SkillsViewModel.InstallState.Idle -> { /* 无状态展示 */ }
+        }
+        if (state is SkillsViewModel.InstallState.Success || state is SkillsViewModel.InstallState.Fail) {
+            Spacer(Modifier.height(12.dp))
+        }
+
+        PrismButton(
+            text = if (isInstalling) "安装中…" else "安装 Skill",
+            enabled = canSubmit,
+            onClick = { onInstall(urlTrimmed) }
+        )
+        Spacer(Modifier.height(8.dp))
+        PrismButton(
+            text = if (state is SkillsViewModel.InstallState.Success) "完成" else "取消",
+            variant = PrismButtonVariant.Ghost,
+            enabled = !isInstalling,
+            onClick = onDismiss
+        )
+    }
 }
 
 /** 元数据键值行。 */
@@ -861,6 +1188,12 @@ private const val BODY_PREVIEW_MAX_LEN = 500
 
 /** Skill 详情弹层 systemPrompt 预览最大长度（字符）。 */
 private const val PROMPT_PREVIEW_MAX_LEN = 200
+
+/** 执行记录工具调用 arguments 预览最大长度（字符，US-029）。 */
+private const val MAX_TOOL_ARG_PREVIEW_LEN = 200
+
+/** 执行记录工具调用 result 预览最大长度（字符，US-029，与 SkillExecutor.MAX_RESULT_PREVIEW_LEN 对齐）。 */
+private const val MAX_TOOL_RESULT_PREVIEW_LEN = 200
 
 /** 状态徽章。 */
 @Composable
@@ -905,7 +1238,7 @@ private fun MemoryCard(title: String, desc: String, meta: String, accent: Color,
 
 /** 分组标题。 */
 @Composable
-private fun SectionHeader(title: String, action: String) {
+private fun SectionHeader(title: String, action: String, onActionClick: (() -> Unit)? = null) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -914,7 +1247,22 @@ private fun SectionHeader(title: String, action: String) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(text = title, color = PrismTextDim, fontSize = 12.sp, letterSpacing = 0.4.sp)
-        Text(text = action, color = PrismIndigo, fontSize = 11.sp)
+        if (onActionClick != null) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onActionClick
+                    )
+                    .padding(horizontal = 4.dp, vertical = 2.dp)
+            ) {
+                Text(text = action, color = PrismIndigo, fontSize = 11.sp)
+            }
+        } else {
+            Text(text = action, color = PrismIndigo, fontSize = 11.sp)
+        }
     }
 }
 

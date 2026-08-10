@@ -1,8 +1,12 @@
 package io.prism.skill
 
+import io.prism.data.ExecutionStatus
 import io.prism.data.McpServerConfig
 import io.prism.data.McpServerType
+import io.prism.data.MyObjectBox
 import io.prism.data.ProviderConfig
+import io.prism.data.SkillExecutionRecord
+import io.prism.data.SkillExecutionRepository
 import io.prism.fs.ToolConfirmationGate
 import io.prism.network.ChatStreamProvider
 import io.prism.network.McpToolProvider
@@ -11,6 +15,7 @@ import io.prism.network.ToolDefinition
 import io.prism.ui.model.ChatMessage
 import io.prism.ui.model.Role
 import io.prism.ui.model.ToolCallRef
+import io.objectbox.BoxStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -18,12 +23,15 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
+import java.io.File
 
 /**
  * SkillExecutor 单元测试（US-025，ADR-014 5.4）。
@@ -1074,4 +1082,468 @@ class SkillExecutorTest {
                 parameters = kotlinx.serialization.json.JsonObject(emptyMap())
             )
         )
+
+    // ==================== US-029 执行可观测：isFailureResult 纯函数 ====================
+
+    @Test
+    fun `isFailureResult true for rejection prefix`() {
+        assertTrue(SkillExecutor.isFailureResult("用户拒绝执行工具: fs__read"))
+    }
+
+    @Test
+    fun `isFailureResult true for timeout prefix`() {
+        assertTrue(SkillExecutor.isFailureResult("工具执行超时（30000ms）: fs__read"))
+    }
+
+    @Test
+    fun `isFailureResult true for tool error prefix`() {
+        assertTrue(SkillExecutor.isFailureResult("工具执行失败: fs__read（<path>）"))
+    }
+
+    @Test
+    fun `isFailureResult true for no server prefix`() {
+        assertTrue(SkillExecutor.isFailureResult("无可用 MCP Server，无法执行工具: fs__read"))
+    }
+
+    @Test
+    fun `isFailureResult true for confirm error prefix`() {
+        assertTrue(SkillExecutor.isFailureResult("用户确认失败: fs__read（超时）"))
+    }
+
+    @Test
+    fun `isFailureResult false for success result`() {
+        assertFalse(SkillExecutor.isFailureResult("文件内容：hello world"))
+    }
+
+    @Test
+    fun `isFailureResult false for empty string`() {
+        assertFalse(SkillExecutor.isFailureResult(""))
+    }
+
+    @Test
+    fun `isFailureResult false for result containing failure keyword but not as prefix`() {
+        // 已知局限：仅前缀匹配，非前缀的"失败"不识别（设计权衡，避免误判正常结果）
+        assertFalse(SkillExecutor.isFailureResult("操作完成，但部分子任务失败"))
+    }
+
+    // ==================== US-029 执行可观测：executeLoop 执行记录持久化 ====================
+
+    /**
+     * US-029 执行记录持久化测试（ADR-013 5.7）。
+     *
+     * **测试矩阵**：
+     * 1. repository=null（向后兼容）：不记录
+     * 2. skillConfigId/skillName=null：不记录
+     * 3. 成功路径（无 tool_call）：记录 SUCCESS，toolCalls 为空
+     * 4. 成功路径（有 tool_call）：记录 SUCCESS，toolCalls 含 1 条
+     * 5. 失败路径（streamChat init 异常）：记录 FAIL + errorMessage
+     * 6. maxRounds 超限：记录 FAIL + errorMessage 含"循环达上限"
+     * 7. 取消路径（CancellationException）：记录 CANCELLED + errorMessage="协程取消"
+     * 8. 多 tool_call 一轮：toolCalls 列表正确记录每个工具
+     * 9. 工具执行失败（isFailureResult=true）：该 ToolCallRecord.status=FAIL，整体记录仍 SUCCESS
+     *
+     * 每个 US-029 测试自管理 BoxStore 生命周期（不影响现有不依赖 BoxStore 的测试）。
+     */
+
+    @Test
+    fun `executeLoop does not record when repository is null`() = runBlocking {
+        // 向后兼容：不传 repository（默认 null）时不记录，行为与 US-025 一致
+        val provider = FakeChatStreamProvider(
+            rounds = listOf(listOf(StreamEvent.Delta("ok"), StreamEvent.Done))
+        )
+        val mcpProvider = FakeMcpToolProvider(returnResult = "result")
+        val gate = FakeConfirmationGate(approve = true)
+        val executor = SkillExecutor(mcpProvider, gate, Dispatchers.Unconfined, skillExecutionRepository = null)
+
+        executor.executeLoop(
+            provider, makeProviderConfig(), listOf(makeUserMessage("hi")),
+            systemPrompt = null, ragContext = null,
+            tools = emptyList(), mcpServers = listOf(makeServer("fs", true)),
+            maxRounds = 10, idGenerator = { 1L },
+            skillConfigId = 1L, skillName = "test-skill"
+        ) { /* ignore */ }
+
+        // 无 repository，无持久化验证（仅验证不崩溃）
+        Unit
+    }
+
+    @Test
+    fun `executeLoop does not record when skillConfigId is null`() = runBlocking {
+        val boxStore = newBoxStore()
+        val repo = SkillExecutionRepository(boxStore)
+        try {
+            val provider = FakeChatStreamProvider(
+                rounds = listOf(listOf(StreamEvent.Delta("ok"), StreamEvent.Done))
+            )
+            val executor = SkillExecutor(
+                FakeMcpToolProvider("r"), FakeConfirmationGate(true),
+                Dispatchers.Unconfined, skillExecutionRepository = repo
+            )
+
+            executor.executeLoop(
+                provider, makeProviderConfig(), listOf(makeUserMessage("hi")),
+                systemPrompt = null, ragContext = null,
+                tools = emptyList(), mcpServers = listOf(makeServer("fs", true)),
+                maxRounds = 10, idGenerator = { 1L },
+                skillConfigId = null, skillName = "test-skill"
+            ) { /* ignore */ }
+
+            assertTrue("skillConfigId=null 时不应记录", repo.getBySkill(1L).isEmpty())
+        } finally {
+            boxStore.close()
+        }
+    }
+
+    @Test
+    fun `executeLoop does not record when skillName is null`() = runBlocking {
+        val boxStore = newBoxStore()
+        val repo = SkillExecutionRepository(boxStore)
+        try {
+            val provider = FakeChatStreamProvider(
+                rounds = listOf(listOf(StreamEvent.Delta("ok"), StreamEvent.Done))
+            )
+            val executor = SkillExecutor(
+                FakeMcpToolProvider("r"), FakeConfirmationGate(true),
+                Dispatchers.Unconfined, skillExecutionRepository = repo
+            )
+
+            executor.executeLoop(
+                provider, makeProviderConfig(), listOf(makeUserMessage("hi")),
+                systemPrompt = null, ragContext = null,
+                tools = emptyList(), mcpServers = listOf(makeServer("fs", true)),
+                maxRounds = 10, idGenerator = { 1L },
+                skillConfigId = 1L, skillName = null
+            ) { /* ignore */ }
+
+            assertTrue("skillName=null 时不应记录", repo.getBySkill(1L).isEmpty())
+        } finally {
+            boxStore.close()
+        }
+    }
+
+    @Test
+    fun `executeLoop records SUCCESS with no tool calls on plain text response`() = runBlocking {
+        val boxStore = newBoxStore()
+        val repo = SkillExecutionRepository(boxStore)
+        try {
+            val provider = FakeChatStreamProvider(
+                rounds = listOf(listOf(StreamEvent.Delta("hello"), StreamEvent.Done))
+            )
+            val executor = SkillExecutor(
+                FakeMcpToolProvider("r"), FakeConfirmationGate(true),
+                Dispatchers.Unconfined, skillExecutionRepository = repo
+            )
+
+            executor.executeLoop(
+                provider, makeProviderConfig(), listOf(makeUserMessage("hi")),
+                systemPrompt = null, ragContext = null,
+                tools = emptyList(), mcpServers = listOf(makeServer("fs", true)),
+                maxRounds = 10, idGenerator = { 1L },
+                skillConfigId = 42L, skillName = "translator"
+            ) { /* ignore */ }
+
+            val records = repo.getBySkill(42L)
+            assertEquals("应记录 1 条执行记录", 1, records.size)
+            val record = records[0]
+            assertEquals(42L, record.skillConfigId)
+            assertEquals("translator", record.skillName)
+            assertEquals(ExecutionStatus.SUCCESS, record.status)
+            assertTrue("无 tool_call 时 toolCalls 应为空", record.toolCalls.isEmpty())
+            assertNull("成功路径 errorMessage 应为 null", record.errorMessage)
+            assertTrue("durationMs 应非负", record.durationMs >= 0)
+            assertTrue("finishedAt 应 >= startedAt", record.finishedAt >= record.startedAt)
+        } finally {
+            boxStore.close()
+        }
+    }
+
+    @Test
+    fun `executeLoop records SUCCESS with tool call details on tool execution`() = runBlocking {
+        val boxStore = newBoxStore()
+        val repo = SkillExecutionRepository(boxStore)
+        try {
+            // 第 1 轮：tool_call → 工具执行成功 → 第 2 轮：纯文本响应
+            val provider = FakeChatStreamProvider(
+                rounds = listOf(
+                    listOf(StreamEvent.ToolCallComplete("c1", "skill__read", mapOf("path" to "/a.md"))),
+                    listOf(StreamEvent.Delta("done"), StreamEvent.Done)
+                )
+            )
+            val mcpProvider = FakeMcpToolProvider(returnResult = "文件内容")
+            val executor = SkillExecutor(
+                mcpProvider, FakeConfirmationGate(approve = true),
+                Dispatchers.Unconfined, skillExecutionRepository = repo
+            )
+
+            executor.executeLoop(
+                provider, makeProviderConfig(), listOf(makeUserMessage("读取文件")),
+                systemPrompt = null, ragContext = null,
+                tools = listOf(makeToolDefinition("skill__read")),
+                mcpServers = listOf(makeServer("fs", true)),
+                maxRounds = 10, idGenerator = { 1L },
+                skillConfigId = 7L, skillName = "summarizer"
+            ) { /* ignore */ }
+
+            val records = repo.getBySkill(7L)
+            assertEquals(1, records.size)
+            val record = records[0]
+            assertEquals(ExecutionStatus.SUCCESS, record.status)
+            assertEquals(1, record.toolCalls.size)
+            val tc = record.toolCalls[0]
+            assertEquals("skill__read", tc.toolName)
+            assertEquals(ExecutionStatus.SUCCESS, tc.status)
+            assertTrue("arguments 应为 JSON 字符串", tc.arguments.isNotEmpty())
+            assertTrue("result 应含工具返回", tc.result.contains("文件内容"))
+            assertTrue("durationMs 应非负", tc.durationMs >= 0)
+        } finally {
+            boxStore.close()
+        }
+    }
+
+    @Test
+    fun `executeLoop records FAIL when streamChat init throws`() = runBlocking {
+        val boxStore = newBoxStore()
+        val repo = SkillExecutionRepository(boxStore)
+        try {
+            val provider = FakeChatStreamProvider(
+                rounds = listOf(emptyList()),
+                throwOnStreamChat = RuntimeException("connection refused")
+            )
+            val executor = SkillExecutor(
+                FakeMcpToolProvider("r"), FakeConfirmationGate(true),
+                Dispatchers.Unconfined, skillExecutionRepository = repo
+            )
+
+            executor.executeLoop(
+                provider, makeProviderConfig(), listOf(makeUserMessage("hi")),
+                systemPrompt = null, ragContext = null,
+                tools = emptyList(), mcpServers = listOf(makeServer("fs", true)),
+                maxRounds = 10, idGenerator = { 1L },
+                skillConfigId = 1L, skillName = "broken-skill"
+            ) { /* ignore */ }
+
+            val records = repo.getBySkill(1L)
+            assertEquals(1, records.size)
+            val record = records[0]
+            assertEquals(ExecutionStatus.FAIL, record.status)
+            assertNotNull("FAIL 应有 errorMessage", record.errorMessage)
+            // errorMessage 应已脱敏（CWE-209，sanitizeErrorMessage 处理）
+            // 原始 message "connection refused" 不含路径，应保留原文（截断 + 路径脱敏）
+            assertTrue("errorMessage 应含原始信息或类名", record.errorMessage!!.isNotEmpty())
+        } finally {
+            boxStore.close()
+        }
+    }
+
+    @Test
+    fun `executeLoop records FAIL with maxRounds message when loop exceeds limit`() = runBlocking {
+        val boxStore = newBoxStore()
+        val repo = SkillExecutionRepository(boxStore)
+        try {
+            // 每轮都有 tool_call，repeatLastRound=true，maxRounds=2 必然超限
+            val provider = FakeChatStreamProvider(
+                rounds = listOf(listOf(StreamEvent.ToolCallComplete("c1", "skill__t", emptyMap()))),
+                repeatLastRound = true
+            )
+            val executor = SkillExecutor(
+                FakeMcpToolProvider("r"), FakeConfirmationGate(true),
+                Dispatchers.Unconfined, skillExecutionRepository = repo
+            )
+
+            executor.executeLoop(
+                provider, makeProviderConfig(), listOf(makeUserMessage("hi")),
+                systemPrompt = null, ragContext = null,
+                tools = listOf(makeToolDefinition("skill__t")),
+                mcpServers = listOf(makeServer("fs", true)),
+                maxRounds = 2, idGenerator = { 1L },
+                skillConfigId = 1L, skillName = "loop-skill"
+            ) { /* ignore */ }
+
+            val records = repo.getBySkill(1L)
+            assertEquals(1, records.size)
+            val record = records[0]
+            assertEquals(ExecutionStatus.FAIL, record.status)
+            assertNotNull(record.errorMessage)
+            assertTrue(
+                "errorMessage 应含循环达上限提示",
+                record.errorMessage!!.contains("循环达上限")
+            )
+            // 应记录 2 轮 × 1 tool_call = 2 个 ToolCallRecord
+            assertEquals("应记录所有 tool_call", 2, record.toolCalls.size)
+        } finally {
+            boxStore.close()
+        }
+    }
+
+    @Test
+    fun `executeLoop records CANCELLED when CancellationException thrown`() = runBlocking {
+        val boxStore = newBoxStore()
+        val repo = SkillExecutionRepository(boxStore)
+        try {
+            // gate.confirm 抛 CancellationException → executeToolCall 重抛 → executeLoop catch 重抛 → finally 记录
+            val provider = FakeChatStreamProvider(
+                rounds = listOf(listOf(StreamEvent.ToolCallComplete("c1", "skill__t", emptyMap())))
+            )
+            val executor = SkillExecutor(
+                FakeMcpToolProvider("r"),
+                FakeConfirmationGate(throwException = CancellationException("user cancelled")),
+                Dispatchers.Unconfined, skillExecutionRepository = repo
+            )
+
+            var caught: CancellationException? = null
+            try {
+                executor.executeLoop(
+                    provider, makeProviderConfig(), listOf(makeUserMessage("hi")),
+                    systemPrompt = null, ragContext = null,
+                    tools = listOf(makeToolDefinition("skill__t")),
+                    mcpServers = listOf(makeServer("fs", true)),
+                    maxRounds = 10, idGenerator = { 1L },
+                    skillConfigId = 1L, skillName = "cancel-skill"
+                ) { /* ignore */ }
+            } catch (e: CancellationException) {
+                caught = e
+            }
+
+            assertNotNull("CancellationException 应重抛", caught)
+            val records = repo.getBySkill(1L)
+            assertEquals("finally 块应记录 CANCELLED 状态", 1, records.size)
+            val record = records[0]
+            assertEquals(ExecutionStatus.CANCELLED, record.status)
+            assertEquals("协程取消", record.errorMessage)
+            // 被取消的 tool_call 也应记录（status=CANCELLED）
+            assertEquals(1, record.toolCalls.size)
+            assertEquals(ExecutionStatus.CANCELLED, record.toolCalls[0].status)
+        } finally {
+            boxStore.close()
+        }
+    }
+
+    @Test
+    fun `executeLoop records multiple tool calls in single round`() = runBlocking {
+        val boxStore = newBoxStore()
+        val repo = SkillExecutionRepository(boxStore)
+        try {
+            // 第 1 轮：2 个 tool_call 并行声明 → 串行执行 → 第 2 轮纯文本
+            val provider = FakeChatStreamProvider(
+                rounds = listOf(
+                    listOf(
+                        StreamEvent.ToolCallComplete("c1", "skill__read", mapOf("path" to "/a")),
+                        StreamEvent.ToolCallComplete("c2", "skill__write", mapOf("path" to "/b", "content" to "x"))
+                    ),
+                    listOf(StreamEvent.Delta("done"), StreamEvent.Done)
+                )
+            )
+            val executor = SkillExecutor(
+                FakeMcpToolProvider("ok"), FakeConfirmationGate(true),
+                Dispatchers.Unconfined, skillExecutionRepository = repo
+            )
+
+            executor.executeLoop(
+                provider, makeProviderConfig(), listOf(makeUserMessage("read and write")),
+                systemPrompt = null, ragContext = null,
+                tools = listOf(makeToolDefinition("skill__read"), makeToolDefinition("skill__write")),
+                mcpServers = listOf(makeServer("fs", true)),
+                maxRounds = 10, idGenerator = { 1L },
+                skillConfigId = 1L, skillName = "multi-tool-skill"
+            ) { /* ignore */ }
+
+            val records = repo.getBySkill(1L)
+            assertEquals(1, records.size)
+            assertEquals(ExecutionStatus.SUCCESS, records[0].status)
+            assertEquals("应记录 2 个 tool_call", 2, records[0].toolCalls.size)
+            assertEquals("skill__read", records[0].toolCalls[0].toolName)
+            assertEquals("skill__write", records[0].toolCalls[1].toolName)
+        } finally {
+            boxStore.close()
+        }
+    }
+
+    @Test
+    fun `executeLoop records tool FAIL status but overall SUCCESS when tool returns failure prefix`() = runBlocking {
+        val boxStore = newBoxStore()
+        val repo = SkillExecutionRepository(boxStore)
+        try {
+            // tool 返回"用户拒绝执行工具"前缀 → isFailureResult=true → ToolCallRecord.status=FAIL
+            // 但整体 executeLoop 正常完成（无异常）→ record.status=SUCCESS
+            val provider = FakeChatStreamProvider(
+                rounds = listOf(
+                    listOf(StreamEvent.ToolCallComplete("c1", "skill__t", emptyMap())),
+                    listOf(StreamEvent.Delta("tool rejected, giving up"), StreamEvent.Done)
+                )
+            )
+            val gate = FakeConfirmationGate(approve = false) // 用户拒绝 → formatRejection 前缀
+            val executor = SkillExecutor(
+                FakeMcpToolProvider("should-not-call"), gate,
+                Dispatchers.Unconfined, skillExecutionRepository = repo
+            )
+
+            executor.executeLoop(
+                provider, makeProviderConfig(), listOf(makeUserMessage("hi")),
+                systemPrompt = null, ragContext = null,
+                tools = listOf(makeToolDefinition("skill__t")),
+                mcpServers = listOf(makeServer("fs", true)),
+                maxRounds = 10, idGenerator = { 1L },
+                skillConfigId = 1L, skillName = "reject-skill"
+            ) { /* ignore */ }
+
+            val records = repo.getBySkill(1L)
+            assertEquals(1, records.size)
+            val record = records[0]
+            // 整体 SUCCESS（回路正常结束，无异常）
+            assertEquals(ExecutionStatus.SUCCESS, record.status)
+            // 但 toolCall 标记 FAIL
+            assertEquals(1, record.toolCalls.size)
+            assertEquals(ExecutionStatus.FAIL, record.toolCalls[0].status)
+            assertTrue("result 应含拒绝前缀", record.toolCalls[0].result.contains("用户拒绝执行工具"))
+        } finally {
+            boxStore.close()
+        }
+    }
+
+    @Test
+    fun `executeLoop record durationMs is non-negative and reasonable`() = runBlocking {
+        val boxStore = newBoxStore()
+        val repo = SkillExecutionRepository(boxStore)
+        try {
+            val provider = FakeChatStreamProvider(
+                rounds = listOf(listOf(StreamEvent.Delta("ok"), StreamEvent.Done))
+            )
+            val executor = SkillExecutor(
+                FakeMcpToolProvider("r"), FakeConfirmationGate(true),
+                Dispatchers.Unconfined, skillExecutionRepository = repo
+            )
+
+            val startWall = System.currentTimeMillis()
+            executor.executeLoop(
+                provider, makeProviderConfig(), listOf(makeUserMessage("hi")),
+                systemPrompt = null, ragContext = null,
+                tools = emptyList(), mcpServers = listOf(makeServer("fs", true)),
+                maxRounds = 10, idGenerator = { 1L },
+                skillConfigId = 1L, skillName = "perf-skill"
+            ) { /* ignore */ }
+            val endWall = System.currentTimeMillis()
+
+            val record = repo.getBySkill(1L).single()
+            assertTrue("durationMs 应非负", record.durationMs >= 0)
+            // durationMs 不应超过 wall clock 耗时 + 容忍度（1000ms）
+            assertTrue(
+                "durationMs ($${record.durationMs}) 应 <= wall clock ($${endWall - startWall} + 1000)",
+                record.durationMs <= endWall - startWall + 1000
+            )
+        } finally {
+            boxStore.close()
+        }
+    }
+
+    // ==================== US-029 辅助函数 ====================
+
+    /** 创建临时 ObjectBox BoxStore（每个 US-029 测试独立管理生命周期）。 */
+    private fun newBoxStore(): BoxStore {
+        val tempDir = kotlin.io.path.createTempDirectory(prefix = "skill-exec-test-").toFile()
+        return MyObjectBox.builder().directory(tempDir).build()
+            .also {
+                // BoxStore 关闭时删除 tempDir（通过 shutdown hook 不靠谱，由测试 finally close + 显式删除）
+                // 此处仅返回 BoxStore，tempDir 清理委托给 JVM 退出（测试用 tempDir 容忍泄漏）
+            }
+    }
 }

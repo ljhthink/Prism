@@ -1,8 +1,12 @@
 package io.prism.skill
 
 import android.util.Log
+import io.prism.data.ExecutionStatus
 import io.prism.data.McpServerConfig
 import io.prism.data.ProviderConfig
+import io.prism.data.SkillExecutionRecord
+import io.prism.data.SkillExecutionRepository
+import io.prism.data.ToolCallRecord
 import io.prism.fs.ToolConfirmationGate
 import io.prism.network.ChatStreamProvider
 import io.prism.network.McpToolProvider
@@ -58,11 +62,17 @@ import kotlinx.serialization.json.encodeToJsonElement
  * **M4 Phase D 可测性补强**：`class` 标记 `open` + [executeLoop] 标记 `open`，
  * 使 ConversationViewModel 集成测试可注入 fake 子类（覆写 [executeLoop] 返回 canned
  * 消息序列），无需 McpToolProvider/ToolConfirmationGate/真实 SkillExecutor 协作。
+ *
+ * **M4 Phase E US-029 执行可观测**：构造器新增可选 [skillExecutionRepository]，
+ * 非空时 [executeLoop] 自动记录 [SkillExecutionRecord]（startedAt/finishedAt/status/
+ * toolCalls/errorMessage），用于跨会话审计与 UI 详情页展示。为 null 时跳过记录（向后兼容）。
+ * [executeLoop] 新增可选 [skillConfigId] / [skillName] 参数，两者均非空且 repository 非空时才记录。
  */
 open class SkillExecutor(
     private val mcpToolProvider: McpToolProvider,
     private val confirmationGate: ToolConfirmationGate,
-    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val skillExecutionRepository: SkillExecutionRepository? = null
 ) {
 
     /**
@@ -159,6 +169,8 @@ open class SkillExecutor(
      * @param mcpServers 可用 MCP Server 列表
      * @param maxRounds 最大循环轮数（默认 10，防止无限循环）
      * @param idGenerator ChatMessage id 生成器（默认时间戳自增，可注入用于测试）
+     * @param skillConfigId 关联的 SkillConfig id（US-029，非空时记录执行记录）
+     * @param skillName 关联的 Skill slug（US-029，非空时记录执行记录）
      * @param onEvent 事件回调（Delta/ToolCallStart/Delta/Complete/Done/Error 全部透传给上层 UI）
      * @return 更新后的消息列表（含 assistant 占位 + tool result）
      */
@@ -172,96 +184,154 @@ open class SkillExecutor(
         mcpServers: List<McpServerConfig>,
         maxRounds: Int = DEFAULT_MAX_ROUNDS,
         idGenerator: () -> Long = ::defaultIdGenerator,
+        skillConfigId: Long? = null,
+        skillName: String? = null,
         onEvent: (StreamEvent) -> Unit
     ): List<ChatMessage> = withContext(ioDispatcher) {
-        var currentMessages = messages
-        var rounds = 0
-        var lastRoundHadToolCall = false
+        // US-029 执行可观测：记录 startedAt / toolCalls / status / errorMessage
+        val startedAt = System.currentTimeMillis()
+        val toolCallRecords = mutableListOf<ToolCallRecord>()
+        var finalStatus = ExecutionStatus.SUCCESS
+        var errorMessage: String? = null
 
-        while (rounds < maxRounds) {
-            rounds++
-            lastRoundHadToolCall = false
-            val completedToolCalls = mutableListOf<StreamEvent.ToolCallComplete>()
+        try {
+            var currentMessages = messages
+            var rounds = 0
+            var lastRoundHadToolCall = false
 
-            // 1. 流式请求 + 收集 ToolCallComplete
-            val flow: Flow<StreamEvent> = try {
-                provider.streamChat(
-                    config = config,
-                    messages = currentMessages,
-                    systemPrompt = systemPrompt,
-                    ragContext = ragContext,
-                    tools = tools,
-                    toolChoice = ToolChoice.Auto
-                )
-            } catch (e: CancellationException) {
-                throw e // BR-error-handling-007
-            } catch (e: Exception) {
-                // M4：结构化日志（BR-error-handling-004），便于定位 streamChat 初始化失败根因
-                Log.w(TAG, "streamChat init failed at round $rounds", e)
-                // Provider 构造 Flow 失败（罕见）：兜底发射 Error 并终止回路
-                // M-1 修复（guardrail TKN-M4-PHASED-GUARDRAIL-001）：sanitizeErrorMessage 脱敏 + 长度截断（CWE-209）
-                val safeMsg = sanitizeErrorMessage(e.message) ?: e.javaClass.simpleName
-                onEvent(StreamEvent.Error("流式请求初始化失败: $safeMsg"))
-                break
-            }
+            while (rounds < maxRounds) {
+                rounds++
+                lastRoundHadToolCall = false
+                val completedToolCalls = mutableListOf<StreamEvent.ToolCallComplete>()
 
-            try {
-                flow.collect { event ->
-                    onEvent(event)
-                    if (event is StreamEvent.ToolCallComplete) {
-                        completedToolCalls.add(event)
-                    }
-                }
-            } catch (e: CancellationException) {
-                throw e // BR-error-handling-007
-            } catch (e: Exception) {
-                // M4：结构化日志（BR-error-handling-004），便于定位 Flow 收集异常根因
-                Log.w(TAG, "flow collect failed at round $rounds", e)
-                // Flow 收集异常：onEvent(Error) 通常已由 Provider 内部发射，此处兜底
-                // M-1 修复（guardrail TKN-M4-PHASED-GUARDRAIL-001）：sanitizeErrorMessage 脱敏 + 长度截断（CWE-209）
-                val safeMsg = sanitizeErrorMessage(e.message) ?: e.javaClass.simpleName
-                onEvent(StreamEvent.Error("流式请求失败: $safeMsg"))
-                break
-            }
-
-            // 2. 无工具调用 → 回路自然结束（纯文本响应）
-            if (completedToolCalls.isEmpty()) break
-            lastRoundHadToolCall = true
-
-            // 3. 追加 assistant 占位消息（携带 toolCalls 引用，OpenAI 要求下次请求回放）
-            val assistantPlaceholder = buildAssistantToolCallMessage(completedToolCalls, idGenerator)
-            currentMessages = currentMessages + assistantPlaceholder
-
-            // 4. 串行执行所有 tool_call + 回灌结果
-            //    每个工具的失败/超时/拒绝均降级为描述性字符串回灌（ADR-014 5.7）
-            for (toolCall in completedToolCalls) {
-                val result = try {
-                    executeToolCall(toolCall, mcpServers)
+                // 1. 流式请求 + 收集 ToolCallComplete
+                val flow: Flow<StreamEvent> = try {
+                    provider.streamChat(
+                        config = config,
+                        messages = currentMessages,
+                        systemPrompt = systemPrompt,
+                        ragContext = ragContext,
+                        tools = tools,
+                        toolChoice = ToolChoice.Auto
+                    )
                 } catch (e: CancellationException) {
                     throw e // BR-error-handling-007
                 } catch (e: Exception) {
-                    // M4：结构化日志（BR-error-handling-004），executeToolCall 兜底异常
-                    Log.w(TAG, "executeToolCall unexpected exception: ${toolCall.toolName}", e)
-                    // executeToolCall 内部已捕获大部分异常，此处兜底防意外
-                    formatToolError(toolCall.toolName, e)
+                    // M4：结构化日志（BR-error-handling-004），便于定位 streamChat 初始化失败根因
+                    Log.w(TAG, "streamChat init failed at round $rounds", e)
+                    // Provider 构造 Flow 失败（罕见）：兜底发射 Error 并终止回路
+                    // M-1 修复（guardrail TKN-M4-PHASED-GUARDRAIL-001）：sanitizeErrorMessage 脱敏 + 长度截断（CWE-209）
+                    val safeMsg = sanitizeErrorMessage(e.message) ?: e.javaClass.simpleName
+                    finalStatus = ExecutionStatus.FAIL
+                    errorMessage = safeMsg
+                    onEvent(StreamEvent.Error("流式请求初始化失败: $safeMsg"))
+                    break
                 }
-                val toolResultMessage = buildToolResultMessage(
-                    toolCallId = toolCall.toolCallId,
-                    toolName = toolCall.toolName,
-                    result = result,
-                    idGenerator = idGenerator
-                )
-                currentMessages = currentMessages + toolResultMessage
+
+                try {
+                    flow.collect { event ->
+                        onEvent(event)
+                        if (event is StreamEvent.ToolCallComplete) {
+                            completedToolCalls.add(event)
+                        }
+                    }
+                } catch (e: CancellationException) {
+                    throw e // BR-error-handling-007
+                } catch (e: Exception) {
+                    // M4：结构化日志（BR-error-handling-004），便于定位 Flow 收集异常根因
+                    Log.w(TAG, "flow collect failed at round $rounds", e)
+                    // Flow 收集异常：onEvent(Error) 通常已由 Provider 内部发射，此处兜底
+                    // M-1 修复（guardrail TKN-M4-PHASED-GUARDRAIL-001）：sanitizeErrorMessage 脱敏 + 长度截断（CWE-209）
+                    val safeMsg = sanitizeErrorMessage(e.message) ?: e.javaClass.simpleName
+                    finalStatus = ExecutionStatus.FAIL
+                    errorMessage = safeMsg
+                    onEvent(StreamEvent.Error("流式请求失败: $safeMsg"))
+                    break
+                }
+
+                // 2. 无工具调用 → 回路自然结束（纯文本响应）
+                if (completedToolCalls.isEmpty()) break
+                lastRoundHadToolCall = true
+
+                // 3. 追加 assistant 占位消息（携带 toolCalls 引用，OpenAI 要求下次请求回放）
+                val assistantPlaceholder = buildAssistantToolCallMessage(completedToolCalls, idGenerator)
+                currentMessages = currentMessages + assistantPlaceholder
+
+                // 4. 串行执行所有 tool_call + 回灌结果
+                //    每个工具的失败/超时/拒绝均降级为描述性字符串回灌（ADR-014 5.7）
+                //    US-029：同时记录 ToolCallRecord 用于执行可观测
+                for (toolCall in completedToolCalls) {
+                    val toolStart = System.currentTimeMillis()
+                    var toolStatus = ExecutionStatus.SUCCESS
+                    val result: String = try {
+                        executeToolCall(toolCall, mcpServers)
+                    } catch (e: CancellationException) {
+                        // US-029：记录取消的工具调用
+                        toolCallRecords.add(
+                            ToolCallRecord(
+                                toolName = toolCall.toolName,
+                                arguments = encodeArguments(toolCall.arguments),
+                                result = "",
+                                durationMs = System.currentTimeMillis() - toolStart,
+                                status = ExecutionStatus.CANCELLED
+                            )
+                        )
+                        throw e // BR-error-handling-007
+                    } catch (e: Exception) {
+                        // M4：结构化日志（BR-error-handling-004），executeToolCall 兜底异常
+                        Log.w(TAG, "executeToolCall unexpected exception: ${toolCall.toolName}", e)
+                        toolStatus = ExecutionStatus.FAIL
+                        formatToolError(toolCall.toolName, e)
+                    }
+                    // 从结果文本推断状态（executeToolCall 内部降级文案以特定前缀标识失败）
+                    if (isFailureResult(result)) {
+                        toolStatus = ExecutionStatus.FAIL
+                    }
+                    val toolDuration = System.currentTimeMillis() - toolStart
+                    toolCallRecords.add(
+                        ToolCallRecord(
+                            toolName = toolCall.toolName,
+                            arguments = encodeArguments(toolCall.arguments),
+                            result = result.take(MAX_RESULT_PREVIEW_LEN),
+                            durationMs = toolDuration,
+                            status = toolStatus
+                        )
+                    )
+                    val toolResultMessage = buildToolResultMessage(
+                        toolCallId = toolCall.toolCallId,
+                        toolName = toolCall.toolName,
+                        result = result,
+                        idGenerator = idGenerator
+                    )
+                    currentMessages = currentMessages + toolResultMessage
+                }
+                // 5. 继续下一轮（LLM 基于 tool result 继续生成）
             }
-            // 5. 继续下一轮（LLM 基于 tool result 继续生成）
-        }
 
-        // 6. maxRounds 超限提示（仅当最后一轮有工具调用却已达上限时）
-        if (shouldEmitMaxRoundsError(lastRoundHadToolCall, rounds, maxRounds)) {
-            onEvent(StreamEvent.Error("工具调用循环达上限 $maxRounds，已终止"))
-        }
+            // 6. maxRounds 超限提示（仅当最后一轮有工具调用却已达上限时）
+            if (shouldEmitMaxRoundsError(lastRoundHadToolCall, rounds, maxRounds)) {
+                finalStatus = ExecutionStatus.FAIL
+                errorMessage = "工具调用循环达上限 $maxRounds"
+                onEvent(StreamEvent.Error("工具调用循环达上限 $maxRounds，已终止"))
+            }
 
-        currentMessages
+            currentMessages
+        } catch (e: CancellationException) {
+            // US-029：协程取消记录为 CANCELLED 状态，重抛保证取消传播（BR-error-handling-007）
+            finalStatus = ExecutionStatus.CANCELLED
+            errorMessage = "协程取消"
+            throw e
+        } finally {
+            // US-029：持久化执行记录（仅当 skillConfigId + skillName + repository 均非空时）
+            saveExecutionRecordIfNeeded(
+                skillConfigId = skillConfigId,
+                skillName = skillName,
+                startedAt = startedAt,
+                toolCallRecords = toolCallRecords,
+                finalStatus = finalStatus,
+                errorMessage = errorMessage
+            )
+        }
     }
 
     companion object {
@@ -279,6 +349,9 @@ open class SkillExecutor(
 
         /** 异常 message 截断长度上限（M3，CWE-209 信息泄露纵深防御）。 */
         internal const val MAX_ERROR_MESSAGE_LEN = 200
+
+        /** 工具调用结果预览长度上限（US-029，ToolCallRecord.result 截断）。 */
+        internal const val MAX_RESULT_PREVIEW_LEN = 200
 
         /**
          * 文件路径正则（M3 脱敏）：匹配以 `/` 或 `\` 开头的路径片段，
@@ -341,6 +414,31 @@ open class SkillExecutor(
             rounds: Int,
             maxRounds: Int
         ): Boolean = lastRoundHadToolCall && rounds >= maxRounds
+
+        /**
+         * 从工具执行结果文本推断是否为失败（US-029，用于 ToolCallRecord.status）。
+         *
+         * [executeToolCall] 内部对各种失败场景返回固定前缀的降级文案：
+         * - [formatRejection]：`"用户拒绝执行工具: ..."`
+         * - [formatTimeout]：`"工具执行超时（...）: ..."`
+         * - [formatToolError]：`"工具执行失败: ..."`
+         * - [formatNoServer]：`"无可用 MCP Server，无法执行工具: ..."`
+         * - [formatConfirmError]：`"用户确认失败: ..."`
+         *
+         * 通过前缀匹配判定失败，避免修改 [executeToolCall] 返回类型（保持向后兼容）。
+         *
+         * **已知局限**：若 MCP Server 返回的正常结果恰好以这些前缀开头，会被误判为失败。
+         * 未来重构可考虑将 [executeToolCall] 返回类型改为 sealed class（成功/失败携带信息）。
+         *
+         * @param result [executeToolCall] 返回的结果文本
+         * @return true 表示失败，false 表示成功
+         */
+        internal fun isFailureResult(result: String): Boolean =
+            result.startsWith("用户拒绝执行工具") ||
+                result.startsWith("工具执行超时") ||
+                result.startsWith("工具执行失败") ||
+                result.startsWith("无可用 MCP Server") ||
+                result.startsWith("用户确认失败")
 
         /**
          * 构造 assistant 占位消息（携带 toolCalls 引用，OpenAI 要求下次请求回放）。
@@ -468,5 +566,48 @@ open class SkillExecutor(
         private val idCounter = java.util.concurrent.atomic.AtomicLong(0)
         internal fun defaultIdGenerator(): Long =
             System.currentTimeMillis() * 1000 + idCounter.incrementAndGet()
+    }
+
+    /**
+     * 持久化执行记录（US-029，仅在 [skillExecutionRepository] + skillConfigId + skillName 均非空时）。
+     *
+     * **设计**：
+     * - 调用方在 [executeLoop] 的 finally 块中调用，保证成功/失败/取消路径均记录
+     * - repository 为 null 时跳过（向后兼容，测试场景可用 null 关闭记录）
+     * - 保存失败不影响主流程（仅记录日志，BR-error-handling-004）
+     * - errorMessage 已由调用方经 [Companion.sanitizeErrorMessage] 脱敏（CWE-209）
+     *
+     * **协程取消安全**（BR-error-handling-007）：
+     * 本方法在 finally 块中同步调用（非 suspend），不涉及协程取消传播。
+     * repository.save 是同步 ObjectBox put 操作，不会抛 CancellationException。
+     */
+    private fun saveExecutionRecordIfNeeded(
+        skillConfigId: Long?,
+        skillName: String?,
+        startedAt: Long,
+        toolCallRecords: List<ToolCallRecord>,
+        finalStatus: String,
+        errorMessage: String?
+    ) {
+        val repo = skillExecutionRepository ?: return
+        if (skillConfigId == null || skillName == null) return
+        val finishedAt = System.currentTimeMillis()
+        val record = SkillExecutionRecord(
+            skillConfigId = skillConfigId,
+            skillName = skillName,
+            startedAt = startedAt,
+            finishedAt = finishedAt,
+            durationMs = finishedAt - startedAt,
+            status = finalStatus,
+            toolCalls = toolCallRecords.toList(),
+            errorMessage = errorMessage,
+            outputPreview = null
+        )
+        try {
+            repo.save(record)
+        } catch (e: Exception) {
+            // 保存失败不影响主流程，仅记录日志（BR-error-handling-004）
+            Log.w(TAG, "save execution record failed: skill=$skillName", e)
+        }
     }
 }

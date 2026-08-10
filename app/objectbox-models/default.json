@@ -234,9 +234,68 @@
         }
       ],
       "relations": []
+    },
+    {
+      "id": "6:6840277947165322461",
+      "lastPropertyId": "10:1783876446657605913",
+      "name": "SkillExecutionRecord",
+      "properties": [
+        {
+          "id": "1:2464713891218075572",
+          "name": "id",
+          "type": 6,
+          "flags": 1
+        },
+        {
+          "id": "2:5443820495508921009",
+          "name": "skillConfigId",
+          "type": 6
+        },
+        {
+          "id": "3:3544162067529136814",
+          "name": "skillName",
+          "type": 9
+        },
+        {
+          "id": "4:1433248773816594991",
+          "name": "startedAt",
+          "type": 6
+        },
+        {
+          "id": "5:8221620142240547323",
+          "name": "finishedAt",
+          "type": 6
+        },
+        {
+          "id": "6:4169145430547358966",
+          "name": "durationMs",
+          "type": 6
+        },
+        {
+          "id": "7:335772482120443130",
+          "name": "status",
+          "type": 9
+        },
+        {
+          "id": "8:7506018953640247382",
+          "name": "toolCalls",
+          "type": 9
+        },
+        {
+          "id": "9:3004237501450792561",
+          "name": "errorMessage",
+          "type": 9
+        },
+        {
+          "id": "10:1783876446657605913",
+          "name": "outputPreview",
+          "type": 9
+        }
+      ],
+      "relations": []
     }
   ],
-  "lastEntityId": "5:5658915561082424760",
+  "lastEntityId": "6:6840277947165322461",
   "lastIndexId": "1:2432317062331387289",
   "lastRelationId": "0:0",
   "lastSequenceId": "0:0",

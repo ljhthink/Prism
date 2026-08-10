@@ -11,13 +11,14 @@ import io.prism.ui.theme.PrismTextFaint
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * SkillsViewModel 纯函数单元测试（US-027，BR-testing-004）。
+ * SkillsViewModel 纯函数单元测试（US-027 / US-029，BR-testing-004）。
  *
  * 验证 [SkillsViewModel.Companion.combineSkills] 与 [SkillsViewModel.Companion.toUiModel]
  * 的合并/映射逻辑，不依赖 Android Context / ObjectBox / 协程，纯 JVM 可测。
@@ -25,6 +26,15 @@ import org.junit.Test
  * **覆盖点**：
  * - combineSkills：空列表 / 完全匹配 / 部分匹配 / config 驱动列表顺序
  * - toUiModel：4 种 source 的 icon 映射 / null manifest 降级 / manifest 透传
+ * - applyEnabledUpdate（US-029 R2-1）：null current / id 不匹配 / id 匹配 + true/false /
+ *   非目标字段保持 / manifest 保持 / 纯函数不可变性
+ *
+ * **US-029 loadExecutionRecords 覆盖说明**：
+ * - 数据层 [SkillExecutionRepository.getRecentBySkill] 已由 SkillExecutionRepositoryTest
+ *   充分覆盖（CRUD + 排序 + limit 截断 + 级联清理，26 测试）
+ * - ViewModel 层 try-catch 兜底（异常时 emptyList）为 trivial 逻辑，由代码审查验证
+ * - 完整 ViewModel 集成测试（selectSkill → loadExecutionRecords → executionRecords StateFlow）
+ *   需 SkillRegistry 实例（依赖 Android Context），超出纯 JVM 测试范围，由 instrumented test 覆盖
  */
 class SkillsViewModelTest {
 
@@ -235,6 +245,94 @@ class SkillsViewModelTest {
         assertTrue("应包含年份 2026", result.contains("2026"))
     }
 
+    // ── applyEnabledUpdate 测试（R2-1 optimistic update，US-029，BR-testing-004）──
+
+    @Test
+    fun `applyEnabledUpdate returns null when current is null`() {
+        val result = SkillsViewModel.applyEnabledUpdate(current = null, id = 1L, enabled = true)
+        assertNull("current 为 null 时应返回 null（无操作）", result)
+    }
+
+    @Test
+    fun `applyEnabledUpdate returns current unchanged when id does not match`() {
+        val current = makeUiModel(id = 1L, isEnabled = false)
+        val result = SkillsViewModel.applyEnabledUpdate(current = current, id = 999L, enabled = true)
+        assertNotNull(result)
+        assertEquals("id 不匹配时不应修改 isEnabled", false, result!!.config.isEnabled)
+        assertEquals("应返回原对象（引用相等）", current, result)
+    }
+
+    @Test
+    fun `applyEnabledUpdate updates isEnabled to true when id matches`() {
+        val current = makeUiModel(id = 5L, isEnabled = false)
+        val result = SkillsViewModel.applyEnabledUpdate(current = current, id = 5L, enabled = true)
+        assertNotNull(result)
+        assertTrue("id 匹配 + enabled=true 时应更新为 true", result!!.config.isEnabled)
+    }
+
+    @Test
+    fun `applyEnabledUpdate updates isEnabled to false when id matches`() {
+        val current = makeUiModel(id = 5L, isEnabled = true)
+        val result = SkillsViewModel.applyEnabledUpdate(current = current, id = 5L, enabled = false)
+        assertNotNull(result)
+        assertFalse("id 匹配 + enabled=false 时应更新为 false", result!!.config.isEnabled)
+    }
+
+    @Test
+    fun `applyEnabledUpdate preserves non-targeted config fields when updating`() {
+        val current = makeUiModel(
+            id = 7L,
+            name = "translator",
+            displayName = "智能翻译",
+            source = SkillSource.REMOTE,
+            isEnabled = true
+        )
+        val result = SkillsViewModel.applyEnabledUpdate(current = current, id = 7L, enabled = false)
+        assertNotNull(result)
+        assertEquals("id 应保持不变", 7L, result!!.config.id)
+        assertEquals("name 应保持不变", "translator", result.config.name)
+        assertEquals("displayName 应保持不变", "智能翻译", result.config.displayName)
+        assertEquals("source 应保持不变", SkillSource.REMOTE, result.config.source)
+        assertFalse("isEnabled 应已更新", result.config.isEnabled)
+    }
+
+    @Test
+    fun `applyEnabledUpdate preserves manifest when updating config`() {
+        val manifest = makeManifest(name = "translator", description = "中英互译")
+        val current = SkillUiModel(
+            config = makeConfig(name = "translator", id = 3L, isEnabled = true),
+            manifest = manifest,
+            icon = "◈"
+        )
+        val result = SkillsViewModel.applyEnabledUpdate(current = current, id = 3L, enabled = false)
+        assertNotNull(result)
+        assertNotNull("manifest 应保持非 null", result!!.manifest)
+        assertEquals("manifest.name 应保持不变", "translator", result.manifest?.name)
+        assertEquals("manifest.description 应保持不变", "中英互译", result.manifest?.description)
+        assertEquals("icon 应保持不变", "◈", result.icon)
+    }
+
+    @Test
+    fun `applyEnabledUpdate with null manifest preserves null manifest`() {
+        val current = SkillUiModel(
+            config = makeConfig(name = "missing-skill", id = 9L, isEnabled = true),
+            manifest = null,
+            icon = "▣"
+        )
+        val result = SkillsViewModel.applyEnabledUpdate(current = current, id = 9L, enabled = false)
+        assertNotNull(result)
+        assertNull("manifest 应保持 null", result!!.manifest)
+        assertFalse("isEnabled 应已更新", result.config.isEnabled)
+    }
+
+    @Test
+    fun `applyEnabledUpdate is pure - does not mutate original current`() {
+        val current = makeUiModel(id = 1L, isEnabled = false)
+        SkillsViewModel.applyEnabledUpdate(current = current, id = 1L, enabled = true)
+        // 原对象不应被修改（纯函数，返回新 copy）
+        assertFalse("原 current 的 isEnabled 不应被修改", current.config.isEnabled)
+    }
+
     // ── 辅助工厂 ────────────────────────────────────────────────────
 
     /** 构建 SkillConfig 测试实例。 */
@@ -275,6 +373,27 @@ class SkillsViewModelTest {
         return SkillRegistry.SkillEntry(
             config = makeConfig(name = name),
             manifest = makeManifest(name = name, description = description)
+        )
+    }
+
+    /** 构建 SkillUiModel 测试实例（用于 applyEnabledUpdate 测试）。 */
+    private fun makeUiModel(
+        id: Long = 0L,
+        name: String = "test-skill",
+        displayName: String = name,
+        source: String = SkillSource.LOCAL_BUILTIN,
+        isEnabled: Boolean = false
+    ): SkillUiModel {
+        return SkillUiModel(
+            config = makeConfig(
+                name = name,
+                id = id,
+                source = source,
+                isEnabled = isEnabled,
+                displayName = displayName
+            ),
+            manifest = null,
+            icon = "◈"
         )
     }
 }

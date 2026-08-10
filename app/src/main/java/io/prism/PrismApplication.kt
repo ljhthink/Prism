@@ -8,6 +8,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import androidx.documentfile.provider.DocumentFile
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.sse.SSE
 import io.objectbox.BoxStore
 import io.prism.data.KnowledgeBaseRepository
@@ -243,9 +244,22 @@ class PrismApplication : Application() {
     val skillRegistry: SkillRegistry by lazy { SkillRegistry(this, skillRepository) }
 
     /**
+     * Skill 执行记录仓库（US-029，ADR-013 5.7）—— 管理 [io.prism.data.SkillExecutionRecord] 的 CRUD。
+     *
+     * 持久化 Skill 执行历史（startedAt/finishedAt/status/toolCalls/errorMessage），
+     * 供 Skill 详情页展示最近 10 次执行记录，跨会话审计。
+     *
+     * 依赖 [boxStore]（ObjectBox 单例）。无 Android Context 依赖（BR-testing-004 可测性）。
+     */
+    val skillExecutionRepository: io.prism.data.SkillExecutionRepository by lazy {
+        io.prism.data.SkillExecutionRepository(boxStore)
+    }
+
+    /**
      * Skill 工具执行器（US-025，ADR-014 5.4）—— 编排「LLM 调工具 → 用户确认 → MCP 调用 → 结果回灌」回路。
      *
-     * 依赖 [mcpToolProviderDispatcher]（接口 McpToolProvider 实现）+ [confirmationGate]（用户确认门禁），
+     * 依赖 [mcpToolProviderDispatcher]（接口 McpToolProvider 实现）+ [confirmationGate]（用户确认门禁）
+     * + [skillExecutionRepository]（US-029 执行可观测，记录 [io.prism.data.SkillExecutionRecord]），
      * 不依赖 SkillRepository/SkillRegistry（tools + mcpServers 由调用方 Phase D ConversationViewModel 传入，
      * per phaseC 考古报告 R8：单一职责）。
      *
@@ -256,10 +270,61 @@ class PrismApplication : Application() {
      * - 失败降级：错误/超时/拒绝信息回灌给 LLM
      * - 命名空间隔离：tool name 格式 `skillName__toolName`，执行时去前缀
      *
+     * **US-029 执行可观测**：[executeLoop] 在 finally 块持久化 [io.prism.data.SkillExecutionRecord]，
+     * 仅当调用方传入 skillConfigId + skillName 时记录（详情见 [io.prism.skill.SkillExecutor]）。
+     *
      * 由 [io.prism.ui.chat.ConversationViewModel] 在 Phase D（US-026）注入使用。
      */
     val skillExecutor: io.prism.skill.SkillExecutor by lazy {
-        io.prism.skill.SkillExecutor(mcpToolProviderDispatcher, confirmationGate)
+        io.prism.skill.SkillExecutor(
+            mcpToolProvider = mcpToolProviderDispatcher,
+            confirmationGate = confirmationGate,
+            skillExecutionRepository = skillExecutionRepository
+        )
+    }
+
+    /**
+     * 远程 Skill 下载专用 HTTP 客户端（US-028，ADR-013 5.6，P2-03 修复）。
+     *
+     * **与共享 [httpClient] 的差异**：
+     * - `install(HttpTimeout)`：启用请求级超时配置（共享 client 未安装此插件，`timeout {}` DSL 为 no-op）
+     * - 不安装 SSE 插件（下载非流式对话，无需 SSE）
+     *
+     * **P2-03 重定向降级防护说明**：
+     * Ktor 3.x 的 `HttpRedirect` 插件默认 `allowHttpsDowngrade=false`，自动拦截 https→http 降级重定向
+     * （降级请求不会发出，返回 3xx 响应）。此为 P2-03 的主防护层。
+     * [io.prism.skill.SkillDownloader.downloadToTmp] 中的最终 URL 协议校验为纵深防御兜底。
+     *
+     * 仍保留 `expectSuccess = true`（非 2xx 抛异常）。
+     */
+    val downloadHttpClient: HttpClient by lazy {
+        HttpClient(OkHttp) {
+            expectSuccess = true
+            install(HttpTimeout)
+        }
+    }
+
+    /**
+     * 远程 Skill 下载器（US-028，ADR-013 5.6）—— HTTPS 下载 + 多层安全校验 + 原子安装。
+     *
+     * 依赖 [downloadHttpClient]（专用下载 client，HttpTimeout 插件已安装），
+     * 不依赖 Context（`remoteSkillsDir` 由调用方 [io.prism.ui.capabilities.SkillsViewModel] 注入，
+     * BR-testing-004 可测性）。
+     *
+     * **安全策略**（用户决策「标准校验」）：
+     * - URL 协议白名单（仅 https）
+     * - 重定向降级防护（最终 URL 协议二次校验，P2-03，CWE-918）
+     * - Content-Length + 流式计数双校验（≤10MB）
+     * - Content-Type 白名单
+     * - ZIP slip 防护 + 总解压大小限制（≤50MB）+ 条目数限制（≤1000）
+     * - YAML 沙箱解析（BR-security-004）
+     * - 原子安装（backup-then-swap 模式）
+     * - 30s 下载超时
+     *
+     * 由 [io.prism.ui.capabilities.SkillsViewModel] 在 Phase E（US-028）注入使用。
+     */
+    val skillDownloader: io.prism.skill.SkillDownloader by lazy {
+        io.prism.skill.SkillDownloader(downloadHttpClient)
     }
 
     override fun onCreate() {
