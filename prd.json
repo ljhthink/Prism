@@ -490,8 +490,8 @@
         "Typecheck passes"
       ],
       "priority": 32,
-      "passes": false,
-      "notes": "M5 L1 会话内。ADR-015 5.3。复用 OpenAICompatibleProvider 非流式请求。摘要 prompt 参考 mem0/CALMem 最佳实践。P2 跨模块。"
+      "passes": true,
+      "notes": "M5 L1 会话内。ADR-015 5.3。复用 OpenAICompatibleProvider 非流式请求。摘要 prompt 参考 mem0/CALMem 最佳实践。P2 跨模块。Phase B 完成 2026-08-11：49 主 Agent 测试 + 12 ac-verifier 补充 = 61 专项测试通过，1035 全量回归 0 失败。BR-security-005 转 active。"
     },
     {
       "id": "US-033",

@@ -1088,6 +1088,93 @@ class OpenAICompatibleProviderTest {
         assertTrue("count 应为 42", complete.arguments["count"] == 42)
     }
 
+    // ==================== M5 Phase B: parseCompletionResponse 纯函数测试（ac-verifier 补充） ====================
+    // 主 Agent 仅通过 FakeCompletionProvider 间接覆盖 parseCompletionResponse，
+    // 以下测试直接验证该纯函数的边缘场景（空 choices / null content / 空白 content / 非 JSON / HTML 错误页）。
+
+    @Test
+    fun `parseCompletionResponse returns content for valid response`() {
+        val body = """{"choices":[{"message":{"role":"assistant","content":"这是摘要"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"""
+        assertEquals("合法响应应返回 content", "这是摘要", provider.parseCompletionResponse(body))
+    }
+
+    @Test
+    fun `parseCompletionResponse returns null for empty choices array`() {
+        val body = """{"choices":[],"usage":null}"""
+        assertNull("空 choices 数组应返回 null", provider.parseCompletionResponse(body))
+    }
+
+    @Test
+    fun `parseCompletionResponse returns null when choices missing`() {
+        val body = """{"usage":{"prompt_tokens":10}}"""
+        assertNull("缺少 choices 字段应返回 null（默认空列表）", provider.parseCompletionResponse(body))
+    }
+
+    @Test
+    fun `parseCompletionResponse returns null when message content is null`() {
+        val body = """{"choices":[{"message":{"role":"assistant","content":null},"finish_reason":"stop"}]}"""
+        assertNull("content 为 null 应返回 null", provider.parseCompletionResponse(body))
+    }
+
+    @Test
+    fun `parseCompletionResponse returns null when message content is blank`() {
+        val body = """{"choices":[{"message":{"role":"assistant","content":"   "},"finish_reason":"stop"}]}"""
+        assertNull("空白 content 应返回 null（takeIf isNotBlank）", provider.parseCompletionResponse(body))
+    }
+
+    @Test
+    fun `parseCompletionResponse returns null when message field missing`() {
+        val body = """{"choices":[{"finish_reason":"stop"}]}"""
+        assertNull("缺少 message 字段应返回 null（默认 CompletionMessage content=null）", provider.parseCompletionResponse(body))
+    }
+
+    @Test
+    fun `parseCompletionResponse returns null for invalid JSON`() {
+        val body = "this is not json at all"
+        assertNull("非 JSON 字符串应返回 null（降级处理）", provider.parseCompletionResponse(body))
+    }
+
+    @Test
+    fun `parseCompletionResponse returns null for HTML error page`() {
+        val body = """<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>"""
+        assertNull("HTML 错误页应返回 null（降级处理）", provider.parseCompletionResponse(body))
+    }
+
+    @Test
+    fun `parseCompletionResponse returns null for empty string`() {
+        assertNull("空字符串应返回 null", provider.parseCompletionResponse(""))
+    }
+
+    @Test
+    fun `parseCompletionResponse ignores extra unknown fields`() {
+        val body = """{"id":"chatcmpl-123","object":"chat.completion","created":1234567890,"model":"gpt-4o","choices":[{"index":0,"message":{"role":"assistant","content":"摘要内容"},"finish_reason":"stop"}],"usage":{"prompt_tokens":50,"completion_tokens":20,"total_tokens":70}}"""
+        assertEquals("含未知字段的合法响应应正常解析", "摘要内容", provider.parseCompletionResponse(body))
+    }
+
+    // ==================== M5 Phase B: buildRequestBody stream=false 测试（ac-verifier 补充） ====================
+
+    @Test
+    fun `buildRequestBody serializes stream false when explicitly passed`() {
+        val config = ProviderConfig(
+            name = "OpenAI", baseUrl = "https://api.openai.com/v1",
+            apiKeyRef = "openai", models = listOf("gpt-4o")
+        )
+        val messages = listOf(
+            ChatMessage(id = 0, role = Role.USER, content = "摘要请求", timestamp = 0)
+        )
+        val body = provider.buildRequestBody(config, messages, systemPrompt = "你是摘要助手", stream = false)
+        assertTrue("非流式请求应包含 stream=false", body.contains("\"stream\":false"))
+        assertFalse("非流式请求不应包含 stream=true", body.contains("\"stream\":true"))
+        assertTrue("应包含 systemPrompt", body.contains("你是摘要助手"))
+    }
+
+    @Test
+    fun `buildRequestBody defaults stream true when not specified`() {
+        val config = ProviderConfig(name = "X", baseUrl = "http://h", apiKeyRef = "", models = listOf("gpt"))
+        val body = provider.buildRequestBody(config, emptyList())
+        assertTrue("默认应包含 stream=true（向后兼容）", body.contains("\"stream\":true"))
+    }
+
     private fun sampleMessages() = listOf(
         ChatMessage(id = 0, role = Role.USER, content = "你好", timestamp = 0)
     )

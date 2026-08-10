@@ -7,7 +7,10 @@ import io.ktor.client.plugins.sse.SSEClientException
 import io.ktor.client.plugins.sse.sse
 import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.header
+import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
@@ -66,7 +69,7 @@ import kotlinx.serialization.json.putJsonObject
 class OpenAICompatibleProvider(
     private val httpClient: HttpClient,
     private val apiKeyRepository: ApiKeyRepository
-) : ChatStreamProvider {
+) : ChatStreamProvider, ChatCompletionProvider {
 
     /** 编译时 JSON，忽略未知字段（如 `reasoning_content`），空安全。 */
     private val json = Json { ignoreUnknownKeys = true }
@@ -153,6 +156,89 @@ class OpenAICompatibleProvider(
         if (!terminated) emit(StreamEvent.Done)
     }.flowOn(Dispatchers.IO)
 
+    // ==================== 非流式请求（ADR-015 5.3 / H-1 阻塞项解除） ====================
+
+    /**
+     * 发起非流式对话请求（stream=false），返回完整的 assistant 回复内容。
+     *
+     * **M5 Phase B**（ADR-015 5.3）：供 [io.prism.memory.ConversationSummarizer] 和
+     * [io.prism.memory.UserProfileManager] 使用，这些后台任务需要完整单次结果而非流式增量。
+     *
+     * **请求**：POST `/chat/completions`，body 含 `stream=false`，复用 [buildRequestBody]
+     * 的消息组装逻辑（systemPrompt 前置 + messages 转换 + ragContext 插入）。
+     * 不携带 tools/toolChoice（后台任务不需要工具调用）。
+     *
+     * **响应**：解析 `choices[0].message.content` 为 [String]。
+     *
+     * **错误处理**（BR-error-handling-007 / BR-error-handling-004）：
+     * - CancellationException 重抛（不吞协程取消）
+     * - 其他异常返回 null（调用方降级处理，如摘要失败降级为截断）
+     * - 不向调用方泄露内部路径/堆栈（CWE-209 纵深防御）
+     *
+     * @param config 目标 Provider 配置
+     * @param messages 对话历史（不含 system 消息）
+     * @param systemPrompt system 消息内容（可选，摘要/抽取 prompt）
+     * @param ragContext RAG context 文本（可选，后台任务通常 null）
+     * @return assistant 回复内容；失败时返回 null
+     * @throws kotlinx.coroutines.CancellationException 协程取消必须重抛
+     */
+    override suspend fun chatCompletion(
+        config: ProviderConfig,
+        messages: List<ChatMessage>,
+        systemPrompt: String?,
+        ragContext: String?
+    ): String? {
+        val endpoint = buildEndpoint(config.baseUrl)
+        val apiKey = if (config.apiKeyRef.isNotBlank()) {
+            apiKeyRepository.readApiKeyOnce(config.apiKeyRef)
+        } else {
+            null
+        }
+
+        return try {
+            val response: HttpResponse = httpClient.post(endpoint) {
+                contentType(ContentType.Application.Json)
+                // 鉴权头优先级：apiKeyRef 明文 > 自定义 Authorization 头（与 streamChat 一致）
+                buildAuthHeader(apiKey)?.let { header(HttpHeaders.Authorization, it) }
+                    ?: customAuthHeader(config.headers)?.let { header(HttpHeaders.Authorization, it) }
+                applyCustomHeaders(this, config.headers)
+                setBody(buildRequestBody(config, messages, systemPrompt, ragContext, stream = false))
+            }
+            val responseBody = response.bodyAsText()
+            parseCompletionResponse(responseBody)
+        } catch (e: CancellationException) {
+            // 协程取消必须重抛，不得吞掉（BR-error-handling-007）
+            throw e
+        } catch (e: ClientRequestException) {
+            // HTTP 4xx/5xx（如 401 鉴权失败、429 限流）—— 返回 null 让调用方降级
+            null
+        } catch (e: Exception) {
+            // 网络/协议错误 —— 返回 null 让调用方降级，不泄露内部细节
+            null
+        }
+    }
+
+    /**
+     * 解析非流式 chat completion 响应体为 assistant 回复内容（纯函数，可测）。
+     *
+     * **解析规则**：
+     * - 合法 JSON 且 `choices` 非空 → `choices[0].message.content`（空白返回 null）
+     * - 合法 JSON 但 `choices` 为空 → null（异常响应，降级处理）
+     * - 非法 JSON / 解析失败 → null（降级处理，不崩溃）
+     *
+     * @param responseBody HTTP 响应体原文（JSON string）
+     * @return assistant 回复内容；解析失败或无内容时返回 null
+     */
+    internal fun parseCompletionResponse(responseBody: String): String? {
+        return try {
+            val parsed = json.decodeFromString(ChatCompletionResponse.serializer(), responseBody)
+            parsed.choices.firstOrNull()?.message?.content?.takeIf { it.isNotBlank() }
+        } catch (e: Exception) {
+            // 解析失败降级为 null，不崩溃
+            null
+        }
+    }
+
     // ==================== 可测试纯函数（ADR-004 4.7 / BR-testing-004） ====================
 
     /** 拼接 chat/completions 端点，去除尾部斜杠。 */
@@ -177,6 +263,7 @@ class OpenAICompatibleProvider(
      *
      * @param tools 工具定义（null 时不序列化 tools 字段，向后兼容）
      * @param toolChoice 工具选择策略（null 时不序列化 tool_choice 字段）
+     * @param stream 是否流式请求（默认 true，向后兼容；M5 Phase B 非流式路径传 false）
      */
     internal fun buildRequestBody(
         config: ProviderConfig,
@@ -184,7 +271,8 @@ class OpenAICompatibleProvider(
         systemPrompt: String? = null,
         ragContext: String? = null,
         tools: List<ToolDefinition>? = null,
-        toolChoice: ToolChoice? = null
+        toolChoice: ToolChoice? = null,
+        stream: Boolean = true
     ): String {
         val requestMessages = buildList {
             // 1. system 消息前置（若有）
@@ -206,7 +294,7 @@ class OpenAICompatibleProvider(
         val body = ChatCompletionRequest(
             model = config.models.firstOrNull() ?: "",
             messages = requestMessages,
-            stream = true,
+            stream = stream,
             tools = tools,
             toolChoice = toolChoice?.let { toolChoiceToJson(it) },
             // strict mode 需 parallel_tool_calls=false（OpenAI 限制），且减少并行幻觉
@@ -547,6 +635,48 @@ private data class ToolCallWire(
 private data class FunctionCallWire(
     val name: String,
     val arguments: String
+)
+
+// ==================== 非流式响应数据类（M5 Phase B，ADR-015 5.3） ====================
+
+/**
+ * 非流式 chat completion 响应体（stream=false）。
+ *
+ * 与流式 [ChatCompletionChunk] 的区别：
+ * - `choices[].message`（完整消息）vs `choices[].delta`（增量分片）
+ * - 无 `usage` 为 null 的中段快照概念，usage 直接在顶层
+ *
+ * **可见性**：[internal] 因 [parseCompletionResponse] 是 internal 纯函数，需在单元测试中
+ * 直接构造与断言（BR-testing-004）。
+ *
+ * @see ChatCompletionChunk 流式响应对照
+ */
+@Serializable
+internal data class ChatCompletionResponse(
+    val choices: List<CompletionChoice> = emptyList(),
+    val usage: UsageWire? = null
+)
+
+/** 非流式响应的单个 choice（含完整 message）。 */
+@Serializable
+internal data class CompletionChoice(
+    val message: CompletionMessage = CompletionMessage(),
+    @SerialName("finish_reason") val finishReason: String? = null
+)
+
+/** 非流式响应的完整 assistant 消息。 */
+@Serializable
+internal data class CompletionMessage(
+    val role: String? = null,
+    val content: String? = null
+)
+
+/** token 用量信息（流式与非流式共用结构）。 */
+@Serializable
+internal data class UsageWire(
+    @SerialName("prompt_tokens") val promptTokens: Int? = null,
+    @SerialName("completion_tokens") val completionTokens: Int? = null,
+    @SerialName("total_tokens") val totalTokens: Int? = null
 )
 
 // ==================== tool_call 状态机累加器（internal，可测） ====================

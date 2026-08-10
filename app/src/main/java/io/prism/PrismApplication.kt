@@ -35,6 +35,9 @@ import io.prism.security.KeystoreCryptoService
 import io.prism.data.MemoryRepository
 import io.prism.data.SkillRepository
 import io.prism.data.UserProfileRepository
+import io.prism.memory.ConversationSummarizer
+import io.prism.memory.MemoryConfigRepository
+import io.prism.memory.SlidingWindowMemoryManager
 import io.prism.skill.SkillRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -351,6 +354,40 @@ class PrismApplication : Application() {
      */
     val userProfileRepository: UserProfileRepository by lazy { UserProfileRepository(boxStore) }
 
+    /**
+     * 记忆系统配置仓库（US-032，ADR-015 5.3）—— 持久化 L1 滑动窗口大小 N。
+     *
+     * 使用独立 DataStore（`prism_memory_config`），与 API Key / 文件系统根目录 DataStore 隔离。
+     * 默认 N=10，可通过 [io.prism.memory.MemoryConfigRepository.setWindowSize] 运行时修改。
+     *
+     * 由 [slidingWindowMemoryManager] 读取 N 值，由记忆管理 UI（US-036）写入 N 值。
+     */
+    val memoryConfigRepository: MemoryConfigRepository by lazy { MemoryConfigRepository(memoryConfigDataStore) }
+
+    /**
+     * 对话摘要生成器（US-032，ADR-015 5.3）—— 使用 LLM 非流式请求对旧消息生成摘要。
+     *
+     * 依赖 [openAICompatibleProvider]（已实现 [io.prism.network.ChatCompletionProvider] 接口）。
+     * [ProviderConfig] 在调用 [io.prism.memory.ConversationSummarizer.summarize] 时由调用方传入
+     * （支持运行时切换 Provider）。
+     *
+     * 由 [slidingWindowMemoryManager] 在超出滑动窗口时调用生成旧消息摘要。
+     */
+    val conversationSummarizer: ConversationSummarizer by lazy {
+        ConversationSummarizer(openAICompatibleProvider)
+    }
+
+    /**
+     * L1 会话内滑动窗口记忆管理器（US-032，ADR-015 5.3）—— 保留最近 N 轮原始消息 + 摘要压缩。
+     *
+     * 依赖 [conversationSummarizer] + [memoryConfigRepository]。
+     * 由 [io.prism.ui.chat.ConversationViewModel]（US-035）在 sendMessage 时调用
+     * [io.prism.memory.SlidingWindowMemoryManager.processMessages] 管理上下文窗口。
+     */
+    val slidingWindowMemoryManager: SlidingWindowMemoryManager by lazy {
+        SlidingWindowMemoryManager(conversationSummarizer, memoryConfigRepository)
+    }
+
     override fun onCreate() {
         super.onCreate()
         boxStore = MyObjectBox.builder()
@@ -393,6 +430,9 @@ class PrismApplication : Application() {
 
     /** 文件系统授权根目录 DataStore 进程级单例（ADR-006 5.3）。 */
     private val Context.filesystemRootsDataStore by preferencesDataStore(name = "prism_filesystem_roots")
+
+    /** 记忆系统配置 DataStore 进程级单例（ADR-015 5.3，US-032 滑动窗口 N 持久化）。 */
+    private val Context.memoryConfigDataStore by preferencesDataStore(name = "prism_memory_config")
 
     companion object {
         /**

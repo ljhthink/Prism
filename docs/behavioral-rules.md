@@ -158,6 +158,18 @@
 - 适用场景：dev
 - 状态：active（ac-verifier TKN-M4-PHASEB-ACCEPTANCE-002 确认转 active，2026-08-09。规则文本已修订纠正 3 处事实错误 + 实现符合正例 + 4 测试验证防护有效）
 
+#### BR-security-005: 可配置数值参数须在 repository 层和消费层双重强制合法范围
+
+- 类别：security
+- 规则：可配置的数值参数（如滑动窗口大小 N、分页 size、重试次数等）必须在 **repository 层**（`set` 方法）和 **消费层**（读取使用处）双重强制合法范围（min + max），不能仅依赖 UI 层校验或仅定义 `MAX`/`MIN` 常量而不强制。repository 层用 `require(value in MIN..MAX)` fail-fast 拒绝越界值；消费层用 `coerceIn(MIN, MAX)` 防御 DataStore/数据库被外部直接写入越界值（绕过 repository 校验）的场景。双层防御确保即使某一层被绕过，另一层仍能拦截，防止过大值导致下游 token 溢出或过小值导致逻辑异常。
+- 反例 1：`const val MAX_WINDOW_SIZE = 50` + `suspend fun setWindowSize(size: Int) { require(size > 0); ... }` —— `MAX` 仅作常量定义不强制，repository 层不拒绝 size=1000
+- 反例 2：`val windowSize = memoryConfigRepository.getWindowSize().coerceAtLeast(1)` —— 消费层仅有下界防御，无上界；DataStore 被写入 N=100000 时全部消息被视为"近期"，token 溢出
+- 正例：`suspend fun setWindowSize(size: Int) { require(size in MIN_WINDOW_SIZE..MAX_WINDOW_SIZE); ... }` + `val windowSize = memoryConfigRepository.getWindowSize().coerceIn(MIN_WINDOW_SIZE, MAX_WINDOW_SIZE)` —— repository 层 require + 消费层 coerceIn 双层防御
+- 来源：M5 Phase B 审查（TKN-M5-PHASEB-GUARDRAIL-001，M-1/M-2 中危发现；主 Agent 修复 + 5 边界测试验证：拒绝 51/1000 + coerceIn 1000→50 + coerceIn 0→1）
+- 添加日期：2026-08-11
+- 适用场景：dev
+- 状态：active（ac-verifier TKN-M5-PHASEB-ACCEPTANCE-001 确认转 active，2026-08-11。M-1 setWindowSize require 双界校验 + M-2 processMessages coerceIn 双层防御均验证有效，5 边界测试通过：拒绝 51/1000 + coerceIn 1000→50 + coerceIn 0→1）
+
 ### concurrency
 
 #### BR-concurrency-001: 多步骤数据库状态变更必须使用事务保证原子性
@@ -401,3 +413,5 @@
 | 2026-08-09 | ac-verifier | 验收受限通过，BR-security-004 转 active | M4 Phase B 验收（TKN-M4-PHASEB-ACCEPTANCE-002）：US-021 5/5 AC 通过，US-022 5/6 通过 + AC-5 受限通过（SkillRegistryTest.kt 不存在，受限根因为 Android Context 构造期依赖 + 无 Robolectric/Mockito 测试基础设施，附 3 项 Phase C 强制条件）。SkillManifestParserTest 33 测试 + 全量 589 回归 0 失败（独立核实）。性能基线：parse 典型 1KB p50<1ms。安全：YAML 注入 4 项 + 敏感信息泄露 6 项全部通过。BR-security-004 proposed → active（规则文本已修订纠正 3 处事实错误 + 实现符合正例 + 4 测试验证防护有效） |
 | 2026-08-10 | guardrail-enforcer | 提议 BR-security-001 补充条款 | M5 Phase A 数据层审查（TKN-M5-PHASEA-GUARDRAIL-001）：55 测试通过、编译通过，无阻断级安全漏洞（无注入/密钥/RCE/命令执行）。HNSW #1209 规避有效（Box.remove 路径确认）。BR-security-001/BR-concurrency-001/003/BR-testing-004 全部合规。L-01 低危（equals null embedding 边界缺陷）+ L-02~L-05 低危建议。结论通过，可进入 ac-verifier。提议 BR-security-001 补充条款（nullable 数组字段 equals 覆盖须用 nullable 扩展函数）待 ac-verifier 确认转 active |
 | 2026-08-10 | ac-verifier | 验收通过，BR-security-001-amendment 转 active | M5 Phase A 验收（TKN-M5-PHASEA-ACCEPTANCE-001）：US-030 5/5 AC 通过（AC-1 Converter 偏离判定合理）+ US-031 5/5 AC 通过，59 专项测试 + 971 全量回归 0 失败。性能基线建立（searchByVector p50=62us / save p50=1311us / getBySession p50=92us）。安全检查 10 项全部通过。L-01 修复验证有效（4 边界测试：双 null 相等 / 双非 null 内容相等 / 单 null 不等 / 双非 null 内容不等）。BR-security-001-amendment proposed → active |
+| 2026-08-11 | guardrail-enforcer | 提议 BR-security-005 | M5 Phase B 审查（TKN-M5-PHASEB-GUARDRAIL-001）：49 测试通过、编译通过，无阻断级安全漏洞。M-1/M-2 中危（setWindowSize 缺上界校验 + processMessages 缺 coerceIn 上界防御）+ L-1/L-2/L-3 低危建议。结论通过。主 Agent 已修复 M-1/M-2（require + coerceIn 双层防御 + 5 边界测试）。提议 BR-security-005（可配置数值参数双重强制合法范围）待 ac-verifier 确认转 active。提议的 BR-error-handling-008（后台任务降级须 Log.w）经主 Agent 判定为 BR-error-handling-004 的具体应用场景，不单独新增规则，L-1 修复将作为 BR-error-handling-004 的违反修复处理 |
+| 2026-08-11 | ac-verifier | 验收通过，BR-security-005 转 active | M5 Phase B 验收（TKN-M5-PHASEB-ACCEPTANCE-001）：US-032 6/6 AC 全部通过，49 主 Agent 测试 + 12 ac-verifier 补充测试（parseCompletionResponse 10 + buildRequestBody stream=false 2）= 61 专项测试全部通过，1035 全量回归 0 失败。性能基线建立（processMessages p50=10.6μs / parseCompletionResponse p50=27μs / truncateMessages p50=2.4-9.0μs）。安全检查全部通过（敏感信息泄露 0 + BR-security-005 双层防御验证 + 注入防护 0）。M-1/M-2 修复验证有效（5 边界测试）。BR-security-005 proposed → active |
