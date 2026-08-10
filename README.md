@@ -8,7 +8,7 @@
 
 **M3 个人知识库 RAG 全部完成并通过里程碑交付审计（US-011~US-019，ADR-007~012 全部 Accepted，有条件通过，M3-001 打包修复已验证）**（2026-08-09）
 
-🚧 **M4 Skills 系统开发中（US-020~US-029，ADR-013/014 Proposed）**（2026-08-09 进行中）—— Skill 数据模型 / SKILL.md 解析 / 注册中心 / tool_calling 接口 / 工具执行回路 / Skills 管理 UI / 远程下载 / 执行可观测
+**M4 Skills 系统全部完成（US-020~US-029，ADR-013/014 Accepted，Phase A~E 全部通过 guardrail + ac-verifier，912 回归 0 失败）**（2026-08-10）—— Skill 数据模型 / SKILL.md 解析 / 注册中心 / tool_calling 接口 / 工具执行回路 / Skills 管理 UI / 远程下载 / 执行可观测。已知限制：M-3 GAP（生产路径执行记录未接入，US-029 基础设施已就绪，待后续 Phase D 接入）
 
 - US-020 Skill 数据模型（SkillConfig 实体 + SkillRepository CRUD）✅（Phase A，guardrail + ac-verifier 通过）
 - US-023 StreamEvent/ChatStreamProvider 接口扩展预留 ✅（Phase A，guardrail + ac-verifier 通过，BR-naming-001 转 active）
@@ -17,6 +17,9 @@
 - US-024 OpenAICompatibleProvider tool_calling 协议（tool_calls delta 状态机 + ToolCallAccumulator + StreamEvent 6 子类）✅（Phase C，guardrail 两轮 + ac-verifier 通过，6/6 AC，726 回归 0 失败，性能基线建立）
 - US-025 SkillExecutor 工具执行回路（maxRounds 10 + 用户确认 + 30s 超时 + namespace 前缀剥离 + 错误回灌）✅（Phase C，guardrail 两轮 + ac-verifier 通过，6/6 AC，M-1 sanitizeErrorMessage 信息脱敏 + 6 处 Log.w 结构化日志）
 - US-026 ConversationViewModel Skill 注入与工具执行回路集成（buildTools + mergeSystemPrompt + executeWithToolLoop + handleStreamEvent + syncToolMessages + AtomicLong idGenerator + R-4 历史过滤器）✅（Phase D，guardrail 两轮 + ac-verifier 通过，7/7 AC，M-1/M-3 修复有效，M-2 异常路径补 3 测试验证通过，757 回归 0 失败，BR-error-handling-008 转 active）
+- US-027 Skills 管理 UI 重构（CapabilitiesScreen Skill 列表 + 详情 + 启用开关 + SkillsViewModel）✅（Phase E，guardrail 两轮 + ac-verifier 通过，5/5 AC，813 回归 0 失败）
+- US-028 远程 Skill 下载（SkillDownloader HTTPS 下载 + 9 层安全校验 + zip slip 防护 + backup-then-swap 原子安装）✅（Phase E，guardrail 两轮 + ac-verifier 通过，6/6 AC，39 MockEngine 集成测试 + 42 纯函数测试，862 回归 0 失败）
+- US-029 Skill 执行可观测（SkillExecutionRecord @Entity + SkillExecutionRepository CRUD + Skill 详情页展示执行记录）✅（Phase E，guardrail 两轮 + ac-verifier 通过，6/6 AC，39 专项测试 + 10 边缘场景，912 回归 0 失败。已知限制：M-3 GAP 生产路径未接入 skillConfigId/skillName）
 
 - US-011 依赖落地 + KnowledgeChunk 向量索引 ✅（guardrail + ac-verifier 通过）
 - US-012 文档解析器（PDF/DOCX/XLSX/MD/TXT）✅（guardrail 有条件通过 + ac-verifier 通过）
@@ -59,8 +62,8 @@
   - [ADR-010 M3 向量检索（US-017）](docs/decisions/ADR-010-m3-vector-retrieval.md)（Accepted）
   - [ADR-011 M3 知识库管理 UI 架构（US-018）](docs/decisions/ADR-011-m3-knowledgebase-ui.md)（Accepted）
   - [ADR-012 M3 RAG 对话集成架构（US-019）](docs/decisions/ADR-012-m3-rag-conversation-integration.md)（Accepted）
-  - [ADR-013 M4 Skills 系统架构（US-004）](docs/decisions/ADR-013-m4-skills-system-architecture.md)（Proposed）
-  - [ADR-014 M4 LLM tool_calling 接口扩展（US-023~US-025）](docs/decisions/ADR-014-m4-toolcalling-interface.md)（Proposed）
+  - [ADR-013 M4 Skills 系统架构（US-004）](docs/decisions/ADR-013-m4-skills-system-architecture.md)（Accepted）
+  - [ADR-014 M4 LLM tool_calling 接口扩展（US-023~US-025）](docs/decisions/ADR-014-m4-toolcalling-interface.md)（Accepted）
 
 ### Reference（参考 / 报告）
 
