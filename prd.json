@@ -523,8 +523,8 @@
         "Typecheck passes"
       ],
       "priority": 34,
-      "passes": false,
-      "notes": "M5 L3 用户画像。ADR-015 5.5。复用 OpenAICompatibleProvider + US-031 UserProfileRepository。P2 跨模块。"
+      "passes": true,
+      "notes": "M5 L3 用户画像。ADR-015 5.5。复用 OpenAICompatibleProvider + US-031 UserProfileRepository。P2 跨模块。2026-08-11 验收通过（TKN-M5-PHASED-ACCEPTANCE-001）：7/7 AC 通过，80 专项测试 + 1185 全量回归 0 失败。"
     },
     {
       "id": "US-035",

@@ -39,6 +39,7 @@ import io.prism.memory.ConversationSummarizer
 import io.prism.memory.CrossSessionMemoryManager
 import io.prism.memory.MemoryConfigRepository
 import io.prism.memory.SlidingWindowMemoryManager
+import io.prism.memory.UserProfileManager
 import io.prism.skill.SkillRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -403,6 +404,24 @@ class PrismApplication : Application() {
      */
     val crossSessionMemoryManager: CrossSessionMemoryManager by lazy {
         CrossSessionMemoryManager(embedder, memoryRepository)
+    }
+
+    /**
+     * L3 用户画像管理器（US-034，ADR-015 5.5）—— 显式偏好设定 + 隐式偏好 LLM 抽取 + 画像注入。
+     *
+     * 依赖 [openAICompatibleProvider]（已实现 [io.prism.network.ChatCompletionProvider] 接口，
+     * Phase B 已扩展非流式 chatCompletion 方法）+ [userProfileRepository]（Phase A 已实现）。
+     *
+     * **职责**：
+     * - 显式偏好 [io.prism.memory.UserProfileManager.setExplicitPreference]（用户 UI 设定）
+     * - 隐式偏好 [io.prism.memory.UserProfileManager.extractImplicitPreferences]（LLM 抽取）
+     * - 画像注入 [io.prism.memory.UserProfileManager.formatProfilesAsContext]（systemPrompt section）
+     *
+     * 由 [io.prism.ui.chat.ConversationViewModel]（US-035）在会话结束时抽取隐式偏好，
+     * 在新会话时加载画像注入 systemPrompt 第三段。由记忆管理 UI（US-036）调用显式设定/查看/删除。
+     */
+    val userProfileManager: UserProfileManager by lazy {
+        UserProfileManager(openAICompatibleProvider, userProfileRepository)
     }
 
     override fun onCreate() {
