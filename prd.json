@@ -446,6 +446,118 @@
       "priority": 29,
       "passes": true,
       "notes": "M4 可观测层。ADR-013 5.7。执行记录持久化到 ObjectBox 跨会话审计。P1 常规。Phase E 验收通过（TKN-M4-PHASEE-US029-ACCEPTANCE-001，guardrail 两轮通过，6/6 AC，39 US-029 专项测试 + 10 边缘场景，912 回归 0 失败）。已知 GAP（M-3）：生产路径 ConversationViewModel 未传入 skillConfigId/skillName，端到端验证待 Phase D 接入。"
+    },
+    {
+      "id": "US-030",
+      "title": "MemoryRecord 实体 + MemoryRepository CRUD（L2 跨会话记忆存储）",
+      "description": "作为系统，我需要将对话历史向量化存入 ObjectBox，以便新会话能按话题检索相关历史。",
+      "acceptanceCriteria": [
+        "定义 MemoryRecord @Entity（id/sessionId/content/embedding[float[]]/timestamp/turnCount）+ MemoryRecordConverter（List<Float> ↔ float[]）",
+        "MemoryRepository CRUD：save / getBySession / searchByVector(queryEmbedding, topK) / deleteBySession / deleteAll",
+        "searchByVector 复用 M3 ObjectBox 向量搜索（nearVector），返回按相似度排序的 top-k 结果",
+        "MemoryRepository 单元测试通过（save / getBySession / searchByVector top-k / deleteBySession / deleteAll）",
+        "Typecheck passes"
+      ],
+      "priority": 30,
+      "passes": false,
+      "notes": "M5 数据层。ADR-015 5.1。复用 M3 ObjectBox 向量搜索基建（KnowledgeChunk 模式）。P1 常规。"
+    },
+    {
+      "id": "US-031",
+      "title": "UserProfile 实体 + UserProfileRepository CRUD（L3 用户画像存储）",
+      "description": "作为系统，我需要结构化存储用户偏好（显式+隐式），以便 AI 跨会话理解用户。",
+      "acceptanceCriteria": [
+        "定义 UserProfile @Entity（id/key/value/category[EXPLICIT/IMPLICIT]/updatedAt）+ ProfileCategory 枚举",
+        "UserProfileRepository CRUD：save / get(key) / getAll / getByCategory / update / delete(key) / deleteAll",
+        "单用户单 key 唯一约束（相同 key upsert 而非 insert）",
+        "UserProfileRepository 单元测试通过（save / get / getAll / getByCategory / upsert / delete / deleteAll）",
+        "Typecheck passes"
+      ],
+      "priority": 31,
+      "passes": false,
+      "notes": "M5 数据层。ADR-015 5.2。显式偏好=用户设定，隐式偏好=LLM 抽取。P1 常规。"
+    },
+    {
+      "id": "US-032",
+      "title": "ConversationSummarizer + SlidingWindowMemoryManager（L1 会话内记忆）",
+      "description": "作为用户，我希望长对话不会因为上下文窗口限制而丢失关键信息，通过滑动窗口+摘要压缩保留要点。",
+      "acceptanceCriteria": [
+        "ConversationSummarizer：使用 OpenAICompatibleProvider 对旧消息生成摘要（非流式单次请求），失败降级为截断",
+        "SlidingWindowMemoryManager：保留最近 N 轮原始消息（默认 10，可配置），超出 N 轮时触发摘要压缩",
+        "摘要压缩：将 N 轮之前的消息压缩为 summary message 注入上下文，保留关键信息",
+        "可配置 N（通过 DataStore 持久化，默认 10），运行时动态生效",
+        "ConversationSummarizer + SlidingWindowMemoryManager 单元测试通过（滑动窗口边界 / 摘要触发 / 摘要注入 / N 可配置 / 摘要失败降级）",
+        "Typecheck passes"
+      ],
+      "priority": 32,
+      "passes": false,
+      "notes": "M5 L1 会话内。ADR-015 5.3。复用 OpenAICompatibleProvider 非流式请求。摘要 prompt 参考 mem0/CALMem 最佳实践。P2 跨模块。"
+    },
+    {
+      "id": "US-033",
+      "title": "CrossSessionMemoryManager（L2 跨会话检索 + 防污染）",
+      "description": "作为用户，我希望新会话能检索到与当前话题相关的历史对话片段，但不被旧会话全文污染。",
+      "acceptanceCriteria": [
+        "对话结束时：将本会话关键消息向量化（复用 Embedder）存入 MemoryRecord",
+        "新会话开始时：将用户首条消息向量化，searchByVector top-k 检索（默认 k=3）相关历史",
+        "防污染：仅注入检索到的 MemoryRecord.content 作为 context，不加载旧会话全文",
+        "检索结果注入 systemPrompt（格式：'相关历史对话：...'），与 RAG 上下文合并",
+        "CrossSessionMemoryManager 单元测试通过（向量化存储 / top-k 检索 / 防污染验证 / 空结果处理 / 注入格式）",
+        "Typecheck passes"
+      ],
+      "priority": 33,
+      "passes": false,
+      "notes": "M5 L2 跨会话。ADR-015 5.4。复用 M3 Embedder + US-030 MemoryRepository。防污染=核心设计约束。P2 跨模块。"
+    },
+    {
+      "id": "US-034",
+      "title": "UserProfileManager（L3 用户画像管理 + 隐式偏好抽取）",
+      "description": "作为用户，我希望 AI 记住我的偏好（显式设定+隐式抽取），以便越用越懂我。",
+      "acceptanceCriteria": [
+        "显式偏好：用户通过 UI 设定（如'我喜欢简洁的回复'），存入 UserProfile category=EXPLICIT",
+        "隐式偏好：对话结束时，LLM 从近期对话抽取偏好（如'用户常用 Python'），存入 category=IMPLICIT",
+        "隐式抽取使用 OpenAICompatibleProvider 非流式请求，抽取 prompt 返回结构化 JSON（key-value pairs）",
+        "画像注入 systemPrompt（格式：'用户偏好：...'），影响 AI 回复风格",
+        "抽取失败降级为跳过（不阻断对话），upsert 已有 key",
+        "UserProfileManager 单元测试通过（显式设定 / 隐式抽取 / 画像注入 / upsert / 抽取失败降级）",
+        "Typecheck passes"
+      ],
+      "priority": 34,
+      "passes": false,
+      "notes": "M5 L3 用户画像。ADR-015 5.5。复用 OpenAICompatibleProvider + US-031 UserProfileRepository。P2 跨模块。"
+    },
+    {
+      "id": "US-035",
+      "title": "ConversationViewModel 记忆系统集成（L1+L2+L3 上下文注入）",
+      "description": "作为用户，我希望对话时 AI 能利用三层记忆（滑动窗口+跨会话检索+用户画像）提供更连贯的回复。",
+      "acceptanceCriteria": [
+        "L1 集成：sendMessage 时使用 SlidingWindowMemoryManager 管理上下文（滑动窗口+摘要压缩）",
+        "L2 集成：新会话首条消息时触发 CrossSessionMemoryManager 检索，注入相关历史",
+        "L3 集成：systemPrompt 合并用户画像（显式+隐式偏好）",
+        "防污染验证：新会话不加载旧会话全文，仅注入检索结果+画像",
+        "上下文合并：systemPrompt = base + RAG context + 跨会话记忆 + 用户画像（顺序明确）",
+        "集成测试通过（L1 摘要触发 / L2 检索注入 / L3 画像注入 / 防污染 / 上下文合并顺序）",
+        "Typecheck passes"
+      ],
+      "priority": 35,
+      "passes": false,
+      "notes": "M5 集成层。ADR-015 5.6。ConversationViewModel Factory 扩展注入三层记忆组件。P2 跨模块。"
+    },
+    {
+      "id": "US-036",
+      "title": "记忆管理 UI（查看/编辑/删除/一键清除）",
+      "description": "作为用户，我希望能查看、编辑、删除 AI 对我的记忆，或一键清除所有记忆。",
+      "acceptanceCriteria": [
+        "新建 MemoryManagementScreen（CapSegment.MEMORY 或设置页二级页面）",
+        "L2 记忆列表：展示 MemoryRecord（会话ID/内容摘要/时间），支持单条删除",
+        "L3 画像列表：展示 UserProfile（key/value/category），支持编辑和删除",
+        "一键清除按钮：删除所有 MemoryRecord + UserProfile（二次确认对话框）",
+        "MemoryManagementViewModel + UI 单元测试通过（列表加载 / 单条删除 / 画像编辑 / 一键清除 / 确认对话框）",
+        "Typecheck passes"
+      ],
+      "priority": 36,
+      "passes": false,
+      "notes": "M5 UI 层。ADR-015 5.7。用户对记忆有完全控制权（GDPR 式）。P1 常规。"
     }
   ]
 }
