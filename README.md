@@ -10,6 +10,8 @@
 
 **M4 Skills 系统全部完成（US-020~US-029，ADR-013/014 Accepted，Phase A~E 全部通过 guardrail + ac-verifier，912 回归 0 失败）**（2026-08-10）—— Skill 数据模型 / SKILL.md 解析 / 注册中心 / tool_calling 接口 / 工具执行回路 / Skills 管理 UI / 远程下载 / 执行可观测。已知限制：M-3 GAP（生产路径执行记录未接入，US-029 基础设施已就绪，待后续 Phase D 接入）
 
+**M5 三层记忆系统 Phase A 完成（US-030 + US-031，ADR-015 Proposed，guardrail 通过 + ac-verifier 通过，971 回归 0 失败）**（2026-08-10）—— MemoryRecord @Entity + MemoryRepository CRUD/向量检索（L2 跨会话记忆）/ UserProfile @Entity + UserProfileRepository CRUD/upsert（L3 用户画像）。BR-security-001-amendment 转 active（nullable 数组字段 equals 覆盖须用 nullable 扩展函数）。性能基线建立（searchByVector p50=62us）
+
 - US-020 Skill 数据模型（SkillConfig 实体 + SkillRepository CRUD）✅（Phase A，guardrail + ac-verifier 通过）
 - US-023 StreamEvent/ChatStreamProvider 接口扩展预留 ✅（Phase A，guardrail + ac-verifier 通过，BR-naming-001 转 active）
 - US-021 SKILL.md 解析器（snakeyaml-engine-kmp 4.0.1 + 安全 LoadSettings + frontmatter 校验）✅（Phase B，guardrail 三轮 + ac-verifier 两轮通过，BR-security-004 转 active）
@@ -64,6 +66,7 @@
   - [ADR-012 M3 RAG 对话集成架构（US-019）](docs/decisions/ADR-012-m3-rag-conversation-integration.md)（Accepted）
   - [ADR-013 M4 Skills 系统架构（US-004）](docs/decisions/ADR-013-m4-skills-system-architecture.md)（Accepted）
   - [ADR-014 M4 LLM tool_calling 接口扩展（US-023~US-025）](docs/decisions/ADR-014-m4-toolcalling-interface.md)（Accepted）
+  - [ADR-015 M5 三层记忆系统架构（US-005）](docs/decisions/ADR-015-m5-memory-system-architecture.md)（Proposed）
 
 ### Reference（参考 / 报告）
 
@@ -178,6 +181,10 @@
   - [2026-08-10-m4-phaseE-us029-guardrail.md](docs/reports/2026-08-10-m4-phaseE-us029-guardrail.md) —— M4 Phase E US-029 安全与质量审计 round 1（guardrail-enforcer，有条件通过，M-1 须修复）
   - [2026-08-10-m4-phaseE-us029-guardrail-r2.md](docs/reports/2026-08-10-m4-phaseE-us029-guardrail-r2.md) —— M4 Phase E US-029 安全与质量审计 round 2（guardrail-enforcer，通过，M-1 修复有效）
   - [2026-08-10-m4-phaseE-us029-acceptance.md](docs/reports/2026-08-10-m4-phaseE-us029-acceptance.md) —— M4 Phase E US-029 验收测试（ac-verifier，通过，6/6 AC，39 US-029 专项测试 + 10 边缘场景，912 回归 0 失败）
+  - [2026-08-10-m5-archaeology.md](docs/reports/2026-08-10-m5-archaeology.md) —— M5 记忆系统基建源码考古（code-archaeologist，6 集成点 + R-1~R-15 风险清单）
+  - [2026-08-10-m5-phaseA-impact-selfcheck.md](docs/reports/2026-08-10-m5-phaseA-impact-selfcheck.md) —— M5 Phase A 变更影响自检（主 Agent，P1 常规，4 项设计决策偏离说明）
+  - [2026-08-10-m5-phaseA-guardrail.md](docs/reports/2026-08-10-m5-phaseA-guardrail.md) —— M5 Phase A 安全与质量审计（guardrail-enforcer，通过，0 阻断/0 高危/0 中危/5 低危建议，L-01 已修复）
+  - [2026-08-10-m5-phaseA-acceptance.md](docs/reports/2026-08-10-m5-phaseA-acceptance.md) —— M5 Phase A 验收测试（ac-verifier，通过，US-030 5/5 + US-031 5/5 AC，59 专项测试 + 971 全量回归 0 失败）
   - [性能基线](docs/reports/perf/) —— 性能基线报告目录
     - [2026-08-02-us002-objectbox-crud-baseline.md](docs/reports/perf/2026-08-02-us002-objectbox-crud-baseline.md) —— US-002 ObjectBox CRUD 性能基线
     - [2026-08-02-us003-apikey-baseline.md](docs/reports/perf/2026-08-02-us003-apikey-baseline.md) —— US-003 API Key 加密存储性能基线
@@ -185,6 +192,7 @@
     - [2026-08-07-us014-embedding-baseline.md](docs/reports/perf/2026-08-07-us014-embedding-baseline.md) —— US-014 端侧嵌入引擎性能基线（初版，JVM）
     - [2026-08-07-us016-ingestion-pipeline-baseline.md](docs/reports/perf/2026-08-07-us016-ingestion-pipeline-baseline.md) —— US-016 摄入管线编排性能基线（初版，FakeEmbedder 100 chunk p99 735ms）
     - [2026-08-07-us017-retrieval-baseline.md](docs/reports/perf/2026-08-07-us017-retrieval-baseline.md) —— US-017 向量检索性能基线（JVM，p50<200us，10K chunk 规模验证）
+    - [2026-08-10-m5-phaseA-memory-baseline.md](docs/reports/perf/2026-08-10-m5-phaseA-memory-baseline.md) —— M5 Phase A 记忆系统性能基线（JVM，searchByVector p50=62us / save p50=1311us / getBySession p50=92us）
 
 ### 运维
 

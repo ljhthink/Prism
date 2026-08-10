@@ -32,7 +32,9 @@ import io.prism.network.OpenAICompatibleProvider
 import io.prism.security.ApiKeyRepository
 import io.prism.security.CryptoService
 import io.prism.security.KeystoreCryptoService
+import io.prism.data.MemoryRepository
 import io.prism.data.SkillRepository
+import io.prism.data.UserProfileRepository
 import io.prism.skill.SkillRegistry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -326,6 +328,28 @@ class PrismApplication : Application() {
     val skillDownloader: io.prism.skill.SkillDownloader by lazy {
         io.prism.skill.SkillDownloader(downloadHttpClient)
     }
+
+    /**
+     * 跨会话记忆仓库（US-030，ADR-015 5.1）—— 管理 [io.prism.data.MemoryRecord] 的 CRUD + 向量检索。
+     *
+     * M5 三层记忆系统 L2 层持久化层。复用 M3 ObjectBox HNSW 向量索引基建（KnowledgeChunk 模式）。
+     * 由 [io.prism.memory.CrossSessionMemoryManager]（US-033）在会话结束时调用 save 持久化对话片段向量，
+     * 在新会话首条消息时调用 searchByVector 检索 top-k 相关历史。
+     *
+     * 依赖 [boxStore]（ObjectBox 单例）。无 Android Context 依赖（BR-testing-004 可测性）。
+     */
+    val memoryRepository: MemoryRepository by lazy { MemoryRepository(boxStore) }
+
+    /**
+     * 用户画像仓库（US-031，ADR-015 5.2）—— 管理 [io.prism.data.UserProfile] 的 CRUD + upsert 唯一约束。
+     *
+     * M5 三层记忆系统 L3 层持久化层。存储用户偏好（显式用户设定 + 隐式 LLM 抽取）。
+     * 由 [io.prism.memory.UserProfileManager]（US-034）调用 save 持久化偏好，
+     * 由 [io.prism.ui.chat.ConversationViewModel] 在新会话时加载画像注入 systemPrompt 第三段。
+     *
+     * 依赖 [boxStore]（ObjectBox 单例）。无 Android Context 依赖（BR-testing-004 可测性）。
+     */
+    val userProfileRepository: UserProfileRepository by lazy { UserProfileRepository(boxStore) }
 
     override fun onCreate() {
         super.onCreate()

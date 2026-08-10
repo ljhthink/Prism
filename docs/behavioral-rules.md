@@ -101,6 +101,17 @@
 - 适用场景：dev
 - 状态：active
 
+#### BR-security-001-amendment: nullable 数组字段 equals 覆盖须使用 nullable 扩展函数
+
+- 类别：security
+- 规则：当 data class 含有 **nullable 数组字段**（如 `FloatArray?`、`IntArray?`）并覆盖 equals/hashCode 时，**禁止使用 `array?.contentEquals(other.array) == true` 模式**。`?.` 安全调用在接收者为 null 时短路返回 null，`null == true` 求值为 false，导致两条均含 null 数组的相同记录被判为不相等（违反 equals 语义一致性）。**必须使用 nullable 扩展函数 `array.contentEquals(other.array)`**（Kotlin 标准库提供 `infix fun FloatArray?.contentEquals(other: FloatArray?): Boolean`），该函数双 null 返回 true、单 null 返回 false、双非 null 做内容比较。hashCode 同理须用 `array?.contentHashCode() ?: 0` 或直接 `array.contentHashCode()`（nullable 扩展函数，null 返回 0）。
+- 反例：`embedding?.contentEquals(other.embedding) == true` —— 双 null embedding 时 `null?.contentEquals(...)` 短路为 null，`null == true` 为 false，两条相同 null embedding 记录判为不等
+- 正例：`embedding.contentEquals(other.embedding)` —— 调用 `FloatArray?.contentEquals(FloatArray?)` nullable 扩展函数，双 null 返回 true
+- 来源：M5 Phase A 审查（TKN-M5-PHASEA-GUARDRAIL-001，L-01 低危发现；主 Agent 修复 + 4 边界测试验证；ac-verifier TKN-M5-PHASEA-ACCEPTANCE-001 确认修复有效）
+- 添加日期：2026-08-10
+- 适用场景：dev
+- 状态：active（ac-verifier TKN-M5-PHASEA-ACCEPTANCE-001 确认转 active，2026-08-10。L-01 修复后 4 边界测试通过：双 null 相等 / 双非 null 内容相等 / 单 null 不等 / 双非 null 内容不等）
+
 #### BR-security-002: Android Keystore StrongBox 密钥生成必须捕获通用异常回退 TEE
 
 - 类别：security
@@ -388,3 +399,5 @@
 | 2026-08-09 | guardrail-enforcer | 提议 BR-naming-001 | M4 Phase A 基础层审查（TKN-M4-PHASEA-GUARDRAIL-001）：556 测试通过、Typecheck 通过，无阻断级安全漏洞（无注入/密钥/RCE）。Role.TOOL 静默映射 bug 已由主 Agent 自查修复（if-else → when 穷尽 + Fail Fast）。G-01 中危（tools 静默忽略，强建议加 Log.w）、G-02~G-05 低危建议项。结论通过，可进入 ac-verifier。BR-naming-001 proposed→待 ac-verifier 确认转 active |
 | 2026-08-09 | ac-verifier | 验收通过，BR-naming-001 转 active | M4 Phase A 基础层验收（TKN-M4-PHASEA-ACCEPTANCE-001）：US-020 6/6 AC 通过，US-023 5/6 通过 + AC-4 有条件通过（Fail Fast 裁定为 ADR-014 5.6 分阶段决策，Phase C US-024 补完整 TOOL→"tool" 映射）。SkillRepositoryTest 12 测试 + 全量 556 回归 0 失败。G-01 Log.w 修复有效。BR-naming-001 proposed → active（规则验证通过，未触发反例模式） |
 | 2026-08-09 | ac-verifier | 验收受限通过，BR-security-004 转 active | M4 Phase B 验收（TKN-M4-PHASEB-ACCEPTANCE-002）：US-021 5/5 AC 通过，US-022 5/6 通过 + AC-5 受限通过（SkillRegistryTest.kt 不存在，受限根因为 Android Context 构造期依赖 + 无 Robolectric/Mockito 测试基础设施，附 3 项 Phase C 强制条件）。SkillManifestParserTest 33 测试 + 全量 589 回归 0 失败（独立核实）。性能基线：parse 典型 1KB p50<1ms。安全：YAML 注入 4 项 + 敏感信息泄露 6 项全部通过。BR-security-004 proposed → active（规则文本已修订纠正 3 处事实错误 + 实现符合正例 + 4 测试验证防护有效） |
+| 2026-08-10 | guardrail-enforcer | 提议 BR-security-001 补充条款 | M5 Phase A 数据层审查（TKN-M5-PHASEA-GUARDRAIL-001）：55 测试通过、编译通过，无阻断级安全漏洞（无注入/密钥/RCE/命令执行）。HNSW #1209 规避有效（Box.remove 路径确认）。BR-security-001/BR-concurrency-001/003/BR-testing-004 全部合规。L-01 低危（equals null embedding 边界缺陷）+ L-02~L-05 低危建议。结论通过，可进入 ac-verifier。提议 BR-security-001 补充条款（nullable 数组字段 equals 覆盖须用 nullable 扩展函数）待 ac-verifier 确认转 active |
+| 2026-08-10 | ac-verifier | 验收通过，BR-security-001-amendment 转 active | M5 Phase A 验收（TKN-M5-PHASEA-ACCEPTANCE-001）：US-030 5/5 AC 通过（AC-1 Converter 偏离判定合理）+ US-031 5/5 AC 通过，59 专项测试 + 971 全量回归 0 失败。性能基线建立（searchByVector p50=62us / save p50=1311us / getBySession p50=92us）。安全检查 10 项全部通过。L-01 修复验证有效（4 边界测试：双 null 相等 / 双非 null 内容相等 / 单 null 不等 / 双非 null 内容不等）。BR-security-001-amendment proposed → active |
