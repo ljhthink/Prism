@@ -23,6 +23,7 @@
 | ADR-015 | M5 三层记忆系统架构（US-005） | Accepted | 2026-08-10 | [ADR-015-m5-memory-system-architecture.md](ADR-015-m5-memory-system-architecture.md) |
 | ADR-016 | M6 跨 App 调用架构（US-037） | Accepted | 2026-08-11 | [ADR-016-m6-cross-app-integration.md](ADR-016-m6-cross-app-integration.md) |
 | ADR-017 | M7 设备适配与降级架构（US-007） | Accepted | 2026-08-11 | [ADR-017-m7-device-adaptation.md](ADR-017-m7-device-adaptation.md) |
+| ADR-018 | M8 集成与发布架构（US-044~US-047） | Accepted | 2026-08-11 | [ADR-018-m8-release-architecture.md](ADR-018-m8-release-architecture.md) |
 
 ## ADR 生命周期
 

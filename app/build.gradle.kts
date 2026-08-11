@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -5,6 +7,15 @@ plugins {
     alias(libs.plugins.compose.compiler)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.objectbox)
+}
+
+// M8 发布配置（ADR-018）：读取 keystore/keystore.properties 配置 release 签名。
+// 文件位于 keystore/ 目录（.gitignore 排除），不存在时 release 构建降级为无签名（CI 可用）。
+// 使用 inputStream().use { } 确保文件句柄释放（guardrail CR-1 修复）。
+val keystorePropertiesFile = rootProject.file("keystore/keystore.properties")
+val keystoreProperties = Properties()
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
 }
 
 android {
@@ -29,9 +40,28 @@ android {
         }
     }
 
+    // M8 发布签名配置（ADR-018）：keystore.properties 存在时创建 release 签名配置
+    signingConfigs {
+        if (keystorePropertiesFile.exists()) {
+            create("release") {
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // M8 ADR-018：启用 R8 代码压缩 + 混淆 + 优化（proguard-rules.pro 补充所有依赖 keep 规则）
+            isMinifyEnabled = true
+            // M8 ADR-018：启用资源压缩（移除未引用资源，需 isMinifyEnabled=true）
+            isShrinkResources = true
+            // M8 ADR-018：keystore.properties 存在时签名 release，否则无签名（CI 可用）
+            if (keystorePropertiesFile.exists()) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

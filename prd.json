@@ -698,6 +698,78 @@
       "priority": 43,
       "passes": true,
       "notes": "M7 构建层。ADR-017 4.8/4.9/4.10 Accepted。P2 构建配置变更。abiFilters 减小 APK 体积约 40%（排除 x86/x86_64 native 库）。开发者如需 x86 模拟器调试可用 arm64 模拟器或覆盖 abiFilters。assembleDebug 验证通过（APK lib/ 仅含 2 个 ABI 目录）。AC4-5 APK 拆包条目验证待真机环境执行（编译层已通过，ac-verifier 标注为低优先级后续项）。"
+    },
+    {
+      "id": "US-044",
+      "title": "M8 Phase A: 生成 release keystore + 配置 Gradle 签名 + 启用 R8 + ProGuard 规则",
+      "description": "作为开发者，我需要为 release 构建配置签名密钥与 R8 全量混淆，以便产出可公开发布的 signed release APK。",
+      "acceptanceCriteria": [
+        "keystore/prism-release.jks 已生成（RSA 2048，SHA256withRSA，有效期至 2053-12-28，PKCS12）",
+        "keystore/keystore.properties 已创建（storeFile/storePassword/keyAlias/keyPassword），.gitignore 排除 keystore/",
+        "keystore/prism-release-credentials.txt 已创建（完整凭据 + 备份说明）",
+        "app/build.gradle.kts 读取 keystore.properties，存在时创建 signingConfigs.release",
+        "app/build.gradle.kts release buildType 启用 isMinifyEnabled + isShrinkResources + signingConfig",
+        "app/build.gradle.kts release buildType 配置 proguardFiles（proguard-android-optimize.txt + proguard-rules.pro）",
+        "app/proguard-rules.pro 包含 15 章节 keep 规则（Kotlin Metadata / ObjectBox / ONNX Runtime / POI / PDFBox / Tink / MCP SDK / SnakeYAML / Ktor / OkHttp / Prism 入口 / ServiceLoader / 调试支持 / 缺失类警告 / 安全力）",
+        "assembleRelease 构建成功（无 R8 阻断错误）",
+        "Typecheck passes"
+      ],
+      "priority": 44,
+      "passes": true,
+      "notes": "M8 发布工程 Phase A。ADR-018 Accepted。P3 重大（首次 R8 全量 + 签名密钥）。keystore/ 目录 .gitignore 第 10-12 行已排除。keystore.properties 缺失时降级无签名（CI 可用）。proguard-rules.pro 15 章节 keep 规则覆盖所有第三方依赖 + Prism 入口点 + ServiceLoader + 调试支持 + R8 missing class 警告。assembleRelease BUILD SUCCESSFUL（78.4MB）。"
+    },
+    {
+      "id": "US-045",
+      "title": "M8 Phase B: assembleRelease 签名验证 + 全量回归（R8 不剥离关键类）+ APK 体积分析",
+      "description": "作为开发者，我需要验证 release APK 签名正确、全量回归测试在 R8 混淆后仍通过、APK 体积符合预期，以便确保发布质量。",
+      "acceptanceCriteria": [
+        "apksigner verify 验证 app-release.apk 签名有效（v2 scheme，覆盖 Prism minSdk 26 / Android 8.0+ 全部目标设备）",
+        "./gradlew test 全量单元测试通过（1497+ 测试，0 失败，0 回归）",
+        "全量测试在 release 构建配置下亦通过（如适用，否则说明理由）",
+        "APK 体积 <80MB（实测 78.4MB）",
+        "APK 体积分析报告记录（含 R8 前后对比、ABI 过滤前后对比、依赖占比）",
+        "mapping.txt 已生成并归档（用于崩溃日志反混淆）",
+        "missing_rules.txt 为空或仅含可选依赖警告（无关键类缺失）",
+        "Typecheck passes"
+      ],
+      "priority": 45,
+      "passes": true,
+      "notes": "M8 发布工程 Phase B。ADR-018 Accepted。P3 重大。任务令牌 TKN-M8-RELEASE-002（R1 有条件通过）+ TKN-M8-RELEASE-002-R2（通过）+ TKN-M8-ACCEPTANCE-002（通过，17/17 AC 全部 PASS）。apksigner v2 scheme 通过 + 1497+1497 测试 0 失败 + APK 78.44MB + mapping.txt 96.86MB 归档 + missing_rules.txt 不存在（所有缺失类已被 -dontwarn 覆盖）。DEF-001 文档修复（ADR-018 4.3 '等 11 条' → '等 15 条'）。真机烟囱测试（ONNX + ObjectBox + Tink + POI 四条路径）留待 Phase D functional-validation-auditor。"
+    },
+    {
+      "id": "US-046",
+      "title": "M8 Phase C: git tag v0.1.0 + GitHub Release 创建 + APK 上传",
+      "description": "作为发布者，我需要打 v0.1.0 tag 并在 GitHub 创建 Release 上传 signed APK + mapping.txt，以便用户可下载安装。",
+      "acceptanceCriteria": [
+        "git tag v0.1.0 已创建并推送（annotated tag，含版本说明）",
+        "GitHub Release v0.1.0 已创建（title + release notes 引用 ADR-018 + 验收报告）",
+        "app-release.apk 已上传至 Release 资产",
+        "mapping.txt 已上传至 Release 资产（供用户反混淆崩溃日志）",
+        "Release notes 包含安装说明 + 最低系统要求（Android 8.0+）+ 已知限制",
+        "Release notes 明确声明不上 Google Play（PRD 非目标）",
+        "Typecheck passes"
+      ],
+      "priority": 46,
+      "passes": false,
+      "notes": "M8 发布工程 Phase C。ADR-018 Accepted。P3 重大。任务令牌 TKN-M8-RELEASE-003。"
+    },
+    {
+      "id": "US-047",
+      "title": "M8 Phase D: functional-validation-auditor 全面审计 + 最终一致性检查 + README 收尾",
+      "description": "作为发布者，我需要 functional-validation-auditor 对整个项目做最终交付审计，确认所有 PRD 验收标准满足、文档与实现一致、已知缺陷受控，并完成 README 文档索引收尾。",
+      "acceptanceCriteria": [
+        "functional-validation-auditor 输出最终交付审计报告（含交付/上线建议）",
+        "PRD 7. 验收标准汇总表逐项验证（BYOK/MCP/RAG/Skills/Memory/CrossApp/DeviceTier/Memory/AGPL/ApiKeyLeak）",
+        "docs/decisions/ ADR 索引与文件一致（ADR-001~018）",
+        "docs/reports/README.md 与实际报告一致（除 perf 子目录外不提交远程）",
+        "README.md 文档索引完整且链接可达",
+        "docs/behavioral-rules.md 健康检查（去重/合并/deprecated 标注）",
+        "M8 里程碑审计报告存档（docs/reports/2026-08-11-m8-milestone-audit.md，本地不入库）",
+        "Typecheck passes"
+      ],
+      "priority": 47,
+      "passes": false,
+      "notes": "M8 发布工程 Phase D。ADR-018 Accepted。P3 重大。任务令牌 TKN-M8-RELEASE-004。"
     }
   ]
 }
