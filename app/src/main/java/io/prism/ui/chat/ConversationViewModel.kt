@@ -7,11 +7,15 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import io.prism.PrismApplication
+import io.prism.crossapp.AppLauncherBridge
+import io.prism.crossapp.CrossAppLauncher
+import io.prism.crossapp.CrossAppLocalToolExecutor
 import io.prism.data.KnowledgeBaseRepository
 import io.prism.data.McpServerRepository
 import io.prism.data.ProviderConfig
 import io.prism.data.ProviderConfigRepository
 import io.prism.embedding.Embedder
+import io.prism.fs.UiConfirmationGate
 import io.prism.memory.CrossSessionMemoryManager
 import io.prism.memory.SlidingWindowMemoryManager
 import io.prism.memory.SlidingWindowResult
@@ -124,7 +128,30 @@ class ConversationViewModel(
      */
     private val applicationScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     /** IO 调度器，用于 RAG embed+search 阻塞调用（BR-concurrency-002）。测试中注入 test dispatcher。 */
-    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    /**
+     * M6 Phase C：用户确认门禁，UI 收集其 [UiConfirmationGate.requests] 流展示确认对话框。
+     *
+     * null 时降级为无确认 UI（SkillExecutor.confirm() 30s 超时返回 false，工具被静默拒绝）。
+     * 生产环境由 [PrismApplication.confirmationGate] 注入；测试可注入 fake 或 null。
+     */
+    val confirmationGate: UiConfirmationGate? = null,
+    /**
+     * M6 Phase C：跨 App 调用 ActivityResult 桥接器，UI 收集其 [AppLauncherBridge.requests] 流
+     * 触发 `launcher.launch(intent)`，回调结果回灌 `bridge.respond(id, result)`。
+     *
+     * null 时降级为无 launcher 注册（跨 App 工具调用 25s 超时返回失败描述，BR-concurrency-005）。
+     * 生产环境由 [PrismApplication.appLauncherBridge] 注入；测试可注入 fake 或 null。
+     */
+    val appLauncherBridge: AppLauncherBridge? = null,
+    /**
+     * M6 Phase C：跨 App 调用核心入口，用于 [buildTools] 合并跨 App 工具定义。
+     *
+     * null 时降级为不注册跨 App 工具（LLM 无法感知跨 App 能力，但已注册的本地工具分支
+     * 仍可通过 SkillExecutor 调用——只是 LLM 不会主动触发）。
+     * 生产环境由 [PrismApplication.crossAppLauncher] 注入；测试可注入 fake 或 null。
+     */
+    val crossAppLauncher: CrossAppLauncher? = null
 ) : ViewModel() {
 
     /**
@@ -294,9 +321,9 @@ class ConversationViewModel(
             // 降级策略：L2/L3 任一失败降级为 null（用户无感），不阻断对话
             startSessionIfNeeded(trimmed)
 
-            // M4 Phase D：构建 tools
+            // M4 Phase D：构建 tools（M6 Phase C 扩展：合并跨 App 本地工具）
             val enabledSkills = skillRegistry?.enabledSkills() ?: emptyList()
-            val tools = Companion.buildTools(enabledSkills)
+            val tools = Companion.buildTools(enabledSkills, crossAppLauncher)
             val mcpServers = mcpServerRepository?.servers?.value ?: emptyList()
 
             // 请求历史构建：
@@ -826,14 +853,22 @@ class ConversationViewModel(
          * **命名空间隔离**（ADR-014 5.5）：tool name 格式 `skillName__toolName`，
          * 避免跨 Skill 同名工具冲突；执行时由 [SkillExecutor.stripNamespace] 剥离前缀。
          *
+         * **M6 Phase C 扩展**（ADR-016 5.4）：合并跨 App 本地工具（`cross_app__` 命名空间），
+         * 由 [CrossAppLocalToolExecutor.buildToolDefinitions] 静态生成 3 个工具定义
+         * （open_app / share_content / pick_media）。crossAppLauncher 为 null 时跳过（向后兼容）。
+         *
          * **纯函数**（US-026 可测性，BR-testing-004 模式）：不依赖实例状态，
          * 可在纯 JVM 测试中直接验证，无需 Android Context 或真实 SkillRegistry。
          *
          * @param enabledSkills 已启用的 Skill 列表（来自 [SkillRegistry.enabledSkills]）
-         * @return 工具定义列表；无 tools 声明的 Skill 贡献 0 项
+         * @param crossAppLauncher 跨 App 调用核心入口（M6 Phase C，可空：null 时不合并跨 App 工具）
+         * @return 工具定义列表；无 tools 声明的 Skill 贡献 0 项；crossAppLauncher 非 null 时追加 3 项跨 App 工具
          */
-        internal fun buildTools(enabledSkills: List<SkillRegistry.SkillEntry>): List<ToolDefinition> {
-            return enabledSkills.flatMap { entry ->
+        internal fun buildTools(
+            enabledSkills: List<SkillRegistry.SkillEntry>,
+            crossAppLauncher: CrossAppLauncher? = null
+        ): List<ToolDefinition> {
+            val skillTools = enabledSkills.flatMap { entry ->
                 (entry.manifest.tools ?: emptyList()).map { toolDecl ->
                     ToolDefinition(
                         function = ToolDefinition.FunctionDef(
@@ -844,6 +879,10 @@ class ConversationViewModel(
                     )
                 }
             }
+            val crossAppTools = crossAppLauncher?.let {
+                CrossAppLocalToolExecutor.buildToolDefinitions(it)
+            } ?: emptyList()
+            return skillTools + crossAppTools
         }
 
         /**
@@ -926,6 +965,10 @@ class ConversationViewModel(
          *
          * M5 Phase E（US-035）：注入三层记忆组件 + [PrismApplication.appScope]
          * （用于 [onCleared] 中 fire-and-forget 记忆持久化）。
+         *
+         * M6 Phase C（US-039）：注入跨 App 调用组件
+         * （[PrismApplication.confirmationGate] / [PrismApplication.appLauncherBridge] / [PrismApplication.crossAppLauncher]），
+         * 供 ConversationScreen 收集 SharedFlow 流并展示确认对话框 + 注册 ActivityResult launcher。
          */
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
@@ -941,7 +984,10 @@ class ConversationViewModel(
                     slidingWindowMemoryManager = app.slidingWindowMemoryManager,
                     crossSessionMemoryManager = app.crossSessionMemoryManager,
                     userProfileManager = app.userProfileManager,
-                    applicationScope = app.appScope
+                    applicationScope = app.appScope,
+                    confirmationGate = app.confirmationGate,
+                    appLauncherBridge = app.appLauncherBridge,
+                    crossAppLauncher = app.crossAppLauncher
                 )
             }
         }

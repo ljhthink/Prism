@@ -1,5 +1,10 @@
 package io.prism.ui.chat
 
+import android.app.Activity
+import android.content.Intent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.ActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -34,9 +39,12 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,12 +56,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import io.prism.crossapp.AppLauncherBridge
+import io.prism.crossapp.CrossAppLauncher
+import io.prism.crossapp.CrossAppLocalToolExecutor
 import io.prism.data.ProviderConfig
+import io.prism.fs.UiConfirmationGate
 import io.prism.rag.RagTarget
 import io.prism.ui.components.PrismAvatar
 import io.prism.ui.components.PrismButton
@@ -90,6 +103,18 @@ import io.prism.ui.theme.PrismTextFaint
  * **US-019 文案修正**（ADR-012 5.8，修复 R-7）：
  * - TypingIndicator 文案从「正在调用 MCP 检索知识库…」改为按 RAG 状态切换
  * - MessageInputBar 占位符从「输入问题，@知识库 检索…」改为「输入问题…」（移除未实现语法）
+ *
+ * **M6 Phase C 集成**（US-039，ADR-016 5.5）：
+ * - **用户确认 UI**：收集 [UiConfirmationGate.requests] 流，展示 [AlertDialog] 供用户允许/拒绝
+ *   工具调用（覆盖 M4 Skill 工具 + M6 跨 App 工具，复用同一确认对话框）。
+ *   确认/取消按钮调用 `gate.respond(id, allow)` 回灌结果，SkillExecutor 挂起协程恢复。
+ * - **跨 App 跳转 launcher**：注册 [ActivityResultContracts.StartActivityForResult] launcher，
+ *   收集 [AppLauncherBridge.requests] 流触发 `launcher.launch(intent)`，
+ *   回调中按 [ActivityResult.getResultCode] 提取结果文本回灌 `bridge.respond(id, result)`。
+ * - **生命周期清理**：[DisposableEffect] 在 Composable 离开组合时调用 [CrossAppLauncher.cancelAll]
+ *   （委托至 [AppLauncherBridge.cancelAll]），避免 Activity 销毁时 pending deferred 泄漏（ADR-016 R2）。
+ * - **降级策略**：[ConversationViewModel.confirmationGate] / [appLauncherBridge] / [crossAppLauncher]
+ *   任一为 null 时跳过对应 UI 注册（向后兼容既有测试，工具调用走超时降级文案）。
  */
 @Composable
 fun ConversationScreen(
@@ -104,6 +129,59 @@ fun ConversationScreen(
     var ragSelectorVisible by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+
+    // ============ M6 Phase C：跨 App 调用 UI 集成（US-039，ADR-016 5.5） ============
+
+    val confirmationGate = viewModel.confirmationGate
+    val appLauncherBridge = viewModel.appLauncherBridge
+    val crossAppLauncher = viewModel.crossAppLauncher
+
+    // 待确认请求（一次只展示一个对话框，用户响应后清空并处理下一个）
+    var pendingConfirm by remember { mutableStateOf<UiConfirmationGate.PendingConfirm?>(null) }
+    // 待处理的 Intent 请求 id（launcher 回调时需要传回 bridge.respond）
+    var pendingIntentRequestId by remember { mutableStateOf<Long?>(null) }
+
+    // ActivityResult launcher：必须先于收集其回调的 state 声明（参考 KnowledgeBaseScreen 先例）
+    val startActivityLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result: ActivityResult ->
+        // 从 ActivityResult 提取结果文本回灌 bridge
+        val resultText = when (result.resultCode) {
+            Activity.RESULT_OK -> {
+                // Photo/Document Picker 返回 Uri；Deep Link/Share Sheet 通常无 data
+                result.data?.dataString ?: "已完成"
+            }
+            Activity.RESULT_CANCELED -> "用户取消"
+            else -> "未知结果（resultCode=${result.resultCode}）"
+        }
+        pendingIntentRequestId?.let { id ->
+            appLauncherBridge?.respond(id, resultText)
+            pendingIntentRequestId = null
+        }
+    }
+
+    // 收集 UiConfirmationGate.requests 流 —— 展示工具确认对话框
+    // 覆盖 M4 Skill 工具 + M6 跨 App 工具（统一确认门禁，ADR-016 R8 缓解）
+    LaunchedEffect(confirmationGate) {
+        confirmationGate?.requests?.collect { request ->
+            pendingConfirm = request
+        }
+    }
+
+    // 收集 AppLauncherBridge.requests 流 —— 触发 launcher.launch(intent)
+    LaunchedEffect(appLauncherBridge) {
+        appLauncherBridge?.requests?.collect { request ->
+            pendingIntentRequestId = request.id
+            startActivityLauncher.launch(request.intent)
+        }
+    }
+
+    // 生命周期清理：Composable 离开组合时清理 pending deferred，避免泄漏（ADR-016 R2）
+    DisposableEffect(crossAppLauncher) {
+        onDispose {
+            crossAppLauncher?.cancelAll()
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
@@ -178,6 +256,126 @@ fun ConversationScreen(
                 onSelect = { viewModel.setRagTarget(it); ragSelectorVisible = false },
                 onClose = { ragSelectorVisible = false }
             )
+        }
+
+        // M6 Phase C：工具调用确认对话框（US-039，ADR-016 5.5）
+        // 覆盖 M4 Skill 工具 + M6 跨 App 工具，复用同一 UiConfirmationGate
+        pendingConfirm?.let { request ->
+            ToolConfirmationDialog(
+                request = request,
+                crossAppLauncher = crossAppLauncher,
+                onAllow = {
+                    confirmationGate?.respond(request.id, true)
+                    pendingConfirm = null
+                },
+                onDeny = {
+                    confirmationGate?.respond(request.id, false)
+                    pendingConfirm = null
+                }
+            )
+        }
+    }
+}
+
+/**
+ * 工具调用确认对话框（M6 Phase C，US-039，ADR-016 5.5）。
+ *
+ * **统一确认门禁**（ADR-016 R8 缓解）：
+ * - M4 Skill 工具（`skillName__toolName`）：仅展示工具名 + 参数
+ * - M6 跨 App 工具（`cross_app__*`）：从 [CrossAppLauncher.getAppConfig] 查询 App 显示名，
+ *   展示「App 名称 + 操作类型 + 内容预览」富信息
+ *
+ * **降级提示**：跨 App 工具若目标 App 未安装，对话框文本提示用户「未安装，将返回降级提示」，
+ * 用户仍可允许执行（CrossAppLauncher.launchApp 会返回 fallbackUrl 描述回灌 LLM）。
+ *
+ * @param request 待确认请求（来自 [UiConfirmationGate.requests]）
+ * @param crossAppLauncher 跨 App 调用入口（可空：null 时仅展示工具名 + 参数，不查询 App 信息）
+ * @param onAllow 用户允许回调（调用方回灌 `gate.respond(id, true)`）
+ * @param onDeny 用户拒绝回调（调用方回灌 `gate.respond(id, false)`）
+ */
+@Composable
+private fun ToolConfirmationDialog(
+    request: UiConfirmationGate.PendingConfirm,
+    crossAppLauncher: CrossAppLauncher?,
+    onAllow: () -> Unit,
+    onDeny: () -> Unit
+) {
+    // 解析确认文案：跨 App 工具富信息 / 通用工具名 + 参数
+    val (title, content) = remember(request, crossAppLauncher) {
+        resolveConfirmationContent(request, crossAppLauncher)
+    }
+
+    AlertDialog(
+        onDismissRequest = onDeny,
+        title = { Text(text = title, color = PrismText, fontWeight = FontWeight.SemiBold) },
+        text = {
+            Column {
+                Text(text = content, color = PrismTextDim, fontSize = 13.sp, lineHeight = 20.sp)
+            }
+        },
+        confirmButton = {
+            PrismButton(text = "允许", variant = PrismButtonVariant.Primary, onClick = onAllow)
+        },
+        dismissButton = {
+            PrismButton(text = "拒绝", variant = PrismButtonVariant.Ghost, onClick = onDeny)
+        }
+    )
+}
+
+/**
+ * 解析确认对话框的标题与内容文案（[ToolConfirmationDialog] 辅助函数）。
+ *
+ * **纯函数**（BR-testing-004）：可在纯 JVM 测试中直接验证，无 Android 依赖。
+ *
+ * **工具类型识别**：
+ * - `cross_app__open_app`：查询 App 显示名 + action，富信息展示
+ * - `cross_app__share_content`：展示分享内容预览（截断到 100 字符防溢出）
+ * - `cross_app__pick_media`：展示选取类型
+ * - 其他工具（M4 Skill）：展示工具名 + JSON 参数
+ *
+ * @param request 待确认请求
+ * @param crossAppLauncher 跨 App 调用入口（可空：null 时跨 App 工具仅展示工具名）
+ * @return Pair(title, content)
+ */
+private fun resolveConfirmationContent(
+    request: UiConfirmationGate.PendingConfirm,
+    crossAppLauncher: CrossAppLauncher?
+): Pair<String, String> {
+    val toolName = request.toolName
+    val args = request.arguments
+
+    return when {
+        toolName == CrossAppLocalToolExecutor.TOOL_OPEN_APP -> {
+            val appId = args["appId"]?.toString()
+            val appConfig = appId?.let { crossAppLauncher?.getAppConfig(it) }
+            val appDisplayName = appConfig?.displayName ?: appId ?: "未知应用"
+            val action = args["action"]?.toString() ?: "打开"
+            val title = "AI 请求打开 $appDisplayName"
+            val content = buildString {
+                append("操作：$action\n")
+                append("应用：$appDisplayName")
+                if (appConfig?.fallbackUrl != null) {
+                    append("\n备用：${appConfig.fallbackUrl}")
+                }
+                val extraParams = args.filterKeys { it !in setOf("appId", "action") }
+                if (extraParams.isNotEmpty()) {
+                    append("\n参数：$extraParams")
+                }
+            }
+            title to content
+        }
+        toolName == CrossAppLocalToolExecutor.TOOL_SHARE_CONTENT -> {
+            val content = args["content"]?.toString() ?: ""
+            val preview = if (content.length > 100) content.take(100) + "…" else content
+            "AI 请求分享内容" to "分享文本：\n$preview"
+        }
+        toolName == CrossAppLocalToolExecutor.TOOL_PICK_MEDIA -> {
+            val mediaType = args["mediaType"]?.toString() ?: "未知类型"
+            "AI 请求选取媒体" to "类型：$mediaType\nAI 将通过系统选择器让你选取照片或文档。"
+        }
+        else -> {
+            // M4 Skill 工具或其他工具：通用展示
+            "AI 请求执行工具" to "工具：$toolName\n参数：$args"
         }
     }
 }

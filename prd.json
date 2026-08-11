@@ -558,6 +558,66 @@
       "priority": 36,
       "passes": true,
       "notes": "M5 UI 层。ADR-015 5.7。用户对记忆有完全控制权（GDPR 式）。P1 常规。Phase E 验收通过（TKN-M5-PHASEE-ACCEPTANCE-001，5/5 AC（AC-1 受限通过 Compose UI 需 instrumented test），29 纯函数单元测试 + 6 deleteById 测试）。"
+    },
+    {
+      "id": "US-037",
+      "title": "M6 Phase A: CrossAppLauncher 核心模块（scheme 清单 + Deep Link + Share Sheet + Picker + Bridge）",
+      "description": "作为开发者，我需要实现跨 App 调用的底层能力模块，以便 AI Agent 后续通过 tool_calling 触发跨 App 操作。",
+      "acceptanceCriteria": [
+        "新增 assets/cross-app/app_schemes.json：7 个 App scheme 配置（微信/支付宝/淘宝/抖音/QQ/微博/百度地图），含 appId/displayName/packageName/scheme/defaultAction/actions/fallbackUrl/queryScheme 字段",
+        "新增 AppSchemeEntry 数据类 + SchemeRegistry（从 assets 加载 JSON 配置，kotlinx.serialization 解析）",
+        "新增 AppAvailabilityChecker（PackageManager.getPackageInfo 检测 App 安装状态，未安装返回 false 不抛异常）",
+        "新增 DeepLinkLauncher（Intent.ACTION_VIEW + Uri.parse(scheme) 跳转，FLAG_ACTIVITY_NEW_TASK，ActivityNotFoundException 捕获返回 false）",
+        "新增 ShareSheetLauncher（ACTION_SEND + Intent.createChooser，支持 text/plain 和 image/* MIME）",
+        "新增 MediaPicker（封装 ActivityResultContracts.PickVisualMedia + GetMultipleContents 契约，通过 AppLauncherBridge 桥接）",
+        "新增 AppLauncherBridge（MutableSharedFlow<PendingIntentRequest> + ConcurrentHashMap<Long, CompletableDeferred<String>> + withTimeoutOrNull 30s，仿 UiConfirmationGate 桥接模式）",
+        "新增 CrossAppLauncher 核心入口（组合 SchemeRegistry + AppAvailabilityChecker + DeepLinkLauncher + ShareSheetLauncher + MediaPicker + AppLauncherBridge）",
+        "新增 CrossAppConfirmationRequest 数据类（appDisplayName/actionType/contentPreview/targetScheme/isAppInstalled）",
+        "SchemeRegistry + AppAvailabilityChecker 纯函数单元测试通过（JSON 解析 / App 状态检测 / 异常路径）",
+        "Typecheck passes"
+      ],
+      "priority": 37,
+      "passes": true,
+      "notes": "M6 底层能力层。ADR-016 方案 A（纯 Android 原生，2026-08-11 转 Accepted）。P2 跨模块。零新增第三方依赖。复用 UiConfirmationGate 桥接模式（SharedFlow + CompletableDeferred）。源码考古 TKN-M6-ARCH-001 + 技术选型 TKN-M6-TECH-SELECTION-001。Phase A 验收通过（TKN-M6-PHASE-A-ACCEPTANCE-001，10/10 AC，SchemeRegistryTest 14 + CrossAppLauncherTemplateTest 12 + DeepLink resolveAction 7 + AppAvailabilityCheckerTest 9 全部通过）。"
+    },
+    {
+      "id": "US-038",
+      "title": "M6 Phase B: LocalToolExecutor AI 集成层（接口 + CrossAppLocalToolExecutor + SkillExecutor 扩展）",
+      "description": "作为开发者，我需要将跨 App 调用能力注册为 AI 可触发的本地工具，以便 LLM 通过 tool_calling 自主决策调用跨 App 操作。",
+      "acceptanceCriteria": [
+        "新增 LocalToolExecutor 接口（handles(toolName): Boolean + suspend execute(toolName, args): String），与 McpToolProvider 平行",
+        "新增 CrossAppLocalToolExecutor 实现 LocalToolExecutor：注册 cross_app__open_app / cross_app__share_content / cross_app__pick_media 三个工具，handles 通过 toolName.startsWith(\"cross_app__\") 判断",
+        "CrossAppLocalToolExecutor.execute 内部通过 AppLauncherBridge 桥接 ActivityResult，返回结果文本（成功/失败描述回灌 LLM）",
+        "CrossAppLocalToolExecutor 通过 intentLauncher: (Intent) -> String? 注入解耦 Android 框架（复用 KnowledgeBaseViewModel inputStreamProvider 模式），纯 JVM 可测",
+        "SkillExecutor 扩展：新增 localToolExecutor 构造器参数（默认 null 向后兼容），executeToolCall 增加本地工具分支（localToolExecutor.handles(toolName) → 走本地 execute，否则走 MCP callTool）",
+        "SkillExecutor 现有 M4 全量回归测试 0 失败（localToolExecutor=null 时行为完全一致）",
+        "PrismApplication 新增 CrossAppLauncher + CrossAppLocalToolExecutor by lazy 依赖注入，SkillExecutor 构造增加 localToolExecutor 参数",
+        "CrossAppLocalToolExecutor 单元测试通过（handles 判断 / open_app / share_content / pick_media / 未安装降级 / 超时降级 / 异常路径）",
+        "SkillExecutor 本地工具分支单元测试通过（localToolExecutor 注入 / handles=true 走本地 / handles=false 走 MCP / localToolExecutor=null 向后兼容）",
+        "Typecheck passes"
+      ],
+      "priority": 38,
+      "passes": true,
+      "notes": "M6 AI 集成层。ADR-016 LocalToolExecutor 路径（否决 IntentToolProvider 路径，语义清晰 + 测试性好 + 扩展性强，2026-08-11 转 Accepted）。P2 跨模块。复用 M4 SkillExecutor 回路（用户确认 + 超时 + 错误回灌 + 可观测 + 命名空间隔离）。sequential-thinking 6 步推演决策。Phase B 验收通过（TKN-M6-PHASE-B-ACCEPTANCE-001，10/10 AC，DEF-01 B2 严重缺陷由 Phase C 闭合：PrismApplication.kt 注入 localToolExecutor 到 SkillExecutor）。CrossAppLocalToolExecutorTest 24 + SkillExecutorLocalToolTest 11 + M6PhaseBAcceptanceSupplementTest 26 用例全部通过。"
+    },
+    {
+      "id": "US-039",
+      "title": "M6 Phase C: UI 集成层（AndroidManifest queries + ConversationViewModel 工具注册 + ConversationScreen launcher + 用户确认 UI）",
+      "description": "作为用户，我希望 AI 能在对话中调用其他 App 的功能（如打开微信、分享内容、选取照片），且调用前需我确认以防误操作。",
+      "acceptanceCriteria": [
+        "AndroidManifest.xml 新增 <queries> 声明：7 个目标 App 包名 + 7 个 scheme intent 过滤器 + 2 个 ACTION_SEND intent 过滤器（text/plain 和 image/*），不声明 QUERY_ALL_PACKAGES",
+        "ConversationViewModel.buildTools 合并跨 App 本地工具（cross_app__open_app / cross_app__share_content / cross_app__pick_media 的 ToolDefinition，含 JSON Schema parameters）",
+        "ConversationViewModel.Factory 注入 CrossAppLauncher + CrossAppLocalToolExecutor（通过 PrismApplication）",
+        "ConversationScreen 注册 ActivityResultContracts.StartActivityForResult launcher，收集 AppLauncherBridge 请求流发起跳转，回调结果回灌 bridge",
+        "ConversationScreen 收集 UiConfirmationGate.requests 流，展示跨 App 确认对话框（App 名称 + 操作类型 + 内容预览 + 确认/取消按钮）",
+        "目标 App 未安装时降级提示（fallbackUrl 网页跳转或提示用户手动打开）",
+        "AI 触发跨 App 调用前必须用户确认（复用 ToolConfirmationGate，确认后才执行跳转）",
+        "集成测试通过（ConversationViewModel 工具执行回路 + 跨 App 工具 handles 判断 + 确认门禁 + 降级路径）",
+        "Typecheck passes"
+      ],
+      "priority": 39,
+      "passes": true,
+      "notes": "M6 UI 集成层 + 里程碑收尾。ADR-016（2026-08-11 转 Accepted）。P2 跨模块。对应 PRD.md US-006 跨 App 调用（产品级）。复用 KnowledgeBaseScreen ActivityResultContracts 先例 + UiConfirmationGate 桥接模式。Phase C 验收通过（TKN-M6-PHASEC-ACCEPTANCE-001，10/10 AC，DEF-01 闭合 + M-1 双重超时竞态修复 BR-concurrency-005 转 active）。M6 里程碑审计通过（TKN-M6-MILESTONE-AUDIT-001，1380 全量回归 0 失败）。已知受限：UNC-1 真机 E2E 7 App Deep Link 兼容性待补测。"
     }
   ]
 }

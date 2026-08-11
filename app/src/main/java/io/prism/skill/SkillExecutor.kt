@@ -67,25 +67,34 @@ import kotlinx.serialization.json.encodeToJsonElement
  * 非空时 [executeLoop] 自动记录 [SkillExecutionRecord]（startedAt/finishedAt/status/
  * toolCalls/errorMessage），用于跨会话审计与 UI 详情页展示。为 null 时跳过记录（向后兼容）。
  * [executeLoop] 新增可选 [skillConfigId] / [skillName] 参数，两者均非空且 repository 非空时才记录。
+ *
+ * **M6 Phase B 本地工具分支**（ADR-016）：构造器新增可选 [localToolExecutor]，
+ * 非空时 [executeToolCall] 在用户确认后先查询 [LocalToolExecutor.handles]：
+ * 若返回 true 走本地执行路径（[LocalToolExecutor.execute]），否则走 MCP 路径。
+ * 为 null 时行为与 M4 完全一致（仅走 MCP 路径，向后兼容）。
+ * 本地工具（如 `cross_app__open_app`）不走 MCP 协议，由 [CrossAppLocalToolExecutor]
+ * 直接调用 Android 原生 API（Intent + ActivityResult）。
  */
 open class SkillExecutor(
     private val mcpToolProvider: McpToolProvider,
     private val confirmationGate: ToolConfirmationGate,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-    private val skillExecutionRepository: SkillExecutionRepository? = null
+    private val skillExecutionRepository: SkillExecutionRepository? = null,
+    private val localToolExecutor: LocalToolExecutor? = null
 ) {
 
     /**
-     * 执行单个 tool_call：用户确认 → MCP 调用 → 返回结果字符串。
+     * 执行单个 tool_call：用户确认 → （本地工具 | MCP 调用） → 返回结果字符串。
      *
      * **降级策略**（ADR-014 5.7）：所有失败场景返回描述性字符串（而非抛异常），
      * 由调用方作为 tool result 回灌给 LLM，让 LLM 决定如何降级。
      *
-     * **流程**：
+     * **流程**（M6 Phase B 新增本地工具分支）：
      * 1. [ToolConfirmationGate.confirm] 请求用户确认（超时由 UiConfirmationGate 内部 30s 兜底）
-     * 2. [selectMcpServer] 选择第一个启用的 MCP Server
-     * 3. [stripNamespace] 剥离命名空间前缀（`skillName__toolName` → `toolName`）
-     * 4. [withTimeout] 包装 [McpToolProvider.callTool]（默认 30s）
+     * 2. **M6 新增**：若 [localToolExecutor] 非空且 [LocalToolExecutor.handles] 返回 true，
+     *    走本地执行路径（[LocalToolExecutor.execute]），跳过 MCP
+     * 3. 否则走 MCP 路径：[selectMcpServer] → [stripNamespace] → [withTimeout] 包装
+     *    [McpToolProvider.callTool]（默认 30s）
      *
      * @param toolCall LLM 返回的完整 tool_call（含 id/name/arguments）
      * @param mcpServers 可用 MCP Server 列表（按优先级，取第一个 enabled）
@@ -109,11 +118,29 @@ open class SkillExecutor(
         }
         if (!approved) return@withContext formatRejection(toolCall.toolName)
 
-        // 2. 选择可用 MCP Server
+        // 2. M6 新增：本地工具分支（LocalToolExecutor 路径，ADR-016）
+        //    本地工具（如 cross_app__open_app）不走 MCP 协议，由 LocalToolExecutor 直接执行
+        if (localToolExecutor != null && localToolExecutor.handles(toolCall.toolName)) {
+            return@withContext try {
+                withTimeout(maxTimeoutMs) {
+                    localToolExecutor.execute(toolCall.toolName, toolCall.arguments)
+                }
+            } catch (e: TimeoutCancellationException) {
+                Log.w(TAG, "local tool timeout: ${toolCall.toolName} (${maxTimeoutMs}ms)")
+                formatTimeout(toolCall.toolName, maxTimeoutMs)
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007
+            } catch (e: Exception) {
+                Log.w(TAG, "local tool execution failed: ${toolCall.toolName}", e)
+                formatToolError(toolCall.toolName, e)
+            }
+        }
+
+        // 3. MCP 工具路径（原有逻辑不变）
         val mcpServer = selectMcpServer(mcpServers)
             ?: return@withContext formatNoServer(toolCall.toolName)
 
-        // 3. 调用工具（超时防护 + 命名空间剥离）
+        // 4. 调用工具（超时防护 + 命名空间剥离）
         val physicalName = stripNamespace(toolCall.toolName)
         try {
             withTimeout(maxTimeoutMs) {
@@ -425,6 +452,14 @@ open class SkillExecutor(
          * - [formatNoServer]：`"无可用 MCP Server，无法执行工具: ..."`
          * - [formatConfirmError]：`"用户确认失败: ..."`
          *
+         * M6 Phase B 新增本地工具失败前缀（CrossAppLocalToolExecutor 返回）：
+         * - `"未找到应用配置: ..."`
+         * - `"未安装..."`
+         * - `"跨 App 调用超时..."`
+         * - `"缺少必需参数 ..."`
+         * - `"不支持的媒体类型: ..."`
+         * - `"未知跨 App 工具: ..."`
+         *
          * 通过前缀匹配判定失败，避免修改 [executeToolCall] 返回类型（保持向后兼容）。
          *
          * **已知局限**：若 MCP Server 返回的正常结果恰好以这些前缀开头，会被误判为失败。
@@ -438,7 +473,13 @@ open class SkillExecutor(
                 result.startsWith("工具执行超时") ||
                 result.startsWith("工具执行失败") ||
                 result.startsWith("无可用 MCP Server") ||
-                result.startsWith("用户确认失败")
+                result.startsWith("用户确认失败") ||
+                result.startsWith("未找到应用配置") ||
+                result.startsWith("未安装") ||
+                result.startsWith("跨 App 调用超时") ||
+                result.startsWith("缺少必需参数") ||
+                result.startsWith("不支持的媒体类型") ||
+                result.startsWith("未知跨 App 工具")
 
         /**
          * 构造 assistant 占位消息（携带 toolCalls 引用，OpenAI 要求下次请求回放）。

@@ -32,6 +32,11 @@ import io.prism.network.OpenAICompatibleProvider
 import io.prism.security.ApiKeyRepository
 import io.prism.security.CryptoService
 import io.prism.security.KeystoreCryptoService
+import io.prism.crossapp.AppAvailabilityChecker
+import io.prism.crossapp.AppLauncherBridge
+import io.prism.crossapp.CrossAppLauncher
+import io.prism.crossapp.CrossAppLocalToolExecutor
+import io.prism.crossapp.SchemeRegistry
 import io.prism.data.MemoryRepository
 import io.prism.data.SkillRepository
 import io.prism.data.UserProfileRepository
@@ -286,8 +291,79 @@ class PrismApplication : Application() {
         io.prism.skill.SkillExecutor(
             mcpToolProvider = mcpToolProviderDispatcher,
             confirmationGate = confirmationGate,
-            skillExecutionRepository = skillExecutionRepository
+            skillExecutionRepository = skillExecutionRepository,
+            localToolExecutor = crossAppLocalToolExecutor
         )
+    }
+
+    /**
+     * 跨 App 调用兼容性清单仓库（M6，ADR-016 5.3）—— 从 `assets/cross-app/app_schemes.json` 加载。
+     *
+     * 首次访问时通过 `assets.open(...)` 同步加载（约 <1ms，JSON 文件 < 4KB），
+     * 失败降级为空清单（跨 App 工具调用将返回 "无可用 App 配置"，不阻断应用启动）。
+     *
+     * **延迟初始化选择**：不用 [onCreate] 异步加载，原因——SchemeRegistry 仅在用户首次
+     * 触发跨 App 工具调用时被 [crossAppLauncher] 访问，懒加载避免应用启动时无谓 IO。
+     *
+     * 由 [crossAppLauncher] / [crossAppLocalToolExecutor] 注入使用。
+     */
+    val schemeRegistry: SchemeRegistry by lazy {
+        runCatching {
+            assets.open(SchemeRegistry.DEFAULT_CONFIG_PATH).use { SchemeRegistry.load(it) }
+        }.getOrElse { e ->
+            android.util.Log.w("PrismApplication", "load schemeRegistry failed: ${e::class.simpleName}")
+            SchemeRegistry.empty()
+        }
+    }
+
+    /**
+     * 跨 App 安装状态检测器（M6，ADR-016 5.3）—— 通过 PackageManager 检测目标 App 是否安装。
+     *
+     * **Android 11+ 包可见性**：依赖 AndroidManifest 的 `<queries>` 声明保证目标 App 可见
+     * （不声明 QUERY_ALL_PACKAGES，遵循 Google Play 政策）。
+     */
+    val appAvailabilityChecker: AppAvailabilityChecker by lazy {
+        AppAvailabilityChecker.fromContext(this)
+    }
+
+    /**
+     * Activity 上下文桥接器（M6，ADR-016 R2 缓解）—— SharedFlow + CompletableDeferred 桥接模式。
+     *
+     * 由 [crossAppLauncher] 注入使用；UI 层（ConversationScreen）收集 [AppLauncherBridge.requests]
+     * 流发起 `launcher.launch(intent)`，回调结果回灌 `bridge.respond(id, result)`。
+     *
+     * **生命周期**：[ConversationScreen] 在 `DisposableEffect` 中调用 [CrossAppLauncher.cancelAll]
+     * （委托至 [AppLauncherBridge.cancelAll]），避免 Activity 销毁时 deferred 泄漏。
+     */
+    val appLauncherBridge: AppLauncherBridge by lazy { AppLauncherBridge() }
+
+    /**
+     * 跨 App 调用核心入口（M6，ADR-016 5.3）—— 组合 SchemeRegistry + AppAvailabilityChecker + AppLauncherBridge。
+     *
+     * 提供三个核心能力：
+     * 1. [CrossAppLauncher.launchApp]：Deep Link 跳转
+     * 2. [CrossAppLauncher.shareContent]：Share Sheet 分享
+     * 3. [CrossAppLauncher.pickMedia]：系统 Picker 选取
+     *
+     * 由 [crossAppLocalToolExecutor] / ConversationViewModel.Factory 注入使用。
+     */
+    val crossAppLauncher: CrossAppLauncher by lazy {
+        CrossAppLauncher(schemeRegistry, appAvailabilityChecker, appLauncherBridge)
+    }
+
+    /**
+     * 跨 App 调用本地工具执行器（M6 Phase B，ADR-016 5.4）—— 实现 LocalToolExecutor 接口。
+     *
+     * 注册 `cross_app__open_app` / `cross_app__share_content` / `cross_app__pick_media` 三个工具，
+     * 由 [skillExecutor] 的本地工具分支调用（[io.prism.skill.SkillExecutor.executeToolCall] 中
+     * `localToolExecutor.handles(toolName)` 命中时走本地路径，否则走 MCP）。
+     *
+     * **DEF-01 修复**（M6 Phase B ac-verifier 验收报告）：
+     * 此 lazy 声明 + [skillExecutor] 构造传入 `localToolExecutor = crossAppLocalToolExecutor`
+     * 保证生产环境中本地工具分支可被触发（Phase B 编译通过但未注入的缺陷已修复）。
+     */
+    val crossAppLocalToolExecutor: CrossAppLocalToolExecutor by lazy {
+        CrossAppLocalToolExecutor(crossAppLauncher)
     }
 
     /**

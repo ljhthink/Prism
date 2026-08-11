@@ -1,0 +1,94 @@
+[
+  {
+    "appId": "wechat",
+    "displayName": "微信",
+    "packageName": "com.tencent.mm",
+    "scheme": "weixin",
+    "defaultAction": "weixin://",
+    "actions": {
+      "open": "weixin://",
+      "scan": "weixin://scanqrcode"
+    },
+    "fallbackUrl": "https://weixin.qq.com/",
+    "queryScheme": "weixin"
+  },
+  {
+    "appId": "alipay",
+    "displayName": "支付宝",
+    "packageName": "com.eg.android.AlipayGphone",
+    "scheme": "alipay",
+    "defaultAction": "alipay://",
+    "actions": {
+      "open": "alipay://",
+      "scan": "alipay://platformapi/startapp?saId=10000007",
+      "pay": "alipay://platformapi/startapp?appId=20000056"
+    },
+    "fallbackUrl": "https://mobile.alipay.com/",
+    "queryScheme": "alipay"
+  },
+  {
+    "appId": "taobao",
+    "displayName": "淘宝",
+    "packageName": "com.taobao.taobao",
+    "scheme": "taobao",
+    "defaultAction": "taobao://",
+    "actions": {
+      "open": "taobao://",
+      "item": "taobao://item?id={itemId}"
+    },
+    "fallbackUrl": "https://m.taobao.com/",
+    "queryScheme": "taobao"
+  },
+  {
+    "appId": "douyin",
+    "displayName": "抖音",
+    "packageName": "com.ss.android.ugc.aweme",
+    "scheme": "snssdk1128",
+    "defaultAction": "snssdk1128://",
+    "actions": {
+      "open": "snssdk1128://",
+      "detail": "snssdk1128://aweme/detail/{awemeId}/"
+    },
+    "fallbackUrl": "https://www.douyin.com/",
+    "queryScheme": "snssdk1128"
+  },
+  {
+    "appId": "qq",
+    "displayName": "QQ",
+    "packageName": "com.tencent.mobileqq",
+    "scheme": "mqq",
+    "defaultAction": "mqq://",
+    "actions": {
+      "open": "mqq://",
+      "scan": "mqq://qrcode/scan_qrcode?version=1&src_type=app"
+    },
+    "fallbackUrl": "https://im.qq.com/",
+    "queryScheme": "mqq"
+  },
+  {
+    "appId": "weibo",
+    "displayName": "微博",
+    "packageName": "com.sina.weibo",
+    "scheme": "sinaweibo",
+    "defaultAction": "sinaweibo://",
+    "actions": {
+      "open": "sinaweibo://",
+      "userinfo": "sinaweibo://userinfo?uid={uid}"
+    },
+    "fallbackUrl": "https://m.weibo.cn/",
+    "queryScheme": "sinaweibo"
+  },
+  {
+    "appId": "baidu_map",
+    "displayName": "百度地图",
+    "packageName": "com.baidu.BaiduMap",
+    "scheme": "baidumap",
+    "defaultAction": "baidumap://",
+    "actions": {
+      "open": "baidumap://",
+      "route": "baidumap://map/direction?origin={origin}&destination={dest}&mode=driving"
+    },
+    "fallbackUrl": "https://map.baidu.com/",
+    "queryScheme": "baidumap"
+  }
+]

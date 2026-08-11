@@ -27,4 +27,80 @@
         </activity>
     </application>
 
+    <!--
+        M6 跨 App 调用包可见性声明（US-039，ADR-016 5.3）。
+
+        Android 11+（API 30+）默认限制包可见性，必须通过 <queries> 显式声明才能：
+        1. 通过 PackageManager.getPackageInfo 检测目标 App 是否安装
+        2. 通过 Intent.ACTION_VIEW + scheme 触发 Deep Link 跳转
+
+        **合规策略**（ADR-016 R1 缓解）：
+        - 仅声明 7 个目标 App 包名 + 7 个 scheme + 2 个 ACTION_SEND intent 过滤器
+        - 不声明 QUERY_ALL_PACKAGES 权限（Google Play 政策禁止滥用）
+
+        **包名清单**（对应 app_schemes.json packageName 字段）：
+        - com.tencent.mm           微信
+        - com.eg.android.AlipayGphone  支付宝
+        - com.taobao.taobao        淘宝
+        - com.ss.android.ugc.aweme 抖音
+        - com.tencent.mobileqq     QQ
+        - com.sina.weibo           微博
+        - com.baidu.BaiduMap       百度地图
+
+        **scheme 清单**（对应 app_schemes.json scheme 字段）：
+        - weixin / alipay / taobao / snssdk1128 / mqq / sinaweibo / baidumap
+    -->
+    <queries>
+
+        <!-- 7 个目标 App 包名（PackageManager 可见性） -->
+        <package android:name="com.tencent.mm" />
+        <package android:name="com.eg.android.AlipayGphone" />
+        <package android:name="com.taobao.taobao" />
+        <package android:name="com.ss.android.ugc.aweme" />
+        <package android:name="com.tencent.mobileqq" />
+        <package android:name="com.sina.weibo" />
+        <package android:name="com.baidu.BaiduMap" />
+
+        <!-- 7 个 scheme intent 过滤器（Deep Link 跳转可见性） -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="weixin" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="alipay" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="taobao" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="snssdk1128" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="mqq" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="sinaweibo" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="baidumap" />
+        </intent>
+
+        <!-- 2 个 ACTION_SEND intent 过滤器（Share Sheet 可见性） -->
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="text/plain" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="image/*" />
+        </intent>
+
+    </queries>
+
 </manifest>

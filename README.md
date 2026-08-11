@@ -20,6 +20,8 @@
 
 **M5 三层记忆系统 Phase E 完成（US-035 + US-036，ADR-015 Accepted，guardrail 两轮 + ac-verifier 通过，US-035 6/6 AC + US-036 5/5 AC（AC-1 受限通过：Compose UI 需 instrumented test），1237 全量回归 0 失败，35 新增测试）**（2026-08-11）—— ConversationViewModel 三层记忆集成（会话边界 sessionId UUID + L2 检索/L3 画像缓存 + onCleared fire-and-forget 持久化 + appScope SupervisorJob）+ systemPrompt 六层合并（RAG → L1 摘要 → L2 跨会话 → L3 画像 → Skill，ADR-015 决策4）+ 记忆管理 UI（L1 窗口配置 + L2 记忆单条删除 + L3 画像编辑/删除 + 一键清除二次确认）+ MemoryManagementViewModel 纯函数校验（MAX_PROFILE_KEY_LEN=50 / MAX_PROFILE_VALUE_LEN=500 防 token 溢出）。降级策略：L1/L2/L3 任一失败降级为 null，不阻断对话
 
+**M6 跨 App 调用集成全部完成（US-037 + US-038 + US-039，ADR-016 Accepted，P2 跨模块，三阶段全部通过 guardrail + ac-verifier + 里程碑审计，1380 全量回归 0 失败）**（2026-08-11）—— 技术选型完成（方案 A 纯 Android 原生 + 方案 D 精简版复用 M4 SkillExecutor/ToolConfirmationGate，零新增第三方依赖）+ 源码考古完成（13 复用基建 + 10 项风险清单 + sequential-thinking 6 步推演 LocalToolExecutor vs IntentToolExecutor 决策）。三 Phase 拆分：Phase A CrossAppLauncher 核心模块（scheme 清单 + Deep Link + Share Sheet + Picker + Bridge）→ Phase B LocalToolExecutor AI 集成层（接口 + CrossAppLocalToolExecutor + SkillExecutor 扩展支持本地工具分支）→ Phase C UI 集成层（AndroidManifest <queries> + ConversationViewModel 工具注册 + ConversationScreen launcher + 用户确认 UI）。7 个目标 App：微信/支付宝/淘宝/抖音/QQ/微博/百度地图。关键缺陷修复：DEF-01 B2 严重（PrismApplication 注入遗漏）+ M-1 B1 一般（双重超时竞态 BR-concurrency-005 转 active）。已知受限：UNC-1 真机 E2E 7 App Deep Link 兼容性待补测
+
 - US-020 Skill 数据模型（SkillConfig 实体 + SkillRepository CRUD）✅（Phase A，guardrail + ac-verifier 通过）
 - US-023 StreamEvent/ChatStreamProvider 接口扩展预留 ✅（Phase A，guardrail + ac-verifier 通过，BR-naming-001 转 active）
 - US-021 SKILL.md 解析器（snakeyaml-engine-kmp 4.0.1 + 安全 LoadSettings + frontmatter 校验）✅（Phase B，guardrail 三轮 + ac-verifier 两轮通过，BR-security-004 转 active）
@@ -38,6 +40,9 @@
 - US-034 L3 用户画像管理（UserProfileManager 显式偏好 UI 设定 + 隐式偏好 LLM 抽取 + parsePreferencesJson 结构化解析 + formatProfilesAsContext 系统提示合并 + 显式不被隐式覆盖 + 抽取失败降级跳过）✅（M5 Phase D，guardrail + ac-verifier 通过，7/7 AC，80 专项测试 0 失败，性能基线建立 formatProfilesAsContext p50=12us）
 - US-035 ConversationViewModel 三层记忆系统集成（会话边界 sessionId UUID + L2 检索/L3 画像首条消息加载缓存 + onCleared fire-and-forget 持久化 appScope SupervisorJob + systemPrompt 六层合并 RAG→L1→L2→L3→Skill ADR-015 决策4 + L1/L2/L3 独立降级为 null 不阻断对话）✅（M5 Phase E，guardrail 两轮 + ac-verifier 通过，6/6 AC，17 集成测试 + 1237 全量回归 0 失败）
 - US-036 记忆管理 UI（CapabilitiesScreen MemoryPanel + L1 窗口大小配置 + L2 记忆列表单条删除 + L3 画像列表编辑/删除 + 一键清除二次确认 + MemoryManagementViewModel 纯函数校验防 token 溢出）✅（M5 Phase E，guardrail 两轮 + ac-verifier 通过，5/5 AC（AC-1 受限通过 Compose UI 需 instrumented test），29 纯函数单元测试 + 6 deleteById 测试）
+- US-037 M6 Phase A CrossAppLauncher 核心模块（app_schemes.json 7 App 配置 + SchemeRegistry + AppAvailabilityChecker + DeepLinkLauncher + ShareSheetLauncher + MediaPicker + AppLauncherBridge + CrossAppLauncher + CrossAppConfirmationRequest）✅（M6 Phase A，guardrail + ac-verifier 通过，10/10 AC，SchemeRegistryTest 14 + CrossAppLauncherTemplateTest 12 + AppAvailabilityCheckerTest 9 全部通过，零新增第三方依赖）
+- US-038 M6 Phase B LocalToolExecutor AI 集成层（LocalToolExecutor 接口 + CrossAppLocalToolExecutor 实现 + SkillExecutor 扩展本地工具分支默认 null 向后兼容）✅（M6 Phase B，guardrail + ac-verifier 通过，10/10 AC，DEF-01 B2 严重缺陷（PrismApplication 注入遗漏）由 Phase C 闭合，CrossAppLocalToolExecutorTest 24 + SkillExecutorLocalToolTest 11 + M6PhaseBAcceptanceSupplementTest 26 用例全部通过）
+- US-039 M6 Phase C UI 集成层（AndroidManifest queries 7+7+2 + PrismApplication 注入 + ConversationViewModel.buildTools 合并 + ConversationScreen ActivityResult launcher + 用户确认 UI + M-1 双重超时竞态修复 BR-concurrency-005 转 active）✅（M6 Phase C，guardrail 两轮 + ac-verifier 通过，10/10 AC，M6 里程碑审计通过 TKN-M6-MILESTONE-AUDIT-001，1380 全量回归 0 失败。已知受限：UNC-1 真机 E2E 7 App Deep Link 兼容性待补测）
 
 - US-011 依赖落地 + KnowledgeChunk 向量索引 ✅（guardrail + ac-verifier 通过）
 - US-012 文档解析器（PDF/DOCX/XLSX/MD/TXT）✅（guardrail 有条件通过 + ac-verifier 通过）
@@ -83,6 +88,7 @@
   - [ADR-013 M4 Skills 系统架构（US-004）](docs/decisions/ADR-013-m4-skills-system-architecture.md)（Accepted）
   - [ADR-014 M4 LLM tool_calling 接口扩展（US-023~US-025）](docs/decisions/ADR-014-m4-toolcalling-interface.md)（Accepted）
   - [ADR-015 M5 三层记忆系统架构（US-005）](docs/decisions/ADR-015-m5-memory-system-architecture.md)（Accepted）
+  - [ADR-016 M6 跨 App 调用架构（US-037）](docs/decisions/ADR-016-m6-cross-app-integration.md)（Accepted）
 
 ### Reference（参考 / 报告）
 
@@ -212,6 +218,18 @@
     - [2026-08-11-m5-phaseB-memory-baseline.md](docs/reports/perf/2026-08-11-m5-phaseB-memory-baseline.md) —— M5 Phase B 滑动窗口记忆性能基线（JVM，processMessages p50 / summarize 调用 LLM 非流式）
     - [2026-08-11-m5-phaseC-memory-baseline.md](docs/reports/perf/2026-08-11-m5-phaseC-memory-baseline.md) —— M5 Phase C 跨会话记忆检索性能基线（JVM，retrieveRelevantMemories p50 / saveSessionMemories p50）
     - [2026-08-11-m5-phaseD-profile-baseline.md](docs/reports/perf/2026-08-11-m5-phaseD-profile-baseline.md) —— M5 Phase D 用户画像性能基线（JVM，formatProfilesAsContext p50=12us / extractImplicitPreferences 调用 LLM 非流式）
+    - [2026-08-11-m6-phase-b-baseline.md](docs/reports/perf/2026-08-11-m6-phase-b-baseline.md) —— M6 Phase B 跨 App 调用性能基线（JVM，handles/resolveTemplates/executeToolCall/isFailureResult）
+  - [2026-08-11-m6-archaeology.md](docs/reports/2026-08-11-m6-archaeology.md) —— M6 跨 App 调用源码考古（code-archaeologist，13 复用基建 + 10 项风险清单 + 方案 A 推荐）
+  - [2026-08-11-m6-tech-selection.md](docs/reports/2026-08-11-m6-tech-selection.md) —— M6 跨 App 调用技术选型对比（tech-selection-researcher，方案 A 纯原生 + 方案 D 精简版复用 M4）
+  - [2026-08-11-m6-phase-a-guardrail.md](docs/reports/2026-08-11-m6-phase-a-guardrail.md) —— M6 Phase A 安全与质量审计（guardrail-enforcer，通过）
+  - [2026-08-11-m6-phase-a-acceptance.md](docs/reports/2026-08-11-m6-phase-a-acceptance.md) —— M6 Phase A 验收测试（ac-verifier，通过，10/10 AC）
+  - [2026-08-11-m6-phase-b-guardrail.md](docs/reports/2026-08-11-m6-phase-b-guardrail.md) —— M6 Phase B 安全与质量审计（guardrail-enforcer，通过）
+  - [2026-08-11-m6-phase-b-acceptance.md](docs/reports/2026-08-11-m6-phase-b-acceptance.md) —— M6 Phase B 验收测试（ac-verifier，通过，10/10 AC，DEF-01 B2 缺陷由 Phase C 闭合）
+  - [2026-08-11-m6-phase-c-archaeology.md](docs/reports/2026-08-11-m6-phase-c-archaeology.md) —— M6 Phase C 源码考古（code-archaeologist，ConversationScreen 集成点分析）
+  - [2026-08-11-m6-phase-c-impact-selfcheck.md](docs/reports/2026-08-11-m6-phase-c-impact-selfcheck.md) —— M6 Phase C 变更影响自检（主 Agent，含 blast-radius 二次自检）
+  - [2026-08-11-m6-phase-c-guardrail.md](docs/reports/2026-08-11-m6-phase-c-guardrail.md) —— M6 Phase C 安全与质量审计（guardrail-enforcer，两轮，M-1 双重超时竞态修复）
+  - [2026-08-11-m6-phase-c-acceptance.md](docs/reports/2026-08-11-m6-phase-c-acceptance.md) —— M6 Phase C 验收测试（ac-verifier，通过，10/10 AC，DEF-01 闭合 + BR-concurrency-005 转 active）
+  - [2026-08-11-m6-milestone-audit.md](docs/reports/2026-08-11-m6-milestone-audit.md) —— M6 里程碑交付审计（functional-validation-auditor，有条件交付→已闭合）
 
 ### 运维
 

@@ -216,6 +216,17 @@
 - 适用场景：dev
 - 状态：active（ac-verifier TKN-US018-AC-001 确认 G-01 修复有效，2026-08-07 转 active）
 
+#### BR-concurrency-005: 嵌套 withTimeout 超时层级必须内层短于外层
+
+- 类别：concurrency / error-handling
+- 规则：当使用嵌套的 `withTimeout` / `withTimeoutOrNull` 作用域时（如外层 SkillExecutor `withTimeout(30s)` 包裹内层 bridge `withTimeoutOrNull(35s)`），内层超时**必须短于**外层超时。若内层超时更长，外层超时会先触发取消传播，导致：(1) 内层 `withTimeoutOrNull` 的超时返回值（null）不会被生成，语义化超时文案丢失；(2) 内层超时后的清理代码（如 `pending.remove(id)`）不执行，资源残留。`withTimeoutOrNull` 仅捕获自身作用域的 `TimeoutCancellationException`，外部取消会正常传播。正确做法：内层超时 < 外层超时（如 25s < 30s），确保内层先超时、返回语义消息、执行清理，外层超时作为不可达兜底。
+- 反例：`withTimeout(30_000) { bridge.requestIntent(intent, timeoutMs = 35_000) }` —— 外层 30s 先超时，bridge 的 35s 超时永不可达，pending.remove 不执行，语义文案 "跨 App 调用超时" 永不返回
+- 正例：`withTimeout(30_000) { bridge.requestIntent(intent, timeoutMs = 25_000) }` —— 内层 25s 先超时，返回 null → pending.remove(id) 执行 → 返回 "跨 App 调用超时" → 外层 30s 永不触发
+- 来源：M6 Phase C 审查（TKN-M6-PHASEC-GUARDRAIL-001，M-1 中危发现：AppLauncherBridge 超时从 30s 改为 35s 方向错误）
+- 添加日期：2026-08-11
+- 适用场景：dev
+- 状态：active（ac-verifier TKN-M6-PHASEC-ACCEPTANCE-001 验证通过，2026-08-11 转 active。M-1 修复正确（25s < 30s）+ 端到端测试验证 bridge 先超时返回语义化文案 + pending 清理 + ac-verifier 补充测试断言超时层级关系）
+
 ### interface
 
 #### BR-interface-001: UI 设计必须用户审核通过后方可实现
@@ -420,3 +431,6 @@
 | 2026-08-11 | ac-verifier | 验收通过，无新规则 | M5 Phase C 验收（TKN-M5-PHASEC-ACCEPTANCE-001）：US-033 6/6 AC 全部通过。34 主 Agent 测试 + 24 ac-verifier 补充测试 = 58 专项测试全部通过，1105 全量回归 0 失败。性能基线建立（saveSessionMemories 1-pair p50=834us / 10-pair p50=15450us / retrieveRelevantMemories 100-records p50=152us / formatMemoriesAsContext p50=8us）。安全检查全部通过（硬编码密钥 0 / 注入 0 / 敏感信息泄露 0 / CancellationException 重抛 2 处正确）。BR-error-handling-004/007 + BR-security-005 + BR-testing-004 全部合规。无新规则提议 |
 | 2026-08-11 | guardrail-enforcer | 无新规则，结论通过 | M5 Phase D 审查（TKN-M5-PHASED-GUARDRAIL-001）：43 测试通过、编译通过，无阻断/高危/中危安全漏洞。3 个 catch 块均有 Log.w（BR-error-handling-004 合规），2 处 CancellationException 正确重抛（BR-error-handling-007 合规）。5 个低危建议：L-01（if-else→when，BR-naming-001 低危违规）、L-02（key/value 长度上限）、L-03（换行符编码）、L-04（测试注释）、L-05（JSON 大小限制）。结论通过，可进入 ac-verifier。无新规则提议 |
 | 2026-08-11 | ac-verifier | 验收通过，无新规则 | M5 Phase D 验收（TKN-M5-PHASED-ACCEPTANCE-001）：US-034 7/7 AC 全部通过。43 主 Agent 测试 + 37 ac-verifier 补充测试 = 80 专项测试全部通过，1185 全量回归 0 失败。性能基线建立（setExplicitPreference p50=907us / parsePreferencesJson p50=50us / formatProfilesAsContext p50=33us / extractImplicitPreferences p50=2377us）。安全检查全部通过（JSON 注入 / 敏感信息泄露 / BR 合规）。无新规则提议 |
+| 2026-08-11 | guardrail-enforcer | 提议 BR-concurrency-005，结论有条件通过 | M6 Phase C 审查（TKN-M6-PHASEC-GUARDRAIL-001）：编译通过，136 测试中 135 通过（1 stale test 失败）。无阻断级安全漏洞（无注入/密钥/RCE/命令执行）。M-1 中危（AppLauncherBridge 超时从 30s 改为 35s 方向错误，35s > 30s 导致 SkillExecutor 仍先超时，KDoc "保证 bridge 先超时" 事实性错误）+ M-2 中危（stale test 需更新）+ L-1 低危（KDoc 引用 "30s" 过时）。提议 BR-concurrency-005（嵌套 withTimeout 超时层级必须内层短于外层）待主 Agent 确认 + ac-verifier 验证后转 active。结论有条件通过 |
+| 2026-08-11 | guardrail-enforcer | BR-concurrency-005 确认合规，结论通过 | M6 Phase C 第二轮审查（TKN-M6-PHASEC-GUARDRAIL-002）：M-1 修复正确（25s < 30s，BR-concurrency-005 合规），M-2 测试更新正确（断言反映修复后行为 + 新增端到端验证测试），M-1 验证测试 BUILD SUCCESSFUL。L-1 残留（类级 KDoc L28 + 方法级 KDoc L68 仍写 "默认 30s"，主 Agent 声称修复 3 处但实际只修 companion object KDoc 1 处）为低危文档问题，不阻断。二次自检报告 §2.4/§4.4/R-PC-4 中旧值 35s 残留。结论通过（附注 L-1-R/L-2-R 建议在后续提交中修正） |
+| 2026-08-11 | ac-verifier | 验收通过，BR-concurrency-005 转 active | M6 Phase C 验收（TKN-M6-PHASEC-ACCEPTANCE-001）：US-006 10/10 AC 全部通过（AC-C-1 到 AC-C-10）。cross-app + skill 专项 378 测试（含 ac-verifier 补充 6 用例 M6PhaseCAcceptanceTest）全部通过（1 跳过性能基准），全量 1380 回归 0 失败。安全检查全部通过（URI 注入防护 / 日志脱敏 / 错误脱敏 CWE-209 / 用户确认 / Android 11+ 包可见性合规 / 协程取消安全 BR-error-handling-007）。性能变异为环境因素（JVM warmup/GC，被测函数均未在 Phase C 修改）。DEF-01（B2 严重）+ M-1（B1 一般）均已修复确认。BR-concurrency-005 proposed → active（M-1 修复正确 25s < 30s + 端到端测试验证 bridge 先超时返回语义化文案 + pending 清理 + ac-verifier 补充测试断言超时层级关系）。1 低危文档残留 DOC-01（ConversationViewModel KDoc "35s"→"25s"） |

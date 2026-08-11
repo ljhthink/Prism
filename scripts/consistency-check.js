@@ -5,6 +5,8 @@
  *
  * 检查项（CLAUDE.md 14.1）:
  *  1. README.md 文档索引中的每个相对链接指向的文件真实存在
+ *     （例外：docs/reports/*.md 一次性工件可能被 .gitignore 排除，跳过存在性检查，
+ *      仅检查命名规范，CLAUDE.md §20.1）
  *  2. docs/decisions/README.md 包含所有 docs/decisions/ADR-*.md
  *  3. docs/templates/README.md 包含所有 *-template.md
  *  4. docs/reports/ 中除 README.md 外的文件命名符合 YYYY-MM-DD-<task>-<type>.md
@@ -62,6 +64,12 @@ function checkReadmeLinks() {
   while ((m = linkRe.exec(text)) !== null) {
     let link = m[1].split('#')[0].split('?')[0];
     if (/^https?:/.test(link)) continue;
+    // CLAUDE.md §20.1: docs/reports/ 下的一次性工件（*.md，除 README.md 外）
+    // 可能被 .gitignore 排除而不在 git 中，但 README 仍需链接它们作为本地索引。
+    // 跳过这些链接的文件存在性检查，只检查命名规范（第 4 项检查负责）。
+    if (/^docs\/reports\/[^/]+\.md$/.test(link) && link !== 'docs/reports/README.md') {
+      continue;
+    }
     if (!exists(link)) {
       errors.push(`README.md 链接指向不存在的文件: ${link}`);
     }
