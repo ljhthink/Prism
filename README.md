@@ -12,6 +12,14 @@
 
 **M5 三层记忆系统 Phase A 完成（US-030 + US-031，ADR-015 Proposed，guardrail 通过 + ac-verifier 通过，971 回归 0 失败）**（2026-08-10）—— MemoryRecord @Entity + MemoryRepository CRUD/向量检索（L2 跨会话记忆）/ UserProfile @Entity + UserProfileRepository CRUD/upsert（L3 用户画像）。BR-security-001-amendment 转 active（nullable 数组字段 equals 覆盖须用 nullable 扩展函数）。性能基线建立（searchByVector p50=62us）
 
+**M5 三层记忆系统 Phase B 完成（US-032，guardrail 通过 + ac-verifier 通过，6/6 AC，61 专项测试 0 失败）**（2026-08-11）—— ConversationSummarizer（非流式 LLM 摘要生成）+ SlidingWindowMemoryManager（L1 滑动窗口 N 轮 + 摘要压缩注入）+ MemoryConfigRepository（DataStore 持久化 N，默认 10）+ OpenAICompatibleProvider.chatCompletion 非流式扩展。摘要失败降级为截断（不阻断对话）
+
+**M5 三层记忆系统 Phase C 完成（US-033，guardrail 三轮 + ac-verifier 通过，6/6 AC，58 专项测试 0 失败）**（2026-08-11）—— CrossSessionMemoryManager（L2 跨会话记忆：对话结束向量化存储 + 新会话 top-k 检索，默认 k=3）+ 防污染设计（仅注入检索结果片段，不加载旧会话全文）+ formatMemoriesAsContext 系统提示合并。性能基线建立（searchByVector p50=62us 复用 M3 基建）
+
+**M5 三层记忆系统 Phase D 完成（US-034，guardrail 通过 + ac-verifier 通过，7/7 AC，80 专项测试 0 失败）**（2026-08-11）—— UserProfileManager（L3 用户画像：显式偏好 UI 设定 + 隐式偏好 LLM 抽取）+ parsePreferencesJson 结构化 JSON 解析（markdown 剥离 + 非字符串 JsonElement 防御）+ formatProfilesAsContext 系统提示合并 + 显式偏好不被隐式覆盖（优先级语义）+ 抽取失败降级为跳过。性能基线建立（formatProfilesAsContext p50=12us）
+
+**M5 三层记忆系统 Phase E 完成（US-035 + US-036，ADR-015 Accepted，guardrail 两轮 + ac-verifier 通过，US-035 6/6 AC + US-036 5/5 AC（AC-1 受限通过：Compose UI 需 instrumented test），1237 全量回归 0 失败，35 新增测试）**（2026-08-11）—— ConversationViewModel 三层记忆集成（会话边界 sessionId UUID + L2 检索/L3 画像缓存 + onCleared fire-and-forget 持久化 + appScope SupervisorJob）+ systemPrompt 六层合并（RAG → L1 摘要 → L2 跨会话 → L3 画像 → Skill，ADR-015 决策4）+ 记忆管理 UI（L1 窗口配置 + L2 记忆单条删除 + L3 画像编辑/删除 + 一键清除二次确认）+ MemoryManagementViewModel 纯函数校验（MAX_PROFILE_KEY_LEN=50 / MAX_PROFILE_VALUE_LEN=500 防 token 溢出）。降级策略：L1/L2/L3 任一失败降级为 null，不阻断对话
+
 - US-020 Skill 数据模型（SkillConfig 实体 + SkillRepository CRUD）✅（Phase A，guardrail + ac-verifier 通过）
 - US-023 StreamEvent/ChatStreamProvider 接口扩展预留 ✅（Phase A，guardrail + ac-verifier 通过，BR-naming-001 转 active）
 - US-021 SKILL.md 解析器（snakeyaml-engine-kmp 4.0.1 + 安全 LoadSettings + frontmatter 校验）✅（Phase B，guardrail 三轮 + ac-verifier 两轮通过，BR-security-004 转 active）
@@ -22,6 +30,14 @@
 - US-027 Skills 管理 UI 重构（CapabilitiesScreen Skill 列表 + 详情 + 启用开关 + SkillsViewModel）✅（Phase E，guardrail 两轮 + ac-verifier 通过，5/5 AC，813 回归 0 失败）
 - US-028 远程 Skill 下载（SkillDownloader HTTPS 下载 + 9 层安全校验 + zip slip 防护 + backup-then-swap 原子安装）✅（Phase E，guardrail 两轮 + ac-verifier 通过，6/6 AC，39 MockEngine 集成测试 + 42 纯函数测试，862 回归 0 失败）
 - US-029 Skill 执行可观测（SkillExecutionRecord @Entity + SkillExecutionRepository CRUD + Skill 详情页展示执行记录）✅（Phase E，guardrail 两轮 + ac-verifier 通过，6/6 AC，39 专项测试 + 10 边缘场景，912 回归 0 失败。已知限制：M-3 GAP 生产路径未接入 skillConfigId/skillName）
+
+- US-030 MemoryRecord @Entity + MemoryRepository CRUD/向量检索（L2 跨会话记忆存储 + HNSW 索引 + session_id 隔离 + count/deleteAll/deleteBySession）✅（M5 Phase A，guardrail + ac-verifier 通过，5/5 AC，59 专项测试 + 971 全量回归 0 失败）
+- US-031 UserProfile @Entity + UserProfileRepository CRUD/upsert（L3 用户画像 key/value/category + category 索引 + upsert 语义）✅（M5 Phase A，guardrail + ac-verifier 通过，5/5 AC，BR-security-001-amendment 转 active）
+- US-032 L1 滑动窗口记忆（ConversationSummarizer 非流式 LLM 摘要 + SlidingWindowMemoryManager N 轮窗口 + 摘要压缩注入 + MemoryConfigRepository DataStore 持久化 N + 摘要失败降级截断）✅（M5 Phase B，guardrail + ac-verifier 通过，6/6 AC，61 专项测试 0 失败，性能基线建立）
+- US-033 L2 跨会话记忆检索（CrossSessionMemoryManager 对话结束向量化存储 + 新会话 top-k 检索默认 k=3 + 防污染仅注入检索片段 + formatMemoriesAsContext 系统提示合并）✅（M5 Phase C，guardrail 三轮 + ac-verifier 通过，6/6 AC，58 专项测试 0 失败）
+- US-034 L3 用户画像管理（UserProfileManager 显式偏好 UI 设定 + 隐式偏好 LLM 抽取 + parsePreferencesJson 结构化解析 + formatProfilesAsContext 系统提示合并 + 显式不被隐式覆盖 + 抽取失败降级跳过）✅（M5 Phase D，guardrail + ac-verifier 通过，7/7 AC，80 专项测试 0 失败，性能基线建立 formatProfilesAsContext p50=12us）
+- US-035 ConversationViewModel 三层记忆系统集成（会话边界 sessionId UUID + L2 检索/L3 画像首条消息加载缓存 + onCleared fire-and-forget 持久化 appScope SupervisorJob + systemPrompt 六层合并 RAG→L1→L2→L3→Skill ADR-015 决策4 + L1/L2/L3 独立降级为 null 不阻断对话）✅（M5 Phase E，guardrail 两轮 + ac-verifier 通过，6/6 AC，17 集成测试 + 1237 全量回归 0 失败）
+- US-036 记忆管理 UI（CapabilitiesScreen MemoryPanel + L1 窗口大小配置 + L2 记忆列表单条删除 + L3 画像列表编辑/删除 + 一键清除二次确认 + MemoryManagementViewModel 纯函数校验防 token 溢出）✅（M5 Phase E，guardrail 两轮 + ac-verifier 通过，5/5 AC（AC-1 受限通过 Compose UI 需 instrumented test），29 纯函数单元测试 + 6 deleteById 测试）
 
 - US-011 依赖落地 + KnowledgeChunk 向量索引 ✅（guardrail + ac-verifier 通过）
 - US-012 文档解析器（PDF/DOCX/XLSX/MD/TXT）✅（guardrail 有条件通过 + ac-verifier 通过）
@@ -66,7 +82,7 @@
   - [ADR-012 M3 RAG 对话集成架构（US-019）](docs/decisions/ADR-012-m3-rag-conversation-integration.md)（Accepted）
   - [ADR-013 M4 Skills 系统架构（US-004）](docs/decisions/ADR-013-m4-skills-system-architecture.md)（Accepted）
   - [ADR-014 M4 LLM tool_calling 接口扩展（US-023~US-025）](docs/decisions/ADR-014-m4-toolcalling-interface.md)（Accepted）
-  - [ADR-015 M5 三层记忆系统架构（US-005）](docs/decisions/ADR-015-m5-memory-system-architecture.md)（Proposed）
+  - [ADR-015 M5 三层记忆系统架构（US-005）](docs/decisions/ADR-015-m5-memory-system-architecture.md)（Accepted）
 
 ### Reference（参考 / 报告）
 
@@ -193,6 +209,9 @@
     - [2026-08-07-us016-ingestion-pipeline-baseline.md](docs/reports/perf/2026-08-07-us016-ingestion-pipeline-baseline.md) —— US-016 摄入管线编排性能基线（初版，FakeEmbedder 100 chunk p99 735ms）
     - [2026-08-07-us017-retrieval-baseline.md](docs/reports/perf/2026-08-07-us017-retrieval-baseline.md) —— US-017 向量检索性能基线（JVM，p50<200us，10K chunk 规模验证）
     - [2026-08-10-m5-phaseA-memory-baseline.md](docs/reports/perf/2026-08-10-m5-phaseA-memory-baseline.md) —— M5 Phase A 记忆系统性能基线（JVM，searchByVector p50=62us / save p50=1311us / getBySession p50=92us）
+    - [2026-08-11-m5-phaseB-memory-baseline.md](docs/reports/perf/2026-08-11-m5-phaseB-memory-baseline.md) —— M5 Phase B 滑动窗口记忆性能基线（JVM，processMessages p50 / summarize 调用 LLM 非流式）
+    - [2026-08-11-m5-phaseC-memory-baseline.md](docs/reports/perf/2026-08-11-m5-phaseC-memory-baseline.md) —— M5 Phase C 跨会话记忆检索性能基线（JVM，retrieveRelevantMemories p50 / saveSessionMemories p50）
+    - [2026-08-11-m5-phaseD-profile-baseline.md](docs/reports/perf/2026-08-11-m5-phaseD-profile-baseline.md) —— M5 Phase D 用户画像性能基线（JVM，formatProfilesAsContext p50=12us / extractImplicitPreferences 调用 LLM 非流式）
 
 ### 运维
 

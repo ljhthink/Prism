@@ -455,8 +455,15 @@ class PrismApplication : Application() {
         }
     }
 
-    /** 应用级协程作用域（后台任务，如授权根目录异步加载）。 */
-    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /**
+     * 应用级协程作用域（后台任务，如授权根目录异步加载 / M5 记忆持久化）。
+     *
+     * M5 Phase E（US-035）：[io.prism.ui.chat.ConversationViewModel.onCleared] 中
+     * 会话结束 fire-and-forget 持久化 L2 跨会话记忆 + L3 隐式偏好抽取需使用此 scope
+     * （viewModelScope 在 onCleared 时已取消，无法启动新协程）。SupervisorJob 保证
+     * 子协程异常不互相取消，记忆持久化失败不影响应用其他部分。
+     */
+    internal val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /** 授权根目录注册/加载互斥锁（C3：串行化加载与注册，避免覆盖竞态）。 */
     private val rootsMutex = Mutex()

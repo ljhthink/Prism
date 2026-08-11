@@ -15,7 +15,7 @@ import java.io.File
  *
  * **验证内容**：
  * 1. MemoryRecord 持久化到 ObjectBox（含 @HnswIndex 向量索引）
- * 2. save / getBySession / searchByVector / deleteBySession / deleteAll / count 全方法覆盖
+ * 2. save / getBySession / searchByVector / deleteById / deleteBySession / deleteAll / count 全方法覆盖
  * 3. searchByVector 复用 M3 ObjectBox 向量搜索基建（nearestNeighbors + findWithScores）
  * 4. 检索结果按相似度降序，相似度 = 1 - COSINE 距离 ∈ [-1, 1]
  * 5. 维度校验 fail-fast（query.size != 384 抛 IllegalArgumentException）
@@ -407,6 +407,112 @@ class MemoryRepositoryTest {
     fun deleteAll_returns_zero_for_empty_repository() {
         val deletedCount = repository.deleteAll()
         assertEquals("空库应返回 0", 0L, deletedCount)
+    }
+
+    // ==================== AC-2（US-036）：deleteById（单条删除） ====================
+    // Phase E 新增方法，US-036 记忆管理 UI 单条删除，使用 Box.remove(id) 规避 HNSW #1209
+
+    @Test
+    fun deleteById_removes_record_and_returns_true() {
+        val id = repository.save(
+            MemoryRecord(
+                sessionId = "s1", content = "记录1", embedding = oneHot(0),
+                timestamp = 1_000L, turnCount = 1
+            )
+        )
+        assertEquals("保存后 count=1", 1L, repository.count())
+
+        val deleted = repository.deleteById(id)
+        assertTrue("存在的 id 应返回 true", deleted)
+        assertEquals("删除后 count=0", 0L, repository.count())
+    }
+
+    @Test
+    fun deleteById_returns_false_for_nonexistent_id() {
+        val deleted = repository.deleteById(99999L)
+        assertFalse("不存在的 id 应返回 false", deleted)
+    }
+
+    @Test
+    fun deleteById_only_removes_target_record() {
+        val id1 = repository.save(
+            MemoryRecord(
+                sessionId = "s1", content = "记录1", embedding = oneHot(0),
+                timestamp = 1_000L, turnCount = 1
+            )
+        )
+        val id2 = repository.save(
+            MemoryRecord(
+                sessionId = "s2", content = "记录2", embedding = oneHot(1),
+                timestamp = 2_000L, turnCount = 1
+            )
+        )
+
+        val deleted = repository.deleteById(id1)
+        assertTrue("删除 id1 应返回 true", deleted)
+        assertEquals("删除后 count=1", 1L, repository.count())
+        assertEquals("id2 应保留", id2, repository.getBySession("s2")[0].id)
+        assertTrue("s1 应为空", repository.getBySession("s1").isEmpty())
+    }
+
+    @Test
+    fun deleteById_with_hnsw_indexed_record_does_not_throw() {
+        // HNSW 索引下的单条删除必须用 Box.remove(id) 路径，否则可能抛
+        // IllegalStateException: Vector is missing for neighbor to repair（objectbox-java#1209）
+        val ids = mutableListOf<Long>()
+        for (i in 0 until 10) {
+            ids.add(
+                repository.save(
+                    MemoryRecord(
+                        sessionId = "s$i",
+                        content = "记忆#$i",
+                        embedding = oneHot(i % 5),
+                        timestamp = i.toLong() * 1_000L,
+                        turnCount = i
+                    )
+                )
+            )
+        }
+
+        // 逐条删除，不应抛 IllegalStateException
+        ids.forEach { id ->
+            val deleted = repository.deleteById(id)
+            assertTrue("每条删除应返回 true", deleted)
+        }
+        assertEquals("全部删除后 count=0", 0L, repository.count())
+    }
+
+    @Test
+    fun deleteById_updates_memoryRecords_flow() {
+        repository.save(
+            MemoryRecord(
+                sessionId = "s1", content = "记录1", embedding = oneHot(0),
+                timestamp = 1_000L, turnCount = 1
+            )
+        )
+        val id2 = repository.save(
+            MemoryRecord(
+                sessionId = "s2", content = "记录2", embedding = oneHot(1),
+                timestamp = 2_000L, turnCount = 1
+            )
+        )
+        assertEquals("保存 2 条后 flow size=2", 2, repository.memoryRecords.value.size)
+
+        repository.deleteById(id2)
+        assertEquals("删除 1 条后 flow size=1", 1, repository.memoryRecords.value.size)
+        assertEquals("s1", repository.memoryRecords.value[0].sessionId)
+    }
+
+    @Test
+    fun deleteById_returns_false_after_already_deleted() {
+        val id = repository.save(
+            MemoryRecord(
+                sessionId = "s1", content = "记录1", embedding = oneHot(0),
+                timestamp = 1_000L, turnCount = 1
+            )
+        )
+        assertTrue("首次删除应返回 true", repository.deleteById(id))
+        assertFalse("重复删除应返回 false", repository.deleteById(id))
     }
 
     // ==================== count ====================

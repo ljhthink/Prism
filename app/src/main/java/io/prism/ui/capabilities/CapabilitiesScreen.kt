@@ -32,6 +32,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -78,19 +79,22 @@ import io.prism.ui.theme.PrismTextFaint
 private enum class CapSegment(val label: String) { MCP("MCP 工具"), SKILLS("Skills"), MEMORY("记忆") }
 
 /**
- * 能力中枢屏幕 —— 深空玻璃肌理（设计规范 v0.4 第 8.3 节，US-002/004/005/008/027）。
+ * 能力中枢屏幕 —— 深空玻璃肌理（设计规范 v0.4 第 8.3 节，US-002/004/005/008/027/036）。
  *
  * 顶部三段式（MCP 工具 / Skills / 记忆）：
  * - MCP 段接入 [CapabilitiesViewModel]，展示动态、可配置的 MCP Server（US-008）
  * - Skills 段接入 [SkillsViewModel]，展示动态 Skill 列表 + 启停 + 详情弹层（US-027，ADR-013 5.5）
- * - 记忆段为静态占位（M5 实现）
+ * - 记忆段接入 [MemoryManagementViewModel]，展示 L1 窗口配置 + L2 跨会话记忆 + L3 用户画像
+ *   + 单条删除/编辑/一键清除（US-036，ADR-015 5.7）
  *
- * 点击 MCP Server 行 → 配置弹层；点击 Skill 行 → 详情弹层（展示 manifest 元数据）。
+ * 点击 MCP Server 行 → 配置弹层；点击 Skill 行 → 详情弹层（展示 manifest 元数据）；
+ * 点击 L3 画像行 → 编辑弹层；点击 L1 卡片 → 修改窗口大小 N。
  */
 @Composable
 fun CapabilitiesScreen(
     viewModel: CapabilitiesViewModel = viewModel(factory = CapabilitiesViewModel.Factory),
-    skillsViewModel: SkillsViewModel = viewModel(factory = SkillsViewModel.Factory)
+    skillsViewModel: SkillsViewModel = viewModel(factory = SkillsViewModel.Factory),
+    memoryViewModel: MemoryManagementViewModel = viewModel(factory = MemoryManagementViewModel.Factory)
 ) {
     var segment by remember { mutableStateOf(CapSegment.MCP) }
     val servers by viewModel.servers.collectAsState()
@@ -100,6 +104,15 @@ fun CapabilitiesScreen(
     val executionRecords by skillsViewModel.executionRecords.collectAsState()
     val installState by skillsViewModel.installState.collectAsState()
     var showInstallSheet by remember { mutableStateOf(false) }
+
+    // M5 Phase E（US-036）：记忆管理状态订阅
+    val memories by memoryViewModel.memories.collectAsState()
+    val profiles by memoryViewModel.profiles.collectAsState()
+    val windowSize by memoryViewModel.windowSize.collectAsState()
+    val selectedProfile by memoryViewModel.selectedProfile.collectAsState()
+    val showClearConfirm by memoryViewModel.showClearConfirm.collectAsState()
+    val showWindowSizeEditor by memoryViewModel.showWindowSizeEditor.collectAsState()
+    val uiMessage by memoryViewModel.uiMessage.collectAsState()
 
     Box {
         LazyColumn(
@@ -173,7 +186,12 @@ fun CapabilitiesScreen(
                     enter = fadeIn() + slideInVertically { it / 4 },
                     exit = fadeOut()
                 ) {
-                    MemoryPanel()
+                    MemoryPanel(
+                        memories = memories,
+                        profiles = profiles,
+                        windowSize = windowSize,
+                        viewModel = memoryViewModel
+                    )
                 }
             }
         }
@@ -214,6 +232,49 @@ fun CapabilitiesScreen(
                 }
             )
         }
+
+        // M5 Phase E（US-036）：L3 用户画像编辑弹层
+        PrismSheetHost(
+            visible = selectedProfile != null,
+            onDismiss = { memoryViewModel.selectProfileForEdit(null) }
+        ) {
+            selectedProfile?.let { profile ->
+                ProfileEditSheet(
+                    profile = profile,
+                    onSave = { key, value, existingId ->
+                        memoryViewModel.saveProfile(key, value, existingId)
+                    }
+                )
+            }
+        }
+
+        // M5 Phase E（US-036）：一键清除二次确认弹层
+        PrismSheetHost(
+            visible = showClearConfirm,
+            onDismiss = { memoryViewModel.hideClearConfirm() }
+        ) {
+            ClearConfirmSheet(
+                memoryCount = memories.size.toLong(),
+                profileCount = profiles.size.toLong(),
+                onConfirm = { memoryViewModel.clearAll() },
+                onCancel = { memoryViewModel.hideClearConfirm() }
+            )
+        }
+
+        // M5 Phase E（US-036，US-032 AC-4）：L1 窗口大小编辑弹层
+        PrismSheetHost(
+            visible = showWindowSizeEditor,
+            onDismiss = { memoryViewModel.hideWindowSizeEditor() }
+        ) {
+            WindowSizeEditSheet(
+                currentSize = windowSize,
+                onSet = { n -> memoryViewModel.setWindowSize(n) },
+                onCancel = { memoryViewModel.hideWindowSizeEditor() }
+            )
+        }
+
+        // M5 Phase E（US-036）：UI 消息横幅（错误/成功一次性提示）
+        UiMessageBanner(message = uiMessage, onConsume = { memoryViewModel.consumeUiMessage() })
     }
 }
 
@@ -1210,21 +1271,96 @@ private fun StatusChip(text: String, active: Boolean, modifier: Modifier = Modif
     }
 }
 
-/** 记忆面板 —— 三层卡片。 */
+/**
+ * 记忆面板 —— 三层记忆真实数据展示（US-036，ADR-015 5.7）。
+ *
+ * **结构**：
+ * - 顶部 "三层记忆 · 一键清除" 入口（点击触发二次确认弹层）
+ * - L1 卡片：展示当前窗口大小 N，点击可修改（US-032 AC-4 运行时配置入口）
+ * - L2 列表：跨会话记忆条目，每条可单条删除（US-036 AC-2）
+ * - L3 列表：用户画像条目，每条可点击编辑或删除（US-036 AC-3）
+ * - L3 头部 "+ 新增" action 触发新建画像弹层
+ *
+ * **空态**：L2/L3 为空时展示空态提示文案，引导用户使用。
+ */
 @Composable
-private fun MemoryPanel() {
+private fun MemoryPanel(
+    memories: List<io.prism.data.MemoryRecord>,
+    profiles: List<io.prism.data.UserProfile>,
+    windowSize: Int,
+    viewModel: MemoryManagementViewModel
+) {
     Column {
-        SectionHeader("三层记忆", "清除")
-        MemoryCard("L1 · 会话内", "滑动窗口 + 每 10 轮摘要压缩", "当前会话已压缩 2 次", PrismIndigo, Modifier.padding(horizontal = 20.dp))
-        MemoryCard("L2 · 跨会话", "对话历史向量化 · 按话题 top-3 检索", "最近主题：Prism 设计 / 知识库", PrismCyan, Modifier.padding(horizontal = 20.dp))
-        MemoryCard("L3 · 用户画像", "偏好：简洁回答 · 中文优先 · 技术向", "2 项显式 · 7 项隐式", PrismMint, Modifier.padding(horizontal = 20.dp))
+        SectionHeader("三层记忆 · 一键清除", "清除", onActionClick = { viewModel.showClearConfirm() })
+
+        // L1 会话内 —— 滑动窗口 + 摘要压缩（点击修改 N）
+        MemoryOverviewCard(
+            title = "L1 · 会话内",
+            desc = "滑动窗口 + 每 N 轮摘要压缩",
+            meta = "当前 N = $windowSize（点击修改）",
+            accent = PrismIndigo,
+            modifier = Modifier.padding(horizontal = 20.dp),
+            onClick = { viewModel.showWindowSizeEditor() }
+        )
+
+        // L2 跨会话 —— 对话历史向量化存储 + top-k 检索
+        SectionHeader("L2 · 跨会话 · ${memories.size} 条", null)
+        if (memories.isEmpty()) {
+            EmptySection("暂无跨会话记忆，对话结束时自动保存关键片段")
+        } else {
+            memories.forEach { record ->
+                MemoryRow(
+                    record = record,
+                    modifier = Modifier.padding(horizontal = 20.dp),
+                    onDelete = { viewModel.deleteMemory(record.id) }
+                )
+            }
+        }
+
+        // L3 用户画像 —— 显式 + 隐式偏好
+        SectionHeader(
+            title = "L3 · 用户画像 · ${profiles.size} 条",
+            action = "+ 新增",
+            onActionClick = {
+                // 传入 id=0 + 空 key/value 表示新建
+                viewModel.selectProfileForEdit(io.prism.data.UserProfile(key = "", value = ""))
+            }
+        )
+        if (profiles.isEmpty()) {
+            EmptySection("暂无用户画像，可在对话中设定偏好或由 AI 自动抽取")
+        } else {
+            profiles.forEach { profile ->
+                ProfileRow(
+                    profile = profile,
+                    modifier = Modifier.padding(horizontal = 20.dp),
+                    onClick = { viewModel.selectProfileForEdit(profile) },
+                    onDelete = { viewModel.deleteProfile(profile.key) }
+                )
+            }
+        }
     }
 }
 
-/** 单层记忆卡。 */
+/**
+ * L1 概览卡（US-036 记忆管理 UI 入口）—— 可点击修改窗口大小 N。
+ *
+ * 与原 Mock [MemoryCard] 区别：[onClick] 非空时整卡可点击触发 L1 编辑弹层。
+ */
 @Composable
-private fun MemoryCard(title: String, desc: String, meta: String, accent: Color, modifier: Modifier = Modifier) {
-    PrismCard(modifier = modifier.fillMaxWidth().padding(bottom = 12.dp)) {
+private fun MemoryOverviewCard(
+    title: String,
+    desc: String,
+    meta: String,
+    accent: Color,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null
+) {
+    PrismCard(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(bottom = 12.dp),
+        onClick = onClick
+    ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(text = "◈  ", color = accent, fontSize = 15.sp, fontWeight = FontWeight.Bold)
@@ -1236,9 +1372,372 @@ private fun MemoryCard(title: String, desc: String, meta: String, accent: Color,
     }
 }
 
+/**
+ * 单条 L2 跨会话记忆行（US-036 AC-2 单条删除）。
+ *
+ * **展示**：
+ * - 左侧 accent 色点
+ * - 中间：sessionId 简写（前 8 位）+ content 截断（前 80 字符）+ 时间戳
+ * - 右侧：删除按钮（✕）
+ */
+@Composable
+private fun MemoryRow(
+    record: io.prism.data.MemoryRecord,
+    modifier: Modifier = Modifier,
+    onDelete: () -> Unit
+) {
+    PrismCard(modifier = modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(PrismCyan)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = record.content.take(MAX_MEMORY_CONTENT_PREVIEW_LEN) +
+                        if (record.content.length > MAX_MEMORY_CONTENT_PREVIEW_LEN) "…" else "",
+                    color = PrismText,
+                    fontSize = 12.5.sp,
+                    lineHeight = 17.sp,
+                    maxLines = 2
+                )
+                Text(
+                    text = "会话 ${record.sessionId.take(8)} · ${formatTimestamp(record.timestamp)} · 第 ${record.turnCount} 轮",
+                    color = PrismTextFaint,
+                    fontSize = 10.5.sp,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(PrismPanel2)
+                    .border(1.dp, PrismLine, RoundedCornerShape(8.dp))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onDelete
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(text = "✕", color = PrismTextDim, fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+/**
+ * 单条 L3 用户画像行（US-036 AC-3 编辑/删除）。
+ *
+ * **展示**：
+ * - 左侧 accent 色点（EXPLICIT=PrismIndigo / IMPLICIT=PrismMint）
+ * - 中间：key + value + category 标签
+ * - 右侧：删除按钮
+ * - 整行点击 → 编辑弹层
+ *
+ * @param profile 待展示的画像
+ * @param onClick 整行点击回调（编辑）
+ * @param onDelete 删除回调
+ */
+@Composable
+private fun ProfileRow(
+    profile: io.prism.data.UserProfile,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+    onDelete: () -> Unit
+) {
+    val isExplicit = profile.category == io.prism.data.ProfileCategory.EXPLICIT.name
+    val accent = if (isExplicit) PrismIndigo else PrismMint
+    val categoryLabel = if (isExplicit) "显式" else "隐式"
+    PrismCard(modifier = modifier.fillMaxWidth().padding(bottom = 8.dp), onClick = onClick) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(accent)
+            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "${profile.key}：${profile.value}",
+                    color = PrismText,
+                    fontSize = 12.5.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Text(
+                    text = "$categoryLabel · 更新于 ${formatTimestamp(profile.updatedAt)}",
+                    color = PrismTextFaint,
+                    fontSize = 10.5.sp,
+                    modifier = Modifier.padding(top = 3.dp)
+                )
+            }
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(PrismPanel2)
+                    .border(1.dp, PrismLine, RoundedCornerShape(8.dp))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onDelete
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(text = "✕", color = PrismTextDim, fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+/**
+ * L3 画像编辑弹层（US-036 AC-3，新建/编辑共用）。
+ *
+ * **逻辑**：
+ * - 标题：根据 profile.id 区分"新建偏好"/"编辑偏好"
+ * - 字段：key（偏好键）+ value（偏好值）
+ * - 保存按钮：调用 [onSave]，由 ViewModel 决定新建 vs 更新
+ * - key 在编辑模式下禁用编辑（避免改变 upsert 唯一约束语义），仅 value 可编辑
+ *
+ * @param profile 待编辑的画像（id=0 + 空 key/value 表示新建）
+ * @param onSave 保存回调，参数：key, value, existingId
+ */
+@Composable
+private fun ProfileEditSheet(
+    profile: io.prism.data.UserProfile,
+    onSave: (key: String, value: String, existingId: Long) -> Unit
+) {
+    val isNew = profile.id == 0L
+    var key by remember(profile.id) { mutableStateOf(profile.key) }
+    var value by remember(profile.id) { mutableStateOf(profile.value) }
+    var showValidation by remember(profile.id) { mutableStateOf(false) }
+
+    val keyValid = key.trim().isNotEmpty()
+    val valueValid = value.trim().isNotEmpty()
+    val canSave = keyValid && valueValid
+
+    PrismSheet(
+        title = if (isNew) "新建用户偏好" else "编辑用户偏好",
+        subtitle = if (isNew) "显式偏好 · 用户主动设定" else "${profile.category} · ${profile.key}"
+    ) {
+        PrismField(
+            label = "偏好键",
+            value = key,
+            onValueChange = { if (isNew) key = it },
+            placeholder = "如 tone / language / tech_stack",
+            hint = if (isNew) "英文 snake_case，保存后不可修改" else "偏好键保存后不可修改"
+        )
+        if (showValidation && !keyValid) ValidationError("偏好键不能为空")
+        Spacer(Modifier.height(16.dp))
+        PrismField(
+            label = "偏好值",
+            value = value,
+            onValueChange = { value = it },
+            placeholder = "如 简洁 / 中文 / Python"
+        )
+        if (showValidation && !valueValid) ValidationError("偏好值不能为空")
+        Spacer(Modifier.height(20.dp))
+        PrismButton(
+            text = "保存",
+            enabled = canSave,
+            onClick = {
+                if (!canSave) {
+                    showValidation = true
+                    return@PrismButton
+                }
+                onSave(key.trim(), value.trim(), profile.id)
+            }
+        )
+    }
+}
+
+/**
+ * "一键清除"二次确认弹层（US-036 AC-4）。
+ *
+ * **展示**：明确告知用户将删除的 L2 + L3 条数，二次确认避免误操作（GDPR 式控制权）。
+ *
+ * @param memoryCount 待删除的 L2 记忆条数
+ * @param profileCount 待删除的 L3 画像条数
+ * @param onConfirm 确认删除回调
+ * @param onCancel 取消回调
+ */
+@Composable
+private fun ClearConfirmSheet(
+    memoryCount: Long,
+    profileCount: Long,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit
+) {
+    PrismSheet(
+        title = "一键清除所有记忆",
+        subtitle = "不可恢复 · 请谨慎操作"
+    ) {
+        Text(
+            text = "将永久删除以下记忆数据：",
+            color = PrismText,
+            fontSize = 13.sp
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = "• L2 跨会话记忆：$memoryCount 条",
+            color = PrismTextDim,
+            fontSize = 12.sp,
+            lineHeight = 18.sp
+        )
+        Text(
+            text = "• L3 用户画像：$profileCount 条",
+            color = PrismTextDim,
+            fontSize = 12.sp,
+            lineHeight = 18.sp
+        )
+        Text(
+            text = "• L1 窗口大小配置保留（仅清数据，不清配置）",
+            color = PrismTextFaint,
+            fontSize = 11.sp,
+            lineHeight = 16.sp,
+            modifier = Modifier.padding(top = 4.dp)
+        )
+        Spacer(Modifier.height(20.dp))
+        PrismButton(
+            text = "确认清除",
+            variant = PrismButtonVariant.Danger,
+            leadingIcon = {
+                Icon(Icons.Filled.Delete, contentDescription = null, tint = PrismDanger, modifier = Modifier.size(16.dp))
+            },
+            onClick = onConfirm
+        )
+        Spacer(Modifier.height(8.dp))
+        PrismButton(
+            text = "取消",
+            variant = PrismButtonVariant.Ghost,
+            onClick = onCancel
+        )
+    }
+}
+
+/**
+ * L1 窗口大小编辑弹层（US-032 AC-4，US-036 暴露入口）。
+ *
+ * **校验**：N 在 1..50 范围内（与 [io.prism.memory.MemoryConfigRepository] 一致）。
+ *
+ * @param currentSize 当前 N 值
+ * @param onSet 设置回调
+ * @param onCancel 取消回调
+ */
+@Composable
+private fun WindowSizeEditSheet(
+    currentSize: Int,
+    onSet: (Int) -> Unit,
+    onCancel: () -> Unit
+) {
+    var input by remember { mutableStateOf(currentSize.toString()) }
+    var showValidation by remember { mutableStateOf(false) }
+
+    val parsed = input.trim().toIntOrNull()
+    val valid = parsed != null && parsed in io.prism.memory.MemoryConfigRepository.MIN_WINDOW_SIZE..io.prism.memory.MemoryConfigRepository.MAX_WINDOW_SIZE
+
+    PrismSheet(
+        title = "设置滑动窗口大小 N",
+        subtitle = "L1 会话内记忆 · 默认 ${io.prism.memory.MemoryConfigRepository.DEFAULT_WINDOW_SIZE}"
+    ) {
+        Text(
+            text = "保留最近 N 轮原始消息，超出部分自动触发摘要压缩。N 越大上下文越完整但 token 消耗越高；N 越小越省 token 但可能丢失早期上下文。",
+            color = PrismTextDim,
+            fontSize = 11.5.sp,
+            lineHeight = 17.sp
+        )
+        Spacer(Modifier.height(16.dp))
+        PrismField(
+            label = "N 值",
+            value = input,
+            onValueChange = { input = it.filter { ch -> ch.isDigit() } },
+            placeholder = "1 ~ ${io.prism.memory.MemoryConfigRepository.MAX_WINDOW_SIZE}",
+            hint = "范围 ${io.prism.memory.MemoryConfigRepository.MIN_WINDOW_SIZE}..${io.prism.memory.MemoryConfigRepository.MAX_WINDOW_SIZE}，过大将导致 token 溢出"
+        )
+        if (showValidation && !valid) {
+            ValidationError(
+                "N 必须为 ${io.prism.memory.MemoryConfigRepository.MIN_WINDOW_SIZE}..${io.prism.memory.MemoryConfigRepository.MAX_WINDOW_SIZE} 范围内的整数"
+            )
+        }
+        Spacer(Modifier.height(20.dp))
+        PrismButton(
+            text = "保存",
+            enabled = valid,
+            onClick = {
+                val n = parsed
+                if (n == null || n !in io.prism.memory.MemoryConfigRepository.MIN_WINDOW_SIZE..io.prism.memory.MemoryConfigRepository.MAX_WINDOW_SIZE) {
+                    showValidation = true
+                    return@PrismButton
+                }
+                onSet(n)
+            }
+        )
+        Spacer(Modifier.height(8.dp))
+        PrismButton(
+            text = "取消",
+            variant = PrismButtonVariant.Ghost,
+            onClick = onCancel
+        )
+    }
+}
+
+/**
+ * UI 消息横幅（US-036）—— 一次性消费的错误/成功提示。
+ *
+ * 用 [androidx.compose.runtime.LaunchedEffect] 在展示 2.5 秒后自动调用 [onConsume] 清空，
+ * 避免旋转/重组时重复展示。颜色按 [MemoryManagementViewModel.UiMessage] 类型映射。
+ */
+@Composable
+private fun UiMessageBanner(
+    message: MemoryManagementViewModel.UiMessage?,
+    onConsume: () -> Unit
+) {
+    if (message == null) return
+    val color = when (message) {
+        is MemoryManagementViewModel.UiMessage.Error -> PrismDanger
+        is MemoryManagementViewModel.UiMessage.Info -> PrismMint
+    }
+    val text = when (message) {
+        is MemoryManagementViewModel.UiMessage.Error -> message.text
+        is MemoryManagementViewModel.UiMessage.Info -> message.text
+    }
+    LaunchedEffect(message) {
+        kotlinx.coroutines.delay(UI_MESSAGE_AUTO_DISMISS_MS)
+        onConsume()
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 16.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(color.copy(alpha = 0.12f))
+            .border(1.dp, color.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+    ) {
+        Text(text = text, color = color, fontSize = 12.sp, lineHeight = 17.sp)
+    }
+}
+
+/** L2 记忆 content 在列表行中预览的最大字符长度。 */
+private const val MAX_MEMORY_CONTENT_PREVIEW_LEN = 80
+
+/** UI 消息横幅自动消失时长（毫秒）。 */
+private const val UI_MESSAGE_AUTO_DISMISS_MS = 2500L
+
 /** 分组标题。 */
 @Composable
-private fun SectionHeader(title: String, action: String, onActionClick: (() -> Unit)? = null) {
+private fun SectionHeader(title: String, action: String? = null, onActionClick: (() -> Unit)? = null) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1247,21 +1746,23 @@ private fun SectionHeader(title: String, action: String, onActionClick: (() -> U
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(text = title, color = PrismTextDim, fontSize = 12.sp, letterSpacing = 0.4.sp)
-        if (onActionClick != null) {
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = onActionClick
-                    )
-                    .padding(horizontal = 4.dp, vertical = 2.dp)
-            ) {
+        if (!action.isNullOrEmpty()) {
+            if (onActionClick != null) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onActionClick
+                        )
+                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                ) {
+                    Text(text = action, color = PrismIndigo, fontSize = 11.sp)
+                }
+            } else {
                 Text(text = action, color = PrismIndigo, fontSize = 11.sp)
             }
-        } else {
-            Text(text = action, color = PrismIndigo, fontSize = 11.sp)
         }
     }
 }

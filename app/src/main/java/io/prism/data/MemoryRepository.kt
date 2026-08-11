@@ -139,6 +139,29 @@ class MemoryRepository(private val boxStore: BoxStore) {
     }
 
     /**
+     * 删除指定 id 的单条记忆记录（US-036 记忆管理 UI 单条删除）。
+     *
+     * **HNSW 删除策略**（ADR-015 风险表 H-4，规避 objectbox-java#1209）：
+     * 使用 `Box.remove(id)` 单条 native 路径，不可用 `Query.remove()`。
+     *
+     * **事务原子性**（BR-concurrency-001）：删除在单个 [boxStore.runInTx] 事务内执行。
+     *
+     * @param id 待删除记录的 id
+     * @return true 表示删除成功（id 存在），false 表示 id 不存在
+     */
+    fun deleteById(id: Long): Boolean {
+        var deleted = false
+        boxStore.runInTx {
+            if (box.contains(id)) {
+                box.remove(id)
+                deleted = true
+            }
+        }
+        refreshFlows()
+        return deleted
+    }
+
+    /**
      * 删除指定 sessionId 的所有记忆记录。
      *
      * **查询方式**：使用 `box.all` 内存过滤获取待删 id（同 [getBySession]），

@@ -12,6 +12,10 @@ import io.prism.data.McpServerRepository
 import io.prism.data.ProviderConfig
 import io.prism.data.ProviderConfigRepository
 import io.prism.embedding.Embedder
+import io.prism.memory.CrossSessionMemoryManager
+import io.prism.memory.SlidingWindowMemoryManager
+import io.prism.memory.SlidingWindowResult
+import io.prism.memory.UserProfileManager
 import io.prism.network.ChatStreamProvider
 import io.prism.network.StreamEvent
 import io.prism.network.ToolDefinition
@@ -23,7 +27,9 @@ import io.prism.ui.model.ChatMessage
 import io.prism.ui.model.Role
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -32,11 +38,12 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
 /**
  * 聊天界面 ViewModel —— 管理消息列表、打字状态、流式回复、RAG 检索与 Skill 工具调用回路
- * （US-019 RAG + US-026 Skill 工具执行回路）。
+ * （US-019 RAG + US-026 Skill 工具执行回路 + US-035 三层记忆系统集成）。
  *
  * 响应式状态：用 [MutableStateFlow] 暴露 [messages] 与 [isTyping]，
  * Compose 通过 `collectAsState()` 订阅渲染（ADR-002 4.2）。
@@ -64,6 +71,20 @@ import java.util.concurrent.atomic.AtomicLong
  * - **消息同步**（R-2）：[syncToolMessages] 把 executeLoop 返回的新增消息（assistant 占位 + tool result）
  *   追加到 [_messages]，aiId 保留为最终文本回复（Delta 累积），不与协议层占位合并
  *
+ * **US-035 三层记忆系统集成**（ADR-015 5.6，M5 Phase E）：
+ * - 构造注入 [SlidingWindowMemoryManager] + [CrossSessionMemoryManager] + [UserProfileManager]
+ *   + [applicationScope]（均可空，null 时降级为无记忆场景，向后兼容）
+ * - **会话边界**：首条 [sendMessage] 生成 sessionId（UUID）+ 触发 L2 检索 + L3 画像加载；
+ *   [onCleared] 中 fire-and-forget 触发 L2 保存 + L3 隐式偏好抽取（用 [applicationScope]）
+ * - **L1 集成**（每轮）：[buildMemoryContext] 调用 [SlidingWindowMemoryManager.processMessages]
+ *   处理 history，返回 summary + recentMessages；recentMessages 替换原始 history 发给 provider
+ * - **L2 集成**（首条消息）：[startSessionIfNeeded] 调用 [CrossSessionMemoryManager.retrieveRelevantMemories]
+ *   + [formatMemoriesAsContext]，结果缓存到 [l2MemoryContext]，后续消息复用
+ * - **L3 集成**（首条消息）：[startSessionIfNeeded] 调用 [UserProfileManager.formatProfilesAsContext]，
+ *   结果缓存到 [l3ProfileContext]，后续消息复用
+ * - **systemPrompt 合并顺序**（ADR-015 决策4）：RAG → L1 摘要 → L2 跨会话 → L3 画像 → Skill
+ * - **降级策略**：L1/L2/L3 任一失败（或管理器为 null）降级为 null（用户无感），不阻断对话
+ *
  * [activeProvider] 由仓库 Flow 暴露，替代 ConversationScreen 内 cast 反模式。
  *
  * @param providerRepository Provider 配置仓库
@@ -73,6 +94,10 @@ import java.util.concurrent.atomic.AtomicLong
  * @param skillRegistry Skill 注册中心（M4 Phase D，可空：null 时降级为无 tools 普通对话）
  * @param skillExecutor Skill 工具执行器（M4 Phase D，可空：null 时降级为普通对话）
  * @param mcpServerRepository MCP Server 配置仓库（M4 Phase D，可空：null 时降级为普通对话）
+ * @param slidingWindowMemoryManager L1 滑动窗口管理器（M5 Phase E，可空：null 时降级为无 L1 摘要）
+ * @param crossSessionMemoryManager L2 跨会话记忆管理器（M5 Phase E，可空：null 时降级为无 L2 检索）
+ * @param userProfileManager L3 用户画像管理器（M5 Phase E，可空：null 时降级为无 L3 画像注入）
+ * @param applicationScope 应用级协程作用域（M5 Phase E，用于 onCleared 中 fire-and-forget 记忆持久化）
  * @param ioDispatcher IO 调度器，用于 RAG embed+search 阻塞调用（BR-concurrency-002）。测试中注入 test dispatcher。
  */
 class ConversationViewModel(
@@ -86,6 +111,18 @@ class ConversationViewModel(
     private val skillExecutor: SkillExecutor? = null,
     /** M4 Phase D：MCP Server 配置仓库，null 时降级为普通对话（向后兼容既有测试） */
     private val mcpServerRepository: McpServerRepository? = null,
+    /** M5 Phase E：L1 滑动窗口记忆管理器，null 时降级为无 L1 摘要（向后兼容既有测试） */
+    private val slidingWindowMemoryManager: SlidingWindowMemoryManager? = null,
+    /** M5 Phase E：L2 跨会话记忆管理器，null 时降级为无 L2 检索（向后兼容既有测试） */
+    private val crossSessionMemoryManager: CrossSessionMemoryManager? = null,
+    /** M5 Phase E：L3 用户画像管理器，null 时降级为无 L3 画像注入（向后兼容既有测试） */
+    private val userProfileManager: UserProfileManager? = null,
+    /**
+     * M5 Phase E：应用级协程作用域，用于 [onCleared] 中 fire-and-forget 记忆持久化。
+     * 必须使用 [SupervisorJob]（不随 ViewModel 销毁取消），生产环境由 [PrismApplication.appScope] 注入。
+     * 测试中可注入 [kotlinx.coroutines.test.TestScope] 或自定义 scope。
+     */
+    private val applicationScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     /** IO 调度器，用于 RAG embed+search 阻塞调用（BR-concurrency-002）。测试中注入 test dispatcher。 */
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : ViewModel() {
@@ -117,6 +154,34 @@ class ConversationViewModel(
     private val _ragTarget = MutableStateFlow<RagTarget>(RagTarget.AllLibraries)
     val ragTarget: StateFlow<RagTarget> = _ragTarget.asStateFlow()
 
+    /**
+     * 当前会话 ID（M5 Phase E，US-035）。
+     *
+     * 首条 [sendMessage] 时生成（UUID），用于 L2 跨会话记忆存储/检索的会话隔离。
+     * null 表示尚未开始会话（无消息发送过），[onCleared] 检查此字段决定是否触发持久化。
+     *
+     * **非 StateFlow**：会话 ID 是内部状态，UI 不需要订阅其变化。
+     */
+    private var sessionId: String? = null
+
+    /**
+     * L2 跨会话记忆上下文缓存（M5 Phase E，US-035）。
+     *
+     * 首条 [sendMessage] 时通过 [CrossSessionMemoryManager.retrieveRelevantMemories] +
+     * [CrossSessionMemoryManager.formatMemoriesAsContext] 生成，后续消息复用（避免每轮 embed+search，
+     * ADR-015 H-2 Embedder 串行锁瓶颈缓解）。null 表示无跨会话记忆（首条消息未触发检索或检索结果为空）。
+     */
+    private var l2MemoryContext: String? = null
+
+    /**
+     * L3 用户画像上下文缓存（M5 Phase E，US-035）。
+     *
+     * 首条 [sendMessage] 时通过 [UserProfileManager.formatProfilesAsContext] 生成，后续消息复用
+     * （画像变更在会话期间不反映，需新会话才生效；与显式偏好 UI 设定解耦）。null 表示无用户画像
+     * （用户从未设定偏好，或 [userProfileManager] 为 null 降级）。
+     */
+    private var l3ProfileContext: String? = null
+
     /** 当前激活 Provider（订阅仓库，供顶栏副标题展示）。 */
     val activeProvider: StateFlow<ProviderConfig?> = providerRepository.activeProviderFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), providerRepository.activeProviderFlow.value)
@@ -136,7 +201,7 @@ class ConversationViewModel(
     }
 
     /**
-     * 发送一条消息（US-019 RAG + US-026 Skill 工具执行回路）。
+     * 发送一条消息（US-019 RAG + US-026 Skill 工具执行回路 + US-035 三层记忆集成）。
      *
      * **流程**：
      * 1. trim 输入 → 追加用户消息（[nextId] 原子自增）→ 追加空 AI 占位消息 → isTyping=true
@@ -146,21 +211,28 @@ class ConversationViewModel(
      *    - 拼 system prompt + ragContext
      *    - 引用来源 [io.prism.ui.model.Citation] 列表附在 AI 占位消息上
      *    - 失败按 [RagBuildResult] 三态降级（ADR-012 5.5），不阻断对话
-     * 4. **M4 Phase D：构建 tools + 合并 systemPrompt**（[Companion.buildTools] + [Companion.mergeSystemPrompt]）
-     * 5. **历史过滤器扩展**（R-4）：排除 aiId + 空content且空toolCalls 的 assistant 占位
-     * 6. **分支策略**（R-1）：
+     * 4. **M5 Phase E：会话启动**（[startSessionIfNeeded]）—— 首条消息生成 sessionId +
+     *    L2 检索（retrieveRelevantMemories）+ L3 画像加载（formatProfilesAsContext）
+     * 5. **M4 Phase D：构建 tools**（[Companion.buildTools]）
+     * 6. **历史过滤器扩展**（R-4）：排除 aiId + 空content且空toolCalls 的 assistant 占位
+     * 7. **M5 Phase E：构建三层记忆上下文**（[buildMemoryContext]）—— L1 processMessages 处理 history
+     *    返回 summary + recentMessages；recentHistory 替换原始 history 发给 provider
+     * 8. **合并 systemPrompt**（[Companion.mergeSystemPrompt]）—— ADR-015 决策4 顺序：
+     *    RAG → L1 摘要 → L2 跨会话 → L3 画像 → Skill
+     * 9. **分支策略**（R-1）：
      *    - tools 非空且 [skillExecutor] 非空 → [SkillExecutor.executeLoop] + onEvent 回调
      *    - 否则 → 普通流式 streamChat + collect
-     * 7. **消息同步**（R-2）：executeLoop 返回后 [syncToolMessages] 把新增消息追加到 [_messages]
-     * 8. Done / Error 后 isTyping=false
+     * 10. **消息同步**（R-2）：executeLoop 返回后 [syncToolMessages] 把新增消息追加到 [_messages]
+     * 11. Done / Error 后 isTyping=false
      *
      * **状态原子性**：所有 [_messages] 写入均通过 [update] CAS（BR-concurrency-004），
      * 避免 RAG 检索协程与 stream collect 协程并发写导致 lost update（修复 R-5）。
      *
-     * **降级提示策略**（ADR-012 5.5 + G-02/G-03 修复）：
+     * **降级提示策略**（ADR-012 5.5 + G-02/G-03 修复 + M5 Phase E 记忆降级）：
      * - [RagBuildResult.Success] → 附 citations，注入 systemPrompt + ragContext
      * - [RagBuildResult.EmbedFailed] → appendDelta 简短提示（项目暂无 Toast 基建，ADR-012 5.5 备注）
-     * - [RagBuildResult.NormalChat] → 主动关闭 / search 空 / 阈值过滤空 / 整个 RAG 异常，用户无感
+     * - [RagBuildResult.NormalChat] → 主动关闭 / search 空 / 阈值过滤空 / RAG 异常，用户无感
+     * - L1/L2/L3 任一失败 → 降级为 null（用户无感，不阻断对话）
      *
      * **M4 Phase D 已知限制**（R-5，ADR-014 5.7 偏差）：
      * - Provider 不支持 tools 字段返回 400 时无法精确降级（StreamEvent.Error 不携带状态码）
@@ -218,10 +290,13 @@ class ConversationViewModel(
                 RagBuildResult.NormalChat -> null  // 主动关闭 / search 空 / 阈值过滤空 / RAG 异常，无提示
             }
 
-            // M4 Phase D：构建 tools + 合并 systemPrompt
+            // M5 Phase E（US-035）：会话启动 —— 首条消息生成 sessionId + L2 检索 + L3 画像加载
+            // 降级策略：L2/L3 任一失败降级为 null（用户无感），不阻断对话
+            startSessionIfNeeded(trimmed)
+
+            // M4 Phase D：构建 tools
             val enabledSkills = skillRegistry?.enabledSkills() ?: emptyList()
             val tools = Companion.buildTools(enabledSkills)
-            val mergedSystemPrompt = Companion.mergeSystemPrompt(ragPlan?.systemPrompt, enabledSkills)
             val mcpServers = mcpServerRepository?.servers?.value ?: emptyList()
 
             // 请求历史构建：
@@ -233,18 +308,33 @@ class ConversationViewModel(
             //    （CR-02，guardrail 发现 1，BR-interface-003）
             // 3. M4 Phase D R-4 修复：保留携带 toolCalls 的空 content assistant 占位消息，
             //    否则下次请求丢失 tool_calls 上下文，OpenAI 返回 400
-            val history = _messages.value.filterNot {
+            val filteredHistory = _messages.value.filterNot {
                 it.id == aiId ||
                     (it.role == Role.ASSISTANT && it.content.isEmpty() && it.toolCalls.isEmpty())
             }
 
+            // M5 Phase E（US-035）：构建三层记忆上下文（L1 每轮处理 + L2/L3 缓存复用）
+            // L1 processMessages 返回 summary + recentMessages；recentMessages 替换原始 history
+            // 降级策略：L1 失败降级为 null summary + 原始 history（不阻断对话）
+            val memoryContext = buildMemoryContext(filteredHistory, active)
+
+            // 合并 systemPrompt（ADR-015 决策4 顺序：RAG → L1 摘要 → L2 跨会话 → L3 画像 → Skill）
+            val mergedSystemPrompt = Companion.mergeSystemPrompt(
+                ragPrompt = ragPlan?.systemPrompt,
+                l1Summary = memoryContext.l1Summary,
+                l2Memories = memoryContext.l2Memories,
+                l3Profiles = memoryContext.l3Profiles,
+                enabledSkills = enabledSkills
+            )
+
             // 分支策略（R-1）：tools 非空且 skillExecutor 非空 → executeLoop + onEvent 回调；
             // 否则 → 普通流式 streamChat + collect（保持无 Skill 场景零开销）
+            // M5 Phase E：history 替换为 memoryContext.recentHistory（L1 滑动窗口处理后的近期消息）
             if (tools.isNotEmpty() && skillExecutor != null) {
                 executeWithToolLoop(
                     aiId = aiId,
                     active = active,
-                    history = history,
+                    history = memoryContext.recentHistory,
                     mergedSystemPrompt = mergedSystemPrompt,
                     ragContext = ragPlan?.ragContext,
                     tools = tools,
@@ -254,10 +344,202 @@ class ConversationViewModel(
                 executePlainStream(
                     aiId = aiId,
                     active = active,
-                    history = history,
+                    history = memoryContext.recentHistory,
                     systemPrompt = mergedSystemPrompt,
                     ragContext = ragPlan?.ragContext
                 )
+            }
+        }
+    }
+
+    /**
+     * 会话启动初始化（M5 Phase E，US-035）。
+     *
+     * 首条 [sendMessage] 时调用，完成：
+     * 1. 生成 [sessionId]（UUID），用于 L2 跨会话记忆存储/检索的会话隔离
+     * 2. L2 跨会话记忆检索：[CrossSessionMemoryManager.retrieveRelevantMemories] +
+     *    [CrossSessionMemoryManager.formatMemoriesAsContext]，结果缓存到 [l2MemoryContext]
+     * 3. L3 用户画像加载：[UserProfileManager.formatProfilesAsContext]，结果缓存到 [l3ProfileContext]
+     *
+     * **幂等**：[sessionId] 非空时直接返回，不重复初始化。
+     *
+     * **降级策略**（ADR-015 5.6）：L2/L3 任一失败（或管理器为 null）降级为 null（用户无感），
+     * 不阻断对话。L2 检索 embed 失败、L3 画像仓库空均属正常降级场景。
+     *
+     * **线程安全**：在 viewModelScope.launch 内调用，L2 检索的 embed 在 [ioDispatcher] 协程执行
+     * （BR-concurrency-002 全程持锁）。L3 画像加载是同步 ObjectBox 查询，无 IO 阻塞。
+     *
+     * **BR-error-handling-007**：显式 try-catch，CancellationException 重抛，其他异常降级为 null。
+     *
+     * @param firstUserMessage 首条用户消息文本（用于 L2 检索查询向量）
+     */
+    private suspend fun startSessionIfNeeded(firstUserMessage: String) {
+        if (sessionId != null) return  // 已启动会话，幂等返回
+
+        sessionId = UUID.randomUUID().toString()
+
+        // L2 跨会话记忆检索（IO 协程，BR-concurrency-002 全程持锁）
+        // 失败降级为 null（用户无感），不阻断对话
+        l2MemoryContext = crossSessionMemoryManager?.let { manager ->
+            try {
+                val results = withContext(ioDispatcher) {
+                    manager.retrieveRelevantMemories(firstUserMessage)
+                }
+                manager.formatMemoriesAsContext(results)
+            } catch (e: CancellationException) {
+                throw e  // BR-error-handling-007：协程取消必须重抛
+            } catch (e: Exception) {
+                // BR-error-handling-004：记录日志（不含敏感信息），降级为无跨会话记忆
+                Log.w(TAG, "L2 retrieveRelevantMemories failed: ${e::class.simpleName}")
+                null
+            }
+        }
+
+        // L3 用户画像加载（同步 ObjectBox 查询，无 IO 阻塞）
+        // 失败降级为 null（用户无感），不阻断对话
+        l3ProfileContext = userProfileManager?.let { manager ->
+            try {
+                manager.formatProfilesAsContext()
+            } catch (e: CancellationException) {
+                throw e  // BR-error-handling-007：协程取消必须重抛（与 L2 一致，L-1 修复）
+            } catch (e: Exception) {
+                // BR-error-handling-004：记录日志，降级为无用户画像
+                Log.w(TAG, "L3 formatProfilesAsContext failed: ${e::class.simpleName}")
+                null
+            }
+        }
+    }
+
+    /**
+     * 统一收集三层记忆上下文（M5 Phase E，US-035，R-5 缓解）。
+     *
+     * 抽取自 [sendMessage]，避免主流程复杂度爆炸。所有记忆层失败统一降级为 null（用户无感）。
+     *
+     * **L1 滑动窗口**（每轮调用）：
+     * - [SlidingWindowMemoryManager.processMessages] 处理 history，返回 summary + recentMessages
+     * - summary 注入 systemPrompt（[SlidingWindowResult.toSummarySystemPromptSection]）
+     * - recentMessages 替换原始 history 发给 provider（滑动窗口只保留近期 N 条）
+     * - 失败降级为 null summary + 原始 history（不阻断对话）
+     *
+     * **L2/L3**：复用 [startSessionIfNeeded] 缓存的 [l2MemoryContext] / [l3ProfileContext]
+     * （首条消息已检索/加载，后续消息复用，避免每轮 embed+search 缓解 ADR-015 H-2 瓶颈）
+     *
+     * **BR-error-handling-007**：显式 try-catch，CancellationException 重抛。
+     *
+     * @param history 过滤后的对话历史（排除当前 aiId + 空占位）
+     * @param active 当前激活 Provider 配置（用于 L1 摘要 LLM 请求，支持运行时切换 Provider）
+     * @return 三层记忆上下文聚合（[MemoryContext]）
+     */
+    private suspend fun buildMemoryContext(
+        history: List<ChatMessage>,
+        active: ProviderConfig
+    ): MemoryContext {
+        // L2/L3 上下文已由 startSessionIfNeeded 缓存，直接复用
+        val l2Memories = l2MemoryContext
+        val l3Profiles = l3ProfileContext
+
+        // L1 滑动窗口处理（每轮调用，内部判断是否需要摘要）
+        // 失败降级为 null summary + 原始 history（不阻断对话）
+        val slidingResult: SlidingWindowResult? = slidingWindowMemoryManager?.let { manager ->
+            try {
+                manager.processMessages(history, active)
+            } catch (e: CancellationException) {
+                throw e  // BR-error-handling-007：协程取消必须重抛
+            } catch (e: Exception) {
+                // BR-error-handling-004：记录日志，降级为无 L1 摘要
+                Log.w(TAG, "L1 processMessages failed: ${e::class.simpleName}")
+                null
+            }
+        }
+
+        val l1Summary = slidingResult?.toSummarySystemPromptSection()
+        val recentHistory = slidingResult?.recentMessages ?: history
+
+        return MemoryContext(
+            l1Summary = l1Summary,
+            recentHistory = recentHistory,
+            l2Memories = l2Memories,
+            l3Profiles = l3Profiles
+        )
+    }
+
+    /**
+     * 三层记忆上下文聚合（M5 Phase E，US-035）。
+     *
+     * @property l1Summary L1 摘要 systemPrompt section（null 表示无摘要/降级/管理器为 null）
+     * @property recentHistory L1 处理后的近期消息列表（替换原始 history 发给 provider；
+     *           无 L1 时等于原始 history）
+     * @property l2Memories L2 跨会话记忆 systemPrompt section（null 表示无/降级/管理器为 null）
+     * @property l3Profiles L3 用户画像 systemPrompt section（null 表示无/降级/管理器为 null）
+     */
+    private data class MemoryContext(
+        val l1Summary: String?,
+        val recentHistory: List<ChatMessage>,
+        val l2Memories: String?,
+        val l3Profiles: String?
+    )
+
+    /**
+     * ViewModel 销毁时的清理钩子（M5 Phase E，US-035）。
+     *
+     * 委托至 [persistSessionMemories]（internal 可测）—— [onCleared] 是 `protected` 无法从测试直接调用，
+     * 提取持久化逻辑至 internal 函数便于单元测试覆盖（BR-testing-004 可测性模式）。
+     *
+     * @see persistSessionMemories
+     */
+    override fun onCleared() {
+        super.onCleared()
+        persistSessionMemories()
+    }
+
+    /**
+     * 会话结束持久化（M5 Phase E，US-035）—— fire-and-forget 触发 L2 保存 + L3 隐式偏好抽取。
+     *
+     * **从 [onCleared] 提取为 internal**：[ViewModel.onCleared] 是 `protected` 无法从测试直接调用，
+     * 提取后测试可调用此函数验证持久化逻辑（BR-testing-004 可测性）。
+     *
+     * **会话结束持久化**（fire-and-forget）：
+     * - L2 保存跨会话记忆：[CrossSessionMemoryManager.saveSessionMemories] 向量化本会话关键对话
+     * - L3 抽取隐式偏好：[UserProfileManager.extractImplicitPreferences] LLM 从对话抽取偏好
+     *
+     * **使用 [applicationScope] 而非 [viewModelScope]**：[viewModelScope] 在 [onCleared] 调用时
+     * 已被取消，无法启动新协程。[applicationScope] 使用 [SupervisorJob]，不随 ViewModel 销毁取消，
+     * 保证记忆持久化在 ViewModel 销毁后继续执行。
+     *
+     * **降级策略**：L2/L3 任一失败静默降级（BR-error-handling-004 已在组件内部处理日志），
+     * 不影响应用其他部分。无 sessionId（未发送过消息）或消息为空时跳过持久化。
+     *
+     * **线程安全**：[applicationScope] 默认 [Dispatchers.IO]，L2 embed 与 L3 chatCompletion
+     * 均在 IO 线程执行。L2/L3 串行执行（避免并发 LLM 请求）。
+     */
+    internal fun persistSessionMemories() {
+        // 未开始会话（无消息发送过）或消息为空 → 跳过持久化
+        val sid = sessionId ?: return
+        val msgs = _messages.value
+        if (msgs.isEmpty()) return
+
+        val active = providerRepository.activeProviderFlow.value
+
+        // fire-and-forget：使用 applicationScope（SupervisorJob），不随 ViewModel 销毁取消
+        applicationScope.launch {
+            // L2 保存跨会话记忆（失败静默，BR-error-handling-004 已在组件内部处理日志）
+            try {
+                crossSessionMemoryManager?.saveSessionMemories(sid, msgs)
+            } catch (e: CancellationException) {
+                throw e  // BR-error-handling-007：协程取消必须重抛
+            } catch (e: Exception) {
+                Log.w(TAG, "onCleared: L2 saveSessionMemories failed: ${e::class.simpleName}")
+            }
+
+            // L3 抽取隐式偏好（需要 active Provider 配置，失败静默）
+            if (active != null) {
+                try {
+                    userProfileManager?.extractImplicitPreferences(msgs, active)
+                } catch (e: CancellationException) {
+                    throw e  // BR-error-handling-007：协程取消必须重抛
+                } catch (e: Exception) {
+                    Log.w(TAG, "onCleared: L3 extractImplicitPreferences failed: ${e::class.simpleName}")
+                }
             }
         }
     }
@@ -565,39 +847,66 @@ class ConversationViewModel(
         }
 
         /**
-         * 合并 RAG system prompt + Skill system prompts（M4 Phase D，R-6 膨胀控制）。
+         * 合并多层 system prompt（M4 Phase D R-6 膨胀控制 + M5 Phase E ADR-015 决策4 六层合并）。
          *
-         * **合并顺序**（考古报告 2.4 节，R-6 缓解）：
+         * **合并顺序**（ADR-015 决策4）：
          * 1. RAG grounding rules（最基础，防幻觉约束）
-         * 2. Skill systemPrompt（具体指令）
-         * 3. Skill 索引描述（可用技能列表，便于 LLM 决策调用）
+         * 2. L1 早期对话摘要（[SlidingWindowResult.toSummarySystemPromptSection]，格式 `[早期对话摘要] ...`）
+         * 3. L2 跨会话记忆（[CrossSessionMemoryManager.formatMemoriesAsContext]，格式 `相关历史对话：...`）
+         * 4. L3 用户画像（[UserProfileManager.formatProfilesAsContext]，格式 `用户偏好：...`）
+         * 5. Skill systemPrompt（具体指令）
+         * 6. Skill 索引描述（可用技能列表，便于 LLM 决策调用）
          *
          * **膨胀控制**：仅合并已启用 Skill 的 systemPrompt，避免未启用 Skill 污染。
-         * 当前不做硬性长度截断（依赖 Skill 作者自律），Phase E 视需要加 token 预算控制。
+         * 当前不做硬性长度截断（依赖 Skill 作者自律 + L1 滑动窗口控制历史长度）。
          *
-         * **纯函数**（US-026 可测性，BR-testing-004 模式）。
+         * **降级策略**：L1/L2/L3 为 null/空时跳过对应层（向后兼容无记忆场景）。
+         *
+         * **纯函数**（US-026 / US-035 可测性，BR-testing-004 模式）。l1Summary/l2Memories/l3Profiles
+         * 带默认值 null，向后兼容 M4 Phase D 既有测试（仅传 ragPrompt + enabledSkills）。
          *
          * @param ragPrompt RAG grounding rules（可能为 null：RAG 关闭或降级）
+         * @param l1Summary L1 早期对话摘要 section（M5 Phase E，默认 null 向后兼容）
+         * @param l2Memories L2 跨会话记忆 section（M5 Phase E，默认 null 向后兼容）
+         * @param l3Profiles L3 用户画像 section（M5 Phase E，默认 null 向后兼容）
          * @param enabledSkills 已启用的 Skill 列表
-         * @return 合并后的 systemPrompt；若 ragPrompt 为 null/空且所有 Skill 均无 systemPrompt
-         *         且无 tools 声明，则返回 null（向后兼容无 Skill 场景）
+         * @return 合并后的 systemPrompt；所有层均为 null/空时返回 null（向后兼容无记忆无 Skill 场景）
          */
         internal fun mergeSystemPrompt(
             ragPrompt: String?,
+            l1Summary: String? = null,
+            l2Memories: String? = null,
+            l3Profiles: String? = null,
             enabledSkills: List<SkillRegistry.SkillEntry>
         ): String? {
             val hasRag = !ragPrompt.isNullOrBlank()
+            val hasL1 = !l1Summary.isNullOrBlank()
+            val hasL2 = !l2Memories.isNullOrBlank()
+            val hasL3 = !l3Profiles.isNullOrBlank()
             val skillPrompts = enabledSkills
                 .mapNotNull { it.manifest.systemPrompt }
                 .filter { it.isNotBlank() }
             // 仅对声明了 tools 的 Skill 输出索引（无 tools 的 Skill 不参与工具调用决策）
             val toolSkills = enabledSkills.filter { !it.manifest.tools.isNullOrEmpty() }
 
-            if (!hasRag && skillPrompts.isEmpty() && toolSkills.isEmpty()) return null
+            if (!hasRag && !hasL1 && !hasL2 && !hasL3 && skillPrompts.isEmpty() && toolSkills.isEmpty()) return null
 
             return buildString {
+                // ADR-015 决策4 合并顺序：RAG → L1 摘要 → L2 跨会话 → L3 画像 → Skill
                 if (hasRag) {
                     append(ragPrompt)
+                    append("\n\n")
+                }
+                if (hasL1) {
+                    append(l1Summary)
+                    append("\n\n")
+                }
+                if (hasL2) {
+                    append(l2Memories)
+                    append("\n\n")
+                }
+                if (hasL3) {
+                    append(l3Profiles)
                     append("\n\n")
                 }
                 skillPrompts.forEach { prompt ->
@@ -612,7 +921,12 @@ class ConversationViewModel(
             }.trimEnd().ifEmpty { null }
         }
 
-        /** 供 [androidx.lifecycle.viewmodel.compose.viewModel] initializer 使用的工厂。 */
+        /**
+         * 供 [androidx.lifecycle.viewmodel.compose.viewModel] initializer 使用的工厂。
+         *
+         * M5 Phase E（US-035）：注入三层记忆组件 + [PrismApplication.appScope]
+         * （用于 [onCleared] 中 fire-and-forget 记忆持久化）。
+         */
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val app = this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY] as PrismApplication
@@ -623,7 +937,11 @@ class ConversationViewModel(
                     knowledgeBaseRepository = app.knowledgeBaseRepository,
                     skillRegistry = app.skillRegistry,
                     skillExecutor = app.skillExecutor,
-                    mcpServerRepository = app.mcpServerRepository
+                    mcpServerRepository = app.mcpServerRepository,
+                    slidingWindowMemoryManager = app.slidingWindowMemoryManager,
+                    crossSessionMemoryManager = app.crossSessionMemoryManager,
+                    userProfileManager = app.userProfileManager,
+                    applicationScope = app.appScope
                 )
             }
         }

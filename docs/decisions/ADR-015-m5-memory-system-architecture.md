@@ -5,8 +5,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | Proposed |
-| 日期 | 2026-08-10 |
+| 状态 | Accepted |
+| 日期 | 2026-08-10（Proposed）→ 2026-08-11（Accepted，M5 Phase E 闭环） |
 | 决策者 | 主 Agent（基于 code-archaeologist 考古报告 TKN-M5-ARCH-001 + web-access 调研 mem0/CALMem/Agent-Memory + 用户需求 PRD US-005） |
 | 关联文档 | [ADR-007](ADR-007-m3-document-ingestion.md) / [ADR-009](ADR-009-m3-ingestion-pipeline.md) / [ADR-010](ADR-010-m3-vector-retrieval.md) / [ADR-012](ADR-012-m3-rag-conversation-integration.md) / [PRD.md](../PRD.md) US-005 / [prd.json](../../prd.json) US-030~US-036 |
 | 上游调研 | [M5 记忆系统基建考古](../reports/2026-08-10-m5-archaeology.md) / web-access 调研（mem0 / CALMem arXiv:2605.20724 / Agent-Memory / Oracle AI Memory） |
