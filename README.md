@@ -24,6 +24,8 @@
 
 **M7 设备适配与降级全部完成（US-040 + US-041 + US-042 + US-043，ADR-017 Accepted，P2 跨模块，四阶段全部通过 guardrail 两轮 + ac-verifier + 里程碑审计，1497 全量回归 0 失败）**（2026-08-11）—— 四档 PerformanceTier（FULL/STANDARD/MINIMAL/CHAT_ONLY）按 RAM 容量自动降级 + 用户手动覆盖（需重启生效）。四 Phase 拆分：Phase A 核心适配层（PerformanceTier + TierManager + TierConfigRepository + NullEmbedder，96 测试含 H-01 修复验证）→ Phase B 集成层（PrismApplication 注入 + ConversationViewModel 降级 + OnnxEmbedder 闲置卸载调度 + M-02 ragTopK<=0 短路修复）→ Phase C UI 层（TierViewModel + SettingsScreen 档位 UI 改造 + TierSheet 弹层，20 测试 + M-01 CancellationException 重抛修复）→ Phase D 构建层（build.gradle.kts abiFilters 限制 arm64-v8a + armeabi-v7a，APK 体积减约 40%）。复用 M5 null 降级基建 + M3 OnnxEmbedder.checkAndUnload 闲置卸载机制。guardrail TKN-M7-GUARDRAIL-001/002 通过 + ac-verifier TKN-M7-ACCEPTANCE-001 通过（117 专项测试 + 1497 全量回归 0 失败）。已知受限：真机 APK 拆包条目验证 + 4GB/6GB 内存峰值测量待真机环境执行
 
+**M8 集成与发布全部完成（US-044 + US-045 + US-046 + US-047，ADR-018 Accepted，P3 重大，四阶段全部通过 guardrail 两轮 + ac-verifier + functional-validation-auditor）**（2026-08-12）—— 首个完整版本 v0.1.0 发布。四 Phase 拆分：Phase A release keystore + R8 全量启用 + ProGuard 15 章节 keep 规则（RSA 2048 + SHA256withRSA + v2 scheme 签名）→ Phase B assembleRelease + 签名验证 + 全量回归（1497+1497 debug+release 测试 0 失败 0 回归）+ APK 体积分析（78.44MB < 80MB，mapping.txt 96.86MB 归档，missing_rules.txt 不存在）→ Phase C git tag v0.1.0 + GitHub Release 创建 + APK + mapping.txt 上传（https://github.com/ljhthink/Prism/releases/tag/v0.1.0）→ Phase D functional-validation-auditor 全面审计 + 最终一致性检查 + README 收尾。R8 优化效果：相比 debug 构建（含 x86/x86_64 + 无压缩）体积减少约 40%。已知受限：真机烟囱测试（ONNX Runtime JNI + ObjectBox JNI + Tink Provider + Apache POI ServiceLoader 四条反射路径）待真机环境执行
+
 - US-020 Skill 数据模型（SkillConfig 实体 + SkillRepository CRUD）✅（Phase A，guardrail + ac-verifier 通过）
 - US-023 StreamEvent/ChatStreamProvider 接口扩展预留 ✅（Phase A，guardrail + ac-verifier 通过，BR-naming-001 转 active）
 - US-021 SKILL.md 解析器（snakeyaml-engine-kmp 4.0.1 + 安全 LoadSettings + frontmatter 校验）✅（Phase B，guardrail 三轮 + ac-verifier 两轮通过，BR-security-004 转 active）
@@ -76,7 +78,7 @@
 
 - [docs/decisions/](docs/decisions/README.md) —— 架构决策记录
   - [ADR-001 Prism 技术栈与架构选型](docs/decisions/ADR-001-prism-tech-stack.md)（Accepted）
-  - [ADR-002 Prism 聊天 UI 架构（US-005）](docs/decisions/ADR-002-prism-chat-ui-architecture.md)（Proposed）
+  - [ADR-002 Prism 聊天 UI 架构（US-005）](docs/decisions/ADR-002-prism-chat-ui-architecture.md)（Accepted）
   - [ADR-003 Provider 配置详情页接入（设置模块）](docs/decisions/ADR-003-prism-provider-config-settings.md)（Accepted）
   - [ADR-004 Prism Provider 流式请求（US-006/US-007）](docs/decisions/ADR-004-prism-provider-streaming.md)（Accepted）
   - [ADR-005 MCP Kotlin SDK Client 集成（US-008）](docs/decisions/ADR-005-mcp-client-integration.md)（Accepted）
@@ -92,6 +94,7 @@
   - [ADR-015 M5 三层记忆系统架构（US-005）](docs/decisions/ADR-015-m5-memory-system-architecture.md)（Accepted）
   - [ADR-016 M6 跨 App 调用架构（US-037）](docs/decisions/ADR-016-m6-cross-app-integration.md)（Accepted）
   - [ADR-017 M7 设备适配与降级架构（US-007）](docs/decisions/ADR-017-m7-device-adaptation.md)（Accepted）
+  - [ADR-018 M8 集成与发布架构（US-044~US-047）](docs/decisions/ADR-018-m8-release-architecture.md)（Accepted）
 
 ### Reference（参考 / 报告）
 

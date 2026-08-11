@@ -7,7 +7,7 @@
 | 编号 | 标题 | 状态 | 日期 | 文件 |
 |---|---|---|---|---|
 | ADR-001 | Prism 技术栈与架构选型 | Accepted | 2026-08-02 | [ADR-001-prism-tech-stack.md](ADR-001-prism-tech-stack.md) |
-| ADR-002 | Prism 聊天 UI 架构（US-005） | Proposed | 2026-08-05 | [ADR-002-prism-chat-ui-architecture.md](ADR-002-prism-chat-ui-architecture.md) |
+| ADR-002 | Prism 聊天 UI 架构（US-005） | Accepted | 2026-08-05 | [ADR-002-prism-chat-ui-architecture.md](ADR-002-prism-chat-ui-architecture.md) |
 | ADR-003 | Provider 配置详情页接入（设置模块） | Accepted | 2026-08-05 | [ADR-003-prism-provider-config-settings.md](ADR-003-prism-provider-config-settings.md) |
 | ADR-004 | OpenAI 兼容 Provider 流式请求（US-006/US-007） | Accepted | 2026-08-05 | [ADR-004-prism-provider-streaming.md](ADR-004-prism-provider-streaming.md) |
 | ADR-005 | MCP Kotlin SDK Client 集成（US-008） | Accepted | 2026-08-06 | [ADR-005-mcp-client-integration.md](ADR-005-mcp-client-integration.md) |

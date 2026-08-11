@@ -750,8 +750,8 @@
         "Typecheck passes"
       ],
       "priority": 46,
-      "passes": false,
-      "notes": "M8 发布工程 Phase C。ADR-018 Accepted。P3 重大。任务令牌 TKN-M8-RELEASE-003。"
+      "passes": true,
+      "notes": "M8 发布工程 Phase C。ADR-018 Accepted。P3 重大。任务令牌 TKN-M8-RELEASE-003。git tag v0.1.0 annotated + 推送 + GitHub Release 创建 + APK 78.44MB + mapping.txt 92.4MB 上传。Release URL: https://github.com/ljhthink/Prism/releases/tag/v0.1.0。Release notes 含安装说明 + Android 8.0+ 最低要求 + 已知限制 + 不上 Google Play 声明。"
     },
     {
       "id": "US-047",
@@ -768,8 +768,8 @@
         "Typecheck passes"
       ],
       "priority": 47,
-      "passes": false,
-      "notes": "M8 发布工程 Phase D。ADR-018 Accepted。P3 重大。任务令牌 TKN-M8-RELEASE-004。"
+      "passes": true,
+      "notes": "M8 发布工程 Phase D。ADR-018 Accepted。P3 重大。任务令牌 TKN-M8-RELEASE-004 + TKN-M8-MILESTONE-AUDIT-001。functional-validation-auditor 9 步审计结论：有条件交付（CONDITIONAL GO），9 通过 + 2 受限通过 + 0 不通过。PRD 11 项验收标准：9 通过 + 2 受限通过（跨 App 真机 E2E + 设备分档真机内存峰值）。AUDIT-001 修复（ADR-002 状态 Proposed → Accepted）。一致性检查通过。README 文档索引完整（160 链接 0 失效）。behavioral-rules.md 32 条规则 9 类别 0 deprecated 健康。v0.1.1 改进清单已建立（P0 真机烟囱测试 + P0 分支模型治理 + P1 跨 App E2E + P1 内存峰值 + P1 APK 拆包验证 + P2 CI license 扫描 + P2 Compose instrumented test）。已知受限：真机烟囱测试（ONNX/ObjectBox/Tink/POI 四条 JNI 反射路径）+ 远程无 main 分支（AUDIT-002，历史遗留）。"
     }
   ]
 }

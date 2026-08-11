@@ -5,7 +5,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | Proposed（US-005 实现后随 PR 评审转为 Accepted） |
+| 状态 | Accepted（US-005 已实现并通过 guardrail + ac-verifier 验收，2026-08-05；M8 里程碑审计 AUDIT-001 修复，2026-08-12） |
 | 日期 | 2026-08-05 |
 | 决策者 | 主 Agent + 用户（三项决策点已确认） |
 | 关联文档 | [PRD](../PRD.md) / [prd.json US-005](../../prd.json) / [ADR-001](ADR-001-prism-tech-stack.md) |
