@@ -459,8 +459,8 @@
         "Typecheck passes"
       ],
       "priority": 30,
-      "passes": false,
-      "notes": "M5 数据层。ADR-015 5.1。复用 M3 ObjectBox 向量搜索基建（KnowledgeChunk 模式）。P1 常规。"
+      "passes": true,
+      "notes": "M5 数据层。ADR-015 5.1。复用 M3 ObjectBox 向量搜索基建（KnowledgeChunk 模式）。P1 常规。Phase A 验收通过（TKN-M5-PHASEA-ACCEPTANCE-001，5/5 AC，59 专项测试 + 971 全量回归 0 失败）。"
     },
     {
       "id": "US-031",
@@ -474,8 +474,8 @@
         "Typecheck passes"
       ],
       "priority": 31,
-      "passes": false,
-      "notes": "M5 数据层。ADR-015 5.2。显式偏好=用户设定，隐式偏好=LLM 抽取。P1 常规。"
+      "passes": true,
+      "notes": "M5 数据层。ADR-015 5.2。显式偏好=用户设定，隐式偏好=LLM 抽取。P1 常规。Phase A 验收通过（TKN-M5-PHASEA-ACCEPTANCE-001，5/5 AC，BR-security-001-amendment 转 active）。"
     },
     {
       "id": "US-032",
@@ -540,8 +540,8 @@
         "Typecheck passes"
       ],
       "priority": 35,
-      "passes": false,
-      "notes": "M5 集成层。ADR-015 5.6。ConversationViewModel Factory 扩展注入三层记忆组件。P2 跨模块。"
+      "passes": true,
+      "notes": "M5 集成层。ADR-015 5.6。ConversationViewModel Factory 扩展注入三层记忆组件。P2 跨模块。Phase E 验收通过（TKN-M5-PHASEE-ACCEPTANCE-001，6/6 AC，17 集成测试 + 1237 全量回归 0 失败）。"
     },
     {
       "id": "US-036",
@@ -556,8 +556,8 @@
         "Typecheck passes"
       ],
       "priority": 36,
-      "passes": false,
-      "notes": "M5 UI 层。ADR-015 5.7。用户对记忆有完全控制权（GDPR 式）。P1 常规。"
+      "passes": true,
+      "notes": "M5 UI 层。ADR-015 5.7。用户对记忆有完全控制权（GDPR 式）。P1 常规。Phase E 验收通过（TKN-M5-PHASEE-ACCEPTANCE-001，5/5 AC（AC-1 受限通过 Compose UI 需 instrumented test），29 纯函数单元测试 + 6 deleteById 测试）。"
     }
   ]
 }
