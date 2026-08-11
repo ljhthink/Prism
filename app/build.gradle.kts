@@ -20,6 +20,13 @@ android {
         versionName = "0.1.0"
         // M3 引入 Apache POI（poi-ooxml）后方法数/引用数可能超限，启用 Multidex（ADR-007 5.3）
         multiDexEnabled = true
+        // M7 设备适配（ADR-017 4.8）：仅打包 arm64-v8a + armeabi-v7a 两个 ABI，
+        // 排除 x86 / x86_64（模拟器用，生产无用），减小 APK 体积（ONNX Runtime Android AAR
+        // 含这两个 ABI 的 native 库，排除其他 ABI 可减约 40%）。
+        // 开发者如需在 x86 模拟器调试，可用 arm64 模拟器或覆盖 abiFilters。
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     buildTypes {

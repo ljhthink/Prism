@@ -22,6 +22,7 @@
 | ADR-014 | M4 LLM tool_calling 接口扩展（US-023~US-025） | Accepted | 2026-08-09 | [ADR-014-m4-toolcalling-interface.md](ADR-014-m4-toolcalling-interface.md) |
 | ADR-015 | M5 三层记忆系统架构（US-005） | Accepted | 2026-08-10 | [ADR-015-m5-memory-system-architecture.md](ADR-015-m5-memory-system-architecture.md) |
 | ADR-016 | M6 跨 App 调用架构（US-037） | Accepted | 2026-08-11 | [ADR-016-m6-cross-app-integration.md](ADR-016-m6-cross-app-integration.md) |
+| ADR-017 | M7 设备适配与降级架构（US-007） | Accepted | 2026-08-11 | [ADR-017-m7-device-adaptation.md](ADR-017-m7-device-adaptation.md) |
 
 ## ADR 生命周期
 

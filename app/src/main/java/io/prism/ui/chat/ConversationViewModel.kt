@@ -151,7 +151,18 @@ class ConversationViewModel(
      * 仍可通过 SkillExecutor 调用——只是 LLM 不会主动触发）。
      * 生产环境由 [PrismApplication.crossAppLauncher] 注入；测试可注入 fake 或 null。
      */
-    val crossAppLauncher: CrossAppLauncher? = null
+    val crossAppLauncher: CrossAppLauncher? = null,
+    /**
+     * M7 Phase B（ADR-017 4.7）：RAG 检索 top-k，按档位动态传入。
+     *
+     * - FULL 档：5（标准批次）
+     * - STANDARD 档：3（小批次，4-6GB 设备约束）
+     * - MINIMAL / CHAT_ONLY 档：0（RAG 禁用，值不使用，因 [buildRagPlan] 在 RagTarget.Off 时短路）
+     *
+     * 默认 [DEFAULT_RAG_TOP_K]=3（向后兼容既有测试，未注入时按 STANDARD 行为）。
+     * 生产环境由 [Factory] 从 [io.prism.tier.TierManager.currentTier.ragTopK] 注入。
+     */
+    private val ragTopK: Int = DEFAULT_RAG_TOP_K
 ) : ViewModel() {
 
     /**
@@ -736,6 +747,12 @@ class ConversationViewModel(
     private suspend fun buildRagPlan(queryText: String): RagBuildResult {
         val target = _ragTarget.value
         if (target is RagTarget.Off) return RagBuildResult.NormalChat
+        // M-02 修复（guardrail TKN-M7-GUARDRAIL-001，BR-error-handling-004）：
+        // MINIMAL/CHAT_ONLY 档 ragTopK=0，NullEmbedder 返回空 FloatArray(0) 会导致下游
+        // KnowledgeBaseRepository.search 的 require(query.size == 384) 抛 IllegalArgumentException。
+        // 虽被外层 catch 兜住降级为 NormalChat，但异常路径成为热路径且无 Log.w 违反
+        // BR-error-handling-004（不吞异常）。此处短路返回 NormalChat，避免异常路径。
+        if (ragTopK <= 0) return RagBuildResult.NormalChat
 
         // IO 协程执行 embed + search（全程阻塞，禁止 Main）
         return withContext(ioDispatcher) {
@@ -757,11 +774,13 @@ class ConversationViewModel(
                 RagTarget.Off -> return@withContext RagBuildResult.NormalChat  // 理论不可达，防御
             }
             val results = try {
-                knowledgeBaseRepository.search(queryVector, k = RAG_TOP_K, knowledgeBaseId = kbId)
+                knowledgeBaseRepository.search(queryVector, k = ragTopK, knowledgeBaseId = kbId)
             } catch (e: CancellationException) {
                 throw e  // G-01 修复：协程取消必须传播
             } catch (e: Exception) {
-                return@withContext RagBuildResult.NormalChat  // search 失败 → 自然降级，无提示
+                // M-02 修复（BR-error-handling-004）：search 失败记录警告日志，不静默吞异常
+                Log.w("ConversationViewModel", "RAG search 失败，降级为普通对话", e)
+                return@withContext RagBuildResult.NormalChat  // search 失败 → 自然降级
             }
 
             // 3. 相似度阈值过滤（R-6，调用方责任，ADR-012 5.6）
@@ -790,8 +809,8 @@ class ConversationViewModel(
         /** Logcat 标签（G-03 修复：结构化日志基建未就绪前用 android.util.Log） */
         private const val TAG = "ConversationViewModel"
 
-        /** RAG top-k（ADR-012 5.6，4GB 低端机约束） */
-        private const val RAG_TOP_K = 3
+        /** RAG top-k 默认值（ADR-012 5.6，4GB 低端机约束；M7 ADR-017 4.7 改为按档位动态） */
+        internal const val DEFAULT_RAG_TOP_K = 3
 
         /** RAG 相似度阈值（ADR-012 5.6，过滤无关结果污染 context） */
         private const val RAG_SIMILARITY_THRESHOLD = 0.3
@@ -973,6 +992,10 @@ class ConversationViewModel(
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
                 val app = this[ViewModelProvider.AndroidViewModelFactory.APPLICATION_KEY] as PrismApplication
+                // M7 设备适配（ADR-017 4.6）：按档位降级传参
+                // - MINIMAL/CHAT_ONLY 档：crossSessionMemoryManager 传 null（L2 禁用，依赖 embedder）
+                // - ragTopK 按档位动态传入（FULL=5, STANDARD=3, MINIMAL/CHAT_ONLY=0）
+                val tier = app.tierManager.currentTier
                 ConversationViewModel(
                     providerRepository = app.providerConfigRepository,
                     provider = app.openAICompatibleProvider,
@@ -982,12 +1005,13 @@ class ConversationViewModel(
                     skillExecutor = app.skillExecutor,
                     mcpServerRepository = app.mcpServerRepository,
                     slidingWindowMemoryManager = app.slidingWindowMemoryManager,
-                    crossSessionMemoryManager = app.crossSessionMemoryManager,
+                    crossSessionMemoryManager = if (tier.isMemoryL2Enabled) app.crossSessionMemoryManager else null,
                     userProfileManager = app.userProfileManager,
                     applicationScope = app.appScope,
                     confirmationGate = app.confirmationGate,
                     appLauncherBridge = app.appLauncherBridge,
-                    crossAppLauncher = app.crossAppLauncher
+                    crossAppLauncher = app.crossAppLauncher,
+                    ragTopK = tier.ragTopK
                 )
             }
         }

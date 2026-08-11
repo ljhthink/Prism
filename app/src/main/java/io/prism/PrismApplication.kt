@@ -19,6 +19,8 @@ import io.prism.document.Chunker
 import io.prism.document.DocumentParserRegistry
 import io.prism.embedding.Embedder
 import io.prism.embedding.EmbedderFactory
+import io.prism.embedding.NullEmbedder
+import io.prism.embedding.OnnxEmbedder
 import io.prism.fs.FilesystemMcpServer
 import io.prism.fs.FilesystemRootStore
 import io.prism.fs.SafFileAccess
@@ -46,10 +48,15 @@ import io.prism.memory.MemoryConfigRepository
 import io.prism.memory.SlidingWindowMemoryManager
 import io.prism.memory.UserProfileManager
 import io.prism.skill.SkillRegistry
+import io.prism.tier.PerformanceTier
+import io.prism.tier.TierConfigRepository
+import io.prism.tier.TierManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -207,19 +214,58 @@ class PrismApplication : Application() {
     val chunker: Chunker by lazy { Chunker(chunkSize = DEFAULT_CHUNK_SIZE, overlap = DEFAULT_CHUNK_OVERLAP) }
 
     /**
+     * 设备档位配置仓库（US-040，ADR-017 4.4）—— 持久化用户手动覆盖的档位偏好。
+     *
+     * 使用独立 DataStore（`prism_tier_config`），与 API Key / 文件系统根目录 / 记忆配置 DataStore 隔离。
+     * 默认 AUTO（使用 RAM 检测结果），用户可在设置中覆盖为四档之一。
+     *
+     * 由 [tierManager] 在 [onCreate] 中 `runBlocking` 一次性读取覆盖值，
+     * 由 [io.prism.ui.settings.TierViewModel]（US-042）写入用户覆盖。
+     */
+    val tierConfigRepository: TierConfigRepository by lazy { TierConfigRepository(tierConfigDataStore) }
+
+    /**
+     * 设备档位管理器（US-040，ADR-017 4.1）—— RAM 检测 + 用户覆盖解析 + 当前档位暴露。
+     *
+     * **必须在 [onCreate] 中 [initialize]**，在任何 `by lazy` 注入访问 [TierManager.currentTier] 之前。
+     * 由于 `by lazy` 首次访问发生在 ViewModel 构造时（远晚于 onCreate），此约束天然满足。
+     *
+     * **初始化**：[onCreate] 中同步检测 RAM（`ActivityManager.MemoryInfo.totalMem`）+ `runBlocking`
+     * 读取 [tierConfigRepository] 的用户覆盖值，解析最终生效档位缓存到内存。
+     *
+     * **覆盖生效**（ADR-017 4.4）：用户修改覆盖后需重启 App 生效。[currentTier] 在 [initialize]
+     * 后不可变，UI 修改覆盖仅持久化到 DataStore，下次启动时读取新值。
+     *
+     * 由 [embedder] / [crossSessionMemoryManager] 等 `by lazy` 注入读取 [currentTier] 决定加载策略，
+     * 由 [io.prism.ui.chat.ConversationViewModel.Factory] 读取 [currentTier] 决定降级传参。
+     */
+    lateinit var tierManager: TierManager
+        private set
+
+    /**
      * 端侧嵌入引擎（US-014，ADR-007 5.2）—— onnxruntime-android 加载 all-MiniLM-L6-v2 INT8 模型。
      *
-     * 经 [EmbedderFactory.create] 从 `assets/models/` 加载 ONNX 模型（~23MB）与 BERT 词表（~226KB）。
-     * 首次访问时延迟初始化，加载耗时 ~200ms，仅在用户首次进入知识库 Tab 时发生。
+     * **M7 档位感知**（ADR-017 4.5）：
+     * - FULL / STANDARD 档：经 [EmbedderFactory.create] 从 `assets/models/` 加载 ONNX 模型（~23MB）与 BERT 词表（~226KB）
+     * - MINIMAL / CHAT_ONLY 档：返回 [NullEmbedder]，不加载模型，节省 ~23MB 内存
+     *
+     * 首次访问时延迟初始化，加载耗时 ~200ms（FULL/STANDARD 档），仅在用户首次进入知识库 Tab 时发生。
      *
      * **生命周期**（BR-concurrency-002）：OnnxEmbedder 全程持锁，单例化复用避免重复加载模型；
      * 协程取消时单次 embed ~100ms 不可中断，最坏延迟可接受。
+     *
+     * **闲置卸载**（ADR-017 4.5）：FULL 档 5min 闲置后 `session.close()`，STANDARD 档 2min。
+     * 由 [startEmbedderUnloadScheduler] 在 [appScope] 中定时调用 [OnnxEmbedder.checkAndUnload]。
      */
     val embedder: Embedder by lazy {
-        assets.open(EmbedderFactory.DEFAULT_MODEL_PATH).use { modelInput ->
-            assets.open(EmbedderFactory.DEFAULT_VOCAB_PATH).use { vocabInput ->
-                EmbedderFactory.create(modelInput, vocabInput)
+        if (tierManager.currentTier.isEmbedderEnabled) {
+            assets.open(EmbedderFactory.DEFAULT_MODEL_PATH).use { modelInput ->
+                assets.open(EmbedderFactory.DEFAULT_VOCAB_PATH).use { vocabInput ->
+                    EmbedderFactory.create(modelInput, vocabInput)
+                }
             }
+        } else {
+            NullEmbedder()
         }
     }
 
@@ -505,6 +551,21 @@ class PrismApplication : Application() {
         boxStore = MyObjectBox.builder()
             .androidContext(this)
             .build()
+        // M7 设备适配（ADR-017 4.1）：必须在所有 by lazy 注入访问 currentTier 之前同步初始化
+        // 内部通过 runBlocking 一次性读取 DataStore 覆盖值（<50ms），缓存到内存供后续注入读取
+        tierManager = TierManager(
+            tierDetector = TierManager.DefaultTierDetector(this),
+            overrideReader = TierManager.DefaultOverrideReader(tierConfigRepository)
+        ).also { it.initialize() }
+        android.util.Log.i(
+            "PrismApplication",
+            "M7 tier initialized: detected=${tierManager.detectedTier} " +
+                "override=${tierManager.currentOverride} current=${tierManager.currentTier} " +
+                "ramBytes=${tierManager.totalRamBytes}"
+        )
+        // M7 嵌入闲置卸载调度（ADR-017 4.5）：FULL 档 5min / STANDARD 档 2min 闲置后 session.close()
+        // MINIMAL/CHAT_ONLY 档不加载 embedder（NullEmbedder），checkIntervalMs=0 跳过调度
+        startEmbedderUnloadScheduler()
         // 异步加载持久化授权根目录到 SAF 访问层（ADR-006 5.3），与 registerFilesystemRoot 经
         // rootsMutex 串行化（C3），失败静默（容错，不阻断启动）
         appScope.launch {
@@ -532,6 +593,38 @@ class PrismApplication : Application() {
     }
 
     /**
+     * M7 嵌入闲置卸载调度器（ADR-017 4.5）。
+     *
+     * 在 [appScope] 中启动协程循环，按 [PerformanceTier.checkIntervalMs] 间隔调用
+     * [OnnxEmbedder.checkAndUnload]，闲置超 [PerformanceTier.embedderIdleThresholdMs] 则
+     * `session.close()` 释放 ~23MB 模型内存，下次 `embed()` 时自动重新加载。
+     *
+     * **档位感知**：
+     * - FULL 档：60s 间隔检查，5min 闲置卸载
+     * - STANDARD 档：30s 间隔检查，2min 闲置卸载
+     * - MINIMAL / CHAT_ONLY 档：checkIntervalMs=0，直接跳过（NullEmbedder 无资源可卸载）
+     *
+     * **激活时机**：embedder 首次被 `by lazy` 访问后才会真正触发卸载（之前 session 未加载），
+     * checkAndUnload 内部判断 session==null 时返回 false，无副作用。
+     */
+    private fun startEmbedderUnloadScheduler() {
+        val tier = tierManager.currentTier
+        val intervalMs = tier.checkIntervalMs
+        if (intervalMs <= 0L) return  // MINIMAL/CHAT_ONLY 档不调度
+        val idleThresholdMs = tier.embedderIdleThresholdMs
+        appScope.launch {
+            while (isActive) {
+                delay(intervalMs)
+                runCatching {
+                    (embedder as? OnnxEmbedder)?.checkAndUnload(idleThresholdMs)
+                }.onFailure { e ->
+                    android.util.Log.w("PrismApplication", "checkAndUnload failed: ${e::class.simpleName}")
+                }
+            }
+        }
+    }
+
+    /**
      * 应用级协程作用域（后台任务，如授权根目录异步加载 / M5 记忆持久化）。
      *
      * M5 Phase E（US-035）：[io.prism.ui.chat.ConversationViewModel.onCleared] 中
@@ -552,6 +645,9 @@ class PrismApplication : Application() {
 
     /** 记忆系统配置 DataStore 进程级单例（ADR-015 5.3，US-032 滑动窗口 N 持久化）。 */
     private val Context.memoryConfigDataStore by preferencesDataStore(name = "prism_memory_config")
+
+    /** 设备档位配置 DataStore 进程级单例（ADR-017 4.4，US-040 用户手动覆盖持久化）。 */
+    private val Context.tierConfigDataStore by preferencesDataStore(name = "prism_tier_config")
 
     companion object {
         /**

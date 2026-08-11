@@ -22,6 +22,8 @@
 
 **M6 跨 App 调用集成全部完成（US-037 + US-038 + US-039，ADR-016 Accepted，P2 跨模块，三阶段全部通过 guardrail + ac-verifier + 里程碑审计，1380 全量回归 0 失败）**（2026-08-11）—— 技术选型完成（方案 A 纯 Android 原生 + 方案 D 精简版复用 M4 SkillExecutor/ToolConfirmationGate，零新增第三方依赖）+ 源码考古完成（13 复用基建 + 10 项风险清单 + sequential-thinking 6 步推演 LocalToolExecutor vs IntentToolExecutor 决策）。三 Phase 拆分：Phase A CrossAppLauncher 核心模块（scheme 清单 + Deep Link + Share Sheet + Picker + Bridge）→ Phase B LocalToolExecutor AI 集成层（接口 + CrossAppLocalToolExecutor + SkillExecutor 扩展支持本地工具分支）→ Phase C UI 集成层（AndroidManifest <queries> + ConversationViewModel 工具注册 + ConversationScreen launcher + 用户确认 UI）。7 个目标 App：微信/支付宝/淘宝/抖音/QQ/微博/百度地图。关键缺陷修复：DEF-01 B2 严重（PrismApplication 注入遗漏）+ M-1 B1 一般（双重超时竞态 BR-concurrency-005 转 active）。已知受限：UNC-1 真机 E2E 7 App Deep Link 兼容性待补测
 
+**M7 设备适配与降级全部完成（US-040 + US-041 + US-042 + US-043，ADR-017 Accepted，P2 跨模块，四阶段全部通过 guardrail 两轮 + ac-verifier + 里程碑审计，1497 全量回归 0 失败）**（2026-08-11）—— 四档 PerformanceTier（FULL/STANDARD/MINIMAL/CHAT_ONLY）按 RAM 容量自动降级 + 用户手动覆盖（需重启生效）。四 Phase 拆分：Phase A 核心适配层（PerformanceTier + TierManager + TierConfigRepository + NullEmbedder，96 测试含 H-01 修复验证）→ Phase B 集成层（PrismApplication 注入 + ConversationViewModel 降级 + OnnxEmbedder 闲置卸载调度 + M-02 ragTopK<=0 短路修复）→ Phase C UI 层（TierViewModel + SettingsScreen 档位 UI 改造 + TierSheet 弹层，20 测试 + M-01 CancellationException 重抛修复）→ Phase D 构建层（build.gradle.kts abiFilters 限制 arm64-v8a + armeabi-v7a，APK 体积减约 40%）。复用 M5 null 降级基建 + M3 OnnxEmbedder.checkAndUnload 闲置卸载机制。guardrail TKN-M7-GUARDRAIL-001/002 通过 + ac-verifier TKN-M7-ACCEPTANCE-001 通过（117 专项测试 + 1497 全量回归 0 失败）。已知受限：真机 APK 拆包条目验证 + 4GB/6GB 内存峰值测量待真机环境执行
+
 - US-020 Skill 数据模型（SkillConfig 实体 + SkillRepository CRUD）✅（Phase A，guardrail + ac-verifier 通过）
 - US-023 StreamEvent/ChatStreamProvider 接口扩展预留 ✅（Phase A，guardrail + ac-verifier 通过，BR-naming-001 转 active）
 - US-021 SKILL.md 解析器（snakeyaml-engine-kmp 4.0.1 + 安全 LoadSettings + frontmatter 校验）✅（Phase B，guardrail 三轮 + ac-verifier 两轮通过，BR-security-004 转 active）
@@ -89,6 +91,7 @@
   - [ADR-014 M4 LLM tool_calling 接口扩展（US-023~US-025）](docs/decisions/ADR-014-m4-toolcalling-interface.md)（Accepted）
   - [ADR-015 M5 三层记忆系统架构（US-005）](docs/decisions/ADR-015-m5-memory-system-architecture.md)（Accepted）
   - [ADR-016 M6 跨 App 调用架构（US-037）](docs/decisions/ADR-016-m6-cross-app-integration.md)（Accepted）
+  - [ADR-017 M7 设备适配与降级架构（US-007）](docs/decisions/ADR-017-m7-device-adaptation.md)（Accepted）
 
 ### Reference（参考 / 报告）
 

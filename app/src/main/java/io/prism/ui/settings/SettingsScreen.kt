@@ -35,6 +35,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.prism.data.ProviderConfig
 import io.prism.data.ProviderPresets
+import io.prism.tier.PerformanceTier
+import io.prism.tier.TierConfigRepository
 import io.prism.ui.components.PrismButton
 import io.prism.ui.components.PrismButtonVariant
 import io.prism.ui.components.PrismField
@@ -52,9 +54,7 @@ import io.prism.ui.theme.PrismMint
 import io.prism.ui.theme.PrismText
 import io.prism.ui.theme.PrismTextDim
 import io.prism.ui.theme.PrismTextFaint
-
-/** 性能档位。 */
-private enum class PerfTier(val label: String) { MINIMAL("极简"), STANDARD("标准"), FULL("全功能") }
+import java.util.Locale
 
 /**
  * 设置屏幕 —— 深空玻璃肌理（设计规范 v0.4 第 8.4 节）。
@@ -69,13 +69,17 @@ fun SettingsScreen(
     viewModel: SettingsViewModel = viewModel(factory = SettingsViewModel.Factory)
 ) {
     var biometric by remember { mutableStateOf(true) }
-    var tier by remember { mutableStateOf(PerfTier.STANDARD) }
+    var tierSheetVisible by remember { mutableStateOf(false) }
     var providerListVisible by remember { mutableStateOf(false) }
     var apiKeyVisible by remember { mutableStateOf(false) }
 
     val providers by viewModel.providers.collectAsState()
     val activeProvider by viewModel.activeProvider.collectAsState()
     val selectedProvider by viewModel.selectedProvider.collectAsState()
+
+    // M7 Phase C（US-042）：档位 UI 由 TierViewModel 驱动（替代原 PerfTier 本地 mock state）
+    val tierViewModel: TierViewModel = viewModel(factory = TierViewModel.Factory)
+    val tierOverride by tierViewModel.override.collectAsState()
 
     Box {
         LazyColumn(
@@ -120,38 +124,13 @@ fun SettingsScreen(
                     icon = "▣",
                     iconColor = Color(0xFFFF9A5C),
                     title = "性能档位",
-                    subtitle = "自动识别 · 8GB RAM",
-                    trailing = {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            PerfTier.entries.forEach { t ->
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(8.dp))
-                                        .background(
-                                            if (t == tier) PrismMint.copy(alpha = 0.08f) else Color.Transparent,
-                                            RoundedCornerShape(8.dp)
-                                        )
-                                        .border(
-                                            1.dp,
-                                            if (t == tier) PrismMint.copy(alpha = 0.4f) else PrismLine,
-                                            RoundedCornerShape(8.dp)
-                                        )
-                                        .clickable(
-                                            interactionSource = remember { MutableInteractionSource() },
-                                            indication = null
-                                        ) { tier = t }
-                                        .padding(horizontal = 9.dp, vertical = 3.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = t.label,
-                                        color = if (t == tier) PrismMint else PrismTextDim,
-                                        fontSize = 10.sp
-                                    )
-                                }
-                            }
-                        }
-                    }
+                    subtitle = tierSubtitle(
+                        override = tierOverride,
+                        detectedTier = tierViewModel.detectedTier,
+                        currentTier = tierViewModel.currentTier,
+                        totalRamBytes = tierViewModel.totalRamBytes
+                    ),
+                    onClick = { tierSheetVisible = true }
                 )
             }
             item { SetSection("关于") }
@@ -185,6 +164,183 @@ fun SettingsScreen(
         // API Key 管理弹层
         PrismSheetHost(visible = apiKeyVisible, onDismiss = { apiKeyVisible = false }) {
             ApiKeySheet(providers, viewModel)
+        }
+        // M7 Phase C（US-042）：性能档位选择弹层
+        PrismSheetHost(visible = tierSheetVisible, onDismiss = { tierSheetVisible = false }) {
+            TierSheet(
+                override = tierOverride,
+                detectedTier = tierViewModel.detectedTier,
+                currentTier = tierViewModel.currentTier,
+                totalRamBytes = tierViewModel.totalRamBytes,
+                onSelect = { value ->
+                    if (value == TierConfigRepository.OVERRIDE_AUTO) {
+                        tierViewModel.clearOverride()
+                    } else {
+                        tierViewModel.setOverride(value)
+                    }
+                    tierSheetVisible = false
+                },
+                onClose = { tierSheetVisible = false }
+            )
+        }
+    }
+}
+
+/**
+ * 格式化档位行副标题（US-042）。
+ *
+ * - 覆盖为 AUTO：显示「自动检测 · {RAM}GB · 当前 {tier}」
+ * - 覆盖为手动：显示「手动覆盖 · {tier}」
+ *
+ * @param override 用户覆盖值（[TierConfigRepository.OVERRIDE_AUTO] 或档位枚举名）
+ * @param detectedTier RAM 检测到的档位
+ * @param currentTier 当前生效档位（运行中，重启后反映新覆盖）
+ * @param totalRamBytes 设备 RAM 总量（字节）
+ */
+private fun tierSubtitle(
+    override: String,
+    detectedTier: PerformanceTier,
+    currentTier: PerformanceTier,
+    totalRamBytes: Long
+): String {
+    val ramGb = totalRamBytes.toDouble() / (1024L * 1024L * 1024L)
+    val ramStr = String.format(Locale.US, "%.1f", ramGb) + "GB"
+    return if (override == TierConfigRepository.OVERRIDE_AUTO) {
+        "自动检测 · $ramStr · ${currentTier.label}"
+    } else {
+        "手动覆盖 · ${currentTier.label}"
+    }
+}
+
+/** 档位中文标签（仅 UI 展示，与 [PerformanceTier] 枚举名解耦）。 */
+private val PerformanceTier.label: String
+    get() = when (this) {
+        PerformanceTier.FULL -> "全功能"
+        PerformanceTier.STANDARD -> "标准"
+        PerformanceTier.MINIMAL -> "极简"
+        PerformanceTier.CHAT_ONLY -> "仅聊天"
+    }
+
+/**
+ * 性能档位选择弹层（US-042）。
+ *
+ * 列出 5 个选项（自动 + 四档），每个选项显示档位名 + RAM 范围 + 功能简述。
+ * 底部固定提示「修改后需重启 App 生效」（ADR-017 4.4：覆盖仅持久化，运行档位需重启才反映）。
+ *
+ * @param override 当前用户覆盖值（用于标记选中项）
+ * @param detectedTier RAM 检测到的档位（用于「自动」选项描述）
+ * @param currentTier 当前生效档位（运行中，弹层顶部展示）
+ * @param totalRamBytes 设备 RAM 总量（字节，用于弹层副标题展示）
+ * @param onSelect 选项点击回调，参数为覆盖值（[TierConfigRepository.OVERRIDE_AUTO] 或档位枚举名）
+ * @param onClose 关闭按钮回调
+ */
+@Composable
+private fun TierSheet(
+    override: String,
+    detectedTier: PerformanceTier,
+    currentTier: PerformanceTier,
+    totalRamBytes: Long,
+    onSelect: (String) -> Unit,
+    onClose: () -> Unit
+) {
+    val ramGb = totalRamBytes.toDouble() / (1024L * 1024L * 1024L)
+    val ramStr = String.format(Locale.US, "%.1f", ramGb) + "GB"
+    PrismSheet(
+        title = "性能档位",
+        subtitle = "检测 $ramStr · 当前 ${currentTier.label}"
+    ) {
+        TierOptionRow(
+            label = "自动",
+            description = "按 RAM 检测结果（当前 ${detectedTier.label}）",
+            selected = override == TierConfigRepository.OVERRIDE_AUTO,
+            onClick = { onSelect(TierConfigRepository.OVERRIDE_AUTO) }
+        )
+        Spacer(Modifier.height(8.dp))
+        TierOptionRow(
+            label = PerformanceTier.FULL.label,
+            description = "≥6GB · RAG 标准批次 + 嵌入常驻 + L2 跨会话",
+            selected = override == PerformanceTier.FULL.name,
+            onClick = { onSelect(PerformanceTier.FULL.name) }
+        )
+        Spacer(Modifier.height(8.dp))
+        TierOptionRow(
+            label = PerformanceTier.STANDARD.label,
+            description = "4-6GB · RAG 小批次 + 嵌入按需 2min 卸载",
+            selected = override == PerformanceTier.STANDARD.name,
+            onClick = { onSelect(PerformanceTier.STANDARD.name) }
+        )
+        Spacer(Modifier.height(8.dp))
+        TierOptionRow(
+            label = PerformanceTier.MINIMAL.label,
+            description = "3-4GB · 禁用 RAG/L2，嵌入不加载",
+            selected = override == PerformanceTier.MINIMAL.name,
+            onClick = { onSelect(PerformanceTier.MINIMAL.name) }
+        )
+        Spacer(Modifier.height(8.dp))
+        TierOptionRow(
+            label = PerformanceTier.CHAT_ONLY.label,
+            description = "<3GB · 仅聊天 + BYOK",
+            selected = override == PerformanceTier.CHAT_ONLY.name,
+            onClick = { onSelect(PerformanceTier.CHAT_ONLY.name) }
+        )
+        Spacer(Modifier.height(16.dp))
+        Text(
+            text = "修改后需重启 App 生效",
+            color = PrismTextFaint,
+            fontSize = 11.sp,
+            letterSpacing = 0.3.sp
+        )
+        Spacer(Modifier.height(12.dp))
+        PrismButton(text = "关闭", variant = PrismButtonVariant.Ghost, onClick = onClose)
+    }
+}
+
+/** 档位选项行（单选样式，选中态高亮）。 */
+@Composable
+private fun TierOptionRow(
+    label: String,
+    description: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) PrismMint.copy(alpha = 0.08f) else PrismPanel2)
+            .border(
+                1.dp,
+                if (selected) PrismMint.copy(alpha = 0.4f) else PrismLine,
+                RoundedCornerShape(12.dp)
+            )
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .background(
+                    if (selected) PrismMint.copy(alpha = 0.12f) else PrismPanel2,
+                    RoundedCornerShape(10.dp)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = if (selected) "✓" else "▣",
+                color = if (selected) PrismMint else PrismTextDim,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = label, color = PrismText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(text = description, color = PrismTextFaint, fontSize = 11.sp)
         }
     }
 }

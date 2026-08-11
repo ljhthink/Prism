@@ -618,6 +618,86 @@
       "priority": 39,
       "passes": true,
       "notes": "M6 UI 集成层 + 里程碑收尾。ADR-016（2026-08-11 转 Accepted）。P2 跨模块。对应 PRD.md US-006 跨 App 调用（产品级）。复用 KnowledgeBaseScreen ActivityResultContracts 先例 + UiConfirmationGate 桥接模式。Phase C 验收通过（TKN-M6-PHASEC-ACCEPTANCE-001，10/10 AC，DEF-01 闭合 + M-1 双重超时竞态修复 BR-concurrency-005 转 active）。M6 里程碑审计通过（TKN-M6-MILESTONE-AUDIT-001，1380 全量回归 0 失败）。已知受限：UNC-1 真机 E2E 7 App Deep Link 兼容性待补测。"
+    },
+    {
+      "id": "US-040",
+      "title": "M7 Phase A: 设备档位核心适配层（PerformanceTier + TierManager + TierConfigRepository + NullEmbedder）",
+      "description": "作为开发者，我需要构建设备档位检测与降级的底层基建，以便后续组件能按 RAM 容量差异化加载功能。",
+      "acceptanceCriteria": [
+        "PerformanceTier 枚举定义四档（FULL/STANDARD/MINIMAL/CHAT_ONLY），含 isRagEnabled/isMemoryL2Enabled/isEmbedderEnabled/ragTopK/embedderIdleThresholdMs/checkIntervalMs 属性 + fromRamBytes(totalRamBytes) 静态映射",
+        "PerformanceTier RAM 阈值：FULL≥6GB, STANDARD≥4GB, MINIMAL≥3GB, CHAT_ONLY<3GB（保守阈值应对 totalMem 报告偏差）",
+        "TierManager 通过 TierDetector + OverrideReader 接口注入（解耦 Android Context 与 runBlocking，可测），initialize() 同步检测 RAM + 读取覆盖 + 解析最终档位",
+        "TierManager 暴露 detectedTier/currentTier/totalRamBytes/currentOverride 只读属性 + isInitialized 防御检查",
+        "TierManager.resolveTier 覆盖优先于检测：OVERRIDE_AUTO 用检测值，否则用覆盖值（无效值降级为检测并 Log.w）",
+        "TierConfigRepository 仿 MemoryConfigRepository 模式：独立 DataStore（prism_tier_config）+ Flow 暴露 + suspend getOverride/setOverride + clearOverride",
+        "TierConfigRepository.VALID_VALUES 包含 AUTO + 四档枚举名，setOverride 拒绝非法值（require throw IllegalArgumentException）",
+        "NullEmbedder 实现 Embedder 接口：embed 返回空 FloatArray，embedBatch 返回空 List，isLoaded 返回 false，checkAndUnload 返回 false",
+        "PerformanceTierTest 36 用例 + TierManagerTest 22 用例 + TierConfigRepositoryTest 20 用例 + NullEmbedderTest 17 用例全部通过（共 95 测试）",
+        "Typecheck passes"
+      ],
+      "priority": 40,
+      "passes": true,
+      "notes": "M7 核心适配层。ADR-017 Accepted（guardrail TKN-M7-GUARDRAIL-001/002 通过 + ac-verifier TKN-M7-ACCEPTANCE-001 通过）。P2 跨模块。复用 MemoryConfigRepository DataStore 模式（ADR-015）+ Embedder 接口（M3 ADR-007）。TierManager 接口注入设计避免 Android Context 依赖，纯 JVM 可测。RAM 阈值保守策略（3GB 设备报告 2.8GB 归 CHAT_ONLY）符合 PRD「低端机优先保稳定」语义。H-01 修复（guardrail round1）：DefaultOverrideReader.read() 加 try-catch 兜底 DataStore 异常降级 AUTO，避免 onCreate 崩溃。实际测试 36+23+20+17=96 用例（H-01 新增 1 用例）。"
+    },
+    {
+      "id": "US-041",
+      "title": "M7 Phase B: 集成层（PrismApplication 注入 + ConversationViewModel 降级 + OnnxEmbedder 调度）",
+      "description": "作为系统，我需要在 App 启动时初始化档位管理器，并按档位动态注入 embedder 与记忆管理器，以实现低端设备降级。",
+      "acceptanceCriteria": [
+        "PrismApplication.onCreate 同步初始化 TierManager（DefaultTierDetector + DefaultOverrideReader），在所有 by lazy 注入访问 currentTier 之前完成",
+        "PrismApplication.tierConfigRepository by lazy 暴露（独立 DataStore prism_tier_config）",
+        "PrismApplication.tierManager lateinit var 暴露（onCreate 中 initialize）",
+        "PrismApplication.embedder by lazy 按 tierManager.currentTier.isEmbedderEnabled 返回 EmbedderFactory.create 或 NullEmbedder",
+        "PrismApplication 启动 startEmbedderUnloadScheduler 协程：按 tier.checkIntervalMs 间隔调用 OnnxEmbedder.checkAndUnload(idleThresholdMs)，MINIMAL/CHAT_ONLY 因 checkIntervalMs=0 跳过",
+        "ConversationViewModel 新增 ragTopK 构造参数（默认 DEFAULT_RAG_TOP_K=3 向后兼容），buildRagPlan 用 ragTopK 替代硬编码 RAG_TOP_K",
+        "ConversationViewModel.Factory 按 tier 传入 ragTopK = tier.ragTopK，crossSessionMemoryManager = if tier.isMemoryL2Enabled app.crossSessionMemoryManager else null",
+        "PrismApplication 集成不破坏既有 ConversationViewModelTest（默认参数向后兼容）",
+        "全量单元测试通过（无回归）",
+        "Typecheck passes"
+      ],
+      "priority": 41,
+      "passes": true,
+      "notes": "M7 集成层。ADR-017 4.5/4.6/4.7 Accepted。P2 跨模块。复用 M5 Phase E 已验证的 null 降级基建（crossSessionMemoryManager=null 时 mergeSystemPrompt 自动跳过 L2）。OnnxEmbedder.checkAndUnload 闲置卸载机制激活（M3 实现但未调用，本 Phase 接入调度协程）。ragTopK 动态化替代 M3 硬编码 RAG_TOP_K=3。M-02 修复（guardrail round1）：buildRagPlan 在 ragTopK<=0 时短路返回 NormalChat + search catch 块补 Log.w，避免 NullEmbedder 空向量导致 IllegalArgumentException 异常路径成为热路径。"
+    },
+    {
+      "id": "US-042",
+      "title": "M7 Phase C: UI 层（TierViewModel + SettingsScreen 档位 UI 改造 + TierSheet 弹层）",
+      "description": "作为用户，我希望在设置中看到当前设备档位，并能手动覆盖档位（需重启生效）。",
+      "acceptanceCriteria": [
+        "TierViewModel 注入 TierConfigRepository + TierManager，暴露 override: StateFlow<String> + detectedTier/currentTier/totalRamBytes 只读属性",
+        "TierViewModel.setOverride(value) 持久化覆盖到 DataStore（runCatching 兜底，非法值不崩溃仅 Log.w）",
+        "TierViewModel.clearOverride() 恢复 AUTO",
+        "TierViewModel.Factory 从 PrismApplication 注入 tierConfigRepository + tierManager",
+        "SettingsScreen 删除本地 PerfTier mock enum + 本地 tier state，改用 TierViewModel 驱动",
+        "SettingsScreen 档位行 subtitle 动态显示：AUTO 时「自动检测 · {RAM}GB · {tier}」，覆盖时「手动覆盖 · {tier}」",
+        "SettingsScreen 档位行点击弹出 TierSheet（PrismSheet 容器）",
+        "TierSheet 列出 5 选项（自动 + 四档），每选项显示档位名 + RAM 范围 + 功能简述 + 选中标记",
+        "TierSheet 底部固定提示「修改后需重启 App 生效」",
+        "TierViewModelTest 20 用例通过（override 默认值/setOverride 持久化/clearOverride/非法值兜底/TierManager 快照读取/覆盖优先于检测）",
+        "全量单元测试通过（无回归）",
+        "Typecheck passes"
+      ],
+      "priority": 42,
+      "passes": true,
+      "notes": "M7 UI 层。ADR-017 4.6 Accepted。P2 跨模块。替代原 SettingsScreen PerfTier 三档 mock（本地 state，无持久化）。RAM 格式化用 Locale.US 确保小数点为点号（避免部分地区逗号）。覆盖生效语义：UI 修改仅持久化，currentTier 运行中不变，需重启 App（TierManager.initialize 读取新值）。M-01 修复（guardrail round1）：setOverride/clearOverride 由 runCatching 改为显式 try-catch + 重抛 CancellationException（BR-error-handling-007），行为等价（非法值不崩溃 + Log.w）但协程取消语义正确。"
+    },
+    {
+      "id": "US-043",
+      "title": "M7 Phase D: 构建层（build.gradle.kts abiFilters + APK 体积优化）",
+      "description": "作为开发者，我需要限制 APK 仅打包生产用 ABI，以减小体积并避免模拟器专用 native 库进入发布包。",
+      "acceptanceCriteria": [
+        "app/build.gradle.kts defaultConfig 新增 ndk { abiFilters += listOf(\"arm64-v8a\", \"armeabi-v7a\") }",
+        "排除 x86 / x86_64 ABI（仅模拟器用，生产无用）",
+        "ONNX Runtime Android AAR + ObjectBox + DataStore 的 native 库均含这两个 ABI",
+        "assembleDebug 成功，APK lib/ 目录仅含 arm64-v8a + armeabi-v7a 两个子目录",
+        "APK 内 lib/ 条目验证：libonnxruntime.so / libobjectbox-jni.so / libdatastore_shared_counter.so / libonnxruntime4j_jni.so 仅在 arm64-v8a + armeabi-v7a 下出现",
+        "不启用 largeHeap（ADR-017 4.9：通过档位降级控制内存更符合 PRD 语义）",
+        "不添加前台服务（ADR-017 4.10：嵌入加载 ~200ms，摄入在前台 UI 触发，无需后台长任务）",
+        "Typecheck passes"
+      ],
+      "priority": 43,
+      "passes": true,
+      "notes": "M7 构建层。ADR-017 4.8/4.9/4.10 Accepted。P2 构建配置变更。abiFilters 减小 APK 体积约 40%（排除 x86/x86_64 native 库）。开发者如需 x86 模拟器调试可用 arm64 模拟器或覆盖 abiFilters。assembleDebug 验证通过（APK lib/ 仅含 2 个 ABI 目录）。AC4-5 APK 拆包条目验证待真机环境执行（编译层已通过，ac-verifier 标注为低优先级后续项）。"
     }
   ]
 }

@@ -525,6 +525,78 @@ class ConversationViewModelTest {
     }
 
     /**
+     * M-02 修复验证（guardrail TKN-M7-GUARDRAIL-001，ac-verifier TKN-M7-ACCEPTANCE-001）：
+     * MINIMAL/CHAT_ONLY 档 ragTopK=0 时，buildRagPlan 应短路返回 NormalChat，
+     * 不调用 embedder.embed()（若 embed 被调用，StubEmbedderImpl(throwOnEmbed=true) 会抛异常
+     * 触发 EmbedFailed 降级，AI 消息内容会含 "⚠️" 前缀）。
+     */
+    @Test
+    fun `ragTopK zero short circuits to normal chat without calling embed`() = runTest(mainDispatcher) {
+        val repo = ProviderConfigRepository(boxStore)
+        val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        repo.save(active)
+        repo.setActive(repo.findByName(active.name)!!.id)
+
+        val kbRepo = KnowledgeBaseRepository(boxStore)
+        // 插入匹配 chunk（若短路失败会执行 search 并可能返回结果）
+        kbRepo.addChunk(KnowledgeChunk(
+            title = "匹配文档.txt#1",
+            content = "匹配内容",
+            embedding = FloatArray(384) { 0.5f },
+            knowledgeBaseId = 0L
+        ))
+
+        val provider = RecordingChatStreamProvider(listOf(StreamEvent.Delta("普通回复"), StreamEvent.Done))
+        val vm = ConversationViewModel(
+            repo, provider,
+            StubEmbedderImpl(throwOnEmbed = true),  // 若 embed 被调用会抛异常 → EmbedFailed
+            kbRepo,
+            ioDispatcher = mainDispatcher,
+            ragTopK = 0  // MINIMAL/CHAT_ONLY 档
+        ).apply { setRagTarget(RagTarget.AllLibraries) }
+
+        vm.sendMessage("查询")
+        advanceUntilIdle()
+
+        // ragTopK=0 短路 → NormalChat（embed 未被调用，无 ⚠️ 前缀）
+        assertTrue("ragTopK=0 应短路返回 NormalChat，systemPrompt 为 null",
+            provider.receivedSystemPrompts.single() == null)
+        assertTrue("ragTopK=0 应短路返回 NormalChat，ragContext 为 null",
+            provider.receivedRagContexts.single() == null)
+        assertEquals("ragTopK=0 短路内容应为纯回复（无 EmbedFailed 提示）",
+            "普通回复", vm.messages.value[1].content)
+        assertTrue("ragTopK=0 不应附引用来源", vm.messages.value[1].sources.isEmpty())
+    }
+
+    /**
+     * M-02 防御性验证：ragTopK 负值也应短路返回 NormalChat（<= 0 条件覆盖负数）。
+     */
+    @Test
+    fun `ragTopK negative also short circuits to normal chat`() = runTest(mainDispatcher) {
+        val repo = ProviderConfigRepository(boxStore)
+        val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        repo.save(active)
+        repo.setActive(repo.findByName(active.name)!!.id)
+
+        val provider = RecordingChatStreamProvider(listOf(StreamEvent.Delta("安全回复"), StreamEvent.Done))
+        val vm = ConversationViewModel(
+            repo, provider,
+            StubEmbedderImpl(throwOnEmbed = true),
+            KnowledgeBaseRepository(boxStore),
+            ioDispatcher = mainDispatcher,
+            ragTopK = -1  // 防御性负值
+        ).apply { setRagTarget(RagTarget.AllLibraries) }
+
+        vm.sendMessage("查询")
+        advanceUntilIdle()
+
+        assertEquals("ragTopK 负值应短路，内容为纯回复",
+            "安全回复", vm.messages.value[1].content)
+        assertTrue("ragTopK 负值应短路，systemPrompt 为 null",
+            provider.receivedSystemPrompts.single() == null)
+    }
+
+    /**
      * G-04 修复验证：RagTarget.SpecificLibrary(kbId <= 0) 应抛 IllegalArgumentException。
      */
     @Test
