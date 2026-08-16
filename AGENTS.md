@@ -113,6 +113,7 @@
 ### Reference（参考 / 报告）
 
 - [docs/PRD.md](docs/PRD.md) —— 产品需求文档 v0.1
+- [docs/prd-uxr8.md](docs/prd-uxr8.md) —— UXR8 需求与执行方案（遗留 Bug + 优化 + 新功能）
 - [prd.json](prd.json) —— Ralph 格式任务分解
 - [docs/reports/](docs/reports/README.md) —— 调研、考古、审查与验收报告（一次性工件，不入库）
 
