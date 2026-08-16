@@ -211,7 +211,29 @@ class ConversationViewModel(
      * null 时降级为不启用该功能（视为 MANUAL，正常注入工具，向后兼容既有测试）。
      * 生产环境由 [Factory] 从 [PrismApplication.toolApprovalConfigRepository] 注入。
      */
-    private val toolApprovalConfigRepository: io.prism.config.ToolApprovalConfigRepository? = null
+    private val toolApprovalConfigRepository: io.prism.config.ToolApprovalConfigRepository? = null,
+    /**
+     * UXR8 Bug1（ADR-028）：RAG 检索目标配置仓库（DataStore 持久化 RagTarget 三态）。
+     *
+     * 解决「用户关闭 RAG 后新对话/重启又被重置为全库 → 知识库内容被系统主动注入」
+     * 的根因（考古 TKN-UXR8-ARCHAEOLOGY-001）：
+     * - [setRagTarget] 切换时持久化；
+     * - [startNewConversation] 不再强制重置为 [RagTarget.AllLibraries]，
+     *   而是恢复用户上次持久化的模式；
+     * - init 读取持久化值恢复。
+     *
+     * null 时降级为仅内存态（向后兼容既有测试）：RagTarget 不持久化、新对话不再重置，
+     * 但 init 不恢复（进程内保持用户本次会话的切换值）。
+     * 生产环境由 [Factory] 从 [PrismApplication.ragTargetConfigRepository] 注入。
+     */
+    private val ragTargetConfigRepository: io.prism.config.RagTargetConfigRepository? = null,
+    /**
+     * O4（PRD UXR8）：是否注入文档生成工具（`document__create_docx` / `document__create_xlsx`）。
+     *
+     * 默认 false（向后兼容既有测试：无 Skill + 无开关时 tools 为空，走纯流式分支）。
+     * 生产环境由 [Factory] 显式传 true（纯本地能力，无开关，LLM 始终可感知）。
+     */
+    private val documentToolsEnabled: Boolean = false
 ) : ViewModel() {
 
     /**
@@ -227,24 +249,8 @@ class ConversationViewModel(
     /** UX-001 问题 2（ADR-022）：用户是否手动切换过深度思考开关（防 init 竞态覆盖）。 */
     private var thinkingToggledByUser = false
 
-    init {
-        // UX-001 问题 5（ADR-021）+ 问题 2（ADR-022 二次反馈）：初始化深度思考开关状态。
-        // 竞态修复：异步读 DataStore 期间用户可能已点击开关（setThinkingEnabled 已写内存），
-        // 若 init 完成后用 DataStore 旧值覆盖会"点了没反应"。用 [thinkingToggledByUser] 标记：
-        // 用户手动切换过则不再应用 init 读取值。
-        viewModelScope.launch {
-            try {
-                val stored = thinkingConfigRepository?.getThinkingEnabled()
-                if (!thinkingToggledByUser) {
-                    stored?.let { _thinkingEnabled.value = it }
-                }
-            } catch (e: CancellationException) {
-                throw e // BR-error-handling-007
-            } catch (e: Exception) {
-                Log.w(TAG, "init thinkingEnabled failed: ${e::class.simpleName}")
-            }
-        }
-    }
+    /** UXR8 Bug1（ADR-028）：用户是否手动切换过 RAG 模式（防 init 竞态覆盖，对齐 thinking 模式）。 */
+    private var ragTargetToggledByUser = false
 
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     /** 消息列表（只读 StateFlow） */
@@ -327,6 +333,54 @@ class ConversationViewModel(
     private val _thinkingEnabled = MutableStateFlow(false)
     val thinkingEnabled: StateFlow<Boolean> = _thinkingEnabled.asStateFlow()
 
+    init {
+        // UX-001 问题 5（ADR-021）+ 问题 2（ADR-022 二次反馈）：初始化深度思考开关状态。
+        // 竞态修复：异步读 DataStore 期间用户可能已点击开关（setThinkingEnabled 已写内存），
+        // 若 init 完成后用 DataStore 旧值覆盖会"点了没反应"。用 [thinkingToggledByUser] 标记：
+        // 用户手动切换过则不再应用 init 读取值。
+        viewModelScope.launch {
+            try {
+                val stored = thinkingConfigRepository?.getThinkingEnabled()
+                if (!thinkingToggledByUser) {
+                    stored?.let { _thinkingEnabled.value = it }
+                }
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007
+            } catch (e: Exception) {
+                Log.w(TAG, "init thinkingEnabled failed: ${e::class.simpleName}")
+            }
+        }
+        // UXR8 Bug1（ADR-028）：初始化 RAG 检索目标为持久化值（用户上次选择的模式）。
+        // 若 init 期间用户已手动切换（setRagTarget 已写内存），用 ragTargetToggledByUser 标记
+        // 不再覆盖（与深度思考开关同一竞态防护模式）。
+        //
+        // **声明顺序**（ac-verifier 补强发现）：本 init 块必须位于 [_ragTarget]/[_thinkingEnabled]
+        // 声明之后 —— viewModelScope 的 Main.immediate 调度器在主线程构造期间同步执行 launch 体，
+        // 若位于声明之前会因属性未初始化抛 NPE 被吞（init 恢复静默失效）。
+        viewModelScope.launch {
+            try {
+                val stored = ragTargetConfigRepository?.getRagTarget()
+                if (stored != null && !ragTargetToggledByUser) {
+                    // UXR8 guardrail MED-2（ADR-028）：持久化的指定库可能已被用户删除，
+                    // 此时降级为 Off（不注入任何知识库内容）而非回退 AllLibraries
+                    //（避免"用户明确限定单库 → 突然注入全库"的意图/隐私双重意外）。
+                    if (stored is RagTarget.SpecificLibrary &&
+                        knowledgeBaseRepository.get(stored.kbId) == null
+                    ) {
+                        Log.w(TAG, "init ragTarget: persisted kb ${stored.kbId} missing, degrade to Off")
+                        _ragTarget.value = RagTarget.Off
+                    } else {
+                        _ragTarget.value = stored
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007
+            } catch (e: Exception) {
+                Log.w(TAG, "init ragTarget failed: ${e::class.simpleName}")
+            }
+        }
+    }
+
     /**
      * 联网搜索开关（UX-001 问题 5，ADR-021）。
      *
@@ -387,9 +441,28 @@ class ConversationViewModel(
         providerRepository.setActive(id)
     }
 
-    /** 切换 RAG 检索目标模式（US-019）。 */
+    /**
+     * 切换 RAG 检索目标模式（US-019，UXR8 Bug1 持久化扩展）。
+     *
+     * 同步更新内存 StateFlow（UI 即时响应）并持久化到 DataStore（[RagTargetConfigRepository]），
+     * 使「用户关闭 RAG」在重启/新对话后仍保持（解决 UXR8 Bug1：关掉后新会话又被重置为全库）。
+     * 仓库为 null 时仅更新内存状态（向后兼容既有测试）。
+     */
     fun setRagTarget(target: RagTarget) {
         _ragTarget.value = target
+        ragTargetToggledByUser = true
+        val repo = ragTargetConfigRepository
+        if (repo != null) {
+            viewModelScope.launch {
+                try {
+                    repo.setRagTarget(target)
+                } catch (e: CancellationException) {
+                    throw e // BR-error-handling-007：协程取消必须重抛
+                } catch (e: Exception) {
+                    Log.w(TAG, "persist ragTarget failed: ${e::class.simpleName}")
+                }
+            }
+        }
     }
 
     /**
@@ -556,6 +629,13 @@ class ConversationViewModel(
     fun startNewConversation() {
         // UX-001 问题 4（ADR-021）：切换前持久化当前会话（若有消息）
         persistSession()
+        // UXR8 Bug2（ADR-028）：切换前持久化当前会话的 L2 跨会话记忆 + L3 隐式偏好。
+        // 根因（考古 TKN-UXR8-ARCHAEOLOGY-001）：L2 保存唯一挂在 [onCleared]，而
+        // 单 Activity + NavHost 下 Chat 是 start destination 永不被 pop，onCleared 仅
+        // 在进程销毁时触发；用户点"新对话"只调 persistSession 不调 persistSessionMemories，
+        // 随后清空 sessionId/messages → 上一会话 L2 在保存前被丢弃（库恒空，检索恒空）。
+        // 修复：清空状态前调用 persistSessionMemories（fire-and-forget，applicationScope）。
+        persistSessionMemories("startNewConversation")
         _messages.value = emptyList()
         _isTyping.value = false
         sessionId = null
@@ -564,9 +644,11 @@ class ConversationViewModel(
         messagesDirty = false
         l2MemoryContext = null
         l3ProfileContext = null
-        // UX-001 问题 4（ADR-022 二次反馈）：新对话重置 RAG 检索目标为默认全库，
-        // 避免打开新对话后仍残留上一个会话的「RAG 全库」状态 / 引用来源 UI。
-        _ragTarget.value = RagTarget.AllLibraries
+        // UXR8 Bug1（ADR-028）：不再强制重置 RAG 目标为默认全库。
+        // 原逻辑（UX-001 问题 4）每次新对话重置为 AllLibraries，导致用户关闭 RAG 后
+        // 开新会话又静默打开 → 知识库内容被"系统主动注入"（考古 TKN-UXR8-ARCHAEOLOGY-001）。
+        // 现保留用户当前（已持久化）的 RAG 模式：Off 保持 Off、指定库保持指定库。
+        // 首次使用默认 AllLibraries（init 读取持久化值，见 RagTargetConfigRepository）。
     }
 
     /**
@@ -581,6 +663,9 @@ class ConversationViewModel(
         val session = repo.get(sessionId) ?: return
         // 持久化当前会话（切换前保存）
         persistSession()
+        // UXR8 Bug2（ADR-028）：加载其他会话前，先持久化当前会话的 L2/L3 记忆
+        //（与 startNewConversation 同因：L2 保存不再仅依赖 onCleared）。
+        persistSessionMemories("loadSession")
         // 反序列化消息列表
         val json = session.messagesJson
         val msgs = try {
@@ -755,7 +840,10 @@ class ConversationViewModel(
             // 问题 8b（ADR-020）+ UX-001 问题 5（ADR-021）：按联网搜索开关合并搜索工具；
             // UXR4 问题 2/3（ADR-024）：合并知识库工具（knowledge_base__search/list_documents/get_document_content）
             val enabledSkills = skillRegistry?.enabledSkills() ?: emptyList()
-            val baseTools = Companion.buildTools(enabledSkills, crossAppLauncher, _webSearchEnabled.value)
+            val baseTools = Companion.buildTools(
+                enabledSkills, crossAppLauncher, _webSearchEnabled.value,
+                documentToolsEnabled = documentToolsEnabled
+            )
             // UXR4 问题 2/3（ADR-024）：知识库工具在 **RAG 开启 + 嵌入可用** 时注入
             //（LLM 可主动枚举/检索/读取知识库，解决 RAG 仅自动注入、LLM 无知识库感知能力的问题）。
             // 语义对齐：RAG 关闭（RagTarget.Off）或低端档（ragTopK<=0，NullEmbedder）时
@@ -1037,8 +1125,18 @@ class ConversationViewModel(
     override fun onCleared() {
         super.onCleared()
         persistSession()
-        persistSessionMemories()
+        persistSessionMemories("onCleared")
     }
+
+    /**
+     * UXR8 guardrail LOW-1（ADR-028）：已触发 L2 持久化的 sessionId 集合（幂等守卫）。
+     *
+     * [CrossSessionMemoryManager.saveSessionMemories] 为无条件 insert（无去重/upsert），
+     * 此集合保证同一会话至多持久化一次，防御未来新增调用路径时的重复保存。
+     * 仅内存态（ViewModel 生命周期内有效），不持久化。
+     */
+    private val persistedSessionIds: MutableSet<String> =
+        java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap())
 
     /**
      * 会话结束持久化（M5 Phase E，US-035）—— fire-and-forget 触发 L2 保存 + L3 隐式偏好抽取。
@@ -1060,9 +1158,13 @@ class ConversationViewModel(
      * **线程安全**：[applicationScope] 默认 [Dispatchers.IO]，L2 embed 与 L3 chatCompletion
      * 均在 IO 线程执行。L2/L3 串行执行（避免并发 LLM 请求）。
      */
-    internal fun persistSessionMemories() {
+    internal fun persistSessionMemories(source: String = "manual") {
         // 未开始会话（无消息发送过）或消息为空 → 跳过持久化
         val sid = sessionId ?: return
+        // UXR8 guardrail LOW-1（ADR-028）：显式幂等守卫 —— 同一 sessionId 仅持久化一次。
+        // saveSessionMemories 为无条件 insert（无 (sessionId, content) 去重），
+        // 纵深防御未来新增调用路径时对同一会话重复保存（当前三处调用点经静态追踪无重复可达）。
+        if (!persistedSessionIds.add(sid)) return
         val msgs = _messages.value
         if (msgs.isEmpty()) return
 
@@ -1072,11 +1174,14 @@ class ConversationViewModel(
         applicationScope.launch {
             // L2 保存跨会话记忆（失败静默，BR-error-handling-004 已在组件内部处理日志）
             try {
-                crossSessionMemoryManager?.saveSessionMemories(sid, msgs)
+                val saved = crossSessionMemoryManager?.saveSessionMemories(sid, msgs) ?: 0
+                // UXR8 可观测性（ADR-028）：成功路径记录触发来源与保存条数，
+                // 供 RCA"触发未执行 vs 保存 0 条"（不含消息内容等敏感信息）。
+                Log.i(TAG, "L2 memories persisted: source=$source savedCount=$saved")
             } catch (e: CancellationException) {
                 throw e  // BR-error-handling-007：协程取消必须重抛
             } catch (e: Exception) {
-                Log.w(TAG, "onCleared: L2 saveSessionMemories failed: ${e::class.simpleName}")
+                Log.w(TAG, "$source: L2 saveSessionMemories failed: ${e::class.simpleName}")
             }
 
             // L3 抽取隐式偏好（需要 active Provider 配置，失败静默）
@@ -1086,7 +1191,7 @@ class ConversationViewModel(
                 } catch (e: CancellationException) {
                     throw e  // BR-error-handling-007：协程取消必须重抛
                 } catch (e: Exception) {
-                    Log.w(TAG, "onCleared: L3 extractImplicitPreferences failed: ${e::class.simpleName}")
+                    Log.w(TAG, "$source: L3 extractImplicitPreferences failed: ${e::class.simpleName}")
                 }
             }
         }
@@ -1898,7 +2003,8 @@ class ConversationViewModel(
         internal fun buildTools(
             enabledSkills: List<SkillRegistry.SkillEntry>,
             crossAppLauncher: CrossAppLauncher? = null,
-            webSearchEnabled: Boolean = false
+            webSearchEnabled: Boolean = false,
+            documentToolsEnabled: Boolean = false
         ): List<ToolDefinition> {
             val skillTools = enabledSkills.flatMap { entry ->
                 (entry.manifest.tools ?: emptyList()).map { toolDecl ->
@@ -1919,7 +2025,14 @@ class ConversationViewModel(
             } else {
                 emptyList()
             }
-            return skillTools + crossAppTools + webSearchTools
+            // O4（PRD UXR8）：文档生成工具（docx/xlsx），documentToolsEnabled=false 默认
+            // 跳过（向后兼容既有纯函数测试），实例路径恒传 true（纯本地能力，无开关）
+            val documentTools = if (documentToolsEnabled) {
+                io.prism.document.DocumentLocalToolExecutor.buildToolDefinitions()
+            } else {
+                emptyList()
+            }
+            return skillTools + crossAppTools + webSearchTools + documentTools
         }
 
         /**
@@ -2038,7 +2151,11 @@ class ConversationViewModel(
                     // UX-001 问题 4（ADR-021）：会话历史仓库（会话持久化 / 历史恢复）
                     sessionRepository = app.sessionRepository,
                     // UXR3 问题 10（ADR-023）：工具审批模式（DISABLED 时不再注入工具）
-                    toolApprovalConfigRepository = app.toolApprovalConfigRepository
+                    toolApprovalConfigRepository = app.toolApprovalConfigRepository,
+                    // UXR8 Bug1（ADR-028）：RAG 检索目标持久化（关闭后新对话不再重置为全库）
+                    ragTargetConfigRepository = app.ragTargetConfigRepository,
+                    // O4（PRD UXR8）：文档生成工具（docx/xlsx，纯本地能力，恒注入）
+                    documentToolsEnabled = true
                 )
             }
         }

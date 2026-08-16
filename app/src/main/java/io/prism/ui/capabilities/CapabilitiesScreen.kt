@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.prism.PrismApplication
 import io.prism.data.McpServerConfig
+import io.prism.data.McpServerPresets
 import io.prism.data.McpServerType
 import io.prism.data.SkillSource
 import io.prism.ui.components.PrismButton
@@ -386,7 +387,14 @@ private fun McpRow(
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(text = server.name.ifEmpty { "未命名 Server" }, color = PrismText, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
-                Text(text = server.baseUrl.ifEmpty { "本地内置 · 零配置" }, color = PrismTextFaint, fontSize = 11.sp)
+                // O2（PRD UXR8）：本地内置 Server 副标题展示功能描述（baseUrl 恒空，此前恒为占位文案）；
+                // 远程 Server 保留 baseUrl（用户需要看到端点与自定义 Server 区分预设来源）
+                val subtitle = if (server.serverType == McpServerType.LOCAL) {
+                    McpServerPresets.findMetaByName(server.name)?.description ?: server.baseUrl.ifEmpty { "本地内置 · 零配置" }
+                } else {
+                    server.baseUrl
+                }
+                Text(text = subtitle, color = PrismTextFaint, fontSize = 11.sp)
             }
             // 远程 Server 已启用时展示连接状态（连接中/已连接/错误）；否则展示启停指示
             if (connectionStatus != null) {
@@ -442,6 +450,9 @@ private fun EmptySection(text: String) {
 /** 预设模板行 —— 点击一键创建。 */
 @Composable
 private fun PresetRow(preset: McpServerConfig, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    // O2（PRD UXR8）：预设行展示功能描述（用户知道每个工具是干什么的），元数据查不到回退既有占位
+    val meta = McpServerPresets.findMetaByName(preset.name)
+    val tag = if (preset.serverType == McpServerType.LOCAL) "本地内置 · 零配置" else "远程模板 · 需填 Key"
     PrismCard(
         modifier = modifier
             .fillMaxWidth()
@@ -457,10 +468,13 @@ private fun PresetRow(preset: McpServerConfig, modifier: Modifier = Modifier, on
             Column(modifier = Modifier.weight(1f)) {
                 Text(text = preset.name, color = PrismText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 Text(
-                    text = if (preset.serverType == McpServerType.LOCAL) "本地内置 · 零配置" else "远程模板 · 需填 Key",
+                    text = meta?.description ?: tag,
                     color = PrismTextFaint,
                     fontSize = 11.sp
                 )
+                if (meta != null) {
+                    Text(text = tag, color = PrismTextFaint, fontSize = 10.sp)
+                }
             }
         }
     }
@@ -564,6 +578,18 @@ private fun McpConfigSheet(config: McpServerConfig, viewModel: CapabilitiesViewM
                 Icon(Icons.Filled.Lock, contentDescription = null, tint = PrismTextFaint, modifier = Modifier.size(16.dp))
             }
         )
+        // O2（PRD UXR8，D-10）：预设来源的远程 Server 展示 API Key 获取指引
+        //（按名称匹配预设元数据；从预设创建的 Server 名称与预设一致即命中）
+        val keyHint = McpServerPresets.findMetaByName(config.name)?.keyHint
+        if (!isLocal && !keyHint.isNullOrBlank()) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "Key 获取：$keyHint",
+                color = PrismTextFaint,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 2.dp)
+            )
+        }
         Spacer(Modifier.height(20.dp))
 
         // 自定义请求头编辑器（对齐 ProviderEditSheet）
@@ -1484,7 +1510,8 @@ private fun ProfileRow(
             )
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "${profile.key}：${profile.value}",
+                    // O1：显式偏好显示自然语言原句；隐式偏好 value 为 LLM 抽取短语，需 key 提供语义
+                    text = if (isExplicit) profile.value else "${profile.key}：${profile.value}",
                     color = PrismText,
                     fontSize = 12.5.sp,
                     fontWeight = FontWeight.Medium
@@ -1516,16 +1543,16 @@ private fun ProfileRow(
 }
 
 /**
- * L3 画像编辑弹层（US-036 AC-3，新建/编辑共用）。
+ * L3 画像编辑弹层（US-036 AC-3，新建/编辑共用，O1/PRD UXR8 自然语言化）。
  *
  * **逻辑**：
- * - 标题：根据 profile.id 区分"新建偏好"/"编辑偏好"
- * - 字段：key（偏好键）+ value（偏好值）
- * - 保存按钮：调用 [onSave]，由 ViewModel 决定新建 vs 更新
- * - key 在编辑模式下禁用编辑（避免改变 upsert 唯一约束语义），仅 value 可编辑
+ * - 标题：根据 profile.id 区分"添加偏好"/"编辑偏好"
+ * - 单字段：自然语言句子（如"我喜欢简洁的回复"），无需理解键值语义（O1）
+ * - 保存按钮：调用 [onSave]，由 ViewModel 自动推导 key（新建）或保留原 key（编辑）
+ * - key 为内部标识，不暴露给用户
  *
- * @param profile 待编辑的画像（id=0 + 空 key/value 表示新建）
- * @param onSave 保存回调，参数：key, value, existingId
+ * @param profile 待编辑的画像（id=0 + 空 value 表示新建）
+ * @param onSave 保存回调，参数：key（编辑传原 key，新建传空串）, value, existingId
  */
 @Composable
 private fun ProfileEditSheet(
@@ -1533,34 +1560,30 @@ private fun ProfileEditSheet(
     onSave: (key: String, value: String, existingId: Long) -> Unit
 ) {
     val isNew = profile.id == 0L
-    var key by remember(profile.id) { mutableStateOf(profile.key) }
     var value by remember(profile.id) { mutableStateOf(profile.value) }
     var showValidation by remember(profile.id) { mutableStateOf(false) }
 
-    val keyValid = key.trim().isNotEmpty()
     val valueValid = value.trim().isNotEmpty()
-    val canSave = keyValid && valueValid
+    val canSave = valueValid
+    val isExplicit = profile.category == io.prism.data.ProfileCategory.EXPLICIT.name
+    val subtitle = when {
+        isNew -> "用一句话描述，无需填写键值"
+        isExplicit -> "显式偏好 · 你主动设定"
+        else -> "隐式偏好 · AI 自动学习"
+    }
 
     PrismSheet(
-        title = if (isNew) "新建用户偏好" else "编辑用户偏好",
-        subtitle = if (isNew) "显式偏好 · 用户主动设定" else "${profile.category} · ${profile.key}"
+        title = if (isNew) "添加用户偏好" else "编辑用户偏好",
+        subtitle = subtitle
     ) {
         PrismField(
-            label = "偏好键",
-            value = key,
-            onValueChange = { if (isNew) key = it },
-            placeholder = "如 tone / language / tech_stack",
-            hint = if (isNew) "英文 snake_case，保存后不可修改" else "偏好键保存后不可修改"
-        )
-        if (showValidation && !keyValid) ValidationError("偏好键不能为空")
-        Spacer(Modifier.height(16.dp))
-        PrismField(
-            label = "偏好值",
+            label = "偏好描述",
             value = value,
             onValueChange = { value = it },
-            placeholder = "如 简洁 / 中文 / Python"
+            placeholder = "如：我喜欢简洁的回复 / 回复用中文 / 我是 Python 开发者",
+            hint = "一条一句自然描述即可，AI 跨会话记住并遵循"
         )
-        if (showValidation && !valueValid) ValidationError("偏好值不能为空")
+        if (showValidation && !valueValid) ValidationError("偏好描述不能为空")
         Spacer(Modifier.height(20.dp))
         PrismButton(
             text = "保存",
@@ -1570,7 +1593,7 @@ private fun ProfileEditSheet(
                     showValidation = true
                     return@PrismButton
                 }
-                onSave(key.trim(), value.trim(), profile.id)
+                onSave(if (isNew) "" else profile.key, value.trim(), profile.id)
             }
         )
     }

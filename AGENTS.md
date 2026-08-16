@@ -16,6 +16,8 @@
 - **M8 集成与发布全部完成（US-044~US-047，ADR-018 Accepted，v0.1.0 发布）**（2026-08-12）—— release 签名 + R8 全量启用 + APK 体积分析（78.44MB）+ GitHub Release v0.1.0 + functional-validation-auditor 全面审计
 - **P8 深度思考 + 联网搜索完成（ADR-020，1559 回归 0 失败）**（2026-08-14）—— DeepSeek thinking/reasoning_effort 参数 + Bing RSS 零配置联网搜索（WebSearchLocalToolExecutor）
 - **UXR1~7 真机迭代修复完成（ADR-021~027，全量回归 1792 用例 0 失败）**（2026-08-16）—— 搜索质量（Bing 冷词分词坍缩 → 多候选核心词短整词降级重试）/ markdown 渲染（0.26.0 无表格组件 → 预处理列表）/ 引用来源（工具调用参数反向映射引用池）/ 工具回路熔断 / 流式渲染 / 会话持久化 / 工具审批模式等
+- **UXR8 批次1 修复完成（ADR-028，1810 回归 0 失败）**（2026-08-16）—— RagTarget 持久化（关闭后新对话不再重置）/ L2 跨会话记忆保存生产触发 / 配置弹层键盘顶出修复（OBS-2 双模式终版）
+- **UXR8 批次2 优化完成（ADR-029，1873 回归 0 失败）**（2026-08-16）—— O1 L3 画像自然语言化（key 冲突保护）/ O2 MCP 模板 description+keyHint / O3 新模板（Firecrawl/n8n/TrendsMCP）/ O4 Skills（document 工具 + firecrawl/humanizer-zh/web-research 3 新 Skill）/ O5 搜索扩容（10 条 + 多查询合并 16 条 + 预算感知）。已知技术债：G2-05 saveProfile VM 级集成测试列入批次3
 
 ### 里程碑明细
 
@@ -30,6 +32,8 @@
 | M8 | 集成与发布（release 签名 / R8 / GitHub Release v0.1.0） | US-044~US-047，functional-validation-auditor | 2026-08-12 |
 | P8 | 深度思考 + 联网搜索 | ADR-020，1559 回归 0 失败 | 2026-08-14 |
 | UXR1-7 | 真机迭代修复（搜索/渲染/引用/工具回路/UI） | ADR-021~027，1792 回归 0 失败 | 2026-08-16 |
+| UXR8-B1 | 批次1 修复（RagTarget 持久化 / L2 触发 / 弹层键盘） | ADR-028，ac-verifier 19/19，1810 回归 0 失败 | 2026-08-16 |
+| UXR8-B2 | 批次2 优化（L3 画像自然语言 / MCP 模板增强 / Skills / 搜索扩容） | ADR-029，ac-verifier 17/17，1873 回归 0 失败 | 2026-08-16 |
 
 ## 用户故事清单
 

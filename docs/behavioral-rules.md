@@ -276,6 +276,17 @@
 - 适用场景：dev
 - 状态：active（ac-verifier TKN-M6-PHASEC-ACCEPTANCE-001 验证通过，2026-08-11 转 active。M-1 修复正确（25s < 30s）+ 端到端测试验证 bridge 先超时返回语义化文案 + pending 清理 + ac-verifier 补充测试断言超时层级关系）
 
+#### BR-concurrency-006: ViewModel init 块中访问实例属性的协程必须位于全部属性声明之后
+
+- 类别：concurrency
+- 规则：`viewModelScope` 默认使用 `Dispatchers.Main.immediate`，在主线程构造 ViewModel 期间 `init` 块内的 `launch` 会**同步执行**协程体。若该协程体访问的属性（如 `MutableStateFlow` 字段）声明在 init 块**之后**，协程执行时属性尚未初始化 → 抛 NPE；若 NPE 被 `catch (e: Exception)` 兜底吞掉，表现为"init 恢复静默失效"——功能不生效且无可见错误。因此 init 块中访问实例属性的协程必须置于**全部相关属性声明之后**，并在 init 块注释中显式声明该顺序契约。
+- 反例：`init { viewModelScope.launch { try { val v = repo.read(); _state.value = v } catch (e: Exception) { Log.w(...) } } }; private val _state = MutableStateFlow(default)` —— launch 体同步执行时 `_state` 未初始化，NPE 被兜底 catch 吞掉，恢复静默失效
+- 正例：`private val _state = MutableStateFlow(default); init { viewModelScope.launch { try { val v = repo.read(); _state.value = v } catch ... } } }` —— 属性先声明，init 后执行
+- 来源：UXR8 批次1 guardrail 复审规则提议（TKN-UXR8B1-GUARDRAIL-002；原始发现：TKN-UXR8B1-GUARDRAIL-001 期间 ac-verifier 补强发现 init 块声明顺序 NPE 风险，ConversationViewModel.kt init 块已含顺序契约注释）
+- 添加日期：2026-08-16
+- 适用场景：dev
+- 状态：active（guardrail TKN-UXR8B1-GUARDRAIL-002 确认非重复 + ConversationViewModel 实证）
+
 ### interface
 
 #### BR-interface-001: UI 设计必须用户审核通过后方可实现
@@ -530,13 +541,13 @@
 #### BR-ui-002: 底部弹层容器必须支持滚动 + 限制最大高度，防止内容超长时按钮被裁剪
 
 - 类别：ui
-- 规则：底部弹层（BottomSheet）容器必须同时满足：(1) **限制最大高度**——宿主容器（如 `PrismSheetHost`）须用 `heightIn(max = screenHeight * 0.9f)` 限制 sheet 最大高度，防止内容撑满全屏遮挡状态栏；(2) **内容区可滚动**——sheet 内部内容区（`PrismSheet` 的 content Column）须用 `weight(1f, fill = false)` + `verticalScroll(rememberScrollState())`，当内容超出最大高度时自动滚动，`fill = false` 确保内容少时不强制填满；(3) **系统 UI 适配**——须加 `imePadding()` 适配软键盘、`navigationBarsPadding()` 适配导航栏，避免底部按钮被遮挡。缺少任一层都会导致内容超长时底部按钮（如"保存配置"）被裁剪到屏幕外不可见/不可点击，用户误以为功能失效。
+- 规则：底部弹层（BottomSheet）容器必须同时满足：(1) **限制最大高度**——宿主容器（如 `PrismSheetHost`）须用 `heightIn(max = 可用高度 * 0.9f)` 限制 sheet 最大高度，**可用高度必须按 IME 双模式自适应判定**（UXR8 Bug3 OBS-2 终版，ADR-028）：Android 存在两种互斥键盘处理机制——**resize 模式**（`adjustResize` window resize 生效，ComposeView 约束已被系统压缩，此时 `WindowInsets.ime` 仍报完整键盘高度，若再 `imePadding()` 会双重扣除导致弹层塌缩）与 **insets 模式**（decorFitsSystemWindows 完全生效，window 不压缩，须 `imePadding()` 单一来源平移）。判定式：`BoxWithConstraints` 读父级约束 `parentMax`，`parentMaxPx < screenPx − imePx/2` → resize 模式（不加 imePadding，maxSheet = parentMax×0.9）；否则 insets 模式（imePadding + maxSheet = (parentMax−ime)×0.9）。无限约束时保守假设 resize 模式。(2) **内容区可滚动**——sheet 内部内容区（`PrismSheet` 的 content Column）须用 `weight(1f, fill = false)` + `verticalScroll(rememberScrollState())`，当内容超出最大高度时自动滚动，`fill = false` 确保内容少时不强制填满；(3) **系统 UI 适配**——`navigationBarsPadding()` 适配导航栏（两模式均实际扣除，insets 自适应无重复风险）。缺少任一层都会导致内容超长时底部按钮（如"保存配置"）被裁剪到屏幕外不可见/不可点击，用户误以为功能失效。
 - 反例：`PrismSheet` content 用 `Column(padding(...)) { content() }` 无 verticalScroll + `PrismSheetHost` sheet Box 无 heightIn 限制 —— ProviderEditSheet 内容约 700dp 超出屏幕，"保存配置"按钮被裁剪到屏幕外，用户只看到"激活"和"删除"按钮，误以为无法保存
-- 正例：`PrismSheetHost` sheet Box 加 `.heightIn(max = screenHeight * 0.9f).imePadding().navigationBarsPadding()` + `PrismSheet` content Column 加 `.weight(1f, fill = false).verticalScroll(rememberScrollState())` —— 内容超长时可滚动，所有按钮可见可点击
-- 来源：DEF-001 Provider 配置保存功能双 Bug 修复（TKN-DEF001-ROOTCAUSE-002，考古报告 §2 假设 1-1 主根因：PrismSheet 无滚动支持 + PrismSheetHost 未限制高度）
-- 添加日期：2026-08-12
+- 正例：`PrismSheetHost` 用 `BoxWithConstraints(navigationBarsPadding)` 读 parentMax → 双模式判定 `imeAppliedByParent` → `Box(.then(if (imeAppliedByParent) Modifier else Modifier.imePadding()).heightIn(max = maxSheetHeight))` + `PrismSheet` content Column 加 `.weight(1f, fill = false).verticalScroll(rememberScrollState())` —— 内容超长时可滚动，键盘弹出时弹层按实际可用空间限高（模拟器实测 resize 模式 maxSheet=331.85dp 弹层完整呈现，修复前双重扣除塌缩至 85dp），所有按钮可见可点击
+- 来源：DEF-001 Provider 配置保存功能双 Bug 修复（TKN-DEF001-ROOTCAUSE-002，考古报告 §2 假设 1-1 主根因：PrismSheet 无滚动支持 + PrismSheetHost 未限制高度）；2026-08-16 UXR8 Bug3 + OBS-1 修正（TKN-UXR8B1-ACCEPTANCE-001）：高度公式改按可用高度计算、修饰符顺序 padding 在前；2026-08-16 OBS-2 终版（TRAE-debugger 约束探针，docs/reports/2026-08-16-uxr8-b1-bug3-obs2-debug.md）：发现 adjustResize window resize 与 imePadding 双重扣除，改双模式自适应判定
+- 添加日期：2026-08-12（2026-08-16 两轮修正）
 - 适用场景：dev
-- 状态：active（guardrail TKN-DEF001-GUARDRAIL-001 确认非重复 + ac-verifier TKN-DEF001-ACCEPTANCE-001 验证通过，2026-08-12 转 active）
+- 状态：active（guardrail TKN-DEF001-GUARDRAIL-001 确认非重复 + ac-verifier TKN-DEF001-ACCEPTANCE-001 验证通过，2026-08-12 转 active；guardrail TKN-UXR8B1-GUARDRAIL-003 强制同步修正 2026-08-16；OBS-2 双模式终版同日修正）
 
 #### BR-ui-003: 底部弹层关键操作按钮须放在固定 footer 区域，不参与滚动
 
@@ -637,6 +648,18 @@
 - 适用场景：dev
 - 状态：active
 
+#### BR-ui-005: padding 类修饰符与约束类修饰符组合时必须推演约束传递顺序，padding 须在约束类之前
+
+- 类别：ui
+- 规则：同一 Modifier 链中同时使用 padding 类（`imePadding`/`navigationBarsPadding`/`padding`）与约束类（`heightIn`/`widthIn`/`requiredHeight`）修饰符时，必须按"**外→内传递约束**"语义显式推演最终约束，且**顺序必须是 padding 在前、约束类在后**。原因：约束类的 max/min 作用于**其后（内侧）**收到的坐标系——若约束类在前，其阈值按外侧全坐标系列出，随后 padding 会在该阈值内**再扣一次**对应尺寸（双重扣除）；padding 在前则先把坐标系平移/收缩到目标区域，约束类再按已收缩坐标系收紧，语义与阈值公式一致。**但顺序正确不等于总量正确**（OBS-2 教训）：`adjustResize` window resize 已在 View 层压缩约束时，`WindowInsets.ime` 仍报完整键盘高度，链内 `imePadding()` 会与外层 resize 双重扣除——IME 适配必须先做双模式判定（见 BR-ui-002），不能仅凭链内顺序推演断言无重复。UI 布局类修复的静态审查必须包含此推演（不能凭"职责正交"直觉断言无冲突），涉及 IME 时须附约束探针实测证据。
+- 反例 1：`.heightIn(max = (screenHeight - imeHeight - navBarHeight) * 0.9f).imePadding().navigationBarsPadding()` —— heightIn 的 max 已按扣除 IME 后的可用空间计算，但 imePadding/navBarsPadding 在该 max 内再扣 331+48dp，弹层被压至 ~65dp 窄带（TKN-UXR8B1-ACCEPTANCE-001 OBS-1 像素实测 180px）
+- 反例 2：`.imePadding().navigationBarsPadding().heightIn(max = ...)`（顺序正确）但设备处于 resize 模式（window 已被 adjustResize 压缩至 1146px）——链内 imePadding 再扣 912px，弹层塌缩至 234px（OBS-2 约束探针实测）
+- 正例：`BoxWithConstraints(navigationBarsPadding)` 读父级实际约束 → 判定 `imeAppliedByParent`（resize 模式 true）→ `Box(.then(if (imeAppliedByParent) Modifier else Modifier.imePadding()).heightIn(max = maxSheetHeight))` —— 顺序正确且总量正确，两模式均无双重扣除
+- 来源：UXR8 批次1 OBS-1 修复（guardrail TKN-UXR8B1-GUARDRAIL-003 LOW-1 规则提议；实证：ac-verifier TKN-UXR8B1-ACCEPTANCE-001 像素级测量 + guardrail r3 独立约束传递链推演复核）；2026-08-16 OBS-2 补充（TRAE-debugger 约束探针：顺序正确仍双重扣除，须双模式判定，docs/reports/2026-08-16-uxr8-b1-bug3-obs2-debug.md）
+- 添加日期：2026-08-16
+- 适用场景：dev
+- 状态：active（guardrail TKN-UXR8B1-GUARDRAIL-003 确认非重复，与 BR-ui-002 正例同批修正避免内部矛盾；OBS-2 双模式判定补充同日更新）
+
 #### BR-interface-013: 对协议必需字段做长度截断前，必须验证回放路径的协议完整性
 
 - 类别：interface
@@ -647,6 +670,17 @@
 - 添加日期：2026-08-15
 - 适用场景：dev / bugfix
 - 状态：active
+
+#### BR-interface-014: 按时间戳排序的 UI 列表必须附加 id 稳定 tie-break
+
+- 类别：interface / testing
+- 规则：按 `System.currentTimeMillis()` 时间戳倒序/正序排序的 UI 列表（如会话历史"最新在前"），必须附加实体 id 作为次级排序键（tie-break），如 `sortedWith(compareByDescending<Session> { it.updatedAt }.thenByDescending { it.id })`。原因：毫秒级时间戳在快速连续操作（用户快速创建/切换）或测试环境（虚拟时间推进极快）下**同毫秒真实存在**；Kotlin 稳定排序对相同键保持物理序列（ObjectBox 按 id 升序），导致"最新创建的实体反而排在后面"。次级键方向必须与主键语义一致（倒序列表用 id 倒序），保证"同毫秒时后创建者在前"。
+- 反例：`box.all.sortedByDescending { it.updatedAt }` —— 同毫秒创建的两个会话，旧会话（小 id）物理序在前被稳定排序保留 → 新会话不在列表最前，ConversationViewModelSessionPersistenceTest 间歇性失败
+- 正例：`box.all.sortedWith(compareByDescending<Session> { it.updatedAt }.thenByDescending { it.id })` —— 同毫秒时新会话（大 id）在前，排序确定且语义正确
+- 来源：UXR8 批次1 guardrail 复审规则提议（TKN-UXR8B1-GUARDRAIL-002；SessionRepository.refreshFlows flaky 实证：ConversationViewModelSessionPersistenceTest 全量回归 1810 中真实触发 1 次）
+- 添加日期：2026-08-16
+- 适用场景：dev
+- 状态：active（guardrail TKN-UXR8B1-GUARDRAIL-002 确认非重复 + 全量回归复跑 1810 全绿实证）
 
 #### BR-testing-005: 防御性修复必须双面断言（保护生效 + 副作用未发生）
 
@@ -725,6 +759,28 @@
 - 适用场景：dev / bugfix
 - 状态：active
 
+#### BR-interface-015: 用户可重复添加的自然语言派生 key 发生冲突时必须生成唯一 key，禁止静默覆盖
+
+- 类别：interface
+- 规则：同一类别多条用户显式偏好并存时（如 L3 画像"我喜欢简洁的回复"与"正式场合用正式语气"都派生 `tone`），冲突 key 必须追加序号（`_2`/`_3`…）生成唯一 key 落库，禁止同 key upsert 静默覆盖旧值（用户显式输入被视为不可丢弃意图）。同 key 同 value 视为幂等（提示"已存在"），同 key 异 value 才走序号追加。派生 key 追加后缀后仍须 ≤ 字段长度上限（长 base 先截断再拼接，纵深防御）。顺带约束：带序号的 key 生成需可被纯函数测试（BR-testing-004）。
+- 反例：`saveProfile` 直接 `setExplicitPreference(key, value)` —— "简洁"与"正式"连续添加时第二条覆盖第一条，用户第二条意图静默丢失
+- 正例：`nextAvailableKey(base, occupied)` 先查 base 可用直接返回；冲突时 `_2` 起递增探测直至唯一（上限防无限循环），长 base 先 `take(MAX - len(suffix))` 截断；同 key 同值提前幂等 return
+- 来源：UXR8 批次2 guardrail G-01（TKN-UXR8-B2-GUARDRAIL-001，L3 画像静默覆盖）
+- 添加日期：2026-08-16
+- 适用场景：dev
+- 状态：active
+
+#### BR-performance-002: 串行子请求必须在发起前检查剩余时间预算，防止总超时丢弃已成功结果
+
+- 类别：performance
+- 规则：被外层 `withTimeout`（如 SkillExecutor 默认 30s）包裹的工具执行器内部发起**串行子请求**（搜索降级重试 / 多查询合并变体）时，每次发起新请求前必须检查剩余预算（判据 `已耗时 + 单请求最坏超时 ≤ 总预算 − 安全缓冲`），不足则跳过新请求并返回已完成部分。原因：无预算感知时子请求耗时之和可贴满/超出外层总超时，外层取消会**整体丢弃已成功结果**。时间常量与上游（client 超时配置 / 外层 withTimeout）必须一致，且用单测断言常量对齐（防漂移）。
+- 反例：主查询 + 降级重试 ≤3 + 合并变体 ≤2 每次 10s 无预算检查 —— 串行最长 40s > 30s 外层超时，主查询已成功结果被取消丢弃
+- 正例：`hasRequestBudget(elapsed)` 纯函数判据 + 每个 `fetchSearch` 前检查，不足 `break` 保留已有结果；单测断言 `TOTAL_TOOL_BUDGET_MS == SkillExecutor.DEFAULT_TOOL_TIMEOUT_MS`
+- 来源：UXR8 批次2 guardrail G-03（TKN-UXR8-B2-GUARDRAIL-001，搜索子请求拖穿总超时）
+- 添加日期：2026-08-16
+- 适用场景：dev / bugfix
+- 状态：active
+
 ## 审计记录
 
 | 日期 | 审计人 | 结果 | 备注 |
@@ -778,3 +834,4 @@
 | 2026-08-14 | 主 Agent | 新增 BR-security-007 + BR-error-handling-011/012 + BR-build-006 + BR-interface-006 | 问题 8（深度思考+联网搜索）与问题 1-7（真机测试 7 问题）修复闭环（TKN-P8-* / TKN-P17-*）。问题 8：深度思考（thinking/reasoning_effort 参数 + ReasoningDelta）+ 联网搜索（Bing RSS 零配置 WebSearchLocalToolExecutor + Composite），guardrail 两轮通过 + ac-verifier 14/14 通过。问题 1-7：新对话/输出清洗/MCP 工具/知识库闪退/skills/键盘遮挡/跨 App 双弹窗，guardrail 四轮（阻断 B-1 Dispatcher describeTools 静默失效 + B-2 正则捕获组越界闪退 → 修复）+ ac-verifier 8/8 通过。全量 1583 用例 0 失败。5 条新规则：BR-security-007（外部内容回灌 LLM 边界标记）、BR-error-handling-011（入参 null+blank 双校验）、BR-error-handling-012（正则捕获组越界防御）、BR-build-006（临时构建改动禁止入库）、BR-interface-006（接口新方法路由类必须覆写转发） |
 | 2026-08-15 | 主 Agent | 新增 BR-interface-008/009/010 | UX 二次反馈 10 问题修复闭环（TKN-UXR2-*，ADR-022）。根因修复：markdown 库 0.28+ 与 Compose 1.6.8 ABI 不兼容（0.26.0 为最高兼容版本，逐版本 AAR 字节码扫描实证）；chunkToEvents isNullOrBlank 丢弃纯换行 delta 导致 markdown 粘连；MCP 工具名直接拼接原始 server 名（空格/中文）生成非法名被过滤 + 400 工具重名。模拟机端到端验证：markdown 14 独立节点分层渲染、无裸符号、零崩溃；开关 toggleable 双向翻转；键盘 IME 正确贴合。3 条新规则：BR-interface-008（第三方 Compose 库升级须校验运行期 ABI）、BR-interface-009（流式解析保留结构字符，isNullOrEmpty 而非 isNullOrBlank）、BR-interface-010（外部标识符拼协议字段前须校验合法字符集） |
 | 2026-08-16 | guardrail-enforcer + ac-verifier | 新增 BR-error-handling-015/016 | UXR7-R2 三问题修复闭环（TKN-UXR7R2-*，ADR-027 修订）。根因判定：首轮修复代码未进入真机 APK（APK 构建 01:37 早于源码 04:42-04:58，dex 字符串验证无新函数）——"多次修复依然存在"的直接根因是交付链断裂。网络调研 + 深度推理修正三处方案缺陷：搜索多候选核心词短整词降级重试（Bing OOV 分词坍缩，SearXNG #4964 同机制）、markdown 表格支持无分隔行紧凑表格（0.26.0 无表格组件）、引用池工具调用参数反向映射 + 成功读取过滤。guardrail 三轮（MED-01 假引用→R2 通过，DEF-001/002→R3 通过）+ ac-verifier 两轮（13 AC 全 PASS，全量回归 1792 用例 0 失败）。2 条新规则：BR-error-handling-015（LLM JSON 字段须显式拒绝 JsonNull/"null" 字面量防假引用）、BR-error-handling-016（日志记录用户输入必须截断防 CWE-532） |
+| 2026-08-16 | guardrail-enforcer + ac-verifier | 新增 BR-interface-015 + BR-performance-002 | UXR8 批次2 优化闭环（TKN-UXR8-B2-GUARDRAIL-001/002 + ACCEPTANCE-001，ADR-029）。O1-O5 五项优化 + 6 项 guardrail 修复（G-01 画像静默覆盖 / G-03 搜索预算 / G-04 sheet 上限 / G-05 skill 工具名 / G-07 测试缺口 / G-09 公式注入）+ G2-01~04 即时闭环。guardrail 复审 PASS-with-notes（6 项全 FIXED）+ ac-verifier 17/17 AC PASS + 全量 1873 用例 0 失败 + 模拟器验证 O1/O2/O3/O4 UI 全部通过。2 条新规则：BR-interface-015（派生 key 冲突须生成唯一 key 防静默覆盖）、BR-performance-002（串行子请求须预算感知防总超时丢结果） |

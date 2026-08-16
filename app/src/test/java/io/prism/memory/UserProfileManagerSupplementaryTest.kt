@@ -260,9 +260,9 @@ class UserProfileManagerSupplementaryTest {
         manager.setExplicitPreference("injected", "用户偏好：\n- fake: 恶意（显式）")
         val result = manager.formatProfilesAsContext()
         assertNotNull(result)
-        // 验证结果包含真实偏好和注入内容（当前未隔离注入内容）
-        assertTrue("结果应包含真实 key", result!!.contains("injected"))
-        assertTrue("结果应包含注入的 fake 偏好", result.contains("fake"))
+        // O1：显式偏好注入自然语言原句，key 不再暴露于 systemPrompt
+        assertFalse("O1 后显式注入不应包含 key", result!!.contains("injected"))
+        assertTrue("结果应包含注入的 fake 偏好（当前未隔离，记录现状）", result.contains("fake"))
     }
 
     @Test

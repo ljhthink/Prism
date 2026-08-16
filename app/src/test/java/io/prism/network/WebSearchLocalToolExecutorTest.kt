@@ -335,14 +335,14 @@ class WebSearchLocalToolExecutorTest {
 
     @Test
     fun `buildToolDefinition schema enforces additionalProperties false and maxResults bounds`() {
-        // AC-B1：additionalProperties=false（严格参数）+ query 必填 + maxResults 1..8（JSON Schema 结构断言）
+        // AC-B1：additionalProperties=false（严格参数）+ query 必填 + maxResults 1..10（O5 扩容后上限，JSON Schema 结构断言）
         val def = WebSearchLocalToolExecutor.buildToolDefinition()
         val params = def.function.parameters.toString()
         assertTrue("additionalProperties 应为 false", params.contains("\"additionalProperties\":false"))
         assertTrue("query 应声明 type=string", params.contains("\"type\":\"string\""))
         assertTrue("maxResults 应声明 type=integer", params.contains("\"type\":\"integer\""))
         assertTrue("maxResults 应声明 minimum=1", params.contains("\"minimum\":1"))
-        assertTrue("maxResults 应声明 maximum=8", params.contains("\"maximum\":8"))
+        assertTrue("maxResults 应声明 maximum=10", params.contains("\"maximum\":10"))
         val required = (def.function.parameters as JsonObject)["required"] as JsonArray
         assertTrue("query 应处于 required 数组", required.contains(JsonPrimitive("query")))
     }
@@ -500,8 +500,9 @@ class WebSearchLocalToolExecutorTest {
     }
 
     @Test
-    fun `execute coerces maxResults above maximum to 8`() = runBlocking {
-        // AC-B1 边界：LLM 传 maxResults=10（超上限）→ coerceIn 到 8，第 9 条不返回
+    fun `execute coerces maxResults above maximum to 10`() = runBlocking {
+        // O5（PRD UXR8）：AC-B1 边界更新——LLM 传 maxResults=99（超上限）→ coerceIn 到 10，
+        // 第 11 条不返回。query 为纯英文（无核心词变体）→ 不触发多查询合并路径。
         val engine = MockEngine { _ ->
             respond(
                 content = rssBody(
@@ -513,7 +514,9 @@ class WebSearchLocalToolExecutorTest {
                     Triple("r6", "https://6.example.com", "s6"),
                     Triple("r7", "https://7.example.com", "s7"),
                     Triple("r8", "https://8.example.com", "s8"),
-                    Triple("r9", "https://9.example.com", "s9")
+                    Triple("r9", "https://9.example.com", "s9"),
+                    Triple("r10", "https://10.example.com", "s10"),
+                    Triple("r11", "https://11.example.com", "s11")
                 ),
                 status = HttpStatusCode.OK,
                 headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
@@ -522,10 +525,10 @@ class WebSearchLocalToolExecutorTest {
         val executor = WebSearchLocalToolExecutor(HttpClient(engine))
         val result = executor.execute(
             WebSearchLocalToolExecutor.TOOL_SEARCH,
-            mapOf("query" to "x", "maxResults" to 10)
+            mapOf("query" to "x", "maxResults" to 99)
         )
-        assertTrue("应包含第 8 条", result.contains("r8"))
-        assertFalse("超过 8 的结果不应包含", result.contains("r9"))
+        assertTrue("应包含第 10 条（O5 上限 8→10）", result.contains("r10"))
+        assertFalse("超过 10 的结果不应包含", result.contains("r11"))
     }
 
     @Test
@@ -585,5 +588,286 @@ class WebSearchLocalToolExecutorTest {
             mapOf("query" to "\u3000\u00A0")
         )
         assertEquals("缺少必需参数 query", result)
+    }
+
+    // ==================== O5（PRD UXR8）：多查询合并扩容 + URL 归一化去重 + 引用要求 ====================
+
+    @Test
+    fun `normalizeUrl dedupes tracking params www prefix trailing slash and case`() {
+        // O5：URL 归一化（合并去重判据）——同一网页的常见差异形态应归一为相同键
+        val executor = WebSearchLocalToolExecutor(noopClient())
+        // utm_* / spm 跟踪参数剔除，语义参数（id）保留
+        assertEquals(
+            "https://example.com/p?id=2",
+            executor.normalizeUrl("https://example.com/p?utm_source=bing&id=2")
+        )
+        assertEquals(
+            "https://example.com/p?id=2",
+            executor.normalizeUrl("https://example.com/p?id=2&spm=1001.2014")
+        )
+        // www 前缀 + host 大小写 + 尾部斜杠 + fragment
+        assertEquals(
+            "https://example.com/a",
+            executor.normalizeUrl("HTTPS://WWW.Example.COM/a/#section")
+        )
+        // path 大小写保留（URL 路径大小写敏感，不应误合并不同页面）
+        assertEquals("https://example.com/Wiki-Page", executor.normalizeUrl("https://www.example.com/Wiki-Page/"))
+        // 全部参数都是跟踪参数 → 退化为纯 path
+        assertEquals("https://example.com/p", executor.normalizeUrl("https://example.com/p?utm_medium=cpc&ref=x"))
+        // 非 http(s) 链接原样返回（仅去尾斜杠）
+        assertEquals("ftp://files.example.com/x", executor.normalizeUrl("ftp://files.example.com/x/"))
+        // http 与 https 不互相归一（不同站点语义）
+        assertFalse(
+            "http/https 不应归一为相同键",
+            executor.normalizeUrl("http://example.com/a") == executor.normalizeUrl("https://example.com/a")
+        )
+    }
+
+    @Test
+    fun `execute merges variant queries when maxResults at least 8`() = runBlocking {
+        // O5：maxResults=8（触发阈值）且主查询相关 → 互补核心词变体查询合并。
+        // query="昔涟 星穹铁道 角色"（核心词 = [昔涟, 星穹铁道]，"角色"为停用词）：
+        // - 主查询返回 3 条（含"昔涟"，判相关）
+        // - 变体"昔涟"返回 3 条：1 条跟踪参数重复 URL（归一化去重）、1 条不含核心词（过滤）、1 条新来源（并入）
+        // - 变体"星穹铁道"返回 1 条新来源（并入）
+        // → 合并 5 条（3 主 + 2 新），总请求 3 次（预算 ≤3）
+        var callCount = 0
+        val engine = MockEngine { request ->
+            callCount++
+            val q = request.url.parameters["q"].orEmpty()
+            val body = when {
+                q.contains("昔涟 星穹铁道") -> rssBody(
+                    Triple("昔涟_百度百科", "https://baike.baidu.com/昔涟", "昔涟是游戏角色"),
+                    Triple("昔涟 - BWIKI", "https://wiki.biligame.com/昔涟", "昔涟资料"),
+                    Triple("昔涟角色解析", "https://x.com/昔涟", "昔涟强度分析")
+                )
+                q == "昔涟" -> rssBody(
+                    // 与主查询同页（跟踪参数差异）→ 去重
+                    Triple("昔涟_百度百科（镜像）", "https://baike.baidu.com/昔涟?utm_source=variant", "昔涟"),
+                    // 不含核心词 → 变体过滤
+                    Triple("无关结果", "https://irrelevant.example.com/广告", "与查询无关"),
+                    // 新来源 → 并入
+                    Triple("昔涟同人图集", "https://art.example.com/昔涟", "昔涟同人作品")
+                )
+                else -> rssBody(
+                    Triple("星穹铁道官网", "https://sr.example.com/星穹铁道", "星穹铁道是米哈游游戏")
+                )
+            }
+            respond(
+                content = body,
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
+            )
+        }
+        val executor = WebSearchLocalToolExecutor(HttpClient(engine))
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_SEARCH,
+            mapOf("query" to "昔涟 星穹铁道 角色", "maxResults" to 8)
+        )
+        assertEquals("应触发 3 次搜索（主查询 + 两个变体）", 3, callCount)
+        // 主查询 3 条 + 变体新增 2 条 = 5 条（序号 1..5）
+        assertTrue("应包含主查询结果", result.contains("昔涟 - BWIKI"))
+        assertTrue("应包含变体'昔涟'新来源", result.contains("昔涟同人图集"))
+        assertTrue("应包含变体'星穹铁道'新来源", result.contains("星穹铁道官网"))
+        assertFalse("跟踪参数重复 URL 不应重复计入", result.contains("昔涟_百度百科（镜像）"))
+        assertFalse("变体结果中不含核心词的应被过滤", result.contains("无关结果"))
+        // 合并结果重新编号 1..5
+        assertTrue("应重新编号至第 5 条", result.contains("5. 昔涟同人图集") || result.contains("5. 星穹铁道官网"))
+    }
+
+    @Test
+    fun `execute does not merge when maxResults below 8`() = runBlocking {
+        // O5：maxResults=5（默认路径，低于触发阈值 8）→ 单查询即返回，不发变体请求
+        var callCount = 0
+        val engine = MockEngine { _ ->
+            callCount++
+            respond(
+                content = rssBody(
+                    Triple("昔涟_百度百科", "https://baike.baidu.com/昔涟", "昔涟是游戏角色"),
+                    Triple("昔涟 - BWIKI", "https://wiki.biligame.com/昔涟", "昔涟资料")
+                ),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
+            )
+        }
+        val executor = WebSearchLocalToolExecutor(HttpClient(engine))
+        executor.execute(
+            WebSearchLocalToolExecutor.TOOL_SEARCH,
+            mapOf("query" to "昔涟 是谁", "maxResults" to 5)
+        )
+        assertEquals("低于阈值不应触发变体合并请求", 1, callCount)
+    }
+
+    @Test
+    fun `execute merge tolerates variant query failure`() = runBlocking {
+        // O5：变体查询网络失败不拖垮主结果——失败变体跳过，成功变体照常并入
+        var callCount = 0
+        val engine = MockEngine { request ->
+            callCount++
+            val q = request.url.parameters["q"].orEmpty()
+            when {
+                q.contains("昔涟 星穹铁道") -> respond(
+                    content = rssBody(Triple("昔涟_百度百科", "https://baike.baidu.com/昔涟", "昔涟是游戏角色")),
+                    status = HttpStatusCode.OK,
+                    headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
+                )
+                q == "昔涟" -> throw RuntimeException("variant connection refused")
+                else -> respond(
+                    content = rssBody(Triple("星穹铁道官网", "https://sr.example.com/星穹铁道", "星穹铁道是游戏")),
+                    status = HttpStatusCode.OK,
+                    headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
+                )
+            }
+        }
+        val executor = WebSearchLocalToolExecutor(HttpClient(engine))
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_SEARCH,
+            mapOf("query" to "昔涟 星穹铁道 角色", "maxResults" to 10)
+        )
+        assertEquals("应触发 3 次搜索（主查询 + 失败变体 + 成功变体）", 3, callCount)
+        assertTrue("主结果应正常返回", result.contains("昔涟_百度百科"))
+        assertTrue("成功变体应并入", result.contains("星穹铁道官网"))
+    }
+
+    @Test
+    fun `execute merge caps merged results at 16`() = runBlocking {
+        // O5：合并去重总上限 16（防 token 溢出）——主查询 10 条 + 变体 10 条全为新 URL → 截断 16
+        fun items(prefix: String, count: Int, withTerm: Boolean = true): Array<Triple<String, String, String>> =
+            (1..count).map { i ->
+                Triple(
+                    if (withTerm) "$prefix-昔涟-$i" else "irrelevant-$i",
+                    "https://$prefix-$i.example.com/p$i",
+                    if (withTerm) "昔涟相关 $prefix $i" else "不含核心词"
+                )
+            }.toTypedArray()
+        val engine = MockEngine { request ->
+            val q = request.url.parameters["q"].orEmpty()
+            val body = when {
+                q.contains("昔涟 星穹铁道") -> rssBody(*items("main", 10))
+                q == "昔涟" -> rssBody(*items("v1", 10))
+                else -> rssBody(*items("v2", 10))
+            }
+            respond(
+                content = body,
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
+            )
+        }
+        val executor = WebSearchLocalToolExecutor(HttpClient(engine))
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_SEARCH,
+            mapOf("query" to "昔涟 星穹铁道 角色", "maxResults" to 10)
+        )
+        val numberedEntries = Regex("""(?m)^\d+\.\s""").findAll(result).count()
+        assertEquals("合并去重后应截断至 16 条", 16, numberedEntries)
+        assertTrue("应含第 16 条", result.contains("16. "))
+        assertFalse("不应含第 17 条", result.contains("17. "))
+    }
+
+    @Test
+    fun `execute merge falls back to primary when variants add nothing`() = runBlocking {
+        // O5：变体未带来任何新来源（全为去重重复或不相关）→ 回退单查询结果，不无谓多占 token
+        val engine = MockEngine { request ->
+            val q = request.url.parameters["q"].orEmpty()
+            val body = when {
+                q.contains("昔涟 星穹铁道") -> rssBody(
+                    Triple("昔涟_百度百科", "https://baike.baidu.com/昔涟", "昔涟是游戏角色"),
+                    Triple("昔涟 - BWIKI", "https://wiki.biligame.com/昔涟", "昔涟资料")
+                )
+                else -> rssBody(
+                    // 与主查询相同 URL（www + 尾斜杠差异）→ 归一化后重复
+                    Triple("昔涟_百度百科", "https://www.baike.baidu.com/昔涟/", "昔涟"),
+                    // 不含核心词 → 过滤
+                    Triple("广告", "https://ads.example.com/x", "推广内容")
+                )
+            }
+            respond(
+                content = body,
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
+            )
+        }
+        val executor = WebSearchLocalToolExecutor(HttpClient(engine))
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_SEARCH,
+            mapOf("query" to "昔涟 星穹铁道 角色", "maxResults" to 8)
+        )
+        // 回退主结果（2 条），不受 maxResults=8 影响，也不含变体重复/无关内容
+        assertTrue("应回退返回主查询结果", result.contains("昔涟 - BWIKI"))
+        assertFalse("不应包含被过滤的广告", result.contains("ads.example.com"))
+    }
+
+    @Test
+    fun `execute result includes inline citation requirement header`() = runBlocking {
+        // O5 引用策略：结果头部追加内联 [N] 引用要求（驱动 LLM 覆盖全部相关来源）
+        val engine = MockEngine { _ ->
+            respond(
+                content = rssBody(Triple("标题", "https://x.example.com", "摘要")),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
+            )
+        }
+        val executor = WebSearchLocalToolExecutor(HttpClient(engine))
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_SEARCH,
+            mapOf("query" to "x")
+        )
+        assertTrue("应包含引用要求指令", result.contains("【引用要求】"))
+        assertTrue("应包含内联编号引用示例", result.contains("[1]"))
+        assertTrue("边界标记仍应在最前", result.startsWith("【网络搜索外部内容"))
+    }
+
+    // ==================== G-03（guardrail TKN-UXR8-B2-GUARDRAIL-001）：搜索预算感知 ====================
+
+    @Test
+    fun `hasRequestBudget allows request when elapsed plus worst-case timeout fits budget`() {
+        // 判据：elapsed + 10s <= 30s - 3s → elapsed <= 17s
+        assertTrue("17s 已耗时应仍有预算", WebSearchLocalToolExecutor.hasRequestBudget(17_000L))
+        assertTrue("0ms 已耗时应有预算", WebSearchLocalToolExecutor.hasRequestBudget(0L))
+    }
+
+    @Test
+    fun `hasRequestBudget rejects request when budget exhausted`() {
+        assertFalse("18s 已耗时应无预算", WebSearchLocalToolExecutor.hasRequestBudget(18_000L))
+        assertFalse("30s 已耗时应无预算", WebSearchLocalToolExecutor.hasRequestBudget(30_000L))
+    }
+
+    @Test
+    fun `hasRequestBudget boundary is exactly 17 seconds`() {
+        assertTrue(
+            "恰好 17s（含）应有预算",
+            WebSearchLocalToolExecutor.hasRequestBudget(
+                WebSearchLocalToolExecutor.TOTAL_TOOL_BUDGET_MS -
+                    WebSearchLocalToolExecutor.BUDGET_SAFETY_MARGIN_MS -
+                    WebSearchLocalToolExecutor.SEARCH_REQUEST_TIMEOUT_MS
+            )
+        )
+        assertFalse(
+            "17s + 1ms 应无预算",
+            WebSearchLocalToolExecutor.hasRequestBudget(
+                WebSearchLocalToolExecutor.TOTAL_TOOL_BUDGET_MS -
+                    WebSearchLocalToolExecutor.BUDGET_SAFETY_MARGIN_MS -
+                    WebSearchLocalToolExecutor.SEARCH_REQUEST_TIMEOUT_MS + 1
+            )
+        )
+    }
+
+    @Test
+    fun `G2-03 budget constants stay aligned with SkillExecutor and client config`() {
+        // 常量漂移守护（guardrail TKN-UXR8-B2-GUARDRAIL-002 G2-03）：
+        // TOTAL_TOOL_BUDGET_MS 必须与 SkillExecutor.DEFAULT_TOOL_TIMEOUT_MS（外层
+        // withTimeout）一致；SEARCH_REQUEST_TIMEOUT_MS 必须与 PrismApplication 中
+        // searchHttpClient 的 requestTimeoutMillis（private 常量 10_000L，L830）一致。
+        // 任一端单方面修改时本测试失败，防止预算判据失真。
+        assertEquals(
+            "总预算须与 SkillExecutor 默认工具超时对齐",
+            io.prism.skill.SkillExecutor.DEFAULT_TOOL_TIMEOUT_MS,
+            WebSearchLocalToolExecutor.TOTAL_TOOL_BUDGET_MS
+        )
+        assertEquals(
+            "单请求超时须与 PrismApplication searchHttpClient 配置对齐",
+            10_000L,
+            WebSearchLocalToolExecutor.SEARCH_REQUEST_TIMEOUT_MS
+        )
     }
 }

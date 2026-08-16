@@ -166,15 +166,17 @@ class UserProfileManager(
     }
 
     /**
-     * 格式化全部画像为 systemPrompt section（US-034 AC-4）。
+     * 格式化全部画像为 systemPrompt section（US-034 AC-4，O1/PRD UXR8 自然语言化）。
      *
-     * **格式**：
+     * **格式**（O1 调整：显式偏好注入自然语言原句，隐式保留 key: value 结构）：
      * ```
      * 用户偏好：
-     * - language: 中文（显式）
+     * - 我喜欢简洁的回复（显式）
      * - tech_stack: Python（隐式）
-     * - tone: 简洁（显式）
      * ```
+     *
+     * **理由**：显式偏好 value 为用户输入的完整句子（O1 自然语言化），原句语义完整，
+     * 无需 key 辅助；隐式偏好 value 为 LLM 抽取的短语（如 "Python"），需 key 提供语义上下文。
      *
      * 该 section 由调用方（ConversationViewModel，US-035）注入新会话 systemPrompt 第三段
      * （ADR-015 决策 4：base → RAG → L1 摘要 → L2 跨会话 → **L3 画像** → Skill）。
@@ -186,8 +188,13 @@ class UserProfileManager(
         if (profiles.isEmpty()) return null
 
         val formatted = profiles.joinToString("\n") { profile ->
-            val categoryLabel = if (profile.category == ProfileCategory.EXPLICIT.name) "显式" else "隐式"
-            "- ${profile.key}: ${profile.value}（$categoryLabel）"
+            val isExplicit = profile.category == ProfileCategory.EXPLICIT.name
+            val categoryLabel = if (isExplicit) "显式" else "隐式"
+            if (isExplicit) {
+                "- ${profile.value}（$categoryLabel）"
+            } else {
+                "- ${profile.key}: ${profile.value}（$categoryLabel）"
+            }
         }
         return "$PROFILE_CONTEXT_PREFIX$formatted"
     }

@@ -117,7 +117,8 @@ class ConversationViewModelMemoryIntegrationTest {
         completionReturn: String? = null,
         windowSize: Int = 10,
         ragTarget: RagTarget = RagTarget.Off,
-        applicationScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        applicationScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+        sessionRepository: io.prism.data.SessionRepository? = null
     ): Pair<ConversationViewModel, MemoryTestRecordingProvider> {
         // 设置滑动窗口大小
         memoryConfigRepository.setWindowSize(windowSize)
@@ -144,7 +145,8 @@ class ConversationViewModelMemoryIntegrationTest {
             crossSessionMemoryManager = crossSessionManager,
             userProfileManager = profileManager,
             applicationScope = applicationScope,
-            ioDispatcher = mainDispatcher
+            ioDispatcher = mainDispatcher,
+            sessionRepository = sessionRepository
         )
         vm.setRagTarget(ragTarget)
         return vm to provider
@@ -492,6 +494,61 @@ class ConversationViewModelMemoryIntegrationTest {
 
         // 不应持久化任何内容
         assertEquals("无会话时不应持久化 L2 记忆", 0L, memoryRepository.count())
+    }
+
+    // ==================== UXR8 Bug2：生产触发路径（L2 保存） ====================
+
+    @Test
+    fun `startNewConversation persists L2 memories before clearing`() = runTest(mainDispatcher) {
+        // UXR8 Bug2（ADR-028，考古 TKN-UXR8-ARCHAEOLOGY-001）：L2 保存此前唯一挂在 onCleared，
+        // 单 Activity 下 Chat 永不被 pop → 用户点"新对话"只调 persistSession 不调 persistSessionMemories
+        // → 上一会话 L2 在保存前被丢弃（库恒空）。修复：startNewConversation 清空前调用持久化。
+        val persistScope = CoroutineScope(SupervisorJob() + mainDispatcher)
+        val (vm, _) = buildMemoryVm(
+            completionReturn = """{"tone":"简洁"}""",
+            applicationScope = persistScope
+        )
+
+        // 建立会话
+        vm.sendMessage("用简洁风格回复")
+        advanceUntilIdle()
+        vm.sendMessage("继续")
+        advanceUntilIdle()
+
+        // 生产触发：点"新对话"（不经 onCleared）
+        vm.startNewConversation()
+        advanceUntilIdle()
+
+        // L2：应持久化跨会话记忆（生产触发路径生效）
+        assertTrue("startNewConversation 应触发 L2 持久化", memoryRepository.count() > 0)
+        // 消息已清空
+        assertTrue("新对话后消息应清空", vm.messages.value.isEmpty())
+    }
+
+    @Test
+    fun `loadSession persists current L2 memories before switching`() = runTest(mainDispatcher) {
+        // UXR8 Bug2 同类修复：加载其他会话前先持久化当前会话的 L2/L3 记忆
+        val persistScope = CoroutineScope(SupervisorJob() + mainDispatcher)
+        val sessionRepo = io.prism.data.SessionRepository(boxStore)
+        // 先建一个目标会话（供 loadSession 加载），避免提前 return 无法覆盖真实切换路径
+        val targetSession = io.prism.data.Session(title = "目标会话", messagesJson = "[]")
+        sessionRepo.save(targetSession)
+        val (vm, _) = buildMemoryVm(
+            completionReturn = """{"tone":"简洁"}""",
+            applicationScope = persistScope,
+            sessionRepository = sessionRepo
+        )
+        vm.sendMessage("记录一些偏好")
+        advanceUntilIdle()
+
+        // 生产触发：加载另一会话（目标存在 → 走真实切换路径 → 切换前应持久化当前 L2）
+        vm.loadSession(targetSession.id)
+        advanceUntilIdle()
+
+        // L2：当前会话记忆应已持久化（生产触发路径生效）
+        assertTrue("loadSession 应触发当前会话 L2 持久化", memoryRepository.count() > 0)
+        // 消息已切换为目标会话（空列表）
+        assertTrue("加载后消息应切换为目标会话内容", vm.messages.value.isEmpty())
     }
 }
 

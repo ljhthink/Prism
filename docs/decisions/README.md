@@ -33,6 +33,8 @@
 | ADR-025 | UXR5 真机反馈修复（markdown 流式渲染/工具 UI 时序/搜索中文/tool_calls 完整性） | Proposed | 2026-08-15 | [ADR-025-uxr5-fixes.md](ADR-025-uxr5-fixes.md) |
 | ADR-026 | UXR6 真机反馈修复（搜索质量/工具熔断 + markdown 渲染 + RAG UI 状态 + 引用覆盖 + TTFT + 日志诊断） | Proposed | 2026-08-16 | [ADR-026-uxr6-fixes.md](ADR-026-uxr6-fixes.md) |
 | ADR-027 | UXR7 真机反馈修复（搜索核心词重试 + markdown 表格预处理 + 引用覆盖读全文 + 熔断扩展） | Proposed | 2026-08-16 | [ADR-027-uxr7-fixes.md](ADR-027-uxr7-fixes.md) |
+| ADR-028 | UXR8 批次1 修复（RagTarget 持久化 + L2 记忆保存触发 + 配置弹层可用高度） | Accepted | 2026-08-16 | [ADR-028-uxr8-b1-fixes.md](ADR-028-uxr8-b1-fixes.md) |
+| ADR-029 | UXR8 批次2 优化（L3 画像自然语言化 + MCP 模板增强 + Skills 文档工具 + 搜索扩容） | Accepted | 2026-08-16 | [ADR-029-uxr8-b2-optimizations.md](ADR-029-uxr8-b2-optimizations.md) |
 
 ## ADR 生命周期
 

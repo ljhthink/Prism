@@ -72,8 +72,14 @@ class SessionRepository(private val boxStore: BoxStore) {
      * 刷新会话列表 StateFlow。
      *
      * 按 [Session.updatedAt] 倒序（最新会话在前，对齐 Kimi/DeepSeek 时间倒序惯例）。
+     * UXR8（ADR-028）：同毫秒更新的会话（快速连续操作/测试环境）以 id 倒序 tie-break，
+     * 保证"最新创建的会话显示在最前"（稳定排序下纯 updatedAt 排序会保持物理 id 升序，
+     * 导致同毫秒时旧会话反而在前 —— ConversationViewModelSessionPersistenceTest 真实触发）。
      */
     private fun refreshFlows() {
-        _sessions.value = box.all.sortedByDescending { it.updatedAt }
+        _sessions.value = box.all.sortedWith(
+            compareByDescending<Session> { it.updatedAt }
+                .thenByDescending { it.id }
+        )
     }
 }

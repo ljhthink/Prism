@@ -61,7 +61,11 @@
   - 远程模板增加"用途说明 + API Key 获取指引"（模板元数据含 `description` + `keyHint`，如"到 https://platform.openai.com/api-keys 获取"）。
   - UI 层在添加远程 Server 时展示该说明。
 
-### O3：新增 MCP 模板（Draw.io / TrendRadar / n8n / Firecrawl）
+### O3：新增 MCP 模板（Firecrawl / n8n / TrendsMCP）
+
+> **落地差异（TKN-UXR8-B2-ACCEPTANCE-001 遗留项4）**：经 D-2/D-3/D-9 确认，最终新增 3 个模板 =
+> **Firecrawl + n8n + TrendsMCP**（TrendRadar 无法做填 Key 模板，以 TrendsMCP 托管化替代）；
+> **不含 Draw.io**（MCP Apps 协议兼容性未实测，暂不纳入）。下表调研结论保留历史分析供追溯。
 
 网络调研结论（TKN-UXR8-MCP-RESEARCH-001）：
 
@@ -93,7 +97,7 @@
 | Skill | 可行性 | 方式 |
 |---|---|---|
 | **Humanizer-zh** | ✅ 直接可用（纯提示词，MIT） | 改写为内置/远程 Skill（24 种 AI 痕迹清单） |
-| **web-access** | ✅ 部分可行（纯提示词部分） | 改写为"联网调研策略"Skill，绑定现有 web_search__search + web_fetch 工具（CDP 部分不可行） |
+| **web-access** | ✅ 部分可行（纯提示词部分） | 改写为"联网调研策略"Skill（实现名 **web-research**，D-11 确认），绑定现有 web_search__search + web_fetch 工具（CDP 部分不可行） |
 | **Firecrawl** | ✅ | 以远程 MCP 模板形式落地（与 O3 复用），SKILL.md 工具化改写 |
 | **docx** | ✅ 需新增 Kotlin 工具 | 新增 `document__create_docx`（LLM 输出 Markdown → POI XWPFDocument 生成，零新依赖） |
 | **xlsx** | ✅ 需新增 Kotlin 工具 | 新增 `document__create_xlsx`（LLM 输出表格数据 → POI XSSFWorkbook 生成，零新依赖） |
@@ -165,8 +169,8 @@
 | 弹层键盘适配 | 模拟器 + 单元测试 | 配置弹层点击文本框不超出屏幕，可滚动 | Bug3 |
 | L3 画像自然语言化 | 单元测试 + UI | 偏好可编辑为自然语言描述 | O1 |
 | MCP 功能描述/Key 指引 | UI 测试 | 工具列表显示描述；远程模板显示 Key 获取指引 | O2 |
-| 新增 MCP 模板 | 集成测试 | Firecrawl/n8n（+Draw.io）模板可一键添加 | O3 |
-| 新增 Skills | 集成测试 + UI | Humanizer-zh/web-access/docx/xlsx 可用 | O4 |
+| 新增 MCP 模板 | 集成测试 | Firecrawl/n8n/TrendsMCP 模板可一键添加（D-2/D-9） | O3 |
+| 新增 Skills | 集成测试 + UI | Humanizer-zh/web-research/docx/xlsx 可用 | O4 |
 | 搜索结果扩容 | 单元测试 | maxResults≤10；多查询合并去重 12-16 条 | O5 |
 | 用户规则文件 | 单元测试 | mergeSystemPrompt 含 userRules 层且优先 | N1 |
 | 反问功能 | 集成测试 | ask_user 工具触发提问卡片 + 中断本轮 | N2 |
@@ -186,9 +190,21 @@
 > - **D-8（执行批次）**：Bug → 优化 → 新功能 分批执行，每批独立闭环 ✅
 > - **D-9（TrendRadar 替代）**：**TrendsMCP（trendsmcp.ai）**，跨 25+ 平台热榜 ✅
 > - **D-10（MCP 功能描述）**：模板元数据（description+keyHint）+ UI 展示 ✅
-> - **D-11（Skills 落地）**：Humanizer-zh/web-access 内置 Skill；docx/xlsx 新增 POI 工具；Firecrawl Skill 复用 MCP 模板；gstack 借鉴评审模板 ✅
+> - **D-11（Skills 落地）**：Humanizer-zh/web-research（实现名）内置 Skill；docx/xlsx 新增 POI 工具；Firecrawl Skill 复用 MCP 模板；gstack 借鉴评审模板 ✅
 
 **全部决策已确认，可进入开发阶段。**
+
+---
+
+## 9. 执行状态追踪
+
+> D-8 分批执行，每批独立闭环（guardrail + ac-verifier + 模拟器验证）。
+
+| 批次 | 内容 | 状态 | 验收证据 |
+|---|---|---|---|
+| 批次1 | Bug1（RagTarget 持久化）/ Bug2（L2 触发）/ Bug3（弹层 IME 双模式，含 OBS-2 终版） | ✅ 完成（2026-08-16） | ac-verifier 19/19 AC PASS；全量 1810 用例 0 失败；模拟器键盘场景验证（[debug 报告](../reports/2026-08-16-uxr8-b1-bug3-obs2-debug.md)）；ADR-028 |
+| 批次2 | O1（L3 画像自然语言）/ O2（MCP 描述+KeyHint）/ O3（Firecrawl+n8n+TrendsMCP 模板）/ O4（Skills：Humanizer-zh/web-research/docx/xlsx）/ O5（搜索扩容 10+合并 12-16） | ✅ 完成（2026-08-16） | ac-verifier 17/17 AC PASS（TKN-UXR8-B2-ACCEPTANCE-001）；guardrail PASS-with-notes（G2-01~04 即时闭环，G2-05 列入批次3）；全量 1873 用例 0 失败；模拟器验证 O1/O2/O3/O4 UI 全部通过；ADR-029 |
+| 批次3 | N1（用户规则文件）/ N2（反问 Phase1+2）/ N3（视觉方案 A） | ⏳ 待启动 | — |
 
 ---
 

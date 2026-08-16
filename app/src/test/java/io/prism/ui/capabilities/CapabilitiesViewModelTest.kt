@@ -222,11 +222,15 @@ class CapabilitiesViewModelTest {
     // ==================== US-010 远程预设加载 ====================
 
     @Test
-    fun `remote presets contains 9 templates`() = runTest(mainDispatcher) {
+    fun `remote presets contains 12 templates`() = runTest(mainDispatcher) {
+        // O3（PRD UXR8）：9 → 12（新增 Firecrawl / n8n / TrendsMCP）
         val names = McpServerPresets.remotePresets.map { it.name }.toSet()
-        assertEquals(9, names.size)
+        assertEquals(12, names.size)
         assertEquals(
-            setOf("GitHub", "Notion", "Slack", "Sentry", "Stripe", "Asana", "Brave", "Exa", "Context7"),
+            setOf(
+                "GitHub", "Notion", "Slack", "Sentry", "Stripe", "Asana", "Brave", "Exa", "Context7",
+                "Firecrawl", "n8n", "TrendsMCP"
+            ),
             names
         )
     }

@@ -4,12 +4,10 @@
 # Unix shell 脚本：强制 LF，确保 Linux/CI 可执行
 gradlew        text eol=lf
 *.sh           text eol=lf
-
 # Windows 批处理脚本：强制 CRLF
 gradlew.bat    text eol=crlf
 *.bat          text eol=crlf
 *.cmd          text eol=crlf
-
 # 二进制文件：不做行结束符转换
 *.jar          binary
 *.png          binary
@@ -18,7 +16,6 @@ gradlew.bat    text eol=crlf
 *.jks          binary
 *.apk          binary
 *.aab          binary
-
 # Kotlin/Java 源码：自动（Windows CRLF / Unix LF）
 *.kt           text
 *.kts          text
@@ -27,7 +24,6 @@ gradlew.bat    text eol=crlf
 *.properties   text
 *.toml         text
 *.pro          text
-
 # 文档与配置：自动
 *.md           text
 *.json         text
@@ -35,3 +31,4 @@ gradlew.bat    text eol=crlf
 *.yaml         text
 *.cfg          text
 *.txt          text
+*.onnx filter=lfs diff=lfs merge=lfs -text

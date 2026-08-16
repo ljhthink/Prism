@@ -227,4 +227,66 @@ class MemoryManagementViewModelTest {
         val result = MemoryManagementViewModel.buildClearResultMessage(999L, 888L)
         assertEquals("已清除 999 条跨会话记忆 · 888 条用户画像", result)
     }
+
+    // ==================== nextAvailableKey（G-01，BR-interface-015） ====================
+
+    @Test
+    fun `nextAvailableKey - no conflict returns base unchanged`() {
+        assertEquals("tone", MemoryManagementViewModel.nextAvailableKey("tone", emptySet()))
+    }
+
+    @Test
+    fun `nextAvailableKey - base occupied appends _2`() {
+        assertEquals(
+            "tone_2",
+            MemoryManagementViewModel.nextAvailableKey("tone", setOf("tone"))
+        )
+    }
+
+    @Test
+    fun `nextAvailableKey - consecutive occupation finds next gap`() {
+        // tone 与 tone_2 已被占用 → 落 tone_3（同类别第三条偏好并存）
+        assertEquals(
+            "tone_3",
+            MemoryManagementViewModel.nextAvailableKey("tone", setOf("tone", "tone_2"))
+        )
+    }
+
+    @Test
+    fun `nextAvailableKey - gap in sequence fills the gap`() {
+        // tone_2 被删后重添同类别偏好 → 复用 tone_2 空位
+        assertEquals(
+            "tone_2",
+            MemoryManagementViewModel.nextAvailableKey("tone", setOf("tone", "tone_3"))
+        )
+    }
+
+    @Test
+    fun `nextAvailableKey - exhausted suffixes falls back to last candidate`() {
+        // 防御性路径：2..100 全占用（实践不可达）→ 返回最后一个尝试值
+        val occupied = (2..100).map { "tone_$it" }.toSet() + setOf("tone")
+        assertEquals("tone_100", MemoryManagementViewModel.nextAvailableKey("tone", occupied))
+    }
+
+    @Test
+    fun `nextAvailableKey - derived hash key follows same dedupe semantics`() {
+        // pref_hash 形式派生 key 同样受冲突保护（异句同类别兜底路径）
+        assertEquals(
+            "pref_1a2b3c4d_2",
+            MemoryManagementViewModel.nextAvailableKey("pref_1a2b3c4d", setOf("pref_1a2b3c4d"))
+        )
+    }
+
+    @Test
+    fun `nextAvailableKey - G2-02 long base truncated to keep candidate within key limit`() {
+        // 纵深防御：base 已达 50 字符上限时，追加后缀须先截断 base 保证候选 ≤50
+        val longBase = "k".repeat(MemoryManagementViewModel.MAX_PROFILE_KEY_LEN)
+        val candidate = MemoryManagementViewModel.nextAvailableKey(longBase, setOf(longBase))
+        assertTrue(
+            "候选 key 应 ≤ MAX_PROFILE_KEY_LEN：${candidate.length}",
+            candidate.length <= MemoryManagementViewModel.MAX_PROFILE_KEY_LEN
+        )
+        // 50 - 2("_2") = 48 个 k + "_2"
+        assertEquals("k".repeat(48) + "_2", candidate)
+    }
 }

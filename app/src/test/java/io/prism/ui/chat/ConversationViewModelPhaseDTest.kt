@@ -192,6 +192,29 @@ class ConversationViewModelPhaseDTest {
         assertEquals("web_search__search", tools[1].function.name)
     }
 
+    // ==================== O4（PRD UXR8）：文档生成工具合并 ====================
+
+    @Test
+    fun `buildTools default excludes document tools for backward compat`() {
+        // 默认 documentToolsEnabled=false（向后兼容）：不追加 docx/xlsx 工具
+        val tools = ConversationViewModel.buildTools(emptyList(), webSearchEnabled = true)
+        assertTrue(
+            "默认不应包含 document 工具",
+            tools.none { it.function.name.startsWith("document__") }
+        )
+    }
+
+    @Test
+    fun `buildTools includes docx and xlsx when documentToolsEnabled true`() {
+        val tools = ConversationViewModel.buildTools(
+            emptyList(), webSearchEnabled = true, documentToolsEnabled = true
+        )
+        val names = tools.map { it.function.name }
+        assertEquals("web_search 1 + document 2 = 3", 3, names.size)
+        assertTrue(names.contains("document__create_docx"))
+        assertTrue(names.contains("document__create_xlsx"))
+    }
+
     // ==================== 纯函数测试：mergeSystemPrompt ====================
 
     @Test

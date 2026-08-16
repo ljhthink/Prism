@@ -416,6 +416,110 @@ class ConversationViewModelTest {
         assertEquals(RagTarget.AllLibraries, vm.ragTarget.value)
     }
 
+    // ==================== UXR8 Bug1（ADR-028）：RagTarget 持久化端到端 ====================
+
+    /**
+     * UXR8 Bug1 AC（ac-verifier 补强项 1）：用户关闭 RAG 后点「新对话」，
+     * RagTarget 保持 Off 且持久化层也为 Off（不再被系统重置为全库）。
+     */
+    @Test
+    fun `rag target off survives startNewConversation with repository injected`() = runTest(mainDispatcher) {
+        val dataStore = io.prism.security.FakePreferenceDataStore(
+            androidx.datastore.preferences.core.emptyPreferences()
+        )
+        val ragRepo = io.prism.config.RagTargetConfigRepository(dataStore)
+        val vm = ConversationViewModel(
+            ProviderConfigRepository(boxStore),
+            FakeChatStreamProvider(listOf(StreamEvent.Done)),
+            DefaultStubEmbedder,
+            KnowledgeBaseRepository(boxStore),
+            ragTargetConfigRepository = ragRepo
+        )
+
+        vm.setRagTarget(RagTarget.Off)
+        vm.startNewConversation()
+        advanceUntilIdle()
+
+        assertEquals("新对话后内存态应保持 Off（UXR8 Bug1 核心）", RagTarget.Off, vm.ragTarget.value)
+        assertEquals("持久化层应保持 Off", RagTarget.Off, ragRepo.getRagTarget())
+    }
+
+    /**
+     * UXR8 Bug1 AC（ac-verifier 补强项 1）：init 从 DataStore 恢复上次持久化的 RagTarget。
+     * 模拟「用户关闭 RAG → 杀进程重启 → 打开 App」场景。
+     */
+    @Test
+    fun `init restores persisted rag target from repository`() = runTest(mainDispatcher) {
+        val dataStore = io.prism.security.FakePreferenceDataStore(
+            androidx.datastore.preferences.core.emptyPreferences()
+        )
+        val ragRepo = io.prism.config.RagTargetConfigRepository(dataStore)
+        // 模拟上一进程持久化了 Off
+        ragRepo.setRagTarget(RagTarget.Off)
+
+        val vm = ConversationViewModel(
+            ProviderConfigRepository(boxStore),
+            FakeChatStreamProvider(listOf(StreamEvent.Done)),
+            DefaultStubEmbedder,
+            KnowledgeBaseRepository(boxStore),
+            ragTargetConfigRepository = ragRepo
+        )
+        advanceUntilIdle()
+
+        assertEquals("init 应恢复持久化的 Off（重启后不重置为全库）", RagTarget.Off, vm.ragTarget.value)
+    }
+
+    /**
+     * UXR8 guardrail MED-2（ADR-028）：持久化的指定库已被删除时，
+     * init 恢复降级为 Off（而非回退 AllLibraries —— 避免突然注入全库的意图/隐私意外）。
+     */
+    @Test
+    fun `init degrades to Off when persisted specific library was deleted`() = runTest(mainDispatcher) {
+        val dataStore = io.prism.security.FakePreferenceDataStore(
+            androidx.datastore.preferences.core.emptyPreferences()
+        )
+        val ragRepo = io.prism.config.RagTargetConfigRepository(dataStore)
+        val kbRepo = KnowledgeBaseRepository(boxStore)
+        // 模拟上一进程持久化了 SpecificLibrary(999999)，但该库在当前数据中不存在
+        ragRepo.setRagTarget(RagTarget.SpecificLibrary(999_999L))
+
+        val vm = ConversationViewModel(
+            ProviderConfigRepository(boxStore),
+            FakeChatStreamProvider(listOf(StreamEvent.Done)),
+            DefaultStubEmbedder,
+            kbRepo,
+            ragTargetConfigRepository = ragRepo
+        )
+        advanceUntilIdle()
+
+        assertEquals("库已删除时应降级 Off", RagTarget.Off, vm.ragTarget.value)
+    }
+
+    /**
+     * UXR8 guardrail MED-2 对照组：持久化的指定库仍存在时正常恢复 SpecificLibrary。
+     */
+    @Test
+    fun `init restores persisted specific library when it still exists`() = runTest(mainDispatcher) {
+        val dataStore = io.prism.security.FakePreferenceDataStore(
+            androidx.datastore.preferences.core.emptyPreferences()
+        )
+        val ragRepo = io.prism.config.RagTargetConfigRepository(dataStore)
+        val kbRepo = KnowledgeBaseRepository(boxStore)
+        val kbId = kbRepo.save(io.prism.data.KnowledgeBase(name = "med2-existing"))
+        ragRepo.setRagTarget(RagTarget.SpecificLibrary(kbId))
+
+        val vm = ConversationViewModel(
+            ProviderConfigRepository(boxStore),
+            FakeChatStreamProvider(listOf(StreamEvent.Done)),
+            DefaultStubEmbedder,
+            kbRepo,
+            ragTargetConfigRepository = ragRepo
+        )
+        advanceUntilIdle()
+
+        assertEquals("库仍存在时应恢复 SpecificLibrary", RagTarget.SpecificLibrary(kbId), vm.ragTarget.value)
+    }
+
     // ==================== G-05 修复：正向快乐路径 + 阈值过滤 + SpecificLibrary 校验 ====================
     // 以下测试补齐 guardrail TKN-US019-RAG-GUARDRAIL-001 G-05/G-07 发现的覆盖缺口。
 

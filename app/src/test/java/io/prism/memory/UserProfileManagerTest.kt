@@ -238,14 +238,15 @@ class UserProfileManagerTest {
 
     @Test
     fun formatProfilesAsContext_returns_formatted_text_with_prefix() {
-        manager.setExplicitPreference("language", "中文")
-        manager.setExplicitPreference("tone", "简洁")
+        // O1：显式偏好注入自然语言原句（不含 key: 前缀）
+        manager.setExplicitPreference("language", "请用中文回答")
+        manager.setExplicitPreference("tone", "我喜欢简洁的回复")
 
         val result = manager.formatProfilesAsContext()
         assertNotNull("应返回格式化文本", result)
         assertTrue("应包含前缀", result!!.startsWith("用户偏好："))
-        assertTrue("应包含 language", result.contains("language: 中文"))
-        assertTrue("应包含 tone", result.contains("tone: 简洁"))
+        assertTrue("显式偏好应注入原句", result.contains("请用中文回答（显式）"))
+        assertTrue("显式偏好应注入原句", result.contains("我喜欢简洁的回复（显式）"))
     }
 
     @Test
@@ -266,6 +267,8 @@ class UserProfileManagerTest {
         assertNotNull(result)
         assertTrue("应包含显式标签", result!!.contains("（显式）"))
         assertTrue("应包含隐式标签", result.contains("（隐式）"))
+        // O1：隐式偏好 value 为 LLM 抽取短语，保留 key: value 结构提供语义
+        assertTrue("隐式偏好应保留 key: value 结构", result.contains("tech_stack: Python（隐式）"))
     }
 
     // ==================== AC-5：抽取失败降级 + upsert + 优先级 ====================

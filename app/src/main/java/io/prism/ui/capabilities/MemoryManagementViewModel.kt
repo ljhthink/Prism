@@ -12,6 +12,7 @@ import io.prism.data.ProfileCategory
 import io.prism.data.UserProfile
 import io.prism.data.UserProfileRepository
 import io.prism.memory.MemoryConfigRepository
+import io.prism.memory.ProfileNaturalLanguageParser
 import io.prism.memory.UserProfileManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -130,37 +131,66 @@ class MemoryManagementViewModel(
     }
 
     /**
-     * 保存画像（新建或更新，US-036 AC-3）。
+     * 保存画像（新建或更新，US-036 AC-3，O1/PRD UXR8 自然语言化）。
      *
      * **逻辑**：
-     * - key/value 校验非空（fail-fast）
-     * - key/value 长度上限校验（M-2 修复，防止超长注入 systemPrompt 导致 token 溢出）
-     * - 已有 id（编辑既有画像）：调用 [UserProfileRepository.update] 保留原 category
+     * - 新建模式（existingId=0）且 key 为空：调用 [ProfileNaturalLanguageParser.deriveKey]
+     *   从自然语言句子自动推导 key（O1：UI 单字段输入，无需用户理解键值语义）
+     * - key/value 校验非空（fail-fast）+ 长度上限校验（M-2 修复，防止超长注入 systemPrompt
+     *   导致 token 溢出）
+     * - **G-01 修复**（guardrail TKN-UXR8-B2-GUARDRAIL-001，BR-interface-015）：新建模式下
+     *   派生 key 与既有画像冲突时**禁止静默覆盖**——
+     *   同 key 且 value 相同 → 幂等提示「已存在」（upsert 语义，不产生重复条目）；
+     *   同 key 且 value 不同 → [Companion.nextAvailableKey] 追加 `_2`/`_3` 序号使两条并存
+     *   （用户在「新增」模式下的意图是添加而非覆盖；key 对用户不可见，覆盖必须可感知）。
+     *   编辑模式（existingId>0）不受影响：用户显式编辑该条目，update 保留原 key。
+     * - 已有 id（编辑既有画像）：调用 [UserProfileRepository.update] 保留原 category 与 key
      * - 无 id（新建画像）：调用 [UserProfileManager.setExplicitPreference] 默认 category=EXPLICIT
      *
-     * @param key 偏好键（非空，长度 ≤ [Companion.MAX_PROFILE_KEY_LEN]）
-     * @param value 偏好值（非空，长度 ≤ [Companion.MAX_PROFILE_VALUE_LEN]）
+     * @param key 偏好键（编辑模式传原 key 非空；新建模式允许为空，自动推导；
+     *   非空时长度 ≤ [Companion.MAX_PROFILE_KEY_LEN]）
+     * @param value 偏好值（自然语言句子，非空，长度 ≤ [Companion.MAX_PROFILE_VALUE_LEN]）
      * @param existingId 既有画像 id（>0 表示编辑模式）；默认 0 表示新建
      */
     fun saveProfile(key: String, value: String, existingId: Long = 0L) {
-        val validation = Companion.validateProfile(key, value)
+        val valueTrimmed = value.trim()
+        // O1：新建模式 key 为空 → 自然语言解析器自动推导（同句 upsert 去重）
+        val derivedKey = key.trim().ifEmpty {
+            if (existingId > 0L) "" else ProfileNaturalLanguageParser.deriveKey(valueTrimmed)
+        }
+        val validation = Companion.validateProfile(derivedKey, value)
         if (!validation.valid) {
             _uiMessage.value = UiMessage.Error(validation.message)
             return
         }
-        val keyTrimmed = key.trim()
-        val valueTrimmed = value.trim()
+        // G-01：新建模式下派生 key 冲突处理（同句幂等 / 异句追加序号，禁止静默覆盖）
+        val effectiveKey: String
+        if (existingId <= 0L) {
+            val clash = profiles.value.firstOrNull { it.key == derivedKey }
+            if (clash != null && clash.value == valueTrimmed) {
+                _uiMessage.value = UiMessage.Info("该偏好已存在，无需重复添加")
+                _selectedProfile.value = null
+                return
+            }
+            effectiveKey = if (clash != null) {
+                Companion.nextAvailableKey(derivedKey, profiles.value.mapTo(HashSet()) { it.key })
+            } else {
+                derivedKey
+            }
+        } else {
+            effectiveKey = derivedKey
+        }
         try {
             if (existingId > 0L) {
-                userProfileRepository.update(keyTrimmed, valueTrimmed)
-                _uiMessage.value = UiMessage.Info("已更新偏好：$keyTrimmed")
+                userProfileRepository.update(effectiveKey, valueTrimmed)
+                _uiMessage.value = UiMessage.Info("已更新偏好")
             } else {
-                userProfileManager.setExplicitPreference(keyTrimmed, valueTrimmed)
-                _uiMessage.value = UiMessage.Info("已新增偏好：$keyTrimmed")
+                userProfileManager.setExplicitPreference(effectiveKey, valueTrimmed)
+                _uiMessage.value = UiMessage.Info("已新增偏好")
             }
             _selectedProfile.value = null
         } catch (e: Exception) {
-            android.util.Log.w(TAG, "saveProfile failed: key=$keyTrimmed", e)
+            android.util.Log.w(TAG, "saveProfile failed: key=$effectiveKey", e)
             _uiMessage.value = UiMessage.Error("保存偏好失败")
         }
     }
@@ -333,6 +363,41 @@ class MemoryManagementViewModel(
             }
             return ValidationResult(true, "")
         }
+
+        /**
+         * G-01 修复（guardrail TKN-UXR8-B2-GUARDRAIL-001，BR-interface-015，纯函数可测）：
+         * 为派生 key 追加 `_2`/`_3`… 序号，直到与既有 key 不冲突。
+         *
+         * 保证同类别多条自然语言偏好并存（如「我喜欢简洁的回复」与「正式场合用正式语气」
+         * 均派生 `tone`，第二条落 `tone_2`），禁止静默覆盖用户显式输入。
+         *
+         * @param base 自动派生的基准 key（如 `tone` / `pref_1a2b3c4d`）
+         * @param occupied 当前已占用的 key 集合
+         * @return 未被占用的 key；理论上序号耗尽（[MAX_DUPLICATE_KEY_SUFFIX] 条同 key，
+         *   实践不可达）时返回最后一个尝试值（降级为 upsert 覆盖语义并保留日志线索）
+         */
+        internal fun nextAvailableKey(base: String, occupied: Set<String>): String {
+            if (base !in occupied) return base
+            var suffix = 2
+            var candidate = base
+            while (suffix <= MAX_DUPLICATE_KEY_SUFFIX) {
+                // G2-02（guardrail TKN-UXR8-B2-GUARDRAIL-002）：后缀可使 key 超过
+                // MAX_PROFILE_KEY_LEN（当前派生 key ≤13 字符不可达，纵深防御）——
+                // 截断 base 保证候选恒 ≤ 上限
+                candidate = "${base.take(MAX_PROFILE_KEY_LEN - "_$suffix".length)}_$suffix"
+                if (candidate !in occupied) return candidate
+                suffix++
+            }
+            // G2-01：序号耗尽（需 100 条同 key，实践不可达）降级为 upsert 覆盖语义，补日志线索
+            android.util.Log.w(TAG, "profile key suffix exhausted, fallback to upsert for key=${candidate.take(LOG_KEY_MAX_LEN)}")
+            return candidate
+        }
+
+        /** G2-01：日志中 key 的最大长度（对齐 LOW-03/CWE-532 截断惯例）。 */
+        private const val LOG_KEY_MAX_LEN = 60
+
+        /** [nextAvailableKey] 序号上限（防御性：同 key 偏好不可能超此量级）。 */
+        private const val MAX_DUPLICATE_KEY_SUFFIX = 100
 
         /**
          * 将"一键清除"结果计数映射为 UI 文案（纯函数，BR-testing-004）。

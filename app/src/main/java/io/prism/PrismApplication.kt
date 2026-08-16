@@ -484,17 +484,36 @@ class PrismApplication : Application() {
     }
 
     /**
-     * 复合本地工具执行器（问题 8b，ADR-020；UXR4 问题 2/3，ADR-024 扩展）——
-     * 组合 M6 跨 App + 联网搜索 + 知识库。
+     * 文档生成本地工具执行器（O4/PRD UXR8）—— 实现 LocalToolExecutor 接口。
+     *
+     * `document__create_docx` / `document__create_xlsx`：LLM 输出 Markdown / 表格数据 →
+     * POI（M3 已引入，零新依赖）生成文件，保存到应用外部私有 Documents 目录。
+     */
+    val documentLocalToolExecutor: io.prism.document.DocumentLocalToolExecutor by lazy {
+        io.prism.document.DocumentLocalToolExecutor(
+            baseDir = getExternalFilesDir(android.os.Environment.DIRECTORY_DOCUMENTS)
+                ?: filesDir.resolve("Documents")
+        )
+    }
+
+    /**
+     * 复合本地工具执行器（问题 8b，ADR-020；UXR4 问题 2/3，ADR-024 扩展；O4/PRD UXR8 扩展）——
+     * 组合 M6 跨 App + 联网搜索 + 知识库 + 文档生成。
      *
      * 将 [crossAppLocalToolExecutor]（`cross_app__*`）、[webSearchLocalToolExecutor]
-     * （`web_search__*`）与 [knowledgeBaseLocalToolExecutor]（`knowledge_base__*`）
-     * 组合为单个 [io.prism.skill.LocalToolExecutor] 门面，
+     * （`web_search__*`）、[knowledgeBaseLocalToolExecutor]（`knowledge_base__*`）与
+     * [documentLocalToolExecutor]（`document__*`）组合为单个
+     * [io.prism.skill.LocalToolExecutor] 门面，
      * 注入 [skillExecutor]，使 SkillExecutor 零改动感知全部本地工具。
      */
     val compositeLocalToolExecutor: io.prism.skill.CompositeLocalToolExecutor by lazy {
         io.prism.skill.CompositeLocalToolExecutor(
-            listOf(crossAppLocalToolExecutor, webSearchLocalToolExecutor, knowledgeBaseLocalToolExecutor)
+            listOf(
+                crossAppLocalToolExecutor,
+                webSearchLocalToolExecutor,
+                knowledgeBaseLocalToolExecutor,
+                documentLocalToolExecutor
+            )
         )
     }
 
@@ -598,6 +617,21 @@ class PrismApplication : Application() {
      */
     val toolApprovalConfigRepository: io.prism.config.ToolApprovalConfigRepository by lazy {
         io.prism.config.ToolApprovalConfigRepository(toolApprovalDataStore)
+    }
+
+    /**
+     * RAG 检索目标配置仓库（UXR8 Bug1，ADR-028）—— 持久化 RagTarget 三态模式。
+     *
+     * 使用独立 DataStore（`prism_rag_config`），与 API Key / 文件系统根目录 / 记忆配置 /
+     * 档位 / 思考 / 审批 DataStore 隔离。默认 [io.prism.rag.RagTarget.AllLibraries]
+     * （对齐 ADR-012 5.2「默认开启」）。
+     *
+     * 由 [io.prism.ui.chat.ConversationViewModel] 读取恢复用户上次的 RAG 模式、
+     * 写入用户切换（setRagTarget），解决「用户关闭 RAG 后新对话又被重置为全库」的
+     * UXR8 Bug1 根因（考古 TKN-UXR8-ARCHAEOLOGY-001）。
+     */
+    val ragTargetConfigRepository: io.prism.config.RagTargetConfigRepository by lazy {
+        io.prism.config.RagTargetConfigRepository(ragConfigDataStore)
     }
 
     /**
@@ -763,6 +797,9 @@ class PrismApplication : Application() {
 
     /** 工具审批模式配置 DataStore 进程级单例（UXR3 问题 10，ADR-023，审批模式持久化）。 */
     private val Context.toolApprovalDataStore by preferencesDataStore(name = "prism_tool_approval")
+
+    /** RAG 检索目标配置 DataStore 进程级单例（UXR8 Bug1，ADR-028，RagTarget 持久化）。 */
+    private val Context.ragConfigDataStore by preferencesDataStore(name = "prism_rag_config")
 
     /** 设备档位配置 DataStore 进程级单例（ADR-017 4.4，US-040 用户手动覆盖持久化）。 */
     private val Context.tierConfigDataStore by preferencesDataStore(name = "prism_tier_config")
