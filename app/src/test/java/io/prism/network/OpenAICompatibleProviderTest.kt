@@ -193,16 +193,243 @@ class OpenAICompatibleProviderTest {
         assertTrue(parseToEvents("""{"choices":[{"delta":{}}]}""").isEmpty())
         // 非 JSON → parseChunk 返回 null → 空列表
         assertTrue(parseToEvents("not-json").isEmpty())
-        // 空白 content 被 chunkToEvents 忽略（isNullOrBlank 检查）
-        assertTrue(parseToEvents("""{"choices":[{"delta":{"content":"   "}}]}""").isEmpty())
+        // 空串 content 被 chunkToEvents 忽略（isNullOrEmpty 检查）
+        assertTrue(parseToEvents("""{"choices":[{"delta":{"content":""}}]}""").isEmpty())
     }
 
     @Test
-    fun `parseChunk ignores unknown fields like reasoning_content`() {
+    fun `parseChunk preserves newline delta for markdown structure`() {
+        // 2026-08-15 修复（markdown 渲染）：纯换行 delta 必须保留。
+        // 此前 isNullOrBlank 会过滤 "\n"（isBlank()=true），导致流式输出中
+        // 单独成 chunk 的换行丢失，markdown 源文本粘连、标题/表格无法解析。
+        val events = parseToEvents("""{"choices":[{"delta":{"content":"\n"}}]}""")
+        assertEquals(listOf(StreamEvent.Delta("\n")), events)
+        // 空格 delta 同样保留（不影响渲染，且避免结构字符被吞）
+        val spaces = parseToEvents("""{"choices":[{"delta":{"content":"  "}}]}""")
+        assertEquals(listOf(StreamEvent.Delta("  ")), spaces)
+    }
+
+    @Test
+    fun `parseChunk preserves whitespace reasoning delta for structure`() {
+        // ac-verifier 补充（TKN-UXR2-ACCEPTANCE-001）：修复同时作用于 reasoning_content
+        //（isNullOrEmpty 而非 isNullOrBlank）。纯换行 reasoning delta 也应保留，
+        // 与 content 语义一致；仅 null/空串被过滤。
+        val newline = parseToEvents("""{"choices":[{"delta":{"reasoning_content":"\n"}}]}""")
+        assertEquals(listOf(StreamEvent.ReasoningDelta("\n")), newline)
+        val empty = parseToEvents("""{"choices":[{"delta":{"reasoning_content":""}}]}""")
+        assertTrue("空串 reasoning delta 仍应被过滤", empty.isEmpty())
+        val absent = parseToEvents("""{"choices":[{"delta":{}}]}""")
+        assertTrue("null reasoning delta 仍应被过滤", absent.isEmpty())
+    }
+
+    @Test
+    fun `parseChunk maps reasoning_content to ReasoningDelta before content delta`() {
+        // 问题 8a（ADR-020）：深度思考模式 delta.reasoning_content 解析为 ReasoningDelta，
+        // 且先于 content Delta 发射（DeepSeek 思考过程先于最终答案输出）。
         val events = parseToEvents(
-            """{"choices":[{"delta":{"content":"思考","reasoning_content":"hidden"}}]}"""
+            """{"choices":[{"delta":{"content":"思考","reasoning_content":"先推理"}}]}"""
         )
-        assertEquals(listOf(StreamEvent.Delta("思考")), events)
+        assertEquals(
+            listOf(StreamEvent.ReasoningDelta("先推理"), StreamEvent.Delta("思考")),
+            events
+        )
+    }
+
+    @Test
+    fun `chunkToEvents emits ReasoningDelta for reasoning_content and Delta for content`() {
+        // 问题 8a（ADR-020）：reasoning_content → ReasoningDelta，content → Delta
+        val events = parseToEvents(
+            """{"choices":[{"delta":{"reasoning_content":"逐步推理","content":"最终答案"}}]}"""
+        )
+        assertEquals(
+            listOf(StreamEvent.ReasoningDelta("逐步推理"), StreamEvent.Delta("最终答案")),
+            events
+        )
+    }
+
+    @Test
+    fun `chunkToEvents ignores empty reasoning_content`() {
+        // 空串 reasoning_content 与 content 一样被忽略（isNullOrEmpty 检查；
+        // 2026-08-15：改为保留空白以支撑 markdown 结构，仅过滤 null 与空串）
+        val events = parseToEvents(
+            """{"choices":[{"delta":{"reasoning_content":"","content":"答案"}}]}"""
+        )
+        assertEquals(listOf(StreamEvent.Delta("答案")), events)
+    }
+
+    @Test
+    fun `chunkToEvents with collectReasoning false drops reasoning but keeps content`() {
+        // UXR3 问题 3（ADR-023，guardrail T-4）：深度思考开关关闭（collectReasoning=false）
+        // 时丢弃 reasoning_content（deepseek-reasoner 原生思考模型固定返回），但 content 仍保留。
+        val chunk = provider.parseChunk(
+            """{"choices":[{"delta":{"reasoning_content":"不应展示的思考","content":"最终答案"}}]}"""
+        )!!
+        val events = provider.chunkToEvents(
+            chunk, mutableMapOf(), testJson, collectReasoning = false
+        )
+        assertEquals(
+            "开关关闭时应只发 content delta，不发 ReasoningDelta",
+            listOf(StreamEvent.Delta("最终答案")),
+            events
+        )
+    }
+
+    @Test
+    fun `chunkToEvents with collectReasoning true keeps reasoning`() {
+        // 对照：collectReasoning=true（默认）时 reasoning_content → ReasoningDelta
+        val chunk = provider.parseChunk(
+            """{"choices":[{"delta":{"reasoning_content":"应当展示的思考","content":"答案"}}]}"""
+        )!!
+        val events = provider.chunkToEvents(
+            chunk, mutableMapOf(), testJson, collectReasoning = true
+        )
+        assertEquals(
+            "开关开启时应发 ReasoningDelta + content delta",
+            listOf(StreamEvent.ReasoningDelta("应当展示的思考"), StreamEvent.Delta("答案")),
+            events
+        )
+    }
+
+    @Test
+    fun `buildRequestBody serializes thinking and reasoning_effort when thinkingEnabled`() {
+        // 问题 8a（ADR-020）：thinkingEnabled=true 时注入 DeepSeek thinking 模式参数
+        val config = ProviderConfig(
+            name = "DeepSeek", baseUrl = "https://api.deepseek.com",
+            apiKeyRef = "deepseek", models = listOf("deepseek-chat")
+        )
+        val messages = listOf(
+            ChatMessage(id = 0, role = Role.USER, content = "你好", timestamp = 0)
+        )
+
+        val body = provider.buildRequestBody(
+            config, messages, thinkingEnabled = true, reasoningEffort = "high"
+        )
+
+        assertTrue("应包含 thinking 参数", body.contains("\"thinking\":{\"type\":\"enabled\"}"))
+        assertTrue("应包含 reasoning_effort", body.contains("\"reasoning_effort\":\"high\""))
+    }
+
+    @Test
+    fun `buildRequestBody serializes all valid reasoning_effort values`() {
+        // AC-A1（ac-verifier TKN-P8-ACCEPTANCE-001）：合法值 low/high/max 均应在请求体注入
+        val config = ProviderConfig(
+            name = "DeepSeek", baseUrl = "https://api.deepseek.com",
+            apiKeyRef = "deepseek", models = listOf("deepseek-chat")
+        )
+        val messages = listOf(
+            ChatMessage(id = 0, role = Role.USER, content = "你好", timestamp = 0)
+        )
+        for (effort in listOf("low", "high", "max")) {
+            val body = provider.buildRequestBody(
+                config, messages, thinkingEnabled = true, reasoningEffort = effort
+            )
+            assertTrue("合法 effort $effort 应序列化", body.contains("\"reasoning_effort\":\"$effort\""))
+            assertTrue("应包含 thinking 参数", body.contains("\"thinking\":{\"type\":\"enabled\"}"))
+        }
+    }
+
+    @Test
+    fun `buildRequestBody omits thinking fields when thinkingEnabled false`() {
+        // 问题 8a（ADR-020）：关闭时不得发送 DeepSeek 专有参数（向后兼容所有端点）
+        val config = ProviderConfig(
+            name = "OpenAI", baseUrl = "https://api.openai.com/v1",
+            apiKeyRef = "openai", models = listOf("gpt-4o")
+        )
+        val messages = listOf(
+            ChatMessage(id = 0, role = Role.USER, content = "你好", timestamp = 0)
+        )
+
+        val body = provider.buildRequestBody(config, messages, thinkingEnabled = false, reasoningEffort = "high")
+
+        assertFalse("关闭时不应包含 thinking 字段", body.contains("thinking"))
+        assertFalse("关闭时不应包含 reasoning_effort 字段", body.contains("reasoning_effort"))
+    }
+
+    @Test
+    fun `buildRequestBody omits thinking fields when thinkingEnabled default false`() {
+        // 向后兼容：不传 thinkingEnabled（默认 false）时与旧行为一致
+        val config = ProviderConfig(
+            name = "Ollama", baseUrl = "http://localhost:11434/v1",
+            apiKeyRef = "", models = listOf("llama3")
+        )
+        val messages = listOf(
+            ChatMessage(id = 0, role = Role.USER, content = "hi", timestamp = 0)
+        )
+
+        val body = provider.buildRequestBody(config, messages)
+
+        assertFalse("默认不应包含 thinking 字段", body.contains("thinking"))
+        assertFalse("默认不应包含 reasoning_effort 字段", body.contains("reasoning_effort"))
+    }
+
+    @Test
+    fun `buildRequestBody echoes reasoning_content on assistant with thinkingChain`() {
+        // UXR4 问题 1/4/6（ADR-024）：assistant 消息携带 thinkingChain 时必须回传 reasoning_content，
+        // 否则 DeepSeek 工具回路第 2 轮返回 400 "reasoning_content must be passed back to the API"。
+        val config = ProviderConfig(
+            name = "DeepSeek", baseUrl = "https://api.deepseek.com",
+            apiKeyRef = "deepseek", models = listOf("deepseek-v4-flash")
+        )
+        val messages = listOf(
+            ChatMessage(id = 0, role = Role.USER, content = "查询天气", timestamp = 0),
+            ChatMessage(
+                id = 1,
+                role = Role.ASSISTANT,
+                content = "",
+                timestamp = 0,
+                toolCalls = listOf(
+                    ToolCallRef("call_1", "function", "web_search__search", "{\"query\":\"天气\"}")
+                ),
+                thinkingChain = "用户需要实时天气，应联网搜索"
+            )
+        )
+
+        val body = provider.buildRequestBody(
+            config, messages, thinkingEnabled = true, reasoningEffort = "high"
+        )
+
+        assertTrue(
+            "assistant 消息应回传 reasoning_content（DeepSeek 协议要求）",
+            body.contains("\"reasoning_content\":\"用户需要实时天气，应联网搜索\"")
+        )
+        assertTrue("应包含 tool_calls 回放", body.contains("\"tool_calls\""))
+    }
+
+    @Test
+    fun `buildRequestBody omits reasoning_content when thinkingChain null`() {
+        // UXR4 问题 1/4/6（ADR-024）：thinkingChain 为空时不输出 reasoning_content（无思考的端点零影响）
+        val config = ProviderConfig(
+            name = "OpenAI", baseUrl = "https://api.openai.com/v1",
+            apiKeyRef = "openai", models = listOf("gpt-4o")
+        )
+        val messages = listOf(
+            ChatMessage(id = 0, role = Role.USER, content = "hi", timestamp = 0),
+            ChatMessage(id = 1, role = Role.ASSISTANT, content = "hello", timestamp = 0)
+        )
+
+        val body = provider.buildRequestBody(config, messages)
+
+        assertFalse("thinkingChain 为空时不应输出 reasoning_content", body.contains("reasoning_content"))
+    }
+
+    @Test
+    fun `buildRequestBody ignores invalid reasoning_effort via whitelist`() {
+        // S-3（guardrail TKN-P8-GUARDRAIL-001）：纵深防御白名单，非法 effort 忽略而非发送
+        val config = ProviderConfig(
+            name = "DeepSeek", baseUrl = "https://api.deepseek.com",
+            apiKeyRef = "deepseek", models = listOf("deepseek-chat")
+        )
+        val messages = listOf(
+            ChatMessage(id = 0, role = Role.USER, content = "你好", timestamp = 0)
+        )
+
+        val body = provider.buildRequestBody(
+            config, messages, thinkingEnabled = true, reasoningEffort = "ultra"
+        )
+
+        assertTrue("应包含 thinking 参数", body.contains("\"thinking\""))
+        assertFalse("非法 effort 不应序列化", body.contains("ultra"))
+        assertFalse("非法 effort 不应产生 reasoning_effort 字段", body.contains("reasoning_effort"))
     }
 
     // ==================== 端到端：真实 Ktor SSE 服务器 ====================
@@ -371,6 +598,8 @@ class OpenAICompatibleProviderTest {
                             is StreamEvent.Delta -> gotDelta.complete(Unit)
                             StreamEvent.Done -> {}
                             is StreamEvent.Error -> emittedError.set(true)
+                            // 问题 8a（ADR-020）：深度思考推理过程，本测试不注入 thinking 不触发。
+                            is StreamEvent.ReasoningDelta -> {}
                             // M4 tool_calling 事件（ADR-014 5.1）：本测试不注入 tools，三分支不会触发。
                             is StreamEvent.ToolCallStart,
                             is StreamEvent.ToolCallDelta,
@@ -548,8 +777,13 @@ class OpenAICompatibleProviderTest {
 
     @Test
     fun `parseChunk handles whitespace-only content after delta`() {
-        // 空白 content 应忽略（不产生空 Delta），但流不终止
-        assertTrue(parseToEvents("""{"choices":[{"delta":{"content":" "}}]}""").isEmpty())
+        // 2026-08-15 修复（markdown 渲染）：空白 content（空格/换行）不再被忽略，
+        // 保留以支撑 markdown 结构字符（标题/列表/表格依赖行首符号与换行）。
+        // 流不因空白 content 终止。
+        assertEquals(
+            listOf(StreamEvent.Delta(" ")),
+            parseToEvents("""{"choices":[{"delta":{"content":" "}}]}""")
+        )
     }
 
     @Test
@@ -901,6 +1135,33 @@ class OpenAICompatibleProviderTest {
         assertTrue("应包含工具名 read_file", body.contains("read_file"))
         assertTrue("应包含 tool_choice auto", body.contains("\"tool_choice\":\"auto\""))
         assertTrue("parallel_tool_calls 应为 false", body.contains("\"parallel_tool_calls\":false"))
+        // DEF-002：OpenAI 规范要求每个 tool 对象必须包含 type:function，否则 DeepSeek 等严格校验返回 400
+        assertTrue("tool 对象必须包含 type:function", body.contains("\"type\":\"function\""))
+    }
+
+    @Test
+    fun `buildRequestBody includes type field when ToolDefinition uses default type value`() {
+        // DEF-002 回归测试：不显式传入 type（使用默认值 "function"）时，序列化结果仍必须包含 type 字段。
+        // 根因：kotlinx.serialization 默认 encodeDefaults=false 会省略值等于默认值的字段，
+        // 导致 ToolDefinition.type 被剥离，DeepSeek 返回 400 "missing field `type`"。
+        // 修复：Json 配置设置 encodeDefaults=true。
+        val config = ProviderConfig(name = "X", baseUrl = "http://h", apiKeyRef = "", models = listOf("gpt"))
+        val messages = listOf(ChatMessage(id = 0, role = Role.USER, content = "hi", timestamp = 0))
+        val tools = listOf(
+            ToolDefinition(
+                // 不传 type，使用默认值 "function"
+                function = ToolDefinition.FunctionDef(
+                    name = "cross_app__open_app",
+                    description = "Open another app",
+                    parameters = buildJsonObject { put("type", "object") }
+                )
+            )
+        )
+        val body = provider.buildRequestBody(config, messages, tools = tools, toolChoice = ToolChoice.Auto)
+        assertTrue(
+            "使用默认 type 值时仍必须序列化 type:function（DEF-002 根因回归）",
+            body.contains("\"type\":\"function\"")
+        )
     }
 
     @Test
@@ -940,6 +1201,8 @@ class OpenAICompatibleProviderTest {
         assertTrue("应包含 assistant tool_calls 回放", body.contains("\"tool_calls\""))
         assertTrue("应包含 function name read_file", body.contains("read_file"))
         assertTrue("应包含 tool result content", body.contains("file content"))
+        // DEF-002 次生风险：assistant tool_calls 回放也必须包含 type:function（ToolCallWire.type 默认值）
+        assertTrue("tool_calls 回放必须包含 type:function", body.contains("\"type\":\"function\""))
     }
 
     @Test
@@ -1178,4 +1441,47 @@ class OpenAICompatibleProviderTest {
     private fun sampleMessages() = listOf(
         ChatMessage(id = 0, role = Role.USER, content = "你好", timestamp = 0)
     )
+
+    // ==================== DEF-002 错误体脱敏测试（BR-error-handling-008） ====================
+
+    @Test
+    fun `sanitizeErrorBody replaces Unix paths with placeholder to prevent CWE-209 leakage`() {
+        // BR-error-handling-008 回归：errorBody 含 Unix 路径时必须脱敏为 <path>
+        val body = """{"error":"model not found at /var/lib/deepseek/models/ on host"}"""
+        val sanitized = provider.sanitizeErrorBody(body)
+        assertFalse("不应包含原始路径 /var/lib", sanitized.contains("/var/lib"))
+        assertTrue("应包含 <path> 脱敏标记", sanitized.contains("<path>"))
+    }
+
+    @Test
+    fun `sanitizeErrorBody replaces Windows paths with placeholder`() {
+        val body = """{"error":"config missing at C:\Users\admin\config.json"}"""
+        val sanitized = provider.sanitizeErrorBody(body)
+        assertFalse("不应包含原始 Windows 路径", sanitized.contains("C:\\Users"))
+        assertTrue("应包含 <path> 脱敏标记", sanitized.contains("<path>"))
+    }
+
+    @Test
+    fun `sanitizeErrorBody replaces newlines with spaces to prevent log injection`() {
+        val body = "line1\nline2\r\nline3"
+        val sanitized = provider.sanitizeErrorBody(body)
+        assertFalse("不应包含换行符", sanitized.contains("\n"))
+        assertFalse("不应包含回车符", sanitized.contains("\r"))
+    }
+
+    @Test
+    fun `sanitizeErrorBody truncates to 200 characters`() {
+        val body = "x".repeat(500)
+        val sanitized = provider.sanitizeErrorBody(body)
+        assertEquals(200, sanitized.length)
+    }
+
+    @Test
+    fun `sanitizeErrorBody preserves safe business error messages`() {
+        // 正常的业务错误信息（如 DeepSeek 返回的 "missing field type"）不应被过度脱敏
+        val body = """{"error":{"message":"Failed to deserialize: missing field `type`","type":"invalid_request_error"}}"""
+        val sanitized = provider.sanitizeErrorBody(body)
+        assertTrue("应保留业务错误信息 missing field", sanitized.contains("missing field"))
+        assertTrue("应保留 invalid_request_error", sanitized.contains("invalid_request_error"))
+    }
 }

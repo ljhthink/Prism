@@ -33,10 +33,14 @@ class ApiKeyRepository(
     /**
      * 保存 API Key（加密后存入 DataStore）。
      *
+     * 空值跳过：当 [value] 为空字符串时直接返回，不加密不落盘。
+     * 场景：用户编辑 Provider 时未输入新 API Key，不应覆盖已有密钥。
+     *
      * @param key API Key 标识符（如 "openai"、"anthropic"）
      * @param value API Key 明文值
      */
     suspend fun saveApiKey(key: String, value: String) {
+        if (value.isEmpty()) return
         val encrypted = cryptoService.encrypt(value.toByteArray(Charsets.UTF_8))
         dataStore.edit { prefs ->
             prefs[byteArrayPreferencesKey(key)] = encrypted

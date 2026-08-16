@@ -121,11 +121,14 @@ class KeystoreCryptoService(
             .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
             .setKeySize(256)
 
+    // BR-security-006：Tink AndroidKeystoreAesGcm.encryptInternal 在 associatedData 为 null 时
+    // 直接调用 Cipher.updateAAD(null) 抛出 IllegalArgumentException: src buffer is null（DEF-001 闪退根因）。
+    // 将 null 转换为空字节数组，Tink 内部对空 AAD 跳过 updateAAD 调用。
     override fun encrypt(plaintext: ByteArray, associatedData: ByteArray?): ByteArray =
-        aead.encrypt(plaintext, associatedData)
+        aead.encrypt(plaintext, associatedData ?: ByteArray(0))
 
     override fun decrypt(ciphertext: ByteArray, associatedData: ByteArray?): ByteArray =
-        aead.decrypt(ciphertext, associatedData)
+        aead.decrypt(ciphertext, associatedData ?: ByteArray(0))
 
     companion object {
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"

@@ -191,7 +191,9 @@ class M5PhaseBPerfBaselineTest {
             config: ProviderConfig,
             messages: List<ChatMessage>,
             systemPrompt: String?,
-            ragContext: String?
+            ragContext: String?,
+            thinkingEnabled: Boolean?,
+            reasoningEffort: String?
         ): String? = returnValue
     }
 }

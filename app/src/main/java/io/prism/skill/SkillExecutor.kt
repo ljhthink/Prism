@@ -1,6 +1,7 @@
 package io.prism.skill
 
 import android.util.Log
+import io.prism.config.ToolApprovalMode
 import io.prism.data.ExecutionStatus
 import io.prism.data.McpServerConfig
 import io.prism.data.ProviderConfig
@@ -80,7 +81,9 @@ open class SkillExecutor(
     private val confirmationGate: ToolConfirmationGate,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val skillExecutionRepository: SkillExecutionRepository? = null,
-    private val localToolExecutor: LocalToolExecutor? = null
+    private val localToolExecutor: LocalToolExecutor? = null,
+    /** UXR3 问题 10（ADR-023）：工具审批模式提供者（null 时降级为 [ToolApprovalMode.MANUAL]，向后兼容既有测试）。 */
+    private val approvalModeProvider: (suspend () -> ToolApprovalMode)? = null
 ) {
 
     /**
@@ -107,16 +110,33 @@ open class SkillExecutor(
         maxTimeoutMs: Long = DEFAULT_TOOL_TIMEOUT_MS
     ): String = withContext(ioDispatcher) {
         // 1. 用户确认（复用 ToolConfirmationGate，超时兜底由 UiConfirmationGate 内部处理）
-        val approved = try {
-            confirmationGate.confirm(toolCall.toolName, toolCall.arguments)
-        } catch (e: CancellationException) {
-            throw e // BR-error-handling-007：协程取消必须重抛
-        } catch (e: Exception) {
-            // M4：结构化日志（BR-error-handling-004），便于生产环境定位用户确认失败根因
-            Log.w(TAG, "tool confirm failed: ${toolCall.toolName}", e)
-            return@withContext formatConfirmError(toolCall.toolName, e)
+        // UX-001 问题 9（ADR-021）：低风险工具走白名单免审批（[isTrustedTool]），
+        // 避免「联网搜索」等高频率只读操作造成确认弹窗轰炸，影响使用体验。
+        // UXR3 问题 10（ADR-023）：按审批模式分派 ——
+        // - MANUAL（默认）：非白名单工具每次调用询问用户；白名单只读工具免审批
+        // - AUTO：所有工具直接放行（不询问用户）
+        // - DISABLED：工具调用被禁用，直接拒绝（纵深防御，即使 LLM 硬编码调用）
+        val mode = approvalModeProvider?.invoke() ?: ToolApprovalMode.MANUAL
+        when (mode) {
+            ToolApprovalMode.DISABLED -> return@withContext formatDisabled(toolCall.toolName)
+            ToolApprovalMode.AUTO -> { /* 直接放行，跳过确认 */ }
+            ToolApprovalMode.MANUAL -> {
+                val approved = if (isTrustedTool(toolCall.toolName)) {
+                    true
+                } else {
+                    try {
+                        confirmationGate.confirm(toolCall.toolName, toolCall.arguments)
+                    } catch (e: CancellationException) {
+                        throw e // BR-error-handling-007：协程取消必须重抛
+                    } catch (e: Exception) {
+                        // M4：结构化日志（BR-error-handling-004），便于生产环境定位用户确认失败根因
+                        Log.w(TAG, "tool confirm failed: ${toolCall.toolName}", e)
+                        return@withContext formatConfirmError(toolCall.toolName, e)
+                    }
+                }
+                if (!approved) return@withContext formatRejection(toolCall.toolName)
+            }
         }
-        if (!approved) return@withContext formatRejection(toolCall.toolName)
 
         // 2. M6 新增：本地工具分支（LocalToolExecutor 路径，ADR-016）
         //    本地工具（如 cross_app__open_app）不走 MCP 协议，由 LocalToolExecutor 直接执行
@@ -136,8 +156,8 @@ open class SkillExecutor(
             }
         }
 
-        // 3. MCP 工具路径（原有逻辑不变）
-        val mcpServer = selectMcpServer(mcpServers)
+        // 3. MCP 工具路径（原有逻辑不变，DEF-008 支持按工具名路由到正确 Server）
+        val mcpServer = selectMcpServer(mcpServers, toolCall.toolName)
             ?: return@withContext formatNoServer(toolCall.toolName)
 
         // 4. 调用工具（超时防护 + 命名空间剥离）
@@ -198,6 +218,8 @@ open class SkillExecutor(
      * @param idGenerator ChatMessage id 生成器（默认时间戳自增，可注入用于测试）
      * @param skillConfigId 关联的 SkillConfig id（US-029，非空时记录执行记录）
      * @param skillName 关联的 Skill slug（US-029，非空时记录执行记录）
+     * @param thinkingEnabled 是否开启深度思考（问题 8a，ADR-020；null 不开启，透传给 provider）
+     * @param reasoningEffort 思考强度（问题 8a；仅 thinkingEnabled 为 true 时透传）
      * @param onEvent 事件回调（Delta/ToolCallStart/Delta/Complete/Done/Error 全部透传给上层 UI）
      * @return 更新后的消息列表（含 assistant 占位 + tool result）
      */
@@ -213,6 +235,8 @@ open class SkillExecutor(
         idGenerator: () -> Long = ::defaultIdGenerator,
         skillConfigId: Long? = null,
         skillName: String? = null,
+        thinkingEnabled: Boolean? = null,
+        reasoningEffort: String? = null,
         onEvent: (StreamEvent) -> Unit
     ): List<ChatMessage> = withContext(ioDispatcher) {
         // US-029 执行可观测：记录 startedAt / toolCalls / status / errorMessage
@@ -225,21 +249,35 @@ open class SkillExecutor(
             var currentMessages = messages
             var rounds = 0
             var lastRoundHadToolCall = false
+            // UXR6 问题 1：重复工具熔断状态。
+            // - effectiveTools：可被熔断置空（熔断后 LLM 无工具可用，只能纯文本回答）
+            // - effectiveSystemPrompt：熔断时追加"不要再调用工具"提示
+            // - consecutiveToolFailures：同一工具连续失败计数（键 = toolName）
+            var effectiveTools = tools
+            var effectiveSystemPrompt = systemPrompt
+            val consecutiveToolFailures = mutableMapOf<String, Int>()
 
             while (rounds < maxRounds) {
                 rounds++
                 lastRoundHadToolCall = false
                 val completedToolCalls = mutableListOf<StreamEvent.ToolCallComplete>()
-
+                // UXR4 问题 1/4/6（ADR-024）：累积本轮流式响应中的 reasoning_content。
+                // DeepSeek 要求携带 tool_calls 的 assistant 消息必须含 reasoning_content，
+                // 否则工具回路第 2 轮请求返回 400。此处收集后传给
+                // [buildAssistantToolCallMessage] 构造占位消息时回传。
+                val roundReasoning = StringBuilder()
                 // 1. 流式请求 + 收集 ToolCallComplete
                 val flow: Flow<StreamEvent> = try {
                     provider.streamChat(
                         config = config,
                         messages = currentMessages,
-                        systemPrompt = systemPrompt,
+                        systemPrompt = effectiveSystemPrompt,
                         ragContext = ragContext,
-                        tools = tools,
-                        toolChoice = ToolChoice.Auto
+                        tools = effectiveTools,
+                        toolChoice = ToolChoice.Auto,
+                        // 问题 8a（ADR-020）：深度思考参数透传（null 不开启，向后兼容）
+                        thinkingEnabled = thinkingEnabled,
+                        reasoningEffort = reasoningEffort
                     )
                 } catch (e: CancellationException) {
                     throw e // BR-error-handling-007
@@ -258,6 +296,10 @@ open class SkillExecutor(
                 try {
                     flow.collect { event ->
                         onEvent(event)
+                        if (event is StreamEvent.ReasoningDelta) {
+                            // UXR4 问题 1/4/6（ADR-024）：累积 reasoning 供 assistant 占位消息回传
+                            roundReasoning.append(event.content)
+                        }
                         if (event is StreamEvent.ToolCallComplete) {
                             completedToolCalls.add(event)
                         }
@@ -279,15 +321,35 @@ open class SkillExecutor(
                 // 2. 无工具调用 → 回路自然结束（纯文本响应）
                 if (completedToolCalls.isEmpty()) break
                 lastRoundHadToolCall = true
+                // UXR6 问题 6（诊断工具循环行为）：记录每轮工具调用明细，
+                // 真机 logcat 可见 LLM 是否反复调用同一工具（配合重复工具熔断做 RCA）。
+                Log.i(
+                    TAG,
+                    "round=$rounds toolCalls=${completedToolCalls.map { it.toolName }}"
+                )
+
+                // UXR3 问题 2（ADR-023，400 Tool names must be unique）：
+                // LLM 一轮内可能并行调用同名工具多次（不同 call id，deepseek-reasoner 常见）。
+                // 若原样回放 assistant.tool_calls，出现重复 function name，DeepSeek 严格校验
+                // 返回 400 "Tool names must be unique"。此处按 toolName 去重（保留首个），
+                // 后续 tool result 回灌也只针对保留的调用，保证 assistant.tool_calls 与
+                // tool result 一一对应（符合 OpenAI 协议）。
+                val uniqueToolCalls = completedToolCalls.distinctBy { it.toolName }
 
                 // 3. 追加 assistant 占位消息（携带 toolCalls 引用，OpenAI 要求下次请求回放）
-                val assistantPlaceholder = buildAssistantToolCallMessage(completedToolCalls, idGenerator)
+                // UXR4 问题 1/4/6（ADR-024）：同时携带本轮 reasoning_content（thinkingChain），
+                // 满足 DeepSeek「带 tool_calls 的 assistant 消息必须含 reasoning_content」要求。
+                val assistantPlaceholder = buildAssistantToolCallMessage(
+                    uniqueToolCalls,
+                    idGenerator,
+                    roundReasoning.toString()
+                )
                 currentMessages = currentMessages + assistantPlaceholder
 
                 // 4. 串行执行所有 tool_call + 回灌结果
                 //    每个工具的失败/超时/拒绝均降级为描述性字符串回灌（ADR-014 5.7）
                 //    US-029：同时记录 ToolCallRecord 用于执行可观测
-                for (toolCall in completedToolCalls) {
+                for (toolCall in uniqueToolCalls) {
                     val toolStart = System.currentTimeMillis()
                     var toolStatus = ExecutionStatus.SUCCESS
                     val result: String = try {
@@ -314,6 +376,14 @@ open class SkillExecutor(
                     if (isFailureResult(result)) {
                         toolStatus = ExecutionStatus.FAIL
                     }
+                    // UXR6 问题 1：重复工具熔断计数（同一工具连续失败累加，成功则清零）。
+                    // 记录在 executeToolCall 返回之后、tool result 回灌之前，供循环末尾熔断判断。
+                    consecutiveToolFailures[toolCall.toolName] =
+                        if (toolStatus == ExecutionStatus.FAIL) {
+                            (consecutiveToolFailures[toolCall.toolName] ?: 0) + 1
+                        } else {
+                            0
+                        }
                     val toolDuration = System.currentTimeMillis() - toolStart
                     toolCallRecords.add(
                         ToolCallRecord(
@@ -332,11 +402,33 @@ open class SkillExecutor(
                     )
                     currentMessages = currentMessages + toolResultMessage
                 }
-                // 5. 继续下一轮（LLM 基于 tool result 继续生成）
+
+                // 5. 重复工具熔断（UXR6 问题 1）：同一工具连续失败达阈值时，
+                //    置空工具 + 追加提示，让 LLM 直接基于已有信息回答，
+                //    避免"失败文案诱导重试 → maxRounds=10 硬终止 → 用户无答案"的死循环。
+                val failedToolName = consecutiveToolFailures.entries
+                    .firstOrNull { it.value >= MAX_CONSECUTIVE_TOOL_FAILURES }
+                    ?.key
+                if (failedToolName != null) {
+                    Log.w(TAG, "tool circuit breaker: $failedToolName failed $MAX_CONSECUTIVE_TOOL_FAILURES times consecutively")
+                    effectiveTools = emptyList()
+                    effectiveSystemPrompt = (effectiveSystemPrompt ?: "") +
+                        "\n\n注意：工具「$failedToolName」连续多次调用失败。请直接基于已有信息回答用户问题，不要再调用任何工具。"
+                    consecutiveToolFailures.clear()
+                    // guardrail Low-3（TKN-UXR6-GUARDRAIL-001）：熔断在最后一轮（round==maxRounds）
+                    // 触发时 continue 后 while 立即退出，lastRoundHadToolCall 仍为 true →
+                    // shouldEmitMaxRoundsError 误发"循环达上限"。熔断即主动终止工具循环，
+                    // 置 false 使 shouldEmitMaxRoundsError 不触发（熔断目标是给用户答案而非报错）。
+                    lastRoundHadToolCall = false
+                    continue // 用空工具再跑一轮：LLM 无工具可用，只能纯文本回答，回路自然结束
+                }
+                // 6. 继续下一轮（LLM 基于 tool result 继续生成）
             }
 
             // 6. maxRounds 超限提示（仅当最后一轮有工具调用却已达上限时）
             if (shouldEmitMaxRoundsError(lastRoundHadToolCall, rounds, maxRounds)) {
+                // UXR6 问题 6：记录循环达上限根因（真机 RCA：确认是重复工具调用导致）
+                Log.w(TAG, "maxRounds reached: rounds=$rounds maxRounds=$maxRounds")
                 finalStatus = ExecutionStatus.FAIL
                 errorMessage = "工具调用循环达上限 $maxRounds"
                 onEvent(StreamEvent.Error("工具调用循环达上限 $maxRounds，已终止"))
@@ -368,8 +460,23 @@ open class SkillExecutor(
         /** 工具执行回路默认最大轮数（防止无限循环，ADR-014 5.5）。 */
         internal const val DEFAULT_MAX_ROUNDS = 10
 
+        /**
+         * 重复工具熔断阈值（UXR6 问题 1）：同一工具连续失败达到该次数即熔断，
+         * 置空工具让 LLM 直接基于已有信息回答，避免"失败文案诱导重试 → maxRounds 硬终止"死循环。
+         */
+        internal const val MAX_CONSECUTIVE_TOOL_FAILURES = 2
+
         /** 命名空间分隔符（`skillName__toolName`）。 */
         internal const val NAMESPACE_SEPARATOR = "__"
+
+        /**
+         * MCP 工具命名空间前缀（DEF-008，Bug-3）。
+         *
+         * 注入到 LLM 的 MCP 工具名格式：`mcp_<serverName>__<toolName>`。
+         * 前缀避免与 Skill 工具（`skillName__toolName`）及跨 App 工具（`cross_app__*`）冲突，
+         * 并使 [selectMcpServer] 能从工具名解析出目标 MCP Server（多 server 时精确路由）。
+         */
+        internal const val MCP_NAMESPACE_PREFIX = "mcp_"
 
         /** 日志 TAG（M4 结构化日志，BR-error-handling-004）。 */
         private const val TAG = "SkillExecutor"
@@ -379,6 +486,12 @@ open class SkillExecutor(
 
         /** 工具调用结果预览长度上限（US-029，ToolCallRecord.result 截断）。 */
         internal const val MAX_RESULT_PREVIEW_LEN = 200
+
+        /**
+         * Q1（guardrail TKN-UXR4-GUARDRAIL-001）：assistant 占位消息携带的 reasoning_content
+         * 长度上限。多轮工具回路中思考链会随轮次累积，需截断防 token 溢出与会话 JSON 膨胀。
+         */
+        internal const val MAX_REASONING_LEN = 2000
 
         /**
          * 文件路径正则（M3 脱敏）：匹配以 `/` 或 `\` 开头的路径片段，
@@ -412,23 +525,68 @@ open class SkillExecutor(
         }
 
         /**
-         * 剥离工具名命名空间前缀（`skillName__toolName` → `toolName`）。
+         * 将 MCP Server 名称规范化为合法工具命名空间（UX-001 问题 5/6，ADR-022 二次修复）。
          *
-         * Skill 声明的工具名带 skill 命名空间前缀以避免跨 Skill 同名冲突，
-         * 调用 MCP Server 时需剥离前缀（MCP Server 不感知 Skill 层命名空间）。
+         * **根因**：server 名含空格（如 `Sequential Thinking`）或中文（如 `跨 App 调用`）时，
+         * 拼出的工具名 `mcp_<serverName>__<tool>` 含非法字符，被 OpenAI/DeepSeek 拒绝
+         * （400 invalid_request_error）或本地 `isLegalToolName` 过滤导致 LLM 感知不到该工具。
          *
-         * 无前缀时原样返回（向后兼容）。
+         * **修复**：将非 `[a-zA-Z0-9]` 字符替换为 `_`，保证工具名合法（OpenAI 仅允许 `[a-zA-Z0-9_-]`）。
+         * 该函数是**双向一致的**：构造工具名（[ConversationViewModel.buildTools 合并]）与反查
+         * [selectMcpServer] 必须使用同一规范化逻辑，否则无法从工具名反解回原始 Server。
+         *
+         * 示例：`Sequential Thinking` → `Sequential_Thinking`；`跨 App 调用` → `______`（中文全替换）。
+         *
+         * @param serverName MCP Server 原始名称
+         * @return 规范化后的合法命名空间（仅含 `[a-zA-Z0-9_]`，不含 `__`）
          */
-        internal fun stripNamespace(toolName: String): String =
-            toolName.substringAfter(NAMESPACE_SEPARATOR)
+        internal fun toMcpNamespace(serverName: String): String =
+            serverName.replace(NON_ALNUM_PATTERN, "_")
+
+        /** 非字母数字字符模式（用于 [toMcpNamespace]，MCP 工具命名空间规范化）。 */
+        internal val NON_ALNUM_PATTERN = Regex("""[^a-zA-Z0-9]""")
 
         /**
-         * 选择第一个启用的 MCP Server（按列表顺序优先）。
+         * 剥离工具名命名空间前缀（DEF-008，Bug-3 扩展）。
          *
-         * @return 第一个 isEnabled 的 Server；无则 null
+         * - MCP 工具（`mcp_<serverName>__<toolName>`）：剥离 `mcp_<serverName>__`，剩 `<toolName>`
+         * - Skill 工具（`skillName__toolName`）：剥离 `skillName__`，剩 `<toolName>`
+         *
+         * MCP Server 不感知 Prism 层命名空间，调用前必须剥离。
          */
-        internal fun selectMcpServer(mcpServers: List<McpServerConfig>): McpServerConfig? =
-            mcpServers.firstOrNull { it.isEnabled }
+        internal fun stripNamespace(toolName: String): String {
+            if (toolName.startsWith(MCP_NAMESPACE_PREFIX)) {
+                return toolName.substringAfter(MCP_NAMESPACE_PREFIX).substringAfter(NAMESPACE_SEPARATOR)
+            }
+            return toolName.substringAfter(NAMESPACE_SEPARATOR)
+        }
+
+        /**
+         * 选择 MCP Server（DEF-008，Bug-3：支持按工具名精确路由）。
+         *
+         * - 工具名带 MCP 前缀（`mcp_<serverName>__...`）：匹配名称一致的启用 Server；
+         *   匹配不到回退第一个启用 Server（向后兼容）
+         * - 无 MCP 前缀（Skill/跨 App 工具）：取第一个启用的 Server（原逻辑）
+         *
+         * @return 匹配的 Server；无启用 Server 则 null
+         */
+        internal fun selectMcpServer(
+            mcpServers: List<McpServerConfig>,
+            toolName: String? = null
+        ): McpServerConfig? {
+            if (toolName != null && toolName.startsWith(MCP_NAMESPACE_PREFIX)) {
+                // UX-001 问题 5/6（ADR-022 二次修复）：工具名中的 serverName 是经 [toMcpNamespace]
+                // 规范化后的命名空间（含空格/中文的原始名会被替换为 `_`），反查时必须对每个
+                // server.name 做同样规范化后再比较，否则含空格/中文的 Server 永远匹配不上。
+                val serverNamespace = toolName
+                    .substringAfter(MCP_NAMESPACE_PREFIX)
+                    .substringBefore(NAMESPACE_SEPARATOR)
+                mcpServers.firstOrNull {
+                    it.isEnabled && toMcpNamespace(it.name).equals(serverNamespace, ignoreCase = true)
+                }?.let { return it }
+            }
+            return mcpServers.firstOrNull { it.isEnabled }
+        }
 
         /**
          * 判定是否应发射 maxRounds 超限 Error 事件。
@@ -474,12 +632,26 @@ open class SkillExecutor(
                 result.startsWith("工具执行失败") ||
                 result.startsWith("无可用 MCP Server") ||
                 result.startsWith("用户确认失败") ||
+                result.startsWith("工具调用已禁用") ||
                 result.startsWith("未找到应用配置") ||
                 result.startsWith("未安装") ||
                 result.startsWith("跨 App 调用超时") ||
                 result.startsWith("缺少必需参数") ||
                 result.startsWith("不支持的媒体类型") ||
-                result.startsWith("未知跨 App 工具")
+                result.startsWith("未知跨 App 工具") ||
+                // UXR6 问题 1：联网搜索失败/空结果前缀（WebSearchLocalToolExecutor 返回），
+                // 纳入失败识别，使重复工具熔断能识别搜索失败并提前终止。
+                result.startsWith("搜索失败") ||
+                // UXR7 问题 1（新发现）：Fetch 工具失败文案（LocalMcpToolProvider 返回
+                // "抓取失败：..."），此前不在前缀列表 → LLM 反复用 Fetch 抓取直至 maxRounds。
+                result.startsWith("抓取失败") ||
+                result.startsWith("Fetch 工具不可用") ||
+                // UXR7-R2（网络调研：LocalMcpToolProvider 全量降级文案审计）：补全剩余
+                // 失败前缀——"仅支持抓取"/"仅支持公网地址"（URL 非法/SSRF 拒绝）与
+                // "工具调用失败"（Filesystem 桥接兜底），避免 LLM 反复用同参数重试直至熔断。
+                result.startsWith("仅支持抓取") ||
+                result.startsWith("仅支持抓取公网地址") ||
+                result.startsWith("工具调用失败")
 
         /**
          * 构造 assistant 占位消息（携带 toolCalls 引用，OpenAI 要求下次请求回放）。
@@ -487,12 +659,19 @@ open class SkillExecutor(
          * content 为空字符串（OpenAI 允许 assistant 空 content + tool_calls）。
          * toolCalls 字段携带所有完成的 tool_call 引用（id/name/arguments JSON string）。
          *
+         * **UXR4 问题 1/4/6（ADR-024）**：新增 [reasoningContent] 参数 —— 携带本轮流式响应
+         * 累积的 reasoning_content（思考链）。DeepSeek 官方要求：携带 tool_calls 的 assistant
+         * 消息必须含 reasoning_content，否则后续请求返回 400。thinkingChain 为空白时置 null
+         * （经 [ChatMessage.toMessageBody] 输出 null，无思考的端点零影响）。
+         *
          * @param toolCalls 本轮 LLM 返回的所有 ToolCallComplete 事件
          * @param idGenerator ChatMessage id 生成器
+         * @param reasoningContent 本轮流式响应累积的 reasoning_content（可为空串/空白）
          */
         internal fun buildAssistantToolCallMessage(
             toolCalls: List<StreamEvent.ToolCallComplete>,
-            idGenerator: () -> Long
+            idGenerator: () -> Long,
+            reasoningContent: String? = null
         ): ChatMessage {
             val refs = toolCalls.map { tc ->
                 ToolCallRef(
@@ -506,7 +685,12 @@ open class SkillExecutor(
                 role = Role.ASSISTANT,
                 content = "",
                 timestamp = System.currentTimeMillis(),
-                toolCalls = refs
+                toolCalls = refs,
+                // Q1（guardrail TKN-UXR4-GUARDRAIL-001）：reasoningContent 长度上限，
+                // 防多轮回路思考链无限膨胀（token 溢出 + 会话 JSON 重复存储）
+                thinkingChain = reasoningContent
+                    ?.takeIf { it.isNotBlank() }
+                    ?.take(MAX_REASONING_LEN)
             )
         }
 
@@ -572,6 +756,31 @@ open class SkillExecutor(
         /** 用户拒绝执行工具的回灌文案。 */
         internal fun formatRejection(toolName: String): String =
             "用户拒绝执行工具: $toolName"
+
+        /** 工具被禁用（DISABLED 模式）的回灌文案（UXR3 问题 10，ADR-023）。 */
+        internal fun formatDisabled(toolName: String): String =
+            "工具调用已禁用（请在设置中开启工具审批模式）: $toolName"
+
+        /**
+         * 判定工具是否属于低风险白名单（UX-001 问题 9，ADR-021）—— 免审批执行。
+         *
+         * **设计原则**：仅豁免「只读、高频率、无副作用」的本地工具，
+         * 避免确认弹窗轰炸影响体验；任何有副作用（跨 App 打开/分享/选取、
+         * 文件系统写入、MCP 自定义工具）的工具仍强制用户确认。
+         *
+         * **当前白名单**：
+         * - `web_search__search`（联网搜索，只读检索）
+         *
+         * **安全性**：白名单是显式枚举，新增工具需人工评估其副作用后加入；
+         * 未知工具名一律返回 false（fail-closed，纵深防御）。
+         */
+        internal fun isTrustedTool(toolName: String): Boolean =
+            toolName in TRUSTED_TOOL_WHITELIST
+
+        /** 免审批工具白名单（只读无副作用工具，显式枚举）。 */
+        internal val TRUSTED_TOOL_WHITELIST: Set<String> = setOf(
+            "web_search__search"
+        )
 
         /** 工具执行超时的回灌文案。 */
         internal fun formatTimeout(toolName: String, ms: Long): String =

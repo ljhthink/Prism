@@ -429,6 +429,66 @@ class IngestionPipelineTest {
         assertTrue("M1: 负数 kbId 时 input 也应被关闭", trackedStream.closed)
     }
 
+    // ==================== UX-001 问题 2（ADR-021）：ingestText 文本直接入库 ====================
+
+    @Test
+    fun ingestText_happy_path_persists_embedded_chunks() = runBlocking {
+        val kbId = repository.save(KnowledgeBase(name = "工作"))
+        val text = "第一段内容。\n\n第二段内容。\n\n第三段内容。"
+
+        val events = pipeline.ingestText("我的笔记", text, kbId).toList()
+
+        // 事件序列：Started → Chunked → ChunkEmbedded×3 → Completed（无 Parsed）
+        assertEquals(6, events.size)
+        assertTrue(events[0] is IngestionEvent.Started)
+        assertTrue(events[1] is IngestionEvent.Chunked)
+        assertTrue(events[2] is IngestionEvent.ChunkEmbedded)
+        assertTrue(events[3] is IngestionEvent.ChunkEmbedded)
+        assertTrue(events[4] is IngestionEvent.ChunkEmbedded)
+        val completed = events[5] as IngestionEvent.Completed
+        assertEquals(3, completed.result.totalChunks)
+        assertEquals(3, completed.result.embeddedChunks)
+        assertEquals(0, completed.result.skippedChunks)
+        assertEquals("我的笔记", completed.result.documentTitle)
+
+        // 入库验证：3 个 chunk 全部写入
+        assertEquals(3, repository.chunkCount(kbId))
+        val chunks = chunkBox.all
+        chunks.forEach { chunk ->
+            assertNotNull("embedding 应非 null", chunk.embedding)
+            assertTrue(chunk.title.startsWith("我的笔记#"))
+        }
+    }
+
+    @Test
+    fun ingestText_negative_knowledge_base_id_throws() = runBlocking {
+        try {
+            pipeline.ingestText("笔记", "内容", -1L).toList()
+            org.junit.Assert.fail("负数 knowledgeBaseId 应抛异常")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("负数"))
+        }
+    }
+
+    @Test
+    fun ingestText_blank_title_throws() = runBlocking {
+        try {
+            pipeline.ingestText("  ", "内容", 0L).toList()
+            org.junit.Assert.fail("空白标题应抛异常")
+        } catch (e: IllegalArgumentException) {
+            assertTrue(e.message!!.contains("空白"))
+        }
+    }
+
+    @Test
+    fun ingestText_chunks_can_be_listed_as_documents() = runBlocking {
+        val kbId = repository.save(KnowledgeBase(name = "工作"))
+        pipeline.ingestText("会议纪要", "第一条。\n\n第二条。", kbId).toList()
+
+        val docs = repository.listDocuments(kbId)
+        assertEquals("文本入库的文档应可被 listDocuments 识别", listOf("会议纪要"), docs)
+    }
+
     /**
      * Q6 补充（TKN-US016-GUARDRAIL-001）：协程取消在 chunk 边界生效。
      * 构造多 chunk 文档，在第 1 个 ChunkEmbedded 后取消 collect，验证管线停止处理后续 chunk。

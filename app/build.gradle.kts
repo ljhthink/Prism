@@ -154,6 +154,7 @@ dependencies {
     implementation(libs.pdfbox)
     // M4 Skills（ADR-013 5.2）：SKILL.md frontmatter YAML 解析（snakeyaml-engine-kmp，Apache 2.0）
     implementation(libs.snakeyaml.engine.kmp)
+    implementation(libs.markdown.renderer.m3)
     debugImplementation(libs.androidx.ui.tooling)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

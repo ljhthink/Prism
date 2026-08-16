@@ -284,6 +284,150 @@ class KnowledgeBaseRepository(private val boxStore: BoxStore) {
     }
 
     /**
+     * 列出指定知识库下的文档标题列表（UX-001 问题 2，ADR-021）。
+     *
+     * chunk title 约定为 `${documentTitle}#${index+1}`（IngestionPipeline 生成），
+     * 文档标题即 title 去掉末尾 `#序号` 后的前缀。按出现顺序去重。
+     *
+     * **容错**：title 不含 `#` 时视整段为文档标题（保留原文，不丢文档）。
+     *
+     * @param knowledgeBaseId 知识库 id（0L=默认库，>0=自建库）
+     * @return 该库下的文档标题列表（去重，按首次出现顺序）
+     * @throws IllegalArgumentException 当 knowledgeBaseId < 0 时
+     */
+    fun listDocuments(knowledgeBaseId: Long): List<String> {
+        require(knowledgeBaseId >= 0) { "knowledgeBaseId 不能为负数（收到 $knowledgeBaseId）" }
+        val seen = linkedSetOf<String>()
+        chunkBox.query()
+            .equal(KnowledgeChunk_.knowledgeBaseId, knowledgeBaseId)
+            .build()
+            .use { q ->
+                q.find().forEach { chunk ->
+                    val (docTitle, _) = parseTitle(chunk.title)
+                    seen.add(docTitle)
+                }
+            }
+        return seen.toList()
+    }
+
+    /**
+     * 获取指定知识库下某文档的全部分块内容（UXR3 问题 12，ADR-023）。
+     *
+     * 按文档标题精确匹配（`title == "$documentTitle#$index"` 或 `title == "$documentTitle"`），
+     * 按 chunkIndex（title 末尾 `#N`）升序拼接，返回该文档的完整文本（近似原始文档正文）。
+     *
+     * **用途**：知识库管理 UI 的「查看内容」功能 —— 用户直接阅读已入库资料，无需在
+     * 外部打开原文件，提升知识库管理便利性（ADR-011 5.4 补充）。
+     *
+     * **容错**：
+     * - 无匹配 chunk 时返回空字符串（UI 展示「无内容」）
+     * - title 无法解析 chunkIndex 时按出现顺序拼接（保留原文顺序）
+     * - 分块间以 `\n\n` 分隔，还原切片时的段落边界（Chunker 语义）
+     *
+     * @param knowledgeBaseId 知识库 id（0L=默认库，>0=自建库）
+     * @param documentTitle 文档标题
+     * @return 文档全文（分块按序号升序拼接；无匹配时返回空串）
+     * @throws IllegalArgumentException 当 knowledgeBaseId < 0 或 documentTitle 为空白时
+     */
+    fun getDocumentContent(knowledgeBaseId: Long, documentTitle: String): String {
+        require(knowledgeBaseId >= 0) { "knowledgeBaseId 不能为负数（收到 $knowledgeBaseId）" }
+        require(documentTitle.isNotBlank()) { "documentTitle 不能为空白" }
+        val matched = chunkBox.query()
+            .equal(KnowledgeChunk_.knowledgeBaseId, knowledgeBaseId)
+            .build()
+            .use { q ->
+                q.find()
+                    .filter { chunk ->
+                        val (docTitle, _) = parseTitle(chunk.title)
+                        docTitle == documentTitle
+                    }
+                    // 按 chunkIndex 升序（title 末尾 #N）；无法解析序号的排最后（保序）
+                    .sortedWith(
+                        compareBy<KnowledgeChunk> { chunk ->
+                            val (_, idx) = parseTitle(chunk.title)
+                            idx ?: Int.MAX_VALUE
+                        }.thenBy { it.id }
+                    )
+            }
+        return matched.joinToString("\n\n") { it.content.trim() }.trim()
+    }
+
+    /**
+     * 删除指定知识库下某个文档的所有分块（UX-001 问题 2，ADR-021）。
+     *
+     * 按文档标题精确匹配（`title == "$documentTitle#$index"` 或 `title == "$documentTitle"`），
+     * 同一文档的所有 chunk 在单事务内删除（原子性，BR-concurrency-001）。
+     *
+     * **HNSW 删除策略**（同 [remove]）：用 `findIds()` + `Box.remove(ids)` 规避 #1209，
+     * `use {}` 关闭 Query（G-02）。
+     *
+     * @param knowledgeBaseId 知识库 id（0L=默认库，>0=自建库）
+     * @param documentTitle 要删除的文档标题
+     * @return 删除的 chunk 数量
+     * @throws IllegalArgumentException 当 knowledgeBaseId < 0 时
+     */
+    fun deleteDocument(knowledgeBaseId: Long, documentTitle: String): Long {
+        require(knowledgeBaseId >= 0) { "knowledgeBaseId 不能为负数（收到 $knowledgeBaseId）" }
+        require(documentTitle.isNotBlank()) { "documentTitle 不能为空白" }
+        var removed: Long = 0L
+        boxStore.runInTx {
+            // ObjectBox QueryBuilder 不支持 OR 前缀匹配，查询后按解析出的文档标题过滤
+            val ids = chunkBox.query()
+                .equal(KnowledgeChunk_.knowledgeBaseId, knowledgeBaseId)
+                .build()
+                .use { it.find() }
+                .filter { chunk ->
+                    val (docTitle, _) = parseTitle(chunk.title)
+                    docTitle == documentTitle
+                }
+                .map { it.id }
+            if (ids.isNotEmpty()) {
+                chunkBox.remove(*ids.toLongArray())
+                removed = ids.size.toLong()
+            }
+        }
+        return removed
+    }
+
+    /**
+     * 将指定知识库下某个文档的所有分块移动到目标知识库（UX-001 问题 2，ADR-021）。
+     *
+     * **原子性**（BR-concurrency-001）：单事务内批量更新 chunk 的 knowledgeBaseId。
+     * 移动后 embedding 保持不变（向量索引关联 chunk 本体，不失效）。
+     *
+     * **边界**：源库与目标库相同视为 no-op（返回 0）；目标库 id 负数拒绝（纵深防御）。
+     *
+     * @param sourceKbId 源知识库 id（0L=默认库，>0=自建库）
+     * @param documentTitle 要移动的文档标题
+     * @param targetKbId 目标知识库 id（0L=默认库，>0=自建库）
+     * @return 移动的 chunk 数量
+     * @throws IllegalArgumentException 当 sourceKbId < 0 / targetKbId < 0 时
+     */
+    fun moveDocument(sourceKbId: Long, documentTitle: String, targetKbId: Long): Long {
+        require(sourceKbId >= 0) { "sourceKbId 不能为负数（收到 $sourceKbId）" }
+        require(targetKbId >= 0) { "targetKbId 不能为负数（收到 $targetKbId）" }
+        require(documentTitle.isNotBlank()) { "documentTitle 不能为空白" }
+        if (sourceKbId == targetKbId) return 0L
+        var moved: Long = 0L
+        boxStore.runInTx {
+            val chunks = chunkBox.query()
+                .equal(KnowledgeChunk_.knowledgeBaseId, sourceKbId)
+                .build()
+                .use { it.find() }
+                .filter { chunk ->
+                    val (docTitle, _) = parseTitle(chunk.title)
+                    docTitle == documentTitle
+                }
+            chunks.forEach { chunk ->
+                chunk.knowledgeBaseId = targetKbId
+                chunkBox.put(chunk)
+            }
+            moved = chunks.size.toLong()
+        }
+        return moved
+    }
+
+    /**
      * 解析 KnowledgeChunk.title 为文档标题与分块序号（ADR-010 5.9）。
      *
      * title 原文格式 `${documentTitle}#${index+1}`（IngestionPipeline 生成，ADR-009）。

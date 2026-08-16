@@ -175,7 +175,9 @@ class ConversationSummarizerTest {
             config: ProviderConfig,
             messages: List<ChatMessage>,
             systemPrompt: String?,
-            ragContext: String?
+            ragContext: String?,
+            thinkingEnabled: Boolean?,
+            reasoningEffort: String?
         ): String? {
             callCount++
             lastConfig = config

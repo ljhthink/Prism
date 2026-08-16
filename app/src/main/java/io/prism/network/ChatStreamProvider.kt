@@ -19,6 +19,11 @@ import kotlinx.coroutines.flow.Flow
  * - 新增 [toolChoice] 可选参数：工具选择策略（Auto/Required/Specific/None）
  * - 所有新参数默认 null，既有调用零改动（向后兼容，BR-interface-004 历史过滤器不受影响）
  *
+ * **问题 8a 接口扩展**（ADR-020）：
+ * - 新增 [thinkingEnabled] 可选参数：是否开启深度思考（DeepSeek thinking 模式）
+ * - 新增 [reasoningEffort] 可选参数：思考强度（low/high/max）
+ * - 默认 null 不开启，向后兼容（既有调用零改动）
+ *
  * @see OpenAICompatibleProvider
  */
 interface ChatStreamProvider {
@@ -31,7 +36,10 @@ interface ChatStreamProvider {
      * @param ragContext RAG context 文本（可选，知识库片段拼接）；null 时不注入 context user 消息
      * @param tools 工具定义列表（可选，M4 tool_calling）；null 时 不发送 tools 字段（普通对话）
      * @param toolChoice 工具选择策略（可选，M4）；null 时由 Provider 默认（OpenAI 默认 auto）
-     * @return [StreamEvent] 流：增量 [StreamEvent.Delta] / 工具调用事件 → [StreamEvent.Done] / [StreamEvent.Error]
+     * @param thinkingEnabled 是否开启深度思考（可选，问题 8a）；null 时不发送 thinking 字段（普通对话）
+     * @param reasoningEffort 思考强度（可选，问题 8a，low/high/max）；仅 thinkingEnabled 为 true 时发送
+     * @return [StreamEvent] 流：增量 [StreamEvent.Delta] / 思考过程 [StreamEvent.ReasoningDelta] /
+     *         工具调用事件 → [StreamEvent.Done] / [StreamEvent.Error]
      */
     fun streamChat(
         config: ProviderConfig,
@@ -39,6 +47,8 @@ interface ChatStreamProvider {
         systemPrompt: String? = null,
         ragContext: String? = null,
         tools: List<ToolDefinition>? = null,
-        toolChoice: ToolChoice? = null
+        toolChoice: ToolChoice? = null,
+        thinkingEnabled: Boolean? = null,
+        reasoningEffort: String? = null
     ): Flow<StreamEvent>
 }

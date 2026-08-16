@@ -3,6 +3,7 @@ package io.prism.network
 import io.prism.data.McpServerConfig
 import io.prism.data.McpServerType
 import kotlinx.coroutines.runBlocking
+import kotlinx.serialization.json.JsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -20,11 +21,19 @@ class McpToolProviderDispatcherTest {
         var lastToolName: String? = null
         var lastArguments: Map<String, Any?>? = null
         var toolsToReturn: List<String> = emptyList()
+        var definitionsToReturn: List<ToolDefinition> = emptyList()
         var callToReturn: String = ""
 
         override suspend fun listTools(config: McpServerConfig): List<String> {
             lastConfig = config
             return toolsToReturn
+        }
+
+        // B-1（guardrail TKN-P17-GUARDRAIL-001）：fake 显式覆写 describeTools，
+        // 验证 Dispatcher 是否正确分发（原实现未覆写导致生产链路 describeTools 恒空）
+        override suspend fun describeTools(config: McpServerConfig): List<ToolDefinition> {
+            lastConfig = config
+            return definitionsToReturn
         }
 
         override suspend fun callTool(
@@ -101,5 +110,54 @@ class McpToolProviderDispatcherTest {
         assertEquals("pong", result)
         assertEquals("echo", remote.lastToolName)
         assertEquals(null, local.lastToolName)
+    }
+
+    // ==================== B-1（guardrail TKN-P17-GUARDRAIL-001）：describeTools 分发 ====================
+
+    @Test
+    fun `describeTools local config routes to local provider`() = runBlocking {
+        val def = ToolDefinition(
+            function = ToolDefinition.FunctionDef(name = "get_current_time", description = "current time", parameters = JsonObject(mapOf()))
+        )
+        val local = RecordingProvider("local").apply { definitionsToReturn = listOf(def) }
+        val remote = RecordingProvider("remote")
+        val dispatcher = McpToolProviderDispatcher(local, remote)
+        val cfg = localConfig()
+
+        val tools = dispatcher.describeTools(cfg)
+
+        assertEquals("应返回本地定义的 1 个工具", 1, tools.size)
+        assertEquals("get_current_time", tools[0].function.name)
+        assertEquals(cfg, local.lastConfig)
+        assertEquals(null, remote.lastConfig)
+    }
+
+    @Test
+    fun `describeTools remote config routes to remote provider`() = runBlocking {
+        val def = ToolDefinition(
+            function = ToolDefinition.FunctionDef(name = "echo", description = "echo tool", parameters = JsonObject(mapOf()))
+        )
+        val local = RecordingProvider("local")
+        val remote = RecordingProvider("remote").apply { definitionsToReturn = listOf(def) }
+        val dispatcher = McpToolProviderDispatcher(local, remote)
+        val cfg = remoteConfig()
+
+        val tools = dispatcher.describeTools(cfg)
+
+        assertEquals(1, tools.size)
+        assertEquals("echo", tools[0].function.name)
+        assertEquals(cfg, remote.lastConfig)
+        assertEquals(null, local.lastConfig)
+    }
+
+    @Test
+    fun `describeTools returns empty when provider has no tools`() = runBlocking {
+        // 未配置工具的 Provider 应返回空（不注入，避免误导 LLM）
+        val local = RecordingProvider("local")
+        val remote = RecordingProvider("remote")
+        val dispatcher = McpToolProviderDispatcher(local, remote)
+
+        assertEquals(emptyList<ToolDefinition>(), dispatcher.describeTools(localConfig()))
+        assertEquals(emptyList<ToolDefinition>(), dispatcher.describeTools(remoteConfig()))
     }
 }

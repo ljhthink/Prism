@@ -18,6 +18,17 @@
 - 适用场景：dev
 - 状态：active（ac-verifier TKN-M4-PHASEA-ACCEPTANCE-001 验证通过，2026-08-09 转 active）
 
+#### BR-naming-002: 局部变量名禁止与同作用域组件参数名同名导致语义混淆
+
+- 类别：naming
+- 规则：在 Composable 函数内部声明的局部 `var`/`val`，若其语义与同作用域内使用的组件参数名相同（如局部变量 `enabled` 表示"开关状态"，同作用域内 PrismButton 也有 `enabled` 参数表示"按钮可点击性"），必须重命名为语义更明确的名称。同名会导致：(1) `enabled = !isNew && !enabled` 一行内左值是参数名、右值是局部变量，需多次回读才能理解；(2) onClick 闭包内 `if (enabled)` 易被误读为"如果按钮启用"而非"如果开关已开启"；(3) 未来若重命名组件参数，可能误改局部变量。命名应表达业务意图（如 `activateAfterSave` 表达"保存后是否激活"），而非复用通用修饰词。
+- 反例：`var enabled by remember { mutableStateOf(config.isActive) }` + `PrismButton(enabled = !isNew && !enabled, ...)` + `if (enabled) { viewModel.setActive(...) }` —— `enabled` 既指开关状态又出现在按钮参数位置，语义混淆
+- 正例：`var activateAfterSave by remember { mutableStateOf(config.isActive) }` + `PrismButton(enabled = !isNew && !activateAfterSave, ...)` + `if (activateAfterSave) { viewModel.setActive(...) }` —— 明确表达"保存后是否激活"
+- 来源：DEF-001 Provider 配置保存功能故障定位（TKN-DEF001-ROOTCAUSE-002，考古报告 §3 变量名 enabled 语义混淆影响评估）
+- 添加日期：2026-08-12
+- 适用场景：dev
+- 状态：active（guardrail TKN-DEF001-GUARDRAIL-001 确认非重复 + ac-verifier TKN-DEF001-ACCEPTANCE-001 验证通过，2026-08-12 转 active）
+
 ### error-handling
 
 #### BR-error-handling-003: 错误文案安全映射时应保留业务语义区分
@@ -87,6 +98,29 @@
 - 添加日期：2026-08-09
 - 适用场景：dev
 - 状态：active（ac-verifier TKN-M4-PHASED-ACCEPTANCE-001 确认 M-1 双层脱敏在集成测试中有效，2026-08-09 转 active）
+
+#### BR-error-handling-009: kotlinx.serialization Json 实例必须设置 encodeDefaults=true + explicitNulls=false
+
+- 类别：error-handling / testing
+- 规则：当使用 kotlinx.serialization 的 `Json` 实例序列化含默认值字段的数据类（如 `data class ToolDefinition(val type: String = "function", ...)`）用于 API 请求体时，**必须**设置 `encodeDefaults = true`，确保值等于默认值的字段被序列化输出。kotlinx.serialization 默认 `encodeDefaults = false`，会省略值等于默认值的字段，导致 OpenAI 兼容 API 规范要求的必填字段（如 `type: "function"`）被剥离，严格校验的服务端（如 DeepSeek）返回 400。配套设置 `explicitNulls = false` 确保 null 字段被完全省略，保持 `field = null` 时不输出该字段的向后兼容行为。项目内所有 `Json` 实例应统一此配置（对齐 `SkillExecutor` / `ToolCallListConverter`）。**测试要求**：序列化测试必须断言带默认值的字段在实际输出中存在，即使构造对象时未显式传入该字段值。
+- 反例 1：`private val json = Json { ignoreUnknownKeys = true }` —— `ToolDefinition.type`（默认值 "function"）被省略，DeepSeek 返回 400 "missing field `type`"
+- 反例 2：`Json { encodeDefaults = true }` —— 不设 `explicitNulls = false`，null 字段被序列化为 `"field":null`，破坏 `tools = null` 时不输出 tools 字段的向后兼容
+- 正例：`Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }` —— 带默认值的字段被输出，null 字段被省略
+- 来源：DEF-002 Bug 修复（DeepSeek API 400 "tools[0]: missing field `type`"；TKN-DEEPSEEK-TOOLS-BUG-001 考古报告；TKN-DEF002-GUARDRAIL-001/002 审查；TKN-DEF002-ACCEPTANCE-002 验收）
+- 添加日期：2026-08-12
+- 适用场景：dev
+- 状态：active
+
+#### BR-error-handling-010: 修改错误处理函数从固定文案改为拼接外部输入时必须重新评估 BR-error-handling-008 适用性
+
+- 类别：error-handling / security
+- 规则：当修改错误处理函数（如 `mapHttpError`）从"固定文案"变更为"拼接外部输入"（如 HTTP 响应体 `errorBody`、异常 `e.message`）时，**必须**重新评估 BR-error-handling-008 例外条款适用性。固定文案适用例外（免脱敏），但拼接外部输入后不再适用例外，必须应用路径脱敏 + 长度截断 + 换行符替换。评估要点：(1) 输入源是否不可信（服务器响应、异常 message）；(2) 输出汇聚点是否用户可见（UI 文案、日志）；(3) 是否已调用脱敏函数（如 `sanitizeErrorBody` / `sanitizeErrorMessage`）。
+- 反例：`fun mapHttpError(status: Int): StreamEvent.Error` 改为 `fun mapHttpError(status: Int, errorBody: String?)` 后直接拼接 `errorBody` 到错误文案，未应用路径脱敏 —— 违反 BR-error-handling-008
+- 正例：修改后调用 `sanitizeErrorBody(errorBody)` 进行路径脱敏 + 长度截断 + 换行符替换后再拼接
+- 来源：DEF-002 Bug 修复（TKN-DEF002-GUARDRAIL-001 发现 B-1 阻断；TKN-DEF002-GUARDRAIL-002 确认修复有效）
+- 添加日期：2026-08-12
+- 适用场景：dev
+- 状态：active
 
 ### security
 
@@ -169,6 +203,21 @@
 - 添加日期：2026-08-11
 - 适用场景：dev
 - 状态：active（ac-verifier TKN-M5-PHASEB-ACCEPTANCE-001 确认转 active，2026-08-11。M-1 setWindowSize require 双界校验 + M-2 processMessages coerceIn 双层防御均验证有效，5 边界测试通过：拒绝 51/1000 + coerceIn 1000→50 + coerceIn 0→1）
+
+#### BR-security-006: Tink AEAD 调用须将 null AAD 转空数组 + ApiKeyRepository 空值跳过 + 清空删除
+
+- 类别：security
+- 规则：(1) 使用 Tink `AndroidKeystoreAesGcm` 时，`encrypt`/`decrypt` 的 `associatedData` 参数为 null 须转为空字节数组 `ByteArray(0)`，因为 Tink 内部直接调用 `Cipher.updateAAD(null)` 抛出 `IllegalArgumentException: src buffer is null`。(2) `ApiKeyRepository.saveApiKey` 当 value 为空字符串时须直接 return（不加密、不落盘、不覆盖已有密钥）。(3) UI 层（如 ApiKeySheet）当用户清空输入框后保存，须调用 `removeApiKey` 删除已存密钥，而非调用 `saveApiKey` 静默跳过导致旧密钥残留。
+- 反例 1：`override fun encrypt(plaintext: ByteArray, associatedData: ByteArray?): ByteArray = aead.encrypt(plaintext, associatedData)` —— associatedData=null 时闪退
+- 反例 2：`suspend fun saveApiKey(key: String, value: String) { val encrypted = cryptoService.encrypt(value.toByteArray()); dataStore.edit { it[byteArrayPreferencesKey(key)] = encrypted } }` —— 空值覆盖已有密钥
+- 反例 3：`onClick = { viewModel.saveApiKey(config.apiKeyRef, key) }` —— key="" 时 saveApiKey 静默跳过，已存密钥不被清除
+- 正例 1：`override fun encrypt(plaintext: ByteArray, associatedData: ByteArray?): ByteArray = aead.encrypt(plaintext, associatedData ?: ByteArray(0))`
+- 正例 2：`suspend fun saveApiKey(key: String, value: String) { if (value.isEmpty()) return; ... }`
+- 正例 3：`onClick = { if (key.isEmpty()) viewModel.removeApiKey(config.apiKeyRef) else viewModel.saveApiKey(config.apiKeyRef, key) }`
+- 来源：DEF-001 Provider 配置保存闪退修复（TKN-DEF001-GUARDRAIL-001 B-1/B-2 阻断级发现 + 运行时验证 logcat 证据）
+- 添加日期：2026-08-12
+- 适用场景：dev
+- 状态：active
 
 ### concurrency
 
@@ -262,6 +311,72 @@
 - 适用场景：dev
 - 状态：active（ac-verifier TKN-US019-RAG-ACCEPTANCE-001 确认修复有效，2026-08-07 转 active）
 
+#### BR-interface-005: Skill systemPrompt 不得作为全局身份注入，须用轻量索引 + 渐进式加载
+
+- 类别：interface / prompt
+- 规则：Agent 框架中，启用 Skill 的**完整 `systemPrompt` 不得无条件注入到全局 system message**。若 Skill 的 systemPrompt 含身份声明（如"你是文本改写助手"），注入后会强制 LLM 身份，导致"启用即被角色污染"（即使用户未主动调用该 Skill）。正确做法（渐进式加载）：(1) 提供**默认通用 persona** 作为基础身份，始终注入；(2) 启用 Skill 只注入**轻量索引**（`name（description）`），让 LLM 感知能力存在；(3) 具体是否调用由 LLM 按任务类型判断或用户显式请求，需要时再加载完整指令/工具。
+- 反例：`mergeSystemPrompt` 把 `enabledSkills.mapNotNull { it.manifest.systemPrompt }` 全部注入——rewriter 的"你是文本改写助手"污染全局身份
+- 正例：`mergeSystemPrompt` 恒以 `DEFAULT_PERSONA` 开头 + 启用 Skill 注入 `可用技能：name（description）`
+- 来源：提示词污染 Bug 修复（ADR-019；TKN-PROMPT-POLLUTION-001 考古；TKN-PROMPT-POLLUTION-GUARDRAIL-001 审查；TKN-PROMPT-POLLUTION-ACCEPTANCE-001 验收）
+- 添加日期：2026-08-12
+- 适用场景：dev
+- 状态：active
+
+#### BR-interface-006: 不可信外部内容渲染前必须做链接 scheme 白名单净化
+
+- 类别：interface / security
+- 规则：对**不可信外部内容**（LLM 输出、第三方网页摘要、工具结果回灌等）做富文本/Markdown 渲染时，必须在渲染前净化链接：仅保留 `http://` / `https://` scheme 的链接为可点击，其他 scheme（`intent://`、`file://`、`javascript:`、`data:` 等）降级为纯文本。渲染组件若无法配置受限 uriHandler（或版本 API 缺失），应用纯函数在渲染前改写不可信内容（CWE-116/CWE-601）。同时，对"从外部内容解析出的可点击链接"应在点击跳转处再做一次 scheme 校验（纵深防御）。
+- 反例：`Markdown(content = message.content)` 直接渲染 LLM 输出——输出含 `[x](intent://...)` 时点击触发非预期 Intent
+- 正例：`Markdown(content = sanitizeMarkdownLinks(message.content))`，`sanitizeMarkdownLinks` 仅放行 http/https，其余降级为纯文本；搜索卡片点击跳转前再次校验 `link.startsWith("http")`
+- 来源：UX-001 问题 8 修复（ADR-021；guardrail TKN-UX001-GUARDRAIL-001 F-01）
+- 添加日期：2026-08-14
+- 适用场景：dev
+- 状态：active
+
+#### BR-interface-007: 第三方 Compose 库的 API 版本差异须以实编译验证而非记忆假设
+
+- 类别：interface / testing
+- 规则：引入第三方 Compose 库（如 Markdown 渲染器）时，不可凭记忆/文档假设其 API 参数名与行为，必须**先编译验证**确认实际签名。同一库不同版本 API 可能显著不同（如 `Markdown(markdown=...)` vs `Markdown(content=...)`、`UrlHandler` vs `ReferenceLinkHandler`），记忆假设会导致编译失败或功能缺失。正确做法：读取库版本实际 API（解 aar/jar 检查类签名或先写最小编译用例）后再接入；对不存在的 API 采用"内容净化纯函数"等不依赖库内部的稳健方案。
+- 反例：凭记忆写 `Markdown(markdown = content, uriHandler = ...)`——0.15.0 实际参数是 `content` 且无 `UrlHandler`，编译失败
+- 正例：先编译验证确认 `Markdown(content = ...)`，用 `sanitizeMarkdownLinks` 纯函数做链接净化（不依赖库内部 handler API）
+- 来源：UX-001 问题 3/8 修复（ADR-021；multiplatform-markdown-renderer 0.15.0 API 实测）
+- 添加日期：2026-08-14
+- 适用场景：dev
+- 状态：active
+
+#### BR-interface-008: 第三方 Compose 库升级必须校验运行期 ABI 兼容（编译期通过 ≠ 运行期可用）
+
+- 类别：interface / testing
+- 规则：升级第三方 Compose 库时，**编译期通过不代表运行期可用**。库基于较高 Compose BOM 编译时，其字节码会引用宿主没有的新 ABI（如 `Composer.startReplaceGroup` 方法、`TextLinkStyles` 类），导致运行期 `NoSuchMethodError` / `ClassNotFoundException`（编译 tip 无报错，运行必崩）。升级前必须校验 ABI 兼容：解包库 AAR 的 `classes.jar`，二进制扫描宿主 Compose 版本不存在的符号；或直接安装运行验证。确定兼容版本后，在 `libs.versions.toml` 注释中记录约束与升级前提（如"0.28.0 起需 Compose ≥1.7"），防止未来盲目升级回归崩溃。
+- 反例：把 markdown-renderer 从 0.15.0 升到 0.37.0 仅验证编译通过即交付——运行期 `ClassNotFoundException: TextLinkStyles`（0.31+ 引用 Compose 1.7 类）
+- 正例：逐版本下载 AAR 解包扫描 `TextLinkStyles`/`startReplaceGroup` 字符串，确认 0.26.0 无引用（兼容 Compose 1.6.8）、0.28.0 起有引用，锁定 0.26.0 并在 toml 注释记录约束
+- 来源：UX-001 问题 1 二次修复（ADR-022；markdown-renderer 0.28+ 与 Compose 1.6.8 ABI 不兼容崩溃实测）
+- 添加日期：2026-08-15
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-interface-009: 流式协议解析必须保留结构字符，空白过滤用 isNullOrEmpty 而非 isNullOrBlank
+
+- 类别：interface
+- 规则：流式协议（如 SSE/OpenAI chat delta）解析增量内容时，**不得用 `isNullOrBlank()` 过滤文本 delta**——`isBlank()` 会把纯换行 `"\n"`（以及纯空格）误判为"空白"丢弃。换行是 markdown 结构字符（标题/列表/表格依赖行首符号），丢失后流式文本粘连成单行、块级解析失效、用户看到裸符号。正确做法：仅过滤 `null` 与空串（`isNullOrEmpty()`），保留空格/换行等结构字符。同理适用于任何"拼接后交给下游结构化解析"的增量流。
+- 反例：`if (!content.isNullOrBlank()) events.add(StreamEvent.Delta(content))` —— 流式输出中单独成 chunk 的 `"\n"` 被丢弃，markdown 标题/表格无法解析（ADR-022 问题 1 根因）
+- 正例：`if (!content.isNullOrEmpty()) events.add(StreamEvent.Delta(content))` —— 保留换行，markdown 块级解析正常（14 个独立节点分层渲染验证）
+- 来源：UX-001 问题 1 二次修复（ADR-022；chunkToEvents isNullOrBlank 丢弃换行实测）
+- 添加日期：2026-08-15
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-interface-010: 拼接外部标识符进协议字段前必须校验合法字符集
+
+- 类别：interface
+- 规则：把外部用户可控标识符（如 MCP server 名、Skill 名）拼接进协议字段（如 OpenAI tool name、JSON key）前，必须校验/规范化字符集。协议只允许特定字符（OpenAI tool name 仅 `[a-zA-Z0-9_-]`），直接拼接含空格/中文/特殊字符的标识符会导致：请求被 API 拒绝（400 invalid_request_error）或本地过滤后功能不可见。正确做法：拼接前规范化（非法字符替换为 `_`），且**构造与反查两侧使用同一规范化函数**（保证能从协议字段反解回原始标识符）。
+- 反例：`"mcp_${server.name}__${tool}"` 直接拼接——`Sequential Thinking`（空格）、`跨 App 调用`（中文）生成非法工具名，LLM 感知不到该工具 / 请求 400
+- 正例：`"mcp_${toMcpNamespace(server.name)}__${tool}"`，`toMcpNamespace` 将非 `[a-zA-Z0-9]` 替换为 `_`；`selectMcpServer` 反查时对每个 server.name 同样规范化后匹配
+- 来源：UX-001 问题 5/6 二次修复（ADR-022；Sequential Thinking 不可用 + 400 工具重名根因）
+- 添加日期：2026-08-15
+- 适用场景：dev / bugfix
+- 状态：active
+
 ### ops
 
 （暂无规则，待累积）
@@ -314,7 +429,7 @@
 - 适用场景：dev
 - 状态：active（ac-verifier TKN-M4-PHASEB-ACCEPTANCE-003 §7 确认转 active，2026-08-09。规则可执行 + 非重复 + SkillRegistry 重构后实现符合全部 4 条要求 + 39 测试验证规则精神）
 
-#### BR-ui-001: Compose 状态持有可变列表时禁止原地改值
+#### BR-testing-005: Compose 状态持有可变列表时禁止原地改值
 
 - 类别：testing
 - 规则：将可变列表持有于 Compose 状态时，禁止对 `mutableStateOf(list)` 中的列表**原地改值**（如 `xs[i] = v`、`xs.add(...)`），因为 `mutableStateOf` 只侦测引用变化，原地改值不触发重组，导致 UI 不回显/丢输入。必须重建新列表，或使用 `mutableStateListOf`（其内部为快照列表，原地改值亦触发重组），与删除/新增行为保持一致。
@@ -386,6 +501,230 @@
 - 适用场景：dev
 - 状态：active
 
+### animation
+
+#### BR-animation-001: spring 欠阻尼动画值传入非负约束修饰符前必须 coerceIn 钳制
+
+- 类别：animation
+- 规则：`animateDpAsState` / `animateFloatAsState` 配合 `spring(dampingRatio < 1.0)`（欠阻尼）时，动画值会产生过冲（overshoot），短暂超出目标值范围。若该动画值传入 `Modifier.padding()` / `Modifier.size()` / `Modifier.width()` / `Modifier.height()` 等有非负约束的修饰符，过冲产生的负值会触发 `IllegalArgumentException: Padding must be non-negative`（或类似异常）导致 App 闪退。必须用 `coerceIn(min, max)` 或 `coerceAtLeast(0.dp)` 钳制动画值到安全范围后再传入非负约束修饰符。过冲量计算公式：`overshoot = exp(-πζ/sqrt(1-ζ²))`，ζ 为阻尼比（DampingRatioMediumBouncy = 0.5，过冲约 16.3%）。
+- 反例：`val offset by animateDpAsState(targetValue = if (checked) 18.dp else 2.dp, animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy)); Box(Modifier.padding(start = offset))` —— checked true→false 时 offset 过冲到约 -0.6dp，padding 抛 IllegalArgumentException 闪退
+- 正例：`Box(Modifier.padding(start = offset.coerceIn(0.dp, 18.dp)))` —— 钳制到非负范围，保留 spring 物理视觉，过冲部分截断不影响整体动画效果
+- 来源：PrismSwitch padding 负值崩溃修复（TKN-BUGFIX-PRISMSWITCH-001，B3 致命，6 处开关页面闪退，logcat 3 次崩溃 PID 2859/2919/2975/3028）
+- 添加日期：2026-08-12
+- 适用场景：dev
+- 状态：active（guardrail TKN-BUGFIX-PRISMSWITCH-001 通过 + ac-verifier TKN-BUGFIX-PRISMSWITCH-002 通过，2026-08-12）
+
+### ui
+
+#### BR-ui-001: 占位 UI 的开关默认值必须为关闭态，避免误导用户以为功能已启用
+
+- 类别：ui
+- 规则：尚未实现的功能若在 UI 中保留占位开关（如生物识别解锁、未来特性预览），开关默认值必须为 `false`（关闭态），且副标题或说明文案必须明确标注"即将支持"/"未启用"等字样。禁止将占位开关默认值设为 `true`，否则用户会误以为功能已启用（如误以为 App 已有生物识别保护），构成虚假安全承诺。占位开关的 state 应使用 `remember { mutableStateOf(false) }`（本地状态，重启重置），不应使用 DataStore 持久化（持久化意味着功能已实现）。
+- 反例：`var biometric by remember { mutableStateOf(true) }` + 副标题"可选二次解锁" —— 用户以为生物识别已启用，实际是纯 UI 占位无任何保护
+- 正例：`var biometric by remember { mutableStateOf(false) }` + 副标题"即将支持 · 可选二次解锁" —— 明确告知用户功能未实现，默认关闭不误导
+- 来源：PrismSwitch 崩溃修复中发现的生物识别占位误导（TKN-BUGFIX-PRISMSWITCH-001，code-archaeologist 考古报告任务 4）
+- 添加日期：2026-08-12
+- 适用场景：dev
+- 状态：active（guardrail TKN-BUGFIX-PRISMSWITCH-001 通过 + ac-verifier TKN-BUGFIX-PRISMSWITCH-002 通过，2026-08-12）
+
+#### BR-ui-002: 底部弹层容器必须支持滚动 + 限制最大高度，防止内容超长时按钮被裁剪
+
+- 类别：ui
+- 规则：底部弹层（BottomSheet）容器必须同时满足：(1) **限制最大高度**——宿主容器（如 `PrismSheetHost`）须用 `heightIn(max = screenHeight * 0.9f)` 限制 sheet 最大高度，防止内容撑满全屏遮挡状态栏；(2) **内容区可滚动**——sheet 内部内容区（`PrismSheet` 的 content Column）须用 `weight(1f, fill = false)` + `verticalScroll(rememberScrollState())`，当内容超出最大高度时自动滚动，`fill = false` 确保内容少时不强制填满；(3) **系统 UI 适配**——须加 `imePadding()` 适配软键盘、`navigationBarsPadding()` 适配导航栏，避免底部按钮被遮挡。缺少任一层都会导致内容超长时底部按钮（如"保存配置"）被裁剪到屏幕外不可见/不可点击，用户误以为功能失效。
+- 反例：`PrismSheet` content 用 `Column(padding(...)) { content() }` 无 verticalScroll + `PrismSheetHost` sheet Box 无 heightIn 限制 —— ProviderEditSheet 内容约 700dp 超出屏幕，"保存配置"按钮被裁剪到屏幕外，用户只看到"激活"和"删除"按钮，误以为无法保存
+- 正例：`PrismSheetHost` sheet Box 加 `.heightIn(max = screenHeight * 0.9f).imePadding().navigationBarsPadding()` + `PrismSheet` content Column 加 `.weight(1f, fill = false).verticalScroll(rememberScrollState())` —— 内容超长时可滚动，所有按钮可见可点击
+- 来源：DEF-001 Provider 配置保存功能双 Bug 修复（TKN-DEF001-ROOTCAUSE-002，考古报告 §2 假设 1-1 主根因：PrismSheet 无滚动支持 + PrismSheetHost 未限制高度）
+- 添加日期：2026-08-12
+- 适用场景：dev
+- 状态：active（guardrail TKN-DEF001-GUARDRAIL-001 确认非重复 + ac-verifier TKN-DEF001-ACCEPTANCE-001 验证通过，2026-08-12 转 active）
+
+#### BR-ui-003: 底部弹层关键操作按钮须放在固定 footer 区域，不参与滚动
+
+- 类别：ui
+- 规则：底部弹层（BottomSheet）中的关键操作按钮（如"保存配置"、"删除"等）须放在固定 footer 区域（不参与 verticalScroll），而非放在可滚动 content 末尾。即使 BR-ui-002 的滚动机制已生效，按钮在 content 末尾仍需滚动才能可见，违反"关键操作始终可见"原则。footer 区域须在 content Column 之下独立渲染，不参与 `weight(1f, fill = false).verticalScroll()`，确保任何内容长度下按钮始终固定在 sheet 底部可见可点击。
+- 反例：`PrismSheet(title="编辑") { PrismField(...); ...; PrismButton(text="保存配置", onClick={...}) }` —— 保存按钮在 content 末尾，内容超长时需滚动才能可见
+- 正例：`PrismSheet(title="编辑", footer={ PrismButton(text="保存配置", onClick={...}) }) { PrismField(...); ... }` —— 保存按钮在 footer 固定底部，始终可见
+- 来源：DEF-001 Provider 配置保存功能双 Bug 修复（TKN-DEF001-GUARDRAIL-001，BR-ui-002 滚动机制补充：滚动虽解决裁剪但按钮仍需滚动可见，footer 固定才是根本方案）
+- 添加日期：2026-08-12
+- 适用场景：dev
+- 状态：active
+
+#### BR-security-007: 第三方/外部不可信内容回灌 LLM 前必须做长度截断 + 控制字符过滤 + 边界标记
+
+- 类别：security
+- 规则：任何第三方/外部来源的内容（如网页搜索结果、外部 API 响应）回灌 LLM 上下文前，必须：(1) 长度截断（防 token 溢出）；(2) 过滤控制字符/孤立代理项/超范围码点（防 NUL/控制字符注入）；(3) 加「不可信内容」边界标记（降低 prompt 注入影响）。工具 description 也应声明内容来源不可信。
+- 反例：搜索结果无前缀直接回灌 LLM —— 第三方网页内容可引导 LLM 执行恶意指令（prompt 注入）
+- 正例：`buildString { append("【网络搜索外部内容，未经验证，仅作参考】\n"); ... }` + `take(200)` 截断 + 数字实体控制字符过滤
+- 来源：问题 8 联网搜索（TKN-P8-GUARDRAIL-001 S-2，WebSearchLocalToolExecutor）
+- 添加日期：2026-08-14
+- 适用场景：dev
+- 状态：active
+
+#### BR-error-handling-011: 工具入参校验必须同时处理 null 与 blank，禁止仅判 null
+
+- 类别：error-handling
+- 规则：LLM 工具入参校验必须同时处理 null 与 blank（`isBlank()`/`isNotEmpty()`），不能仅判 null。空串/空白串会绕过校验发出无效请求或返回误导性结果。
+- 反例：`arguments["query"]?.toString()?.trim() ?: return "缺少参数"` —— 空串/全空白串被放行
+- 正例：`arguments["query"]?.toString()?.trim()?.takeIf { it.isNotEmpty() } ?: return "缺少参数"`
+- 来源：问题 8 联网搜索（TKN-P8-GUARDRAIL-001 M-2，WebSearchLocalToolExecutor.execute）
+- 添加日期：2026-08-14
+- 适用场景：dev
+- 状态：active
+
+#### BR-build-006: 临时性构建/调试改动（如临时 ABI、临时开关）禁止随功能提交入库
+
+- 类别：build
+- 规则：临时性构建/调试改动（如为模拟器临时加 x86_64 ABI、临时开关）禁止随功能提交入库，提交前必须还原或拆分独立 commit。带"测试后恢复"注释的临时改动会污染工程规范（ADR-017 4.8 明确生产 ABI 范围）。
+- 反例：`abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") // 临时加入 x86_64（测试后恢复）` 并入功能提交
+- 正例：提交前还原为 `listOf("arm64-v8a", "armeabi-v7a")`；模拟器调试用独立分支/独立 commit
+- 来源：问题 1-7 审查（TKN-P17-GUARDRAIL-001 M-1，app/build.gradle.kts 临时 x86_64）
+- 添加日期：2026-08-14
+- 适用场景：dev
+- 状态：active
+
+#### BR-error-handling-012: 正则 replace 回调使用 groupValues[i] 前必须确认正则含捕获组
+
+- 类别：error-handling
+- 规则：`Regex.replace(input) { match -> match.groupValues[i] }` 中，若正则不含捕获组 i，`groupValues[i]` 必抛 `IndexOutOfBoundsException`。使用前必须确认正则含捕获组（用 `Regex("""...(...)...""")`），或改用 `match.value`（整体匹配，与捕获组数量无关）。修复引入的正则必须立即补单测锁定。
+- 反例：`CODE_BLOCK_PATTERN = Regex("""```[\s\S]*?```""")`（无捕获组）+ `m.groupValues[1]` —— 含代码块的回复闪退（B3 致命）
+- 正例：无捕获组正则用 `m.value`；行内代码正则含捕获组 `Regex("""`([^`\n]+)`""")` 时用 `m.groupValues[1]`
+- 来源：问题 2 修复（TKN-P17-GUARDRAIL-002 B-2，ConversationScreen.stripMarkdownSymbols）
+- 添加日期：2026-08-14
+- 适用场景：dev
+- 状态：active
+
+#### BR-interface-006: 接口新增方法时路由/门面类必须同步覆写转发，禁止继承默认空实现
+
+- 类别：interface
+- 规则：接口新增方法（尤其带默认空实现）时，所有实现类——尤其是路由/门面类（Dispatcher/Facade）——必须显式覆写并按需转发到下游，禁止依赖接口默认实现。否则生产链路通过门面类调用时静默返回默认空结果，底层实现成为不可达代码，功能"看似修复实则未修复"。
+- 反例：`McpToolProvider` 新增 `describeTools`（默认 emptyList）后，`McpToolProviderDispatcher` 未覆写 —— 生产链路 `dispatcher.describeTools` 恒空，MCP 工具无法注入 LLM（Bug-3 实际未修复，guardrail 才查出）
+- 正例：Dispatcher 显式覆写 `describeTools` 并按 serverType 转发到 local/remote
+- 来源：问题 3 修复（TKN-P17-GUARDRAIL-001 B-1，McpToolProviderDispatcher）
+- 添加日期：2026-08-14
+- 适用场景：dev
+- 状态：active
+
+#### BR-interface-011: 携带 tool_calls 的 assistant 消息必须回传 reasoning_content（DeepSeek 协议约束）
+
+- 类别：interface
+- 规则：DeepSeek 思考模式下，携带 `tools` 参数的请求，后续所有轮次的 assistant 消息（含 tool_calls 回放占位）必须回传 `reasoning_content` 字段，否则 API 返回 400 "The `reasoning_content` in the thinking mode must be passed back to the API"。`MessageBody` 必须包含 `reasoning_content` 字段，`ChatMessage.toMessageBody()` 的 ASSISTANT 分支必须从 `thinkingChain` 填充该字段，`SkillExecutor.buildAssistantToolCallMessage` 构造的占位消息必须携带 `thinkingChain`。无思考的端点（`thinkingChain` 为空/null）不输出该字段（`explicitNulls=false` 省略），零影响。
+- 反例：`MessageBody` 仅有 `role/content/tool_call_id/tool_calls` 四字段 → 工具回路第 2 轮必 400（B3 致命，深度思考开启 + 联网搜索/GitHub/Sequential Thinking 全部触发）
+- 正例：`MessageBody` 新增 `@SerialName("reasoning_content") reasoningContent: String? = null`；`toMessageBody()` ASSISTANT 分支传 `reasoningContent = thinkingChain`；`executeLoop` 累积 `roundReasoning` 传入 `buildAssistantToolCallMessage`
+- 来源：UXR4 问题 1/4/6 修复（TKN-UXR4-ARCHAEOLOGY-001 + DeepSeek 官方 thinking_mode 文档 + GitHub openclaw#71037 同类根因，2026-08-15）
+- 添加日期：2026-08-15
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-interface-012: 会话持久化仅在有新消息（脏标记）时写库，避免"只读打开"刷新 updatedAt
+
+- 类别：interface
+- 规则：会话持久化（`persistSession`）必须引入脏标记机制：仅当有新消息（sendMessage/编辑重发）时置位，回答完成（Done/Error）落库后清位；`loadSession` 加载历史会话后清位。`persistSession` 检查脏标记，无标记时跳过写库。避免"只读打开历史会话再退出"刷新 updatedAt（会话被错误顶到"刚刚"），确保 `updatedAt = 最后消息结束时刻`。
+- 反例：`persistSession` 无条件写库（`onCleared`/`startNewConversation`/`loadSession` 均调用），用户打开历史会话查看后退出 → `updatedAt` 被刷新为"现在" → 列表错误置顶
+- 正例：`messagesDirty` 脏标记 + `persistSession` 无标记时 `return`；`loadSession` 清位；回答完成（Done/Error）落库并清位；工具回路 `executeWithToolLoop` finally 落库
+- 来源：UXR4 问题 8/9 修复（ADR-024 子决策 D，2026-08-15）
+- 添加日期：2026-08-15
+- 适用场景：dev
+- 状态：active
+
+#### BR-ui-004: 工具执行阶段 activeTool/isTyping 应由回路结束统一清除，而非 Done 事件即清除
+
+- 类别：ui
+- 规则：工具调用回路中，`activeTool` 和 `isTyping` 的生命周期应从"Done 事件即清除"改为"工具回路（executeLoop）结束统一清除"。具体：`ToolCallStart` 置位 → `ToolCallComplete` 保持（+ 置 isTyping=true）→ 回路结束（`executeWithToolLoop` finally）统一清除。非工具回路（executePlainStream）保持"Done 清除"原行为。避免工具执行阶段（联网搜索/MCP 调用耗时数秒）UI 呈空白（指示一闪而过）。
+- 反例：`handleStreamEvent(Done) { _isTyping=false; _activeTool=null }` → Done 紧跟 ToolCallComplete 到达，工具尚未执行但指示已清除，执行期用户看到空白
+- 正例：`toolLoopActive` 标志位区分工具回路与非工具回路；`Done` 时检查 `toolLoopActive`，仅 false 时清除；`executeWithToolLoop` finally 统一复位
+- 来源：UXR4 问题 7/10 修复（ADR-024 子决策 C，2026-08-15）
+- 添加日期：2026-08-15
+- 适用场景：dev
+- 状态：active
+
+#### BR-interface-013: 对协议必需字段做长度截断前，必须验证回放路径的协议完整性
+
+- 类别：interface
+- 规则：对协议必需的字段（如 DeepSeek `reasoning_content`）做长度截断（`.take(N)`）前，必须验证该字段的**回放路径**（工具回路第 2 轮回传 assistant 消息）是否会被截断值破坏协议完整性。若截断作用在协议回传副本上，须用真实端点验证截断值不被拒绝；必要时采用"协议副本完整 + 持久化副本裁剪"分层（回传用完整链、落库用裁剪链）。
+- 反例：`buildAssistantToolCallMessage` 对 `reasoningContent` 直接 `.take(2000)` 截断，且该截断后的值经 `toMessageBody` 回传 DeepSeek —— 若 DeepSeek 对 reasoning_content 做语义/字节级校验，截断可能重新触发 B3 400 "must be passed back"
+- 正例：回传副本保留完整 thinkingChain（`toMessageBody` 用内存完整链），仅持久化层（`persistSession`）剥离/裁剪；或截断后经真实 API 验证 400 不触发
+- 来源：guardrail R2-NEW-1（TKN-UXR4-GUARDRAIL-R2，Q1 截断 + S1 剥离对协议回放的影响）
+- 添加日期：2026-08-15
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-testing-005: 防御性修复必须双面断言（保护生效 + 副作用未发生）
+
+- 类别：testing
+- 规则：防御性修复（防并发/截断/剥离）必须同时断言"保护生效"与"副作用未发生"两面，避免单面断言漏检。例如 S1 隐私剥离：既断言 JSON 中思考链被剥离（保护生效），又断言内存 thinkingChain 保留（副作用未发生——协议回传不受影响）。若修复有主副作用路径，双面都要覆盖。
+- 反例：S1 disabled 用例仅 `assertNotNull(aiMsg)` + 断言 JSON 不含思考内容，未断言内存 thinkingChain 非空 —— 若未来 strip 意外改写内存，测试仍通过
+- 正例：断言 JSON 剥离 + `assertEquals("思考内容", aiMsg.thinkingChain)` 内存保留，两面闭环
+- 来源：guardrail R2-NEW-2（TKN-UXR4-GUARDRAIL-R2，S1 测试缺口）
+- 添加日期：2026-08-15
+- 适用场景：testing
+- 状态：active
+
+#### BR-error-handling-013: 状态守卫把 UI 瑕疵升级为功能锁死前，须确认所有退出路径复位该状态
+
+- 类别：error-handling
+- 规则：添加状态守卫（如 `sendMessage` 的 `if (_isTyping.value) return`）时，守卫会把"状态未复位"从纯 UI 瑕疵升级为**功能锁死**（卡死期间所有操作被静默丢弃）。添加前必须穷举该状态的所有退出路径并确认均有复位（try-finally 兜底），否则新增守卫会放大未复位风险。
+- 反例：Q5 守卫 `sendMessage` isTyping 拦截，但 `executePlainStream` 无 try-finally 复位 isTyping —— 若未来 Provider 直接抛异常而非发射 Error，卡死即永久屏蔽用户发送
+- 正例：守卫配套确认 Done/Error/finally 三路径均复位 isTyping；`executePlainStream` 补 finally 兜底
+- 来源：guardrail R2-NEW-4（TKN-UXR4-GUARDRAIL-R2，Q5 防御纵深）
+- 添加日期：2026-08-15
+- 适用场景：dev
+- 状态：active
+
+#### BR-error-handling-014: 工具结果失败文案禁止含诱导 LLM 重试的措辞
+
+- 类别：error-handling
+- 规则：工具执行器（如 web_search）返回的失败/空结果文案禁止含"请稍后重试""请重新搜索"等措辞——在 LLM 工具回路上下文中，这些措辞会诱导 LLM 反复以同义 query 重试同一工具直至 maxRounds 硬终止，用户得不到答案。失败文案应中性（如"搜索失败：联网搜索暂不可用，请基于已有信息回答"），并前置可识别前缀（如「搜索失败」）供上层 `isFailureResult` 识别触发熔断。
+- 反例：`"联网搜索失败：网络错误或服务不可用，请稍后重试"` —— LLM 读到"请稍后重试"持续调用 web_search，10 轮后硬报"循环达上限"
+- 正例：`"搜索失败：联网搜索暂不可用，请基于已有信息回答"` —— 中性，且前置「搜索失败」被 isFailureResult 识别触发重复工具熔断（MAX_CONSECUTIVE_TOOL_FAILURES=2）
+- 来源：UXR6 问题 1 根因（TKN-UXR6-ARCHAEOLOGY-001，失败文案诱导重试 + 无重复工具熔断）
+- 添加日期：2026-08-16
+- 适用场景：dev
+- 状态：active
+
+#### BR-interface-005: 缓存键必须包含实体唯一性签名
+
+- 类别：interface
+- 规则：任何按实体缓存的结果（如 MCP 工具定义缓存），缓存键不得只用易重复字段（如 `server.name`），必须包含能区分实体的唯一性签名（如 `name@baseUrl`），否则同名不同配置的实体在 `getOrPut` 时键冲突静默遮蔽（返回错误缓存）。
+- 反例：`mcpToolsCache.getOrPut(server.name) { ... }` —— 同名不同 baseUrl 的 server 缓存冲突，返回错误工具定义
+- 正例：`mcpToolsCache.getOrPut("${server.name}@${server.baseUrl}") { ... }` + enabled 集合签名（`name@baseUrl` join）做整体失效
+- 来源：UXR6 guardrail Medium-1（TKN-UXR6-GUARDRAIL-001，主 Agent 盲区确认）
+- 添加日期：2026-08-16
+- 适用场景：dev
+- 状态：active
+
+#### BR-testing-006: 循环/状态机核心逻辑须用「真实执行 + fake 依赖」的循环级测试覆盖
+
+- 类别：testing
+- 规则：工具回路、状态机等**核心循环逻辑**（如 SkillExecutor.executeLoop 的熔断、轮次推进）不能只用「覆写方法返回 canned」的外层测试，必须新增**真实执行 + fake 依赖**的循环级集成测试（真实 executeLoop + fake ChatStreamProvider/McpToolProvider 驱动多轮），直接断言循环行为（轮数、tools 变化、事件序列、终止条件）。覆写 stub 测试无法发现循环内部的逻辑缺陷（如熔断不触发、边界误发错误）。
+- 反例：`ConversationViewModelUxR6Test` 早期只用 FakeSkillExecutor 覆写 executeLoop（验证外层 streamingIds），未测真实循环的熔断逻辑 —— guardrail Medium-2 指出循环逻辑无单测
+- 正例：`executeLoop circuit breaker empties tools...` —— 真实 SkillExecutor + CircuitBreakerChatProvider（前 2 轮 ToolCallComplete → 第 3 轮纯文本），断言轮数=3、第 3 轮 tools 空、systemPrompt 含提示、无 maxRounds Error
+- 来源：UXR6 guardrail Medium-2（TKN-UXR6-GUARDRAIL-001）
+- 添加日期：2026-08-16
+- 适用场景：dev
+- 状态：active
+
+#### BR-error-handling-015: 解析 LLM 生成的 JSON 字符串字段必须显式拒绝 JsonNull 与 "null" 字面量
+
+- 类别：error-handling
+- 规则：从 LLM 生成的 JSON 参数（如 `ToolCallRef.arguments`）中提取字符串字段时，禁止直接 `jsonPrimitive.content`——`JsonNull.content` 返回字面量字符串 `"null"`，会把"字段为 null"误当成合法值，产生假数据（如假引用 "null"）。必须显式判断 `raw is JsonNull` 返回 null，且 trim 后拒绝 `"null"`/空串。对象/数组等容器经 `jsonPrimitive` 会抛异常，须有 catch 兜底为 null（fail-closed，不崩溃）。
+- 反例：`obj["documentTitle"]?.jsonPrimitive?.content?.trim()?.takeIf { it.isNotEmpty() }` —— `{"documentTitle": null}` 时返回字面量 `"null"`，UI 出现名为 "null" 的假引用
+- 正例：`if (raw == null || raw is JsonNull) return null; raw.jsonPrimitive.content.trim().takeIf { it.isNotEmpty() && it != "null" }`（catch 兜底 null）
+- 来源：ac-verifier DEF-001（TKN-UXR7R2-ACCEPTANCE-001，引用池假引用 "null"）
+- 添加日期：2026-08-16
+- 适用场景：dev
+- 状态：active
+
+#### BR-error-handling-016: 日志记录用户输入/外部数据必须截断，禁止输出完整原文
+
+- 类别：error-handling
+- 规则：日志（Log.d/w/i）中记录任何用户输入或外部数据（搜索关键词、工具参数、URL 等）时，必须截断到合理长度（如 `take(120)`），禁止输出完整原文。用户输入可能含 PII（姓名/手机号/私密问题），完整输出到 logcat 构成 CWE-532 敏感信息泄露面。RCA 所需的主体信息（前 N 字符）足以定位问题。新增日志点必须主动套用截断常量，不能只截断初始实现处。
+- 反例：`Log.w(TAG, "query=$query")` 输出完整搜索词；某日志点截断而另一处 `core=$term` 未截断——审计发现遗漏
+- 正例：`Log.w(TAG, "query=${query.take(LOG_QUERY_MAX_LEN)}")` + companion 定义 `LOG_QUERY_MAX_LEN = 120`，全文件所有用户输入日志点统一套用
+- 来源：guardrail LOW-03 / ac-verifier DEF-002（TKN-UXR7R2-ACCEPTANCE-001）
+- 添加日期：2026-08-16
+- 适用场景：dev / bugfix
+- 状态：active
+
 ## 审计记录
 
 | 日期 | 审计人 | 结果 | 备注 |
@@ -434,3 +773,8 @@
 | 2026-08-11 | guardrail-enforcer | 提议 BR-concurrency-005，结论有条件通过 | M6 Phase C 审查（TKN-M6-PHASEC-GUARDRAIL-001）：编译通过，136 测试中 135 通过（1 stale test 失败）。无阻断级安全漏洞（无注入/密钥/RCE/命令执行）。M-1 中危（AppLauncherBridge 超时从 30s 改为 35s 方向错误，35s > 30s 导致 SkillExecutor 仍先超时，KDoc "保证 bridge 先超时" 事实性错误）+ M-2 中危（stale test 需更新）+ L-1 低危（KDoc 引用 "30s" 过时）。提议 BR-concurrency-005（嵌套 withTimeout 超时层级必须内层短于外层）待主 Agent 确认 + ac-verifier 验证后转 active。结论有条件通过 |
 | 2026-08-11 | guardrail-enforcer | BR-concurrency-005 确认合规，结论通过 | M6 Phase C 第二轮审查（TKN-M6-PHASEC-GUARDRAIL-002）：M-1 修复正确（25s < 30s，BR-concurrency-005 合规），M-2 测试更新正确（断言反映修复后行为 + 新增端到端验证测试），M-1 验证测试 BUILD SUCCESSFUL。L-1 残留（类级 KDoc L28 + 方法级 KDoc L68 仍写 "默认 30s"，主 Agent 声称修复 3 处但实际只修 companion object KDoc 1 处）为低危文档问题，不阻断。二次自检报告 §2.4/§4.4/R-PC-4 中旧值 35s 残留。结论通过（附注 L-1-R/L-2-R 建议在后续提交中修正） |
 | 2026-08-11 | ac-verifier | 验收通过，BR-concurrency-005 转 active | M6 Phase C 验收（TKN-M6-PHASEC-ACCEPTANCE-001）：US-006 10/10 AC 全部通过（AC-C-1 到 AC-C-10）。cross-app + skill 专项 378 测试（含 ac-verifier 补充 6 用例 M6PhaseCAcceptanceTest）全部通过（1 跳过性能基准），全量 1380 回归 0 失败。安全检查全部通过（URI 注入防护 / 日志脱敏 / 错误脱敏 CWE-209 / 用户确认 / Android 11+ 包可见性合规 / 协程取消安全 BR-error-handling-007）。性能变异为环境因素（JVM warmup/GC，被测函数均未在 Phase C 修改）。DEF-01（B2 严重）+ M-1（B1 一般）均已修复确认。BR-concurrency-005 proposed → active（M-1 修复正确 25s < 30s + 端到端测试验证 bridge 先超时返回语义化文案 + pending 清理 + ac-verifier 补充测试断言超时层级关系）。1 低危文档残留 DOC-01（ConversationViewModel KDoc "35s"→"25s"） |
+| 2026-08-12 | 主 Agent | 新增 BR-animation-001 + BR-ui-001 | PrismSwitch padding 负值崩溃修复（TKN-BUGFIX-PRISMSWITCH-001/002）：用户报告 B3 致命崩溃（配置 Provider/MCP/Skills 时多次闪退）。logcat 捕获根因 `IllegalArgumentException: Padding must be non-negative` at PrismSwitch.kt:59，spring DampingRatioMediumBouncy (ζ=0.5) 欠阻尼过冲 16.3% 导致 offset 最低值约 -0.6dp。修复：`.padding(start = offset.coerceIn(0.dp, 18.dp))`。同时发现生物识别占位默认值 `true` 误导用户，改为 `false` + "即将支持" 标注。guardrail 通过 + ac-verifier 8/8 AC 通过（1497 回归 0 失败，6 处开关 69 次切换 0 崩溃，Golden Master 崩溃 3→0）。新增 DEF-001（B1 一般，Provider 保存后重启副标题未更新，留待用户验证确认） |
+| 2026-08-12 | 主 Agent | 提议 BR-ui-002 + BR-naming-002 | DEF-001 Provider 配置保存功能双 Bug 修复（TKN-DEF001-ROOTCAUSE-002）：用户报告"保存按钮没有保存二字"+"无法保存"。code-archaeologist 故障定位根因：PrismSheet 无 verticalScroll + PrismSheetHost 未限制最大高度，导致 ProviderEditSheet 内容约 700dp 超出屏幕，"保存配置"按钮被裁剪不可见/不可点击。修复：PrismSheetHost 加 `heightIn(max=screenHeight*0.9f)` + `imePadding` + `navigationBarsPadding`；PrismSheet content 加 `weight(1f, fill=false)` + `verticalScroll`；重命名 `var enabled` 为 `activateAfterSave`。提议 BR-ui-002（弹层容器滚动+限高）+ BR-naming-002（变量名避免与组件参数同名）待 guardrail + ac-verifier 确认转 active |
+| 2026-08-14 | 主 Agent | 新增 BR-security-007 + BR-error-handling-011/012 + BR-build-006 + BR-interface-006 | 问题 8（深度思考+联网搜索）与问题 1-7（真机测试 7 问题）修复闭环（TKN-P8-* / TKN-P17-*）。问题 8：深度思考（thinking/reasoning_effort 参数 + ReasoningDelta）+ 联网搜索（Bing RSS 零配置 WebSearchLocalToolExecutor + Composite），guardrail 两轮通过 + ac-verifier 14/14 通过。问题 1-7：新对话/输出清洗/MCP 工具/知识库闪退/skills/键盘遮挡/跨 App 双弹窗，guardrail 四轮（阻断 B-1 Dispatcher describeTools 静默失效 + B-2 正则捕获组越界闪退 → 修复）+ ac-verifier 8/8 通过。全量 1583 用例 0 失败。5 条新规则：BR-security-007（外部内容回灌 LLM 边界标记）、BR-error-handling-011（入参 null+blank 双校验）、BR-error-handling-012（正则捕获组越界防御）、BR-build-006（临时构建改动禁止入库）、BR-interface-006（接口新方法路由类必须覆写转发） |
+| 2026-08-15 | 主 Agent | 新增 BR-interface-008/009/010 | UX 二次反馈 10 问题修复闭环（TKN-UXR2-*，ADR-022）。根因修复：markdown 库 0.28+ 与 Compose 1.6.8 ABI 不兼容（0.26.0 为最高兼容版本，逐版本 AAR 字节码扫描实证）；chunkToEvents isNullOrBlank 丢弃纯换行 delta 导致 markdown 粘连；MCP 工具名直接拼接原始 server 名（空格/中文）生成非法名被过滤 + 400 工具重名。模拟机端到端验证：markdown 14 独立节点分层渲染、无裸符号、零崩溃；开关 toggleable 双向翻转；键盘 IME 正确贴合。3 条新规则：BR-interface-008（第三方 Compose 库升级须校验运行期 ABI）、BR-interface-009（流式解析保留结构字符，isNullOrEmpty 而非 isNullOrBlank）、BR-interface-010（外部标识符拼协议字段前须校验合法字符集） |
+| 2026-08-16 | guardrail-enforcer + ac-verifier | 新增 BR-error-handling-015/016 | UXR7-R2 三问题修复闭环（TKN-UXR7R2-*，ADR-027 修订）。根因判定：首轮修复代码未进入真机 APK（APK 构建 01:37 早于源码 04:42-04:58，dex 字符串验证无新函数）——"多次修复依然存在"的直接根因是交付链断裂。网络调研 + 深度推理修正三处方案缺陷：搜索多候选核心词短整词降级重试（Bing OOV 分词坍缩，SearXNG #4964 同机制）、markdown 表格支持无分隔行紧凑表格（0.26.0 无表格组件）、引用池工具调用参数反向映射 + 成功读取过滤。guardrail 三轮（MED-01 假引用→R2 通过，DEF-001/002→R3 通过）+ ac-verifier 两轮（13 AC 全 PASS，全量回归 1792 用例 0 失败）。2 条新规则：BR-error-handling-015（LLM JSON 字段须显式拒绝 JsonNull/"null" 字面量防假引用）、BR-error-handling-016（日志记录用户输入必须截断防 CWE-532） |

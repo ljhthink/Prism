@@ -21,6 +21,13 @@ class McpToolProviderDispatcher(
         if (config.serverType == McpServerType.LOCAL) localProvider.listTools(config)
         else remoteProvider.listTools(config)
 
+    // B-1 修复（guardrail TKN-P17-GUARDRAIL-001）：原实现未覆写 describeTools，
+    // 继承了接口默认 emptyList()，导致生产链路 mcpToolProviderDispatcher.describeTools 恒空，
+    // MCP 工具（time 等）无法注入 LLM（Bug-3 实际未修复）。此处按 serverType 分发到本地/远程实现。
+    override suspend fun describeTools(config: McpServerConfig): List<ToolDefinition> =
+        if (config.serverType == McpServerType.LOCAL) localProvider.describeTools(config)
+        else remoteProvider.describeTools(config)
+
     override suspend fun callTool(
         config: McpServerConfig,
         name: String,

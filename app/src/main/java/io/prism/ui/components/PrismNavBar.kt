@@ -12,8 +12,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
@@ -59,8 +61,14 @@ fun PrismNavBar(
     Column(
         modifier = modifier
             .fillMaxWidth()
+            // UXR3 问题 1（键盘，guardrail M-5 修复）：Scaffold 已关闭 content insets，
+            // 底部导航需自行处理 IME 与导航栏安全区。用 `ime.union(navigationBars)` 取
+            // **合并值**而非 `imePadding() + navigationBarsPadding()` 顺序叠加 ——
+            // 键盘弹出时 ime inset 已覆盖导航栏区域，若再叠加 navigationBars 会双重计数，
+            // 导致输入区被顶高（3 键导航设备尤其明显，正是本轮要消除的同类问题）。
+            // union 语义：取各边最大值（键盘弹出时取 ime 高度，键盘收起时取导航栏高度）。
+            .windowInsetsPadding(WindowInsets.ime.union(WindowInsets.navigationBars))
             .background(PrismPanel)
-            .windowInsetsPadding(WindowInsets.navigationBars)
     ) {
         // 顶部 1px 描边（`--line`）
         Box(

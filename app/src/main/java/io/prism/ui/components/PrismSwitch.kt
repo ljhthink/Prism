@@ -56,7 +56,11 @@ fun PrismSwitch(
     ) {
         Box(
             modifier = Modifier
-                .padding(start = offset)
+                // BR-animation-001: spring DampingRatioMediumBouncy (ζ=0.5) 欠阻尼过冲约 16.3%，
+                // checked true→false 时 offset 从 18.dp→2.dp 过冲最低值约 -0.6dp，
+                // Compose padding 不允许负值会抛 IllegalArgumentException 闪退（B3 致命）。
+                // coerceIn 截断过冲到非负范围，保留 spring 物理滑动视觉（设计规范 v0.4 第 9.3 节）。
+                .padding(start = offset.coerceIn(0.dp, 18.dp))
                 .size(20.dp)
                 .clip(CircleShape)
                 .background(Color.White)

@@ -21,14 +21,20 @@ import io.prism.memory.SlidingWindowMemoryManager
 import io.prism.memory.SlidingWindowResult
 import io.prism.memory.UserProfileManager
 import io.prism.network.ChatStreamProvider
+import io.prism.network.McpToolProvider
 import io.prism.network.StreamEvent
 import io.prism.network.ToolDefinition
+import io.prism.network.WebSearchLocalToolExecutor
+import io.prism.network.KnowledgeBaseLocalToolExecutor
 import io.prism.rag.RagContextBuilder
 import io.prism.rag.RagTarget
 import io.prism.skill.SkillExecutor
 import io.prism.skill.SkillRegistry
 import io.prism.ui.model.ChatMessage
+import io.prism.ui.model.Citation
 import io.prism.ui.model.Role
+import io.prism.ui.model.SearchResult
+import io.prism.ui.model.ToolCallRef
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -42,6 +48,9 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicLong
 
@@ -153,6 +162,13 @@ class ConversationViewModel(
      */
     val crossAppLauncher: CrossAppLauncher? = null,
     /**
+     * DEF-008（Bug-3）：MCP 工具提供者，用于注入已启用 MCP Server 的工具到 LLM `tools` 列表。
+     *
+     * null 时降级为不注入 MCP 工具（LLM 无法感知 MCP 能力）。
+     * 生产环境由 [PrismApplication.mcpToolProviderDispatcher] 注入；测试可注入 fake 或 null。
+     */
+    private val mcpToolProvider: McpToolProvider? = null,
+    /**
      * M7 Phase B（ADR-017 4.7）：RAG 检索 top-k，按档位动态传入。
      *
      * - FULL 档：5（标准批次）
@@ -162,7 +178,40 @@ class ConversationViewModel(
      * 默认 [DEFAULT_RAG_TOP_K]=3（向后兼容既有测试，未注入时按 STANDARD 行为）。
      * 生产环境由 [Factory] 从 [io.prism.tier.TierManager.currentTier.ragTopK] 注入。
      */
-    private val ragTopK: Int = DEFAULT_RAG_TOP_K
+    private val ragTopK: Int = DEFAULT_RAG_TOP_K,
+    /**
+     * 问题 8a（ADR-020）：深度思考配置仓库（DataStore 持久化开关 + 思考强度）。
+     *
+     * null 时降级为深度思考关闭（不发送 thinking 字段，向后兼容所有 Provider 端点）。
+     * 生产环境由 [Factory] 从 [PrismApplication.thinkingConfigRepository] 注入。
+     */
+    private val thinkingConfigRepository: io.prism.config.ThinkingConfigRepository? = null,
+    /**
+     * 问题 8b（ADR-020）：是否启用联网搜索工具（`web_search__search`）。
+     *
+     * 默认 false（向后兼容既有测试：纯函数 [Companion.buildTools] 默认不合并搜索工具，
+     * 空 Skill 列表返回空 tools）。生产环境由 [Factory] 显式传 true（联网搜索零配置免费，
+     * LLM 始终可感知并调用）。
+     */
+    private val webSearchEnabled: Boolean = false,
+    /**
+     * UX-001 问题 4（ADR-021）：会话仓库（历史对话记录持久化）。
+     *
+     * null 时降级为无会话持久化（向后兼容既有测试，消息仅内存态）。
+     * 生产环境由 [Factory] 从 [PrismApplication.sessionRepository] 注入。
+     */
+    private val sessionRepository: io.prism.data.SessionRepository? = null,
+    /**
+     * UXR3 问题 10（ADR-023）：工具审批模式配置仓库。
+     *
+     * 用于构建 tools 前判断是否注入工具定义：
+     * - DISABLED 模式：不向 LLM 注入任何工具（LLM 无法感知与调用工具）
+     * - MANUAL / AUTO 模式：正常注入（执行时的审批由 [SkillExecutor] 按模式处理）
+     *
+     * null 时降级为不启用该功能（视为 MANUAL，正常注入工具，向后兼容既有测试）。
+     * 生产环境由 [Factory] 从 [PrismApplication.toolApprovalConfigRepository] 注入。
+     */
+    private val toolApprovalConfigRepository: io.prism.config.ToolApprovalConfigRepository? = null
 ) : ViewModel() {
 
     /**
@@ -175,6 +224,28 @@ class ConversationViewModel(
      */
     private val nextId = AtomicLong(0L)
 
+    /** UX-001 问题 2（ADR-022）：用户是否手动切换过深度思考开关（防 init 竞态覆盖）。 */
+    private var thinkingToggledByUser = false
+
+    init {
+        // UX-001 问题 5（ADR-021）+ 问题 2（ADR-022 二次反馈）：初始化深度思考开关状态。
+        // 竞态修复：异步读 DataStore 期间用户可能已点击开关（setThinkingEnabled 已写内存），
+        // 若 init 完成后用 DataStore 旧值覆盖会"点了没反应"。用 [thinkingToggledByUser] 标记：
+        // 用户手动切换过则不再应用 init 读取值。
+        viewModelScope.launch {
+            try {
+                val stored = thinkingConfigRepository?.getThinkingEnabled()
+                if (!thinkingToggledByUser) {
+                    stored?.let { _thinkingEnabled.value = it }
+                }
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007
+            } catch (e: Exception) {
+                Log.w(TAG, "init thinkingEnabled failed: ${e::class.simpleName}")
+            }
+        }
+    }
+
     private val _messages = MutableStateFlow<List<ChatMessage>>(emptyList())
     /** 消息列表（只读 StateFlow） */
     val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
@@ -182,6 +253,61 @@ class ConversationViewModel(
     private val _isTyping = MutableStateFlow(false)
     /** AI 是否正在回复（打字指示） */
     val isTyping: StateFlow<Boolean> = _isTyping.asStateFlow()
+
+    /**
+     * 当前正在调用的工具名（UX-001 问题 7，ADR-022）。
+     *
+     * 非 null 表示 LLM 正在调用该工具（UI 展示「正在调用工具: xxx」），
+     * null 表示无活动工具调用。由 [handleStreamEvent] 的 ToolCallStart 置位。
+     *
+     * **UXR4 问题 7/10（ADR-024）生命周期修复**：此前在 [StreamEvent.Done]（紧跟
+     * ToolCallComplete）即清除，工具**执行阶段** activeTool=null 且 isTyping=false，
+     * UI 指示一闪而过。现改为：工具回路（[executeWithToolLoop]）期间 activeTool 保持，
+     * 由回路结束（finally）统一清除；无工具的普通流式分支（[executePlainStream]）
+     * 保持"Done 清除"原行为。
+     */
+    private val _activeTool = MutableStateFlow<String?>(null)
+    val activeTool: StateFlow<String?> = _activeTool.asStateFlow()
+
+    /**
+     * UXR6 问题 2：当前正在流式生成的 AI 消息 id 集合。
+     *
+     * 替代「全局 isTyping + lastOrNull() 推断」的每消息独立标记：
+     * - [launchAnswer] 创建 aiId 占位消息时加入（流式期间渲染为纯文本，避免 markdown 中间态井号残留）
+     * - [handleStreamEvent] Done/Error 或 [executeWithToolLoop] finally 时移除（切换 Markdown 完整渲染）
+     * - 多消息并发时仅当前消息为 true，判定准确（修复全局推断在工具占位/tool 消息插入后失效）
+     */
+    private val _streamingIds = MutableStateFlow<Set<Long>>(emptySet())
+    val streamingIds: StateFlow<Set<Long>> = _streamingIds.asStateFlow()
+
+    /**
+     * UXR6 问题 3a：当前是否正在执行 RAG 检索（反映「本消息」的检索活动）。
+     *
+     * [launchAnswer] 的 [buildRagPlan] 前置 true、完成/降级后置 false。
+     * UI 据此决定是否显示「正在检索知识库…」指示，替代旧「ragTarget 开关 + 全局 ragDone」
+     * 推断（旧逻辑对每条消息无条件显示检索画面）。
+     */
+    private val _ragRetrieving = MutableStateFlow(false)
+    val ragRetrieving: StateFlow<Boolean> = _ragRetrieving.asStateFlow()
+
+    /**
+     * UXR4 问题 7/10（ADR-024）：是否处于工具执行回路中。
+     *
+     * true 时 [handleStreamEvent] 的 Done 事件**不**清除 activeTool/isTyping
+     * （工具执行阶段保持「正在调用工具」指示），由 [executeWithToolLoop] 的 finally
+     * 统一复位。false（普通流式分支）时 Done 清除原行为不变。
+     */
+    private var toolLoopActive = false
+
+    /**
+     * UXR6 问题 5（TTFT）：MCP 工具定义缓存。
+     *
+     * [launchAnswer] 每轮都会对每个 enabled 远程 MCP Server 调用 `describeTools`
+     * （网络连接 + listTools），是不可达 Server 时首 token 前的重阻塞项。工具定义低频变化，
+     * 故按 enabled server 集合签名做失效：server 增删改/启停导致签名变化 → 清缓存重取。
+     */
+    private val mcpToolsCache = mutableMapOf<String, List<ToolDefinition>>()
+    private var mcpToolsSignature: String? = null
 
     /**
      * RAG 检索目标模式（US-019，ADR-012 5.2）。
@@ -193,6 +319,24 @@ class ConversationViewModel(
     val ragTarget: StateFlow<RagTarget> = _ragTarget.asStateFlow()
 
     /**
+     * 深度思考开关（UX-001 问题 5，ADR-021）。
+     *
+     * 初始值从 [thinkingConfigRepository] 读取；切换时经 [setThinkingEnabled] 持久化到
+     * DataStore，并同步内存 StateFlow（UI 即时响应）。null 仓库降级为默认关闭。
+     */
+    private val _thinkingEnabled = MutableStateFlow(false)
+    val thinkingEnabled: StateFlow<Boolean> = _thinkingEnabled.asStateFlow()
+
+    /**
+     * 联网搜索开关（UX-001 问题 5，ADR-021）。
+     *
+     * 初始值由构造函数 [webSearchEnabled] 决定（生产默认 true，向后兼容既有测试默认 false）。
+     * 切换时经 [setWebSearchEnabled] 更新，[sendMessage] 按当前值决定是否合并搜索工具。
+     */
+    private val _webSearchEnabled = MutableStateFlow(webSearchEnabled)
+    val webSearchEnabledFlow: StateFlow<Boolean> = _webSearchEnabled.asStateFlow()
+
+    /**
      * 当前会话 ID（M5 Phase E，US-035）。
      *
      * 首条 [sendMessage] 时生成（UUID），用于 L2 跨会话记忆存储/检索的会话隔离。
@@ -201,6 +345,16 @@ class ConversationViewModel(
      * **非 StateFlow**：会话 ID 是内部状态，UI 不需要订阅其变化。
      */
     private var sessionId: String? = null
+    /** UX-001 问题 4（ADR-021）：当前会话的 ObjectBox id（null 表示尚未持久化）。 */
+    private var sessionObjId: Long = 0L
+
+    /**
+     * UXR4 问题 8/9（ADR-024）：会话脏标记 —— 仅当有新消息（sendMessage/编辑重发）时置位。
+     *
+     * `persistSession` 仅在脏标记为 true 时写库，避免"只读打开历史会话再退出"刷新 updatedAt。
+     * 回答完成（Done/Error）时落库并清位；`loadSession` 后清位。
+     */
+    private var messagesDirty = false
 
     /**
      * L2 跨会话记忆上下文缓存（M5 Phase E，US-035）。
@@ -236,6 +390,115 @@ class ConversationViewModel(
     /** 切换 RAG 检索目标模式（US-019）。 */
     fun setRagTarget(target: RagTarget) {
         _ragTarget.value = target
+    }
+
+    /**
+     * 切换深度思考开关（UX-001 问题 5，ADR-021）。
+     *
+     * 同步更新内存 StateFlow（UI 即时响应）并持久化到 DataStore（[ThinkingConfigRepository]）。
+     * 仓库为 null 时仅更新内存状态（降级场景）。
+     */
+    fun setThinkingEnabled(enabled: Boolean) {
+        // UX-001 问题 2（ADR-022）：标记用户已手动切换（防 init 异步读取覆盖竞态）
+        thinkingToggledByUser = true
+        _thinkingEnabled.value = enabled
+        val repo = thinkingConfigRepository
+        if (repo != null) {
+            viewModelScope.launch {
+                try {
+                    repo.setThinkingEnabled(enabled)
+                } catch (e: CancellationException) {
+                    throw e // BR-error-handling-007：协程取消必须重抛
+                } catch (e: Exception) {
+                    Log.w(TAG, "persist thinkingEnabled failed: ${e::class.simpleName}")
+                }
+            }
+        }
+    }
+
+    /**
+     * 切换联网搜索开关（UX-001 问题 5，ADR-021）。
+     *
+     * [sendMessage] 按当前值决定是否合并 `web_search__search` 工具到 LLM tools 列表。
+     */
+    fun setWebSearchEnabled(enabled: Boolean) {
+        _webSearchEnabled.value = enabled
+    }
+
+    /**
+     * 判断当前是否处于「工具禁用」审批模式（UXR3 问题 10，ADR-023）。
+     *
+     * DISABLED 模式下不向 LLM 注入任何工具定义（[sendMessage] 构建 tools 前调用）。
+     * 仓库为 null 时视为 MANUAL（正常注入，向后兼容既有测试）。
+     *
+     * **BR-error-handling-007**（guardrail M-3 修复）：禁用 `runCatching`（会吞
+     * CancellationException 破坏取消即时传播），改用显式 try-catch 重抛。
+     */
+    private suspend fun isToolsDisabled(): Boolean {
+        val repo = toolApprovalConfigRepository ?: return false
+        return try {
+            repo.getMode() == io.prism.config.ToolApprovalMode.DISABLED
+        } catch (e: CancellationException) {
+            throw e // BR-error-handling-007：协程取消必须重抛
+        } catch (e: Exception) {
+            Log.w(TAG, "read toolApprovalMode failed: ${e::class.simpleName}")
+            false
+        }
+    }
+
+    /**
+     * 编辑用户消息并重新发送（UXR3 问题 13，ADR-023）。
+     *
+     * 将指定用户消息的内容替换为 [newText]，并**删除该消息之后的所有消息**（含原 AI 回复），
+     * 然后触发一次新的 [sendMessage] 请求（携带替换后的完整历史，AI 基于编辑后的问题重新回答）。
+     *
+     * **实现策略**（复用 sendMessage 主流程）：
+     * 1. 找到目标用户消息 index（找不到则忽略）
+     * 2. 替换内容 + 截断其后所有消息（[replaceAndTruncateMessages] 原子 CAS）
+     * 3. 调用 [sendMessage] 追加编辑后的新消息并请求 AI —— 由于截断后列表已不含旧 AI 回复，
+     *    新消息将作为会话末尾正确触发完整请求
+     *
+     * **边界**：
+     * - 仅允许编辑 USER 角色消息（AI/TOOL 消息编辑语义不明确，忽略）
+     * - newText 空白时忽略（无意义编辑）
+     * - 编辑时若正在生成（isTyping=true），视为忽略（避免并发状态撕裂）
+     *
+     * @param messageId 目标用户消息 id
+     * @param newText 编辑后的新内容
+     */
+    fun editUserMessageAndResend(messageId: Long, newText: String) {
+        val trimmed = newText.trim()
+        if (trimmed.isEmpty()) return
+        if (_isTyping.value) return
+
+        val msgs = _messages.value
+        val index = msgs.indexOfFirst { it.id == messageId && it.role == Role.USER }
+        if (index < 0) return
+
+        replaceAndTruncateMessages(messageId, trimmed, index)
+        // UXR4 问题 8/9（ADR-024）：编辑修改了消息内容，置脏标记（回答完成后落库）
+        messagesDirty = true
+        // 编辑后直接发起回答请求（不重复追加用户消息 —— 原消息已被替换为编辑内容）
+        launchAnswer(trimmed)
+    }
+
+    /**
+     * 原子替换用户消息内容并截断其后的所有消息（UXR3 问题 13，ADR-023）。
+     *
+     * 通过 [_messages.update] CAS 一次性完成「替换 + 截断」，避免两步分开导致的中间状态
+     * 被 UI 订阅者观察到（BR-concurrency-004 状态原子性）。
+     *
+     * @param messageId 目标消息 id
+     * @param newContent 新内容
+     * @param index 目标消息在列表中的下标（调用方已校验）
+     */
+    private fun replaceAndTruncateMessages(messageId: Long, newContent: String, index: Int) {
+        _messages.update { msgs ->
+            val updated = msgs.toMutableList()
+            updated[index] = updated[index].copy(content = newContent)
+            updated.subList(index + 1, updated.size).clear()
+            updated
+        }
     }
 
     /**
@@ -278,28 +541,182 @@ class ConversationViewModel(
      *
      * @param text 用户输入文本
      */
+    /**
+     * 开启新对话（DEF-009，Bug-1）。
+     *
+     * 清空当前消息列表并重置会话边界状态，使下一条消息走全新的会话初始化。
+     *
+     * **会话边界**：重置 [sessionId] / [l2MemoryContext] / [l3ProfileContext]，
+     * 使 [startSessionIfNeeded] 在下一轮重新生成 sessionId 并检索 L2/L3。
+     * 保留 [nextId] 递增（消息 id 全局唯一，避免跨会话冲突）。
+     *
+     * **注意**：当前消息仅内存态（无持久化），新对话会丢弃旧会话消息。
+     * 会话持久化属后续 US（记忆/会话历史），本方法聚焦"开启新对话"的最小语义。
+     */
+    fun startNewConversation() {
+        // UX-001 问题 4（ADR-021）：切换前持久化当前会话（若有消息）
+        persistSession()
+        _messages.value = emptyList()
+        _isTyping.value = false
+        sessionId = null
+        sessionObjId = 0L
+        // UXR4 问题 8/9（ADR-024）：新会话无未落库变更，清脏标记
+        messagesDirty = false
+        l2MemoryContext = null
+        l3ProfileContext = null
+        // UX-001 问题 4（ADR-022 二次反馈）：新对话重置 RAG 检索目标为默认全库，
+        // 避免打开新对话后仍残留上一个会话的「RAG 全库」状态 / 引用来源 UI。
+        _ragTarget.value = RagTarget.AllLibraries
+    }
+
+    /**
+     * 加载指定会话（UX-001 问题 4，ADR-021）—— 从 [SessionRepository] 恢复历史对话。
+     *
+     * 先持久化当前会话（若有消息），再加载目标会话的 JSON 消息列表。
+     *
+     * @param sessionId 要加载的会话的 ObjectBox id
+     */
+    fun loadSession(sessionId: Long) {
+        val repo = sessionRepository ?: return
+        val session = repo.get(sessionId) ?: return
+        // 持久化当前会话（切换前保存）
+        persistSession()
+        // 反序列化消息列表
+        val json = session.messagesJson
+        val msgs = try {
+            io.prism.util.ChatMessageSerializer.decodeList(json)
+        } catch (e: Exception) {
+            emptyList()
+        }
+        _messages.value = msgs
+        sessionObjId = sessionId
+        // UXR4 问题 8/9（ADR-024）：加载的会话是"只读查看"，清脏标记 ——
+        // 退出时不刷新 updatedAt（避免打开即顶到「刚刚」）。
+        messagesDirty = false
+        // 重置 L2/L3 缓存（新会话上下文）
+        this.sessionId = null
+        l2MemoryContext = null
+        l3ProfileContext = null
+    }
+
+    /**
+     * 持久化当前会话到 [SessionRepository]（UX-001 问题 4，ADR-021）。
+     *
+     * 将当前消息列表序列化为 JSON，保存或更新 [Session] 实体。
+     * 消息为空时跳过（无内容可存的空会话）。
+     * 降级场景（仓库为 null / 序列化失败）静默降级，不阻断对话。
+     *
+     * **UXR4 S1 隐私边界（ADR-024 / guardrail TKN-UXR4-GUARDRAIL-001）**：
+     * 深度思考开关**关闭**时，思考链（thinkingChain）在内存中仍被累积（供协议层
+     * reasoning_content 回传，DeepSeek 硬性要求），但**不持久化进会话 JSON**
+     * （`encodeDefaults=true` 会写入 thinkingChain）。协议回传与本地留存解耦：
+     * - 回传：内存 thinkingChain 保留（第 2 轮工具回路仍携带）
+     * - 留存：开关关闭 → 序列化前剥离 thinkingChain（用户"关闭=不产生思考痕迹"预期）
+     */
+    private fun persistSession() {
+        val repo = sessionRepository ?: return
+        val msgs = _messages.value
+        if (msgs.isEmpty()) return
+        // UXR4 问题 8/9（ADR-024）：无脏标记（只读打开历史会话、或上次已落库）时跳过写库，
+        // 避免"打开→退出"刷新 updatedAt（会话被错误顶到「刚刚」）。
+        if (!messagesDirty) return
+        // 生成标题（首条用户消息截断）
+        val title = msgs.firstOrNull { it.role == Role.USER }?.content?.take(50)?.trim()
+            ?: "新会话"
+        // S1（ADR-024）：开关关闭时剥离 thinkingChain 再序列化（隐私边界，协议回传不受影响）
+        val toPersist = if (_thinkingEnabled.value) msgs else stripThinkingChain(msgs)
+        val json = try {
+            io.prism.util.ChatMessageSerializer.encodeList(toPersist)
+        } catch (e: Exception) {
+            return // 序列化失败静默降级
+        }
+        if (sessionObjId == 0L) {
+            // 新建会话
+            sessionObjId = repo.save(
+                io.prism.data.Session(
+                    title = title,
+                    messagesJson = json,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        } else {
+            // 更新已有会话
+            repo.get(sessionObjId)?.let { existing ->
+                repo.save(
+                    existing.copy(
+                        title = title,
+                        messagesJson = json,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+            }
+        }
+        // 落库成功清位（同一内容不再重复写库）
+        messagesDirty = false
+    }
+
+    /**
+     * 剥离所有消息的 thinkingChain（UXR4 S1 隐私边界，ADR-024）。
+     *
+     * 深度思考开关关闭时调用，避免思考链被 `encodeDefaults=true` 持久化进会话 JSON。
+     * 仅影响持久化视图；内存中 [ChatMessage.thinkingChain] 保持不变（供协议回传）。
+     *
+     * @param msgs 原始消息列表
+     * @return 剥离 thinkingChain 后的消息列表
+     */
+    private fun stripThinkingChain(msgs: List<ChatMessage>): List<ChatMessage> =
+        msgs.map { if (it.thinkingChain != null) it.copy(thinkingChain = null) else it }
+
     fun sendMessage(text: String) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
+        // Q5（guardrail TKN-UXR4-GUARDRAIL-001）：AI 正在回复时忽略新发送，
+        // 防止并发回路（旧回路 finally 清除新回路 isTyping）导致状态撕裂。
+        if (_isTyping.value) return
 
         val now = System.currentTimeMillis()
         _messages.update { it + ChatMessage(nextId.getAndIncrement(), Role.USER, trimmed, now) }
+        // UXR4 问题 8/9（ADR-024）：新消息置脏标记，回答完成后落库并刷新 updatedAt
+        messagesDirty = true
 
+        // UXR3 问题 13（ADR-023）：发起回答请求逻辑提取为独立方法，
+        // 供普通发送与编辑重发（[editUserMessageAndResend]）共用 —— 编辑重发不追加新用户消息。
+        launchAnswer(trimmed)
+    }
+
+    /**
+     * 发起一轮 AI 回答请求（UXR3 问题 13，ADR-023 重构提取）。
+     *
+     * 从 [sendMessage] 提取：追加 AI 占位消息 + RAG 注入 + 会话启动 + 构建 tools +
+     * 三层记忆上下文 + 合并 systemPrompt + 分支执行（executeLoop / 普通流式）。
+     *
+     * **调用方**：
+     * - [sendMessage]：追加用户消息后调用（标准发送）
+     * - [editUserMessageAndResend]：替换 + 截断原消息后调用（编辑重发，不重复追加用户消息）
+     *
+     * @param userText 用户消息文本（已 trim，编辑重发时与替换后的消息内容一致）
+     */
+    private fun launchAnswer(userText: String) {
         viewModelScope.launch {
             _isTyping.value = true
             val aiId = nextId.getAndIncrement()
-            _messages.update { it + ChatMessage(aiId, Role.ASSISTANT, "", now) }
+            // UXR6 问题 2：创建占位即标记为流式生成中（流式期间 UI 渲染纯文本，完成后再切 Markdown）
+            markStreaming(aiId)
+            _messages.update { it + ChatMessage(aiId, Role.ASSISTANT, "", System.currentTimeMillis()) }
 
             val active = providerRepository.activeProviderFlow.value
             if (active == null) {
                 appendDelta(aiId, "\n\n⚠️ 尚未配置激活的 Provider，请在「设置」中添加并激活")
+                markCompleted(aiId)
                 _isTyping.value = false
                 return@launch
             }
 
+            // UXR6 问题 3a：RAG 检索开始 —— UI 显示「正在检索知识库…」（仅真实检索期间）
+            _ragRetrieving.value = true
             // RAG 注入（IO 协程，BR-concurrency-002 全程持锁，禁止 Main）
             // G-01 修复：外层 runCatching 重抛 CancellationException（BR-error-handling-007 提议）
-            val ragResult = runCatching { buildRagPlan(trimmed) }
+            val ragResult = runCatching { buildRagPlan(userText) }
                 .getOrElse { e ->
                     if (e is CancellationException) throw e
                     // G-03 修复：整个 RAG 注入异常 → 仅日志记录 simpleName，用户无感（ADR-012 5.5）
@@ -307,6 +724,8 @@ class ConversationViewModel(
                     Log.w(TAG, "RAG injection failed: ${e::class.simpleName}, degrading to normal chat")
                     RagBuildResult.NormalChat
                 }
+            // UXR6 问题 3a：RAG 检索结束（无论成功/降级，避免「检索知识库」指示残留）
+            _ragRetrieving.value = false
 
             // G-02 修复：按 RagBuildResult 三态差异化处理用户感知
             val ragPlan: RagPlan? = when (ragResult) {
@@ -330,12 +749,86 @@ class ConversationViewModel(
 
             // M5 Phase E（US-035）：会话启动 —— 首条消息生成 sessionId + L2 检索 + L3 画像加载
             // 降级策略：L2/L3 任一失败降级为 null（用户无感），不阻断对话
-            startSessionIfNeeded(trimmed)
+            startSessionIfNeeded(userText)
 
-            // M4 Phase D：构建 tools（M6 Phase C 扩展：合并跨 App 本地工具）
+            // M4 Phase D：构建 tools（M6 Phase C 扩展：合并跨 App 本地工具；DEF-008 合并 MCP 工具；
+            // 问题 8b（ADR-020）+ UX-001 问题 5（ADR-021）：按联网搜索开关合并搜索工具；
+            // UXR4 问题 2/3（ADR-024）：合并知识库工具（knowledge_base__search/list_documents/get_document_content）
             val enabledSkills = skillRegistry?.enabledSkills() ?: emptyList()
-            val tools = Companion.buildTools(enabledSkills, crossAppLauncher)
+            val baseTools = Companion.buildTools(enabledSkills, crossAppLauncher, _webSearchEnabled.value)
+            // UXR4 问题 2/3（ADR-024）：知识库工具在 **RAG 开启 + 嵌入可用** 时注入
+            //（LLM 可主动枚举/检索/读取知识库，解决 RAG 仅自动注入、LLM 无知识库感知能力的问题）。
+            // 语义对齐：RAG 关闭（RagTarget.Off）或低端档（ragTopK<=0，NullEmbedder）时
+            // LLM 不应感知知识库能力（与 buildRagPlan 短路一致 + guardrail Q2 能力对齐）。
+            val kbTools = if (_ragTarget.value is RagTarget.Off || ragTopK <= 0) {
+                emptyList()
+            } else {
+                io.prism.network.KnowledgeBaseLocalToolExecutor.buildToolDefinitions()
+            }
             val mcpServers = mcpServerRepository?.servers?.value ?: emptyList()
+            // DEF-008（Bug-3）：注入已启用 MCP Server 的工具（带 mcp_ 命名空间前缀，支持多 server 精确路由）。
+            // describeTools 失败降级为空（不阻断对话），命名空间由 SkillExecutor.stripNamespace/selectMcpServer 处理。
+            // M-2 修复（guardrail TKN-P17-GUARDRAIL-001）：原 runCatching 会吞 CancellationException，
+            // 违反 BR-error-handling-007。改为显式 try-catch 重抛 CancellationException。
+            // UXR6 问题 5（TTFT）：describeTools 结果按 enabled server 集合签名缓存，避免每轮
+            // 网络连接 + listTools 阻塞首 token；签名变化（server 增删改/启停）时清缓存重取。
+            val enabledMcpServers = mcpServers.filter { it.isEnabled }
+            val mcpSignature = enabledMcpServers.joinToString("|") { "${it.name}@${it.baseUrl}" }
+            if (mcpSignature != mcpToolsSignature) {
+                mcpToolsCache.clear()
+                mcpToolsSignature = mcpSignature
+            }
+            val mcpTools = mcpToolProvider?.let { provider ->
+                enabledMcpServers.flatMap { server ->
+                    // guardrail Medium-1（TKN-UXR6-GUARDRAIL-001）：缓存键用 name@baseUrl，
+                    // 避免同名 server 不同 baseUrl 时 getOrPut 键冲突静默遮蔽。
+                    val cacheKey = "${server.name}@${server.baseUrl}"
+                    val toolDefs = mcpToolsCache.getOrPut(cacheKey) {
+                        try {
+                            provider.describeTools(server)
+                        } catch (e: CancellationException) {
+                            throw e // BR-error-handling-007：协程取消必须重抛
+                        } catch (e: Exception) {
+                            // BR-error-handling-004：记录日志（不含敏感信息），降级为空工具列表
+                            Log.w(TAG, "describeTools failed: ${e::class.simpleName}")
+                            emptyList()
+                        }
+                    }
+                    toolDefs.map { toolDef ->
+                        // UX-001 问题 5/6（ADR-022 二次修复）：server 名经 [SkillExecutor.toMcpNamespace]
+                        // 规范化后再拼工具名（空格/中文 → `_`），否则含空格/中文的 server 名会生成
+                        // 非法工具名，被 OpenAI/DeepSeek 400 拒绝或本地 isLegalToolName 过滤。
+                        toolDef.copy(
+                            function = toolDef.function.copy(
+                                name = "${SkillExecutor.MCP_NAMESPACE_PREFIX}${SkillExecutor.toMcpNamespace(server.name)}${SkillExecutor.NAMESPACE_SEPARATOR}${toolDef.function.name}"
+                            )
+                        )
+                    }
+                }
+            } ?: emptyList()
+            // UX-001 问题 5（二次反馈，ADR-022）：工具名唯一性保障。
+            // 根因：MCP 工具名前缀仅依赖 server.name，用户重复添加同名预设 / 自定义同名 server /
+            // 空名 server 时产生完全相同工具名 → OpenAI/DeepSeek 400 "Tool names must be unique"。
+            // 修复：合并后按工具名去重（保留首个），并过滤非法工具名（OpenAI 仅允许 [a-zA-Z0-9_-]）。
+            // 同时避免 Skill 工具（skillName__tool）与 MCP 工具（mcp_server__tool）跨域重名（理论上前缀
+            // 命名空间已隔离，防御性再校验）。
+            val tools = if (isToolsDisabled()) {
+                // UXR3 问题 10（ADR-023）：DISABLED 审批模式 —— 不向 LLM 注入任何工具定义，
+                // LLM 无法感知与调用工具（tools 为空走普通流式对话分支，行为等同无 Skill 场景）。
+                emptyList()
+            } else {
+                (baseTools + kbTools + mcpTools)
+                    .distinctBy { it.function.name }
+                    .filter { isLegalToolName(it.function.name) }
+            }
+
+            // 问题 8a（ADR-020）+ UX-001 问题 5（ADR-021）：深度思考开关由 UI 状态驱动。
+            // 关闭时 thinkingEnabled=false，不发送 thinking/reasoning_effort 字段（向后兼容所有端点）。
+            val thinkingConfig = thinkingConfigRepository
+            val thinkingEnabled = _thinkingEnabled.value
+            val reasoningEffort = thinkingConfig
+                ?.takeIf { thinkingEnabled }
+                ?.getReasoningEffort()
 
             // 请求历史构建：
             // 1. 排除当前 AI 占位消息（aiId）—— 它是本轮待生成目标，不应进 history。
@@ -346,10 +839,16 @@ class ConversationViewModel(
             //    （CR-02，guardrail 发现 1，BR-interface-003）
             // 3. M4 Phase D R-4 修复：保留携带 toolCalls 的空 content assistant 占位消息，
             //    否则下次请求丢失 tool_calls 上下文，OpenAI 返回 400
-            val filteredHistory = _messages.value.filterNot {
+            val baseHistory = _messages.value.filterNot {
                 it.id == aiId ||
                     (it.role == Role.ASSISTANT && it.content.isEmpty() && it.toolCalls.isEmpty())
             }
+            // UXR5 问题 4（tool_calls 完整性保护，候选 3 防御）：会话恢复/旧数据可能丢失
+            // assistant(tool_calls) 占位的 toolCalls 字段（ChatMessageSerializer 反序列化），
+            // 导致 history 中出现无前置 tool_calls 的孤儿 TOOL 消息 → DeepSeek 400
+            // "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"。
+            // 防御：丢弃所有无法配对到前置 assistant(tool_calls) 的 TOOL 消息。
+            val filteredHistory = Companion.dropOrphanToolMessages(baseHistory)
 
             // M5 Phase E（US-035）：构建三层记忆上下文（L1 每轮处理 + L2/L3 缓存复用）
             // L1 processMessages 返回 summary + recentMessages；recentMessages 替换原始 history
@@ -368,6 +867,7 @@ class ConversationViewModel(
             // 分支策略（R-1）：tools 非空且 skillExecutor 非空 → executeLoop + onEvent 回调；
             // 否则 → 普通流式 streamChat + collect（保持无 Skill 场景零开销）
             // M5 Phase E：history 替换为 memoryContext.recentHistory（L1 滑动窗口处理后的近期消息）
+            // 问题 8a（ADR-020）：深度思考参数透传给两条分支
             if (tools.isNotEmpty() && skillExecutor != null) {
                 executeWithToolLoop(
                     aiId = aiId,
@@ -376,7 +876,9 @@ class ConversationViewModel(
                     mergedSystemPrompt = mergedSystemPrompt,
                     ragContext = ragPlan?.ragContext,
                     tools = tools,
-                    mcpServers = mcpServers
+                    mcpServers = mcpServers,
+                    thinkingEnabled = thinkingEnabled,
+                    reasoningEffort = reasoningEffort
                 )
             } else {
                 executePlainStream(
@@ -384,7 +886,9 @@ class ConversationViewModel(
                     active = active,
                     history = memoryContext.recentHistory,
                     systemPrompt = mergedSystemPrompt,
-                    ragContext = ragPlan?.ragContext
+                    ragContext = ragPlan?.ragContext,
+                    thinkingEnabled = thinkingEnabled,
+                    reasoningEffort = reasoningEffort
                 )
             }
         }
@@ -520,13 +1024,19 @@ class ConversationViewModel(
     /**
      * ViewModel 销毁时的清理钩子（M5 Phase E，US-035）。
      *
-     * 委托至 [persistSessionMemories]（internal 可测）—— [onCleared] 是 `protected` 无法从测试直接调用，
-     * 提取持久化逻辑至 internal 函数便于单元测试覆盖（BR-testing-004 可测性模式）。
+     * **UX-001 问题 4（ADR-021）**：先调用 [persistSession] 把当前对话持久化为会话历史，
+     * 再委托 [persistSessionMemories]（internal 可测）持久化 L2/L3 记忆。
+     * 顺序保证：会话 JSON 先落库，记忆向量化 / 画像抽取后执行，互不冲突。
      *
+     * [onCleared] 是 `protected` 无法从测试直接调用，提取持久化逻辑至 internal 函数
+     * 便于单元测试覆盖（BR-testing-004 可测性模式）。
+     *
+     * @see persistSession
      * @see persistSessionMemories
      */
     override fun onCleared() {
         super.onCleared()
+        persistSession()
         persistSessionMemories()
     }
 
@@ -610,8 +1120,13 @@ class ConversationViewModel(
         mergedSystemPrompt: String?,
         ragContext: String?,
         tools: List<ToolDefinition>,
-        mcpServers: List<io.prism.data.McpServerConfig>
+        mcpServers: List<io.prism.data.McpServerConfig>,
+        thinkingEnabled: Boolean,
+        reasoningEffort: String?
     ) {
+        // UXR4 问题 7/10（ADR-024）：进入工具回路 —— 期间 handleStreamEvent 的 Done 不清除
+        // activeTool/isTyping，保证工具执行阶段持续显示「正在调用工具」。finally 统一复位。
+        toolLoopActive = true
         try {
             val updatedMessages = skillExecutor!!.executeLoop(
                 provider = provider,
@@ -623,10 +1138,12 @@ class ConversationViewModel(
                 mcpServers = mcpServers,
                 maxRounds = Companion.DEFAULT_MAX_ROUNDS,
                 idGenerator = { nextId.getAndIncrement() },
+                thinkingEnabled = thinkingEnabled,
+                reasoningEffort = reasoningEffort,
                 onEvent = { event -> handleStreamEvent(aiId, event) }
             )
             // R-2：同步 executeLoop 返回的新增消息（assistant 占位 + tool result）到 _messages
-            syncToolMessages(updatedMessages, history.size)
+            syncToolMessages(updatedMessages, history.size, aiId)
         } catch (e: CancellationException) {
             throw e // BR-error-handling-007：协程取消必须重抛
         } catch (e: Exception) {
@@ -634,7 +1151,16 @@ class ConversationViewModel(
             Log.w(TAG, "executeLoop failed: ${e::class.simpleName}", e)
             appendDelta(aiId, "\n\n⚠️ 工具执行回路异常: ${e::class.simpleName}")
         } finally {
+            toolLoopActive = false
+            // UXR6 问题 2：工具回路结束时标记 aiId 完成（切换 Markdown 完整渲染）。
+            // 最终文本 Delta 在最后一行 Done 前已累积到 aiId；若途中 Error 未在此标记，
+            // 本 finally 兜底确保 isStreaming 标记清除，避免残留"流式中"状态。
+            markCompleted(aiId)
+            _activeTool.value = null
             _isTyping.value = false
+            // UXR4 问题 8/9（ADR-024）：工具回路结束（含最终文本回答完成）落库，
+            // updatedAt=最后消息结束时刻；脏标记检查由 persistSession 内部处理。
+            persistSession()
         }
     }
 
@@ -650,25 +1176,51 @@ class ConversationViewModel(
         active: ProviderConfig,
         history: List<ChatMessage>,
         systemPrompt: String?,
-        ragContext: String?
+        ragContext: String?,
+        thinkingEnabled: Boolean,
+        reasoningEffort: String?
     ) {
-        val stream = provider.streamChat(
-            config = active,
-            messages = history,
-            systemPrompt = systemPrompt,
-            ragContext = ragContext
-        )
-        stream.collect { event -> handleStreamEvent(aiId, event) }
+        try {
+            val stream = provider.streamChat(
+                config = active,
+                messages = history,
+                systemPrompt = systemPrompt,
+                ragContext = ragContext,
+                thinkingEnabled = thinkingEnabled,
+                reasoningEffort = reasoningEffort
+            )
+            stream.collect { event -> handleStreamEvent(aiId, event) }
+        } catch (e: CancellationException) {
+            throw e // BR-error-handling-007：协程取消必须重抛
+        } catch (e: Exception) {
+            // R2-NEW-4（guardrail TKN-UXR4-GUARDRAIL-R2）：防御纵深 ——
+            // 若未来 Provider 直接抛异常（而非发射 StreamEvent.Error），此处兜底复位状态，
+            // 避免 isTyping 卡死导致 sendMessage 守卫永久屏蔽用户发送。
+            Log.w(TAG, "plain stream failed: ${e::class.simpleName}", e)
+            markCompleted(aiId)
+            _isTyping.value = false
+            _activeTool.value = null
+            persistSession()
+        } finally {
+            // guardrail Low-4 / R2-1（TKN-UXR6-GUARDRAIL-R2）：流若空事件结束（无 Done/Error），
+            // streamingIds 与 isTyping 会残留"流式中"标记（UI 永远纯文本渲染 + sendMessage 守卫
+            // 永久屏蔽用户发送）。markCompleted 与 isTyping=false 均为幂等操作，无论 Done/catch
+            // 分支是否已清，此处兜底确保复位（与 catch 分支对称）。
+            markCompleted(aiId)
+            _isTyping.value = false
+        }
     }
 
     /**
-     * 处理 [StreamEvent] 通用回调（M4 Phase D 抽取，覆盖 6 子类穷尽匹配）。
+     * 处理 [StreamEvent] 通用回调（M4 Phase D 抽取，覆盖 7 子类穷尽匹配）。
      *
      * 同时被 [executeWithToolLoop]（作为 executeLoop 的 onEvent 回调）与
      * [executePlainStream]（作为 collect 内 when 分发）使用，保证两分支事件处理一致。
      *
      * **事件处理策略**：
      * - [StreamEvent.Delta] → [appendDelta] 累积到 aiId 消息
+     * - [StreamEvent.ReasoningDelta] → [appendDelta] 以 `[思考]` 前缀累积（问题 8a，
+     *   深度思考推理过程，与最终答案区分）
      * - [StreamEvent.Done] → isTyping=false
      * - [StreamEvent.Error] → appendDelta 错误提示 + isTyping=false
      * - [StreamEvent.ToolCallStart] → appendDelta 工具调用指示（UI 即时反馈，
@@ -685,20 +1237,79 @@ class ConversationViewModel(
     private fun handleStreamEvent(aiId: Long, event: StreamEvent) {
         when (event) {
             is StreamEvent.Delta -> appendDelta(aiId, event.content)
-            StreamEvent.Done -> _isTyping.value = false
+            // UX-001 问题 7（ADR-021）：深度思考推理过程改为独立 thinkingChain 字段（可折叠展示），
+            // 不再混入最终答案 content（避免「[思考]」前缀污染正文）。
+            // UXR4 问题 1/4/6（ADR-024）：thinkingChain 始终累积（供协议层 reasoning_content 回传），
+            // UI 展示由 ConversationScreen 的 showThinking（深度思考开关）控制。
+            is StreamEvent.ReasoningDelta -> appendThinkingDelta(aiId, event.content)
+            StreamEvent.Done -> {
+                // UXR4 问题 7/10（ADR-024）：工具回路（executeLoop 第 1 轮）的 Done 紧跟
+                // ToolCallComplete 之后到达，此时工具**尚未执行**。若在此清除 activeTool/isTyping，
+                // 工具执行阶段 UI 呈空白（指示一闪而过）。故仅在非工具回路（executePlainStream）
+                // 时清除；工具回路由 executeWithToolLoop finally 统一复位。
+                if (!toolLoopActive) {
+                    // UXR6 问题 2：Done 时标记该消息完成（切换 Markdown 完整渲染）
+                    markCompleted(aiId)
+                    _isTyping.value = false
+                    _activeTool.value = null
+                    // UXR4 问题 8/9（ADR-024）：回答完成落库（updatedAt=最后消息结束时刻）。
+                    // 仅非工具回路（普通流式完成）在此落库；工具回路由 executeWithToolLoop
+                    // 的 finally 落库（其内部最后一个 Done 同样会走到 executeLoop 返回后）。
+                    persistSession()
+                }
+            }
             is StreamEvent.Error -> {
                 // M-1 修复（guardrail TKN-M4-PHASED-GUARDRAIL-001）：UI 边界防御性脱敏
                 // 第二层防御，覆盖未来 Provider 可能透传原始异常 message 的风险（CWE-209）
                 val safeMsg = Companion.sanitizeUiErrorMessage(event.message)
                 appendDelta(aiId, "\n\n⚠️ $safeMsg")
-                _isTyping.value = false
+                // UXR6 问题 2（核心修复）：与 Done 分支保持对称 —— 工具回路（executeLoop）
+                // **中途**的 Error 事件（网络抖动/SSE 中断/某轮失败）不得无条件清 isTyping，
+                // 否则破坏 isStreaming（第 2 回合最终文本流式期间被误判为"完成"，Markdown 直接
+                // 渲染不完整中间态 → 井号残留）。Error 统一由 executeWithToolLoop finally 复位；
+                // 仅非工具回路（executePlainStream）在此直接复位。
+                if (!toolLoopActive) {
+                    markCompleted(aiId)
+                    _isTyping.value = false
+                    _activeTool.value = null
+                    // UXR4 问题 8/9（ADR-024）：错误结束也落库（保留已生成内容）
+                    persistSession()
+                }
             }
             is StreamEvent.ToolCallStart -> {
-                // UI 即时反馈：工具调用开始（Phase E US-027 可升级为独立气泡/卡片）
-                appendDelta(aiId, "\n🔧 ${event.toolName}\n")
+                // UX-001 问题 7（ADR-022）：工具调用状态可视化 —— 记录活动工具名，
+                // UI 展示「正在调用工具: xxx」（对齐 Claude Code 工具进度模型）。
+                // 工具名去命名空间前缀展示（如 web_search__search → search）。
+                _activeTool.value = event.toolName.substringAfterLast(SkillExecutor.NAMESPACE_SEPARATOR)
             }
             is StreamEvent.ToolCallDelta -> Unit  // no-op：参数增量片段，UI 实时展示为可选优化
-            is StreamEvent.ToolCallComplete -> Unit  // no-op：executeLoop 内部已处理执行
+            is StreamEvent.ToolCallComplete -> {
+                // UXR4 问题 7/10（ADR-024）：工具调用完成（即将执行）—— 保持 activeTool
+                //（继续展示「正在调用工具: xxx」）+ 置 isTyping=true，使工具执行阶段有进行中指示，
+                // 而非 Done 后立即清除导致执行期空白。
+                _isTyping.value = true
+                _activeTool.value = event.toolName.substringAfterLast(SkillExecutor.NAMESPACE_SEPARATOR)
+            }
+        }
+    }
+
+    /**
+     * 将深度思考推理增量追加到消息的 [ChatMessage.thinkingChain] 字段（UX-001 问题 7，ADR-021）。
+     *
+     * 与 [appendDelta] 分离：thinkingChain 独立于 content，UI 层渲染为可折叠「深度思考」区域，
+     * 与最终答案区分展示（对齐 DeepSeek 手机端「深度思考区域 + 生成回答」两段式）。
+     *
+     * @param aiId 目标 AI 消息 id
+     * @param delta 思考过程增量片段
+     */
+    private fun appendThinkingDelta(aiId: Long, delta: String) {
+        _messages.update { msgs ->
+            // UXR6 问题 4/5：与 appendDelta 相同的分配优化（仅重建目标消息，避免全量 map）
+            val index = msgs.indexOfFirst { it.id == aiId }
+            if (index < 0) return@update msgs
+            val updated = msgs.toMutableList()
+            updated[index] = updated[index].copy(thinkingChain = (updated[index].thinkingChain ?: "") + delta)
+            updated
         }
     }
 
@@ -712,15 +1323,93 @@ class ConversationViewModel(
      * 新增的 assistant 占位（content="", toolCalls 非空）与 tool result（role=TOOL）作为
      * 独立消息追加到 [_messages]，UI 渲染时按 id 顺序展示。
      *
+     * **UX-001 问题 8（ADR-021）**：联网搜索（`web_search__search`）的 TOOL 结果
+     * 解析为结构化 [SearchResult] 列表，附加到 AI 消息 [ChatMessage.searchResults]，
+     * UI 渲染为可折叠来源卡片（可点击跳转外部网站）。
+     *
      * **原子性**：通过 [_messages.update] CAS 写入（BR-concurrency-004）。
      *
      * @param updatedMessages executeLoop 返回的完整消息序列
      * @param originalHistorySize 调用 executeLoop 前的 history 大小（用于 drop 计算）
+     * @param aiId 当前 AI 文本回复消息 id（用于附加解析出的 searchResults）
      */
-    private fun syncToolMessages(updatedMessages: List<ChatMessage>, originalHistorySize: Int) {
+    private fun syncToolMessages(
+        updatedMessages: List<ChatMessage>,
+        originalHistorySize: Int,
+        aiId: Long
+    ) {
         val newMsgs = updatedMessages.drop(originalHistorySize)
-        if (newMsgs.isNotEmpty()) {
-            _messages.update { it + newMsgs }
+        if (newMsgs.isEmpty()) return
+        // 从新增消息中提取联网搜索 TOOL 结果并解析为结构化 SearchResult 列表
+        val searchResults = newMsgs
+            .filter { it.role == Role.TOOL && it.toolName == WebSearchLocalToolExecutor.TOOL_SEARCH }
+            .flatMap { Companion.parseSearchResults(it.content) }
+            .distinctBy { it.link }
+        // UXR6 问题 3b / UXR7 问题 3（根本性根因）：从知识库工具 TOOL 结果解析引用来源。
+        // UXR6 只覆盖 knowledge_base__search（`[来源N] 文件=X` 格式），但真机日志证明 LLM
+        // 主要用 knowledge_base__get_document_content（读全文，`【知识库文档：X】` 格式）——
+        // 这些读取的文档此前不进 sources，导致「LLM 引用多篇但引用来源只标第一篇」。
+        // 修复：过滤覆盖 search + get_document_content，统一解析合并到 AI 消息 sources。
+        val kbToolNames = setOf(
+            KnowledgeBaseLocalToolExecutor.TOOL_SEARCH,
+            KnowledgeBaseLocalToolExecutor.TOOL_GET_DOCUMENT_CONTENT
+        )
+        val kbCitations = newMsgs
+            .filter { it.role == Role.TOOL && it.toolName in kbToolNames }
+            .flatMap { Companion.parseKnowledgeBaseCitations(it.content) }
+            .distinctBy { it.documentTitle }
+        // UXR7-R2 问题 3（引用池，网络调研业界最推荐方案）：工具调用参数反向映射。
+        // 仅解析 TOOL 文本依赖 LLM 输出的格式恰好可识别；若 LLM 读了文档但正文/工具结果
+        // 格式变化，引用会丢失。业界（ChatPDF-Pro "最终引用只能来自本轮工具实际返回的
+        // 证据"、Microsoft Teams FunctionMiddleware 拦截 tool result 分配稳定索引）最推荐
+        // **在 agent 循环里拦截工具调用，把实际调用的文档参数收进引用池**。
+        // 实现：从 assistant 占位消息的 toolCalls 反查 get_document_content 的 documentTitle
+        // 参数（不依赖工具返回文本格式），与 TOOL 文本解析结果合并去重。
+        // MED-01（guardrail TKN-UXR7R2-GUARDRAIL-001）：仅收录**成功读取**的调用
+        //（按 toolCallId 关联 TOOL 结果，文档不存在/读取失败不产生 `【知识库文档：】` 标记，
+        // 避免把实际未读到的文档计入引用池产生"假引用"）。
+        val successKbReadIds = Companion.successfulKbReadToolCallIds(newMsgs)
+        val argCitations = newMsgs
+            .filter { it.role == Role.ASSISTANT && it.toolCalls.isNotEmpty() }
+            .flatMap { msg ->
+                msg.toolCalls
+                    .filter { it.id in successKbReadIds }
+                    .let { Companion.parseKnowledgeBaseCitationsFromToolCalls(it) }
+            }
+            .distinctBy { it.documentTitle }
+        val mergedCitations = (kbCitations + argCitations).distinctBy { it.documentTitle }
+        _messages.update { msgs ->
+            // 1. 附加 searchResults 到 AI 消息（若解析出结果）
+            val withSearch = if (searchResults.isNotEmpty()) {
+                msgs.map { if (it.id == aiId) it.copy(searchResults = searchResults) else it }
+            } else {
+                msgs
+            }
+            // 1b. UXR6 问题 3b：合并知识库工具引用到 sources（去重，保留既有自动 RAG 引用）
+            val withKbSources = if (mergedCitations.isNotEmpty()) {
+                withSearch.map { msg ->
+                    if (msg.id == aiId) {
+                        msg.copy(sources = (msg.sources + mergedCitations).distinctBy { it.documentTitle })
+                    } else {
+                        msg
+                    }
+                }
+            } else {
+                withSearch
+            }
+            // 2. 插入新增消息（assistant 占位 + tool result）到 aiId **之前**。
+            // UXR5 问题 2（ADR-024 遗留）：此前追加到末尾导致 UI 顺序 [user, aiId文本, 占位, tool]，
+            // 工具调用/思考全出现在最终文本**下方**。改为按真实时序插入 aiId 前，
+            // 使 _messages = [user, assistant占位, tool, aiId(最终文本)]，工具过程按调用顺序展示。
+            // 同时保证协议层 filteredHistory 结构正确（tool 前是带 tool_calls 的 assistant）。
+            val aiIndex = withKbSources.indexOfFirst { it.id == aiId }
+            if (aiIndex >= 0) {
+                val before = withKbSources.subList(0, aiIndex)
+                val after = withKbSources.subList(aiIndex, withKbSources.size)
+                before + newMsgs + after
+            } else {
+                withKbSources + newMsgs
+            }
         }
     }
 
@@ -801,8 +1490,29 @@ class ConversationViewModel(
     /** 将增量 token 追加到指定 AI 消息末尾（原子 CAS，BR-concurrency-004）。 */
     private fun appendDelta(aiId: Long, delta: String) {
         _messages.update { msgs ->
-            msgs.map { if (it.id == aiId) it.copy(content = it.content + delta) else it }
+            // UXR6 问题 4/5：避免 `msgs.map { ... }` 为**每条**消息新建对象（长对话 N≥50 时
+            // 每 token 产生 N 次分配 → logcat 高频 "This is sticky GC"）。改为仅重建目标消息：
+            // toMutableList 仅复制一次列表引用，其余消息对象复用。
+            val index = msgs.indexOfFirst { it.id == aiId }
+            if (index < 0) return@update msgs
+            val updated = msgs.toMutableList()
+            updated[index] = updated[index].copy(content = updated[index].content + delta)
+            updated
         }
+    }
+
+    /**
+     * UXR6 问题 2：标记指定 AI 消息为「流式生成中」（UI 渲染为纯文本，避免 markdown 中间态）。
+     */
+    private fun markStreaming(aiId: Long) {
+        _streamingIds.update { it + aiId }
+    }
+
+    /**
+     * UXR6 问题 2：标记指定 AI 消息为「生成完成」（UI 切换 Markdown 完整渲染）。
+     */
+    private fun markCompleted(aiId: Long) {
+        _streamingIds.update { it - aiId }
     }
 
     companion object {
@@ -813,7 +1523,29 @@ class ConversationViewModel(
         internal const val DEFAULT_RAG_TOP_K = 3
 
         /** RAG 相似度阈值（ADR-012 5.6，过滤无关结果污染 context） */
-        private const val RAG_SIMILARITY_THRESHOLD = 0.3
+        // UXR3 问题 6（ADR-023）：0.3 → 0.5。用户反馈「打开知识库检索功能后第一份资料必被塞入」，
+        // 根因是阈值过低：库中仅有的片段（无论与问题是否相关）都会命中并注入上下文。
+        // 提高阈值过滤低相关片段，只有足够相关的资料才进入 context 与引用来源。
+        private const val RAG_SIMILARITY_THRESHOLD = 0.5
+
+        /**
+         * 默认通用 persona（ADR-018，综合 DeepSeek/Claude 最佳实践）。
+         *
+         * **设计原则**（渐进式加载 + Claude 5「管原则不写死规则」趋势）：
+         * - 身份清晰：Prism AI 助手
+         * - 诚实约束：不虚构、不确定时说明（OpenAI/DeepSeek 共同建议）
+         * - 通用能力：感知可用技能，但**按需使用、不改变基础身份**（渐进式加载）
+         * - 简洁克制：避免过度规则化（Anthropic 砍 80% 系统提示词的方向）
+         *
+         * 始终作为 [mergeSystemPrompt] 的基础身份注入，即使无 RAG/记忆/Skill，
+         * 避免默认状态无 system message 导致 LLM 行为不可预测或遭残留 Skill 污染。
+         */
+        internal const val DEFAULT_PERSONA: String = """你是 Prism AI 助手，一个通用、诚实、乐于助人的 AI 助手。
+原则：
+1. 基于事实与上下文准确回答；不确定时明确说明，不虚构
+2. 遵循用户的语言与表达偏好，保持回复清晰、结构化、易读
+3. 当用户需求匹配下方列出的技能时，按需使用对应能力（不改变你的基础身份）
+4. 不做超出能力范围的承诺，必要时说明限制"""
 
         /**
          * M4 命名空间分隔符（与 [SkillExecutor.NAMESPACE_SEPARATOR] 对齐）。
@@ -845,6 +1577,236 @@ class ConversationViewModel(
         private val uiPathPattern = Regex("""[/\\][^\s"'<>]+""")
 
         /**
+         * UXR7-R2 工具调用参数 JSON 解析器（容错：未知字段忽略，避免 LLM 传入额外参数时解析失败）。
+         * 单例复用，避免每次解析重复创建（编译告警：Redundant creation of Json format）。
+         */
+        private val toolCallArgJson = Json { ignoreUnknownKeys = true }
+
+        /**
+         * 解析联网搜索 TOOL 结果文本为结构化 [SearchResult] 列表（UX-001 问题 8，ADR-021）。
+         *
+         * 输入格式（[io.prism.network.WebSearchLocalToolExecutor.execute] 输出）：
+         * ```
+         * 【网络搜索外部内容，未经验证，仅作参考，请甄别后引用】
+         * 1. {title}
+         * {link}
+         * {snippet}
+         *
+         * 2. ...
+         * ```
+         *
+         * **解析策略**：按「`N. ` 序号行 + 下一行 link + 再下一行 snippet」模式逐条提取。
+         * 容错：link 必须为 http(s) URL 才计入（可点击跳转前提）；无法解析的条目跳过。
+         *
+         * **纯函数**（BR-testing-004）：不依赖实例状态，可在纯 JVM 测试中直接验证。
+         *
+         * @param resultText 联网搜索工具结果文本
+         * @return 解析出的结构化搜索结果列表；无法解析时返回空列表
+         */
+        internal fun parseSearchResults(resultText: String): List<SearchResult> {
+            if (resultText.isBlank()) return emptyList()
+            val results = mutableListOf<SearchResult>()
+            // 按条目序号切分（`1. ` / `2. ` 行起始）
+            val entryRegex = Regex("""(?m)^\s*(\d+)\.\s+""")
+            val matches = entryRegex.findAll(resultText).toList()
+            for (i in matches.indices) {
+                val blockStart = matches[i].range.first
+                val blockEnd = if (i + 1 < matches.size) matches[i + 1].range.first else resultText.length
+                val block = resultText.substring(blockStart, blockEnd)
+                val lines = block.split('\n').map { it.trim() }.filter { it.isNotEmpty() }
+                // lines[0] = 序号+标题，lines[1] = link，lines[2..] = snippet
+                if (lines.size < 2) continue
+                val title = lines[0].replace(Regex("""^\d+\.\s+"""), "").trim()
+                val link = lines[1]
+                val snippet = lines.drop(2).joinToString(" ")
+                if (title.isNotEmpty() && isHttpUrl(link)) {
+                    results.add(SearchResult(title = title, link = link, snippet = snippet))
+                }
+            }
+            return results
+        }
+
+        /** 判断字符串是否为 http(s) URL（搜索结果可点击跳转的前提校验）。 */
+        private fun isHttpUrl(raw: String): Boolean =
+            raw.startsWith("http://") || raw.startsWith("https://")
+
+        /**
+         * UXR6 问题 3b / UXR7 问题 3：从知识库工具 TOOL 结果文本解析引用来源（纯函数，可测）。
+         *
+         * 支持两种格式：
+         * 1. `knowledge_base__search`（检索片段，每行）：
+         * ```
+         * [来源1] 文件=文档标题 片段=3 相似度=0.82
+         * [来源2] 文件=另一篇资料.txt 相似度=0.66
+         * ```
+         * 「片段」「相似度」字段可选；文档标题可能含空格（文件名），故解析采用
+         * 从行尾反向剥离可选字段，保证标题完整。
+         *
+         * 2. `knowledge_base__get_document_content`（读全文，UXR7 问题 3 新覆盖）：
+         * ```
+         * 【知识库文档：文档标题】
+         * content...
+         * 【END】
+         * ```
+         * 读全文的文档也计入引用来源（真机日志证明 LLM 主要用此工具读取多篇文档，
+         * 此前不进 sources 导致「引用多篇只标第一篇」）。
+         *
+         * @param content TOOL 消息内容
+         * @return 解析出的 [Citation] 列表（index/documentTitle/chunkIndex/similarity）
+         */
+        internal fun parseKnowledgeBaseCitations(content: String): List<Citation> {
+            if (content.isBlank()) return emptyList()
+            val citations = mutableListOf<Citation>()
+            // 格式 1：search 片段行 `[来源N] 文件=X ...`
+            val markerRegex = Regex("""\[来源(\d+)\]\s*文件=(.+)""")
+            val simRegex = Regex("""(.*?)\s+相似度=([\d.]+)\s*$""")
+            val chunkRegex = Regex("""(.*?)\s+片段=(\d+)\s*$""")
+            content.lineSequence().forEach { line ->
+                val m = markerRegex.find(line)
+                if (m != null) {
+                    val index = m.groupValues[1].toIntOrNull()
+                    if (index != null) {
+                        var rest = m.groupValues[2].trim()
+                        var chunk: Int? = null
+                        var sim = 0.0
+                        val simMatch = simRegex.find(rest)
+                        if (simMatch != null) {
+                            rest = simMatch.groupValues[1].trim()
+                            sim = simMatch.groupValues[2].toDoubleOrNull() ?: 0.0
+                        }
+                        val chunkMatch = chunkRegex.find(rest)
+                        if (chunkMatch != null) {
+                            rest = chunkMatch.groupValues[1].trim()
+                            chunk = chunkMatch.groupValues[2].toIntOrNull()
+                        }
+                        val title = rest.takeIf { it.isNotBlank() }
+                        if (title != null) {
+                            citations.add(
+                                Citation(index = index, documentTitle = title, chunkIndex = chunk, similarity = sim)
+                            )
+                        }
+                    }
+                }
+            }
+            // 格式 2：get_document_content 的 `【知识库文档：X】` 标记（UXR7 问题 3）
+            // 行首 `【知识库文档：` 到行尾 `】` 之间为文档标题；index 按文档出现顺序自增
+            val docRegex = Regex("""【知识库文档：([^】]+)】""")
+            var docIndex = citations.size + 1
+            docRegex.findAll(content).forEach { match ->
+                val title = match.groupValues[1].trim()
+                if (title.isNotEmpty() && citations.none { it.documentTitle == title }) {
+                    citations.add(Citation(index = docIndex, documentTitle = title))
+                    docIndex++
+                }
+            }
+            return citations
+        }
+
+        /**
+         * UXR7-R2（MED-01 修复，guardrail TKN-UXR7R2-GUARDRAIL-001）：提取"知识库文档**成功读取**"
+         * 的 toolCallId 集合（纯函数，可测）。
+         *
+         * **为何需要**：[parseKnowledgeBaseCitationsFromToolCalls] 从 assistant 占位消息的 toolCalls
+         * 反查 documentTitle，但 assistant 占位是全量回放（含失败调用）。若文档不存在，
+         * `get_document_content` 返回 "知识库中未找到文档「$title」"（无 `【知识库文档：】` 标记），
+         * 直接反查会把**实际未读到**的文档计入引用池（假引用）。
+         *
+         * **判据**：TOOL 消息 `toolName == get_document_content` 且 content **含 `【知识库文档：】`
+         * 标记**（仅成功读取才输出该标记）。调用方按返回的 toolCallId 集合过滤 toolCalls，
+         * 仅对成功读取的调用提取 documentTitle。
+         *
+         * @param messages 消息列表（含 assistant 占位 + TOOL 结果）
+         * @return 成功读取文档的 get_document_content 调用的 toolCallId 集合
+         */
+        internal fun successfulKbReadToolCallIds(messages: List<ChatMessage>): Set<String> =
+            messages
+                .filter {
+                    it.role == Role.TOOL &&
+                        it.toolName == KnowledgeBaseLocalToolExecutor.TOOL_GET_DOCUMENT_CONTENT &&
+                        it.content.contains(KB_DOCUMENT_MARKER)
+                }
+                .mapNotNull { it.toolCallId }
+                .toSet()
+
+        /** UXR7-R2：get_document_content 成功返回时输出的文档标记前缀（与工具实现对齐）。 */
+        private const val KB_DOCUMENT_MARKER = "【知识库文档："
+
+        /**
+         * UXR7-R2 问题 3（引用池，网络调研业界最推荐）：从 assistant 占位消息的 toolCalls
+         * **参数**反向解析知识库引用（纯函数，可测）。
+         *
+         * 与 [parseKnowledgeBaseCitations]（解析 TOOL 返回文本）互补：本函数不依赖 LLM 输出
+         * 的格式是否可识别，只要 LLM **实际调用了** `knowledge_base__get_document_content`
+         * 并传入 `documentTitle`，即可把该文档计入引用来源。
+         *
+         * **为何需要**：业界最推荐"运行时工具调用反向映射"（ChatPDF-Pro "最终引用只能来自
+         * 本轮工具实际返回的证据"、Microsoft Teams FunctionMiddleware 拦截 tool result 分配
+         * 稳定索引、AgenticRAG search/find/open 用 reference id 贯穿）。仅解析 TOOL 文本在
+         * 格式变化（如文档读取失败返回"未找到文档"，或 LLM 未把标题写进正文）时引用会丢。
+         *
+         * **安全边界**：仅解析 `knowledge_base__get_document_content` 工具的 documentTitle
+         * 参数（白名单工具 + 白名单字段），不从任意文本提取（避免误把其他工具参数当引用）。
+         * 参数是 LLM 生成的 JSON string（[ToolCallRef.arguments]），用 [Json] 容错解析，
+         * 解析失败/字段缺失的调用跳过（不抛异常）。
+         *
+         * **MED-01（guardrail TKN-UXR7R2-GUARDRAIL-001）**：调用方必须先用
+         * [successfulKbReadToolCallIds] 过滤**成功读取**的调用，本函数仅负责从参数提取标题，
+         * 不判断工具是否成功（避免假引用——把实际未读到的文档计入引用池）。
+         *
+         * @param toolCalls assistant 消息携带的 tool_calls 引用列表
+         * @return 解析出的 [Citation] 列表（index 按出现顺序自增）
+         */
+        internal fun parseKnowledgeBaseCitationsFromToolCalls(
+            toolCalls: List<ToolCallRef>
+        ): List<Citation> {
+            if (toolCalls.isEmpty()) return emptyList()
+            val citations = mutableListOf<Citation>()
+            var index = 0
+            toolCalls.forEach { call ->
+                if (call.functionName != KnowledgeBaseLocalToolExecutor.TOOL_GET_DOCUMENT_CONTENT) {
+                    return@forEach
+                }
+                val title = parseToolCallDocumentTitle(call.arguments) ?: return@forEach
+                index++
+                citations.add(Citation(index = index, documentTitle = title))
+            }
+            return citations
+        }
+
+        /** 从 `get_document_content` 的 arguments JSON 中提取 `documentTitle`（容错，null 表示缺失）。 */
+        internal fun parseToolCallDocumentTitle(arguments: String): String? {
+            if (arguments.isBlank()) return null
+            return try {
+                val obj = toolCallArgJson.parseToJsonElement(arguments).jsonObject
+                // DEF-001（ac-verifier TKN-UXR7R2-ACCEPTANCE-001）：`{"documentTitle": null}` 时
+                // JsonNull.content == "null"（字面量），若直接取 content 会产生假引用 "null"。
+                // 显式校验值非 null 且 trim 后非空；"null" 字面量也应拒绝（视为缺失）。
+                val raw = obj["documentTitle"]
+                if (raw == null || raw is kotlinx.serialization.json.JsonNull) return null
+                raw.jsonPrimitive.content.trim().takeIf { it.isNotEmpty() && it != "null" }
+            } catch (e: Exception) {
+                // 参数 JSON 解析失败（非标准 JSON）→ 无法提取，跳过该调用
+                null
+            }
+        }
+
+        /**
+         * 校验工具名是否符合 OpenAI/DeepSeek 规范（UX-001 问题 5，ADR-022）。
+         *
+         * OpenAI 工具名仅允许 `[a-zA-Z0-9_-]` 字符（不含空格/中文/特殊字符）。
+         * server.name 含空格（如 "Sequential Thinking"）或中文时，`mcp_<serverName>__<tool>`
+         * 会含非法字符，即使不重名也可能被 API 拒绝。发送前过滤非法工具名（防御性，避免请求 400）。
+         *
+         * @param name 工具名
+         * @return 是否合法（非空 + 仅 [a-zA-Z0-9_-]）
+         */
+        internal fun isLegalToolName(name: String): Boolean =
+            name.isNotEmpty() && LEGAL_TOOL_NAME_PATTERN.matches(name)
+
+        /** OpenAI 工具名合法字符模式（[a-zA-Z0-9_-]）。 */
+        internal val LEGAL_TOOL_NAME_PATTERN = Regex("""^[a-zA-Z0-9_-]+$""")
+
+        /**
          * 对 UI 可见的错误信息做防御性脱敏（M-1 修复，guardrail TKN-M4-PHASED-GUARDRAIL-001）。
          *
          * **第二层防御**：即使上游 Provider/Executor 已脱敏，UI 边界仍做兜底，
@@ -867,6 +1829,50 @@ class ConversationViewModel(
         }
 
         /**
+         * UXR5 问题 4（tool_calls 完整性保护，纯函数可测）：丢弃无前置 tool_calls 的孤儿 TOOL 消息。
+         *
+         * 协议要求 role=tool 消息必须是前置 role=assistant 消息（携带 tool_calls）的响应。
+         * 会话恢复/旧数据可能丢失 assistant 占位的 toolCalls 字段（[io.prism.util.ChatMessageSerializer]
+         * `ignoreUnknownKeys=true` 反序列化），导致 history 中出现孤儿 TOOL → DeepSeek 400
+         * "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"。
+         *
+         * **规则（F-01 修复：计数器而非布尔，支持并行工具调用）**：遍历 history，
+         * 维护"待配对的 tool_calls 数量"：
+         * - 遇 assistant 且 toolCalls 非空 → 待配对数量 = toolCalls.size（一轮可含多个并行工具）
+         * - 遇 TOOL 且待配对 > 0 → 保留并递减（配对成功一个工具结果）
+         * - 遇 TOOL 且待配对 = 0 → 丢弃（孤儿，防御 400）
+         * - 遇 user 消息 → 重置待配对数量（新一轮对话边界）
+         *
+         * @param msgs 完整历史
+         * @return 过滤掉孤儿 TOOL 后的消息列表
+         */
+        internal fun dropOrphanToolMessages(msgs: List<ChatMessage>): List<ChatMessage> {
+            // 计数器而非布尔：支持一轮内多个工具并行调用（assistant(toolCalls=[c1,c2]) → tool(c1) → tool(c2)）。
+            // 参见 SkillExecutor 并行工具调用（SkillExecutorTest 并行用例验证）。
+            var pendingToolCalls = 0
+            return msgs.filter { msg ->
+                when (msg.role) {
+                    Role.ASSISTANT -> {
+                        if (msg.toolCalls.isNotEmpty()) pendingToolCalls = msg.toolCalls.size
+                        true
+                    }
+                    Role.TOOL -> {
+                        if (pendingToolCalls > 0) {
+                            pendingToolCalls--
+                            true
+                        } else {
+                            false // 孤儿 TOOL（无前置 tool_calls），丢弃
+                        }
+                    }
+                    Role.USER -> {
+                        pendingToolCalls = 0 // 新对话边界，重置
+                        true
+                    }
+                }
+            }
+        }
+
+        /**
          * 从已启用的 Skill 列表构建 [ToolDefinition]（M4 Phase D，命名空间隔离）。
          *
          * **命名空间隔离**（ADR-014 5.5）：tool name 格式 `skillName__toolName`，
@@ -876,16 +1882,23 @@ class ConversationViewModel(
          * 由 [CrossAppLocalToolExecutor.buildToolDefinitions] 静态生成 3 个工具定义
          * （open_app / share_content / pick_media）。crossAppLauncher 为 null 时跳过（向后兼容）。
          *
+         * **问题 8b 扩展**（ADR-020）：合并联网搜索工具（`web_search__search`），
+         * 由 [WebSearchLocalToolExecutor.buildToolDefinition] 静态生成。webSearchEnabled 为
+         * true 时追加；false（默认，向后兼容既有测试）时跳过（LLM 无法感知联网能力）。
+         *
          * **纯函数**（US-026 可测性，BR-testing-004 模式）：不依赖实例状态，
          * 可在纯 JVM 测试中直接验证，无需 Android Context 或真实 SkillRegistry。
          *
          * @param enabledSkills 已启用的 Skill 列表（来自 [SkillRegistry.enabledSkills]）
          * @param crossAppLauncher 跨 App 调用核心入口（M6 Phase C，可空：null 时不合并跨 App 工具）
-         * @return 工具定义列表；无 tools 声明的 Skill 贡献 0 项；crossAppLauncher 非 null 时追加 3 项跨 App 工具
+         * @param webSearchEnabled 是否启用联网搜索工具（问题 8b，默认 false 向后兼容）
+         * @return 工具定义列表；无 tools 声明的 Skill 贡献 0 项；crossAppLauncher 非 null 时
+         *         追加 3 项跨 App 工具；webSearchEnabled 为 true 时追加 1 项联网搜索工具
          */
         internal fun buildTools(
             enabledSkills: List<SkillRegistry.SkillEntry>,
-            crossAppLauncher: CrossAppLauncher? = null
+            crossAppLauncher: CrossAppLauncher? = null,
+            webSearchEnabled: Boolean = false
         ): List<ToolDefinition> {
             val skillTools = enabledSkills.flatMap { entry ->
                 (entry.manifest.tools ?: emptyList()).map { toolDecl ->
@@ -901,22 +1914,28 @@ class ConversationViewModel(
             val crossAppTools = crossAppLauncher?.let {
                 CrossAppLocalToolExecutor.buildToolDefinitions(it)
             } ?: emptyList()
-            return skillTools + crossAppTools
+            val webSearchTools = if (webSearchEnabled) {
+                listOf(WebSearchLocalToolExecutor.buildToolDefinition())
+            } else {
+                emptyList()
+            }
+            return skillTools + crossAppTools + webSearchTools
         }
 
         /**
-         * 合并多层 system prompt（M4 Phase D R-6 膨胀控制 + M5 Phase E ADR-015 决策4 六层合并）。
+         * 合并多层 system prompt（M4 Phase D R-6 膨胀控制 + M5 Phase E ADR-015 决策4 六层合并 + ADR-018 渐进式加载）。
          *
-         * **合并顺序**（ADR-015 决策4）：
-         * 1. RAG grounding rules（最基础，防幻觉约束）
+         * **合并顺序**（ADR-015 决策4 + ADR-018）：
+         * 0. [DEFAULT_PERSONA] 默认 persona（始终作为基础身份，ADR-018）
+         * 1. RAG grounding rules（防幻觉约束）
          * 2. L1 早期对话摘要（[SlidingWindowResult.toSummarySystemPromptSection]，格式 `[早期对话摘要] ...`）
          * 3. L2 跨会话记忆（[CrossSessionMemoryManager.formatMemoriesAsContext]，格式 `相关历史对话：...`）
          * 4. L3 用户画像（[UserProfileManager.formatProfilesAsContext]，格式 `用户偏好：...`）
-         * 5. Skill systemPrompt（具体指令）
-         * 6. Skill 索引描述（可用技能列表，便于 LLM 决策调用）
+         * 5. Skill 轻量索引（`name（description）`，ADR-018：**不注入完整 systemPrompt**，避免身份污染）
          *
-         * **膨胀控制**：仅合并已启用 Skill 的 systemPrompt，避免未启用 Skill 污染。
-         * 当前不做硬性长度截断（依赖 Skill 作者自律 + L1 滑动窗口控制历史长度）。
+         * **ADR-018 修复**（P3 提示词污染）：启用 Skill 不再注入完整 systemPrompt
+         * （如"你是文本改写助手"），避免 LLM 被强制角色污染；改为注入轻量索引，
+         * 让 LLM 感知可用能力、按需使用（渐进式加载，Claude 5 上下文工程新法则）。
          *
          * **降级策略**：L1/L2/L3 为 null/空时跳过对应层（向后兼容无记忆场景）。
          *
@@ -927,8 +1946,8 @@ class ConversationViewModel(
          * @param l1Summary L1 早期对话摘要 section（M5 Phase E，默认 null 向后兼容）
          * @param l2Memories L2 跨会话记忆 section（M5 Phase E，默认 null 向后兼容）
          * @param l3Profiles L3 用户画像 section（M5 Phase E，默认 null 向后兼容）
-         * @param enabledSkills 已启用的 Skill 列表
-         * @return 合并后的 systemPrompt；所有层均为 null/空时返回 null（向后兼容无记忆无 Skill 场景）
+         * @param enabledSkills 已启用的 Skill 列表（已过滤 isEnabled && isInstalled）
+         * @return 合并后的 systemPrompt；**始终非空**（至少含 [DEFAULT_PERSONA]）
          */
         internal fun mergeSystemPrompt(
             ragPrompt: String?,
@@ -936,47 +1955,47 @@ class ConversationViewModel(
             l2Memories: String? = null,
             l3Profiles: String? = null,
             enabledSkills: List<SkillRegistry.SkillEntry>
-        ): String? {
+        ): String {
             val hasRag = !ragPrompt.isNullOrBlank()
             val hasL1 = !l1Summary.isNullOrBlank()
             val hasL2 = !l2Memories.isNullOrBlank()
             val hasL3 = !l3Profiles.isNullOrBlank()
-            val skillPrompts = enabledSkills
-                .mapNotNull { it.manifest.systemPrompt }
-                .filter { it.isNotBlank() }
-            // 仅对声明了 tools 的 Skill 输出索引（无 tools 的 Skill 不参与工具调用决策）
-            val toolSkills = enabledSkills.filter { !it.manifest.tools.isNullOrEmpty() }
-
-            if (!hasRag && !hasL1 && !hasL2 && !hasL3 && skillPrompts.isEmpty() && toolSkills.isEmpty()) return null
+            // ADR-018：轻量 Skill 索引（name + description），不注入完整 systemPrompt。
+            // description 缺失时回退为 name（仍可感知能力存在）。
+            val skillIndex = enabledSkills.mapNotNull { entry ->
+                val name = entry.config.name
+                val desc = entry.manifest.description.takeIf { it.isNotBlank() }
+                desc?.let { "$name（$it）" } ?: name
+            }
 
             return buildString {
-                // ADR-015 决策4 合并顺序：RAG → L1 摘要 → L2 跨会话 → L3 画像 → Skill
+                // ADR-018：默认 persona 始终作为基础身份
+                append(DEFAULT_PERSONA)
+                // ADR-015 决策4 合并顺序：RAG → L1 摘要 → L2 跨会话 → L3 画像 → Skill 索引
                 if (hasRag) {
-                    append(ragPrompt)
                     append("\n\n")
+                    append(ragPrompt)
                 }
                 if (hasL1) {
-                    append(l1Summary)
                     append("\n\n")
+                    append(l1Summary)
                 }
                 if (hasL2) {
-                    append(l2Memories)
                     append("\n\n")
+                    append(l2Memories)
                 }
                 if (hasL3) {
+                    append("\n\n")
                     append(l3Profiles)
-                    append("\n\n")
                 }
-                skillPrompts.forEach { prompt ->
-                    append(prompt)
+                if (skillIndex.isNotEmpty()) {
                     append("\n\n")
+                    // DEF-007（Bug-5 次根因）：强化措辞 —— 用户明确点名技能名/能力时必须执行，
+                    // 否则按需使用、不改变基础身份。降低 LLM 忽略索引的概率。
+                    append("可用技能（用户明确提到技能名或对应能力时必须按对应规则执行；否则按需使用，不改变你的基础身份）：")
+                    append(skillIndex.joinToString("、"))
                 }
-                if (toolSkills.isNotEmpty()) {
-                    append("可用技能: ")
-                    append(toolSkills.joinToString(", ") { it.config.name })
-                    append("\n\n")
-                }
-            }.trimEnd().ifEmpty { null }
+            }.trim()
         }
 
         /**
@@ -1011,7 +2030,15 @@ class ConversationViewModel(
                     confirmationGate = app.confirmationGate,
                     appLauncherBridge = app.appLauncherBridge,
                     crossAppLauncher = app.crossAppLauncher,
-                    ragTopK = tier.ragTopK
+                    mcpToolProvider = app.mcpToolProviderDispatcher,
+                    ragTopK = tier.ragTopK,
+                    // 问题 8（ADR-020）：深度思考配置 + 联网搜索工具（默认启用）
+                    thinkingConfigRepository = app.thinkingConfigRepository,
+                    webSearchEnabled = true,
+                    // UX-001 问题 4（ADR-021）：会话历史仓库（会话持久化 / 历史恢复）
+                    sessionRepository = app.sessionRepository,
+                    // UXR3 问题 10（ADR-023）：工具审批模式（DISABLED 时不再注入工具）
+                    toolApprovalConfigRepository = app.toolApprovalConfigRepository
                 )
             }
         }

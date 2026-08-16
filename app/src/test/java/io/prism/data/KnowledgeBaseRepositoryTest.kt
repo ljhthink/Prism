@@ -408,6 +408,76 @@ class KnowledgeBaseRepositoryTest {
         assertNull("库本身也应删除", repository.get(kbId))
     }
 
+    // ==================== UX-001 问题 2（ADR-021）：文档级管理 ====================
+
+    @Test
+    fun listDocuments_groups_chunks_by_document_title() {
+        val kbId = repository.save(KnowledgeBase(name = "工作"))
+        // 两个文档，各 2 个 chunk（title 约定 `文档名#序号`）
+        chunkBox.put(KnowledgeChunk(title = "文档A#1", content = "a1", knowledgeBaseId = kbId))
+        chunkBox.put(KnowledgeChunk(title = "文档A#2", content = "a2", knowledgeBaseId = kbId))
+        chunkBox.put(KnowledgeChunk(title = "文档B#1", content = "b1", knowledgeBaseId = kbId))
+
+        val docs = repository.listDocuments(kbId)
+        assertEquals("应列出 2 个去重文档", listOf("文档A", "文档B"), docs)
+    }
+
+    @Test
+    fun listDocuments_handles_title_without_hash() {
+        val kbId = repository.save(KnowledgeBase(name = "工作"))
+        chunkBox.put(KnowledgeChunk(title = "无哈希标题", content = "c", knowledgeBaseId = kbId))
+
+        val docs = repository.listDocuments(kbId)
+        assertEquals("无 # 的 title 应整段作为文档标题", listOf("无哈希标题"), docs)
+    }
+
+    @Test
+    fun deleteDocument_removes_all_chunks_of_that_document_only() {
+        val kbId = repository.save(KnowledgeBase(name = "工作"))
+        chunkBox.put(KnowledgeChunk(title = "文档A#1", content = "a1", knowledgeBaseId = kbId))
+        chunkBox.put(KnowledgeChunk(title = "文档A#2", content = "a2", knowledgeBaseId = kbId))
+        chunkBox.put(KnowledgeChunk(title = "文档B#1", content = "b1", knowledgeBaseId = kbId))
+
+        val removed = repository.deleteDocument(kbId, "文档A")
+
+        assertEquals("应删除 2 个 chunk", 2, removed)
+        assertEquals("剩余 1 个 chunk（文档B）", 1, repository.chunkCount(kbId))
+        assertEquals("文档B 仍保留", listOf("文档B"), repository.listDocuments(kbId))
+    }
+
+    @Test
+    fun deleteDocument_returns_zero_for_nonexistent_document() {
+        val kbId = repository.save(KnowledgeBase(name = "工作"))
+        chunkBox.put(KnowledgeChunk(title = "文档A#1", content = "a1", knowledgeBaseId = kbId))
+
+        assertEquals("不存在的文档删除应返回 0", 0, repository.deleteDocument(kbId, "不存在的文档"))
+        assertEquals("原文档不受影响", 1, repository.chunkCount(kbId))
+    }
+
+    @Test
+    fun moveDocument_moves_all_chunks_to_target_library() {
+        val kbId = repository.save(KnowledgeBase(name = "工作"))
+        val targetId = repository.save(KnowledgeBase(name = "学习"))
+        chunkBox.put(KnowledgeChunk(title = "文档A#1", content = "a1", knowledgeBaseId = kbId))
+        chunkBox.put(KnowledgeChunk(title = "文档A#2", content = "a2", knowledgeBaseId = kbId))
+
+        val moved = repository.moveDocument(kbId, "文档A", targetId)
+
+        assertEquals("应移动 2 个 chunk", 2, moved)
+        assertEquals("源库文档消失", emptyList<String>(), repository.listDocuments(kbId))
+        assertEquals("目标库含文档A", listOf("文档A"), repository.listDocuments(targetId))
+        assertEquals("目标库 chunk 数", 2, repository.chunkCount(targetId))
+    }
+
+    @Test
+    fun moveDocument_same_library_is_noop() {
+        val kbId = repository.save(KnowledgeBase(name = "工作"))
+        chunkBox.put(KnowledgeChunk(title = "文档A#1", content = "a1", knowledgeBaseId = kbId))
+
+        assertEquals("同库移动应为 no-op", 0, repository.moveDocument(kbId, "文档A", kbId))
+        assertEquals("chunk 保留在源库", 1, repository.chunkCount(kbId))
+    }
+
     @Test
     fun remove_cascade_deletes_mixed_embedding_and_non_embedding_chunks() {
         val kbId = repository.save(KnowledgeBase(name = "混合库"))
@@ -428,5 +498,75 @@ class KnowledgeBaseRepositoryTest {
         val vector = FloatArray(384)
         vector[dominantIndex] = 1.0f
         return vector
+    }
+
+    // ===== UXR3 问题 12（ADR-023）：文档内容查看 =====
+
+    @Test
+    fun getDocumentContent_concatenates_chunks_in_index_order() {
+        val kbId = repository.save(KnowledgeBase(name = "工作"))
+        // 乱序插入 chunk（#3 / #1 / #2），验证按 chunkIndex 升序拼接
+        chunkBox.put(KnowledgeChunk(title = "文档A#3", content = "第三节", knowledgeBaseId = kbId))
+        chunkBox.put(KnowledgeChunk(title = "文档A#1", content = "第一节", knowledgeBaseId = kbId))
+        chunkBox.put(KnowledgeChunk(title = "文档A#2", content = "第二节", knowledgeBaseId = kbId))
+
+        val content = repository.getDocumentContent(kbId, "文档A")
+
+        assertEquals("应按序号升序拼接", "第一节\n\n第二节\n\n第三节", content)
+    }
+
+    @Test
+    fun getDocumentContent_filters_other_documents_and_other_libraries() {
+        val kbId = repository.save(KnowledgeBase(name = "工作"))
+        val otherKbId = repository.save(KnowledgeBase(name = "学习"))
+        chunkBox.put(KnowledgeChunk(title = "文档A#1", content = "a1", knowledgeBaseId = kbId))
+        chunkBox.put(KnowledgeChunk(title = "文档A#2", content = "a2", knowledgeBaseId = kbId))
+        // 其他文档 + 其他库的 chunk 不应混入
+        chunkBox.put(KnowledgeChunk(title = "文档B#1", content = "b1", knowledgeBaseId = kbId))
+        chunkBox.put(KnowledgeChunk(title = "文档A#1", content = "other-lib", knowledgeBaseId = otherKbId))
+
+        val content = repository.getDocumentContent(kbId, "文档A")
+
+        assertEquals("仅含目标文档在本库的分块", "a1\n\na2", content)
+    }
+
+    @Test
+    fun getDocumentContent_returns_empty_when_no_match() {
+        val kbId = repository.save(KnowledgeBase(name = "工作"))
+        chunkBox.put(KnowledgeChunk(title = "文档A#1", content = "a1", knowledgeBaseId = kbId))
+
+        assertEquals("无匹配文档应返回空串", "", repository.getDocumentContent(kbId, "不存在"))
+    }
+
+    @Test
+    fun getDocumentContent_trims_chunk_content_and_edges() {
+        val kbId = repository.save(KnowledgeBase(name = "工作"))
+        chunkBox.put(KnowledgeChunk(title = "文档A#1", content = "  段落一  ", knowledgeBaseId = kbId))
+        chunkBox.put(KnowledgeChunk(title = "文档A#2", content = "段落二\n", knowledgeBaseId = kbId))
+
+        val content = repository.getDocumentContent(kbId, "文档A")
+
+        assertEquals("应 trim 每块首尾空白并 trim 整体", "段落一\n\n段落二", content)
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun getDocumentContent_throws_for_negative_kb_id() {
+        repository.getDocumentContent(-1L, "文档A")
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun getDocumentContent_throws_for_blank_title() {
+        repository.getDocumentContent(0L, "   ")
+    }
+
+    @Test
+    fun getDocumentContent_default_library_supported() {
+        // 默认库（id=0L）
+        chunkBox.put(KnowledgeChunk(title = "笔记#1", content = "n1", knowledgeBaseId = 0L))
+        chunkBox.put(KnowledgeChunk(title = "笔记#2", content = "n2", knowledgeBaseId = 0L))
+
+        val content = repository.getDocumentContent(0L, "笔记")
+
+        assertEquals("默认库文档应可查看", "n1\n\nn2", content)
     }
 }

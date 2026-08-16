@@ -210,6 +210,8 @@ class FilesystemMcpServerEdgeCaseTest {
         // 构造一个 readFile 抛含内部路径/异常类型细节的实现的 FileSystemAccess
         val leakyFs = object : FileSystemAccess {
             override suspend fun listAllowedDirectories() = emptyList<String>()
+            // 模拟「已授权但读取失败」：hasAuthorizedRoots 返回 true，使 read_file 走执行分支
+            override suspend fun hasAuthorizedRoots() = true
             override suspend fun readFile(path: String): String =
                 throw IOException("内部路径 /data/secret/db 访问失败: PermissionDenied")
             override suspend fun readMultipleFiles(paths: List<String>) = emptyMap<String, String>()
@@ -234,6 +236,7 @@ class FilesystemMcpServerEdgeCaseTest {
     fun `callTool write_file on read-only access returns failure not exception`() = runBlocking {
         val readOnlyFs = object : FileSystemAccess {
             override suspend fun listAllowedDirectories() = listOf("notes")
+            override suspend fun hasAuthorizedRoots() = true
             override suspend fun readFile(path: String) = "data"
             override suspend fun readMultipleFiles(paths: List<String>) = emptyMap<String, String>()
             override suspend fun listDirectory(path: String) = emptyList<FileEntry>()
@@ -305,5 +308,120 @@ class FilesystemMcpServerEdgeCaseTest {
         }
         // 空内容经 renderResult 过滤空白 → 空串
         assertEquals("空内容应可读回", "", read)
+    }
+
+    // ==================== UXR3 问题 8（ADR-023）：未授权根目录引导文案（guardrail T-6 补齐） ====================
+
+    @Test
+    fun `callTool read_file returns guide message when no roots authorized`() = runBlocking {
+        // 空文件系统（无授权根目录）→ 目录/文件工具返回明确引导文案，而非泛化「工具执行出错」
+        val (_, _, provider) = build(fs = InMemoryFileAccess())
+        val result = withTimeout(10.seconds) {
+            provider.callTool(localConfig, "read_file", mapOf("path" to "notes/readme.md"))
+        }
+        assertTrue("未授权时应返回引导文案", result.contains("未授权任何目录"))
+        assertTrue("引导文案应指向能力页", result.contains("能力页"))
+        assertFalse("不应是泛化执行出错", result.contains("工具执行出错") && !result.contains("未授权"))
+    }
+
+    @Test
+    fun `callTool list_directory returns guide message when no roots authorized`() = runBlocking {
+        val (_, _, provider) = build(fs = InMemoryFileAccess())
+        val result = withTimeout(10.seconds) {
+            provider.callTool(localConfig, "list_directory", mapOf("path" to "notes"))
+        }
+        assertTrue("未授权时 list_directory 应返回引导文案", result.contains("未授权任何目录"))
+    }
+
+    @Test
+    fun `callTool directory_tree returns guide message when no roots authorized`() = runBlocking {
+        val (_, _, provider) = build(fs = InMemoryFileAccess())
+        val result = withTimeout(10.seconds) {
+            provider.callTool(localConfig, "directory_tree", mapOf("path" to "notes"))
+        }
+        assertTrue("未授权时 directory_tree 应返回引导文案", result.contains("未授权任何目录"))
+    }
+
+    @Test
+    fun `callTool list_allowed_directories works without authorized roots`() = runBlocking {
+        // list_allowed_directories 是引导工具，未授权时也应正常返回（空列表），不触发引导文案
+        val (_, _, provider) = build(fs = InMemoryFileAccess())
+        val result = withTimeout(10.seconds) {
+            provider.callTool(localConfig, "list_allowed_directories", emptyMap())
+        }
+        // 空文件系统 → 空列表；不报「未授权」引导（该工具用于引导用户授权）
+        assertFalse("list_allowed_directories 不应返回引导文案", result.contains("未授权任何目录"))
+    }
+
+    // ==================== UXR3 问题 10（ADR-023）：FilesystemMcpServer 审批模式（guardrail N-1 补齐） ====================
+
+    @Test
+    fun `callTool read_file in AUTO mode skips confirmation gate`() = runBlocking {
+        var confirmCount = 0
+        val gate = ToolConfirmationGate { _, _ -> confirmCount++; true }
+        val server = FilesystemMcpServer(
+            fileSystemAccess = InMemoryFileAccess().addDirectory("notes").addFile("notes/readme.md", "hello"),
+            confirmationGate = gate,
+            approvalModeProvider = { io.prism.config.ToolApprovalMode.AUTO }
+        )
+        val provider = LocalMcpToolProvider(server)
+
+        val result = withTimeout(10.seconds) {
+            provider.callTool(localConfig, "read_file", mapOf("path" to "notes/readme.md"))
+        }
+
+        assertEquals("AUTO 模式应直接返回内容", "hello", result)
+        assertEquals("AUTO 模式不应调用确认门禁", 0, confirmCount)
+    }
+
+    @Test
+    fun `callTool read_file in DISABLED mode rejects without confirmation or execution`() = runBlocking {
+        var confirmCount = 0
+        var readCalled = false
+        val fs = object : FileSystemAccess {
+            override suspend fun listAllowedDirectories() = listOf("notes")
+            override suspend fun hasAuthorizedRoots() = true
+            override suspend fun readFile(path: String): String { readCalled = true; return "data" }
+            override suspend fun readMultipleFiles(paths: List<String>) = emptyMap<String, String>()
+            override suspend fun listDirectory(path: String) = emptyList<FileEntry>()
+            override suspend fun directoryTree(path: String) = emptyList<FileEntry>()
+            override suspend fun searchFiles(path: String, query: String, limit: Int) = emptyList<String>()
+            override suspend fun getFileInfo(path: String): FileEntry = FileEntry("", "", false)
+            override suspend fun writeFile(path: String, content: String) = true
+        }
+        val gate = ToolConfirmationGate { _, _ -> confirmCount++; true }
+        val server = FilesystemMcpServer(
+            fileSystemAccess = fs,
+            confirmationGate = gate,
+            approvalModeProvider = { io.prism.config.ToolApprovalMode.DISABLED }
+        )
+        val provider = LocalMcpToolProvider(server)
+
+        val result = withTimeout(10.seconds) {
+            provider.callTool(localConfig, "read_file", mapOf("path" to "notes/readme.md"))
+        }
+
+        assertTrue("DISABLED 模式应返回禁用文案", result.contains("已禁用"))
+        assertEquals("DISABLED 模式不应调用确认门禁", 0, confirmCount)
+        assertFalse("DISABLED 模式不应执行文件读取", readCalled)
+    }
+
+    @Test
+    fun `callTool read_file in MANUAL mode asks confirmation gate`() = runBlocking {
+        var confirmCount = 0
+        val gate = ToolConfirmationGate { _, _ -> confirmCount++; true }
+        val server = FilesystemMcpServer(
+            fileSystemAccess = InMemoryFileAccess().addDirectory("notes").addFile("notes/readme.md", "hello"),
+            confirmationGate = gate,
+            approvalModeProvider = { io.prism.config.ToolApprovalMode.MANUAL }
+        )
+        val provider = LocalMcpToolProvider(server)
+
+        val result = withTimeout(10.seconds) {
+            provider.callTool(localConfig, "read_file", mapOf("path" to "notes/readme.md"))
+        }
+
+        assertEquals("MANUAL 模式应返回内容", "hello", result)
+        assertEquals("MANUAL 模式应调用确认门禁", 1, confirmCount)
     }
 }

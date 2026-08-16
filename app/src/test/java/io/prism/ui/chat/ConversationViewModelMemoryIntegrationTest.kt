@@ -352,8 +352,7 @@ class ConversationViewModelMemoryIntegrationTest {
             enabledSkills = emptyList()
         )
 
-        assertNotNull(result)
-        val ragIdx = result!!.indexOf(ragPrompt)
+        val ragIdx = result.indexOf(ragPrompt)
         val l1Idx = result.indexOf(l1Summary)
         val l2Idx = result.indexOf(l2Memories)
         val l3Idx = result.indexOf(l3Profiles)
@@ -364,7 +363,8 @@ class ConversationViewModelMemoryIntegrationTest {
     }
 
     @Test
-    fun `merge order - all layers null returns null`() {
+    fun `merge order - all layers null returns default persona`() {
+        // ADR-018：所有层为 null 时返回默认 persona（而非 null），保证 LLM 有基础身份
         val result = ConversationViewModel.mergeSystemPrompt(
             ragPrompt = null,
             l1Summary = null,
@@ -372,11 +372,11 @@ class ConversationViewModelMemoryIntegrationTest {
             l3Profiles = null,
             enabledSkills = emptyList()
         )
-        assertNull("所有层为 null 时应返回 null", result)
+        assertEquals("所有层为 null 时应返回默认 persona", ConversationViewModel.DEFAULT_PERSONA, result)
     }
 
     @Test
-    fun `merge order - only L2 present returns L2 section`() {
+    fun `merge order - only L2 present returns persona then L2 section`() {
         val l2Memories = "相关历史对话：\n1. 历史"
         val result = ConversationViewModel.mergeSystemPrompt(
             ragPrompt = null,
@@ -385,8 +385,12 @@ class ConversationViewModelMemoryIntegrationTest {
             l3Profiles = null,
             enabledSkills = emptyList()
         )
-        assertNotNull(result)
-        assertEquals(l2Memories, result)
+        assertTrue("应包含默认 persona", result.startsWith(ConversationViewModel.DEFAULT_PERSONA))
+        assertTrue("应包含 L2 section", result.contains(l2Memories))
+        assertTrue(
+            "persona 应在 L2 之前",
+            result.indexOf(ConversationViewModel.DEFAULT_PERSONA) < result.indexOf(l2Memories)
+        )
     }
 
     @Test
@@ -396,7 +400,8 @@ class ConversationViewModelMemoryIntegrationTest {
             ragPrompt = "RAG rules",
             enabledSkills = emptyList()
         )
-        assertEquals("RAG rules", result)
+        assertTrue("应包含默认 persona", result.startsWith(ConversationViewModel.DEFAULT_PERSONA))
+        assertTrue("应包含 RAG rules", result.contains("RAG rules"))
     }
 
     // ==================== AC-6：降级策略 ====================
@@ -510,7 +515,9 @@ private class MemoryTestRecordingProvider(private val events: List<StreamEvent>)
         systemPrompt: String?,
         ragContext: String?,
         tools: List<ToolDefinition>?,
-        toolChoice: ToolChoice?
+        toolChoice: ToolChoice?,
+        thinkingEnabled: Boolean?,
+        reasoningEffort: String?
     ): Flow<StreamEvent> {
         receivedMessages += messages
         receivedSystemPrompts += systemPrompt
@@ -530,7 +537,9 @@ private class FakeCompletionProvider(private val returnValue: String?) : ChatCom
         config: ProviderConfig,
         messages: List<ChatMessage>,
         systemPrompt: String?,
-        ragContext: String?
+        ragContext: String?,
+        thinkingEnabled: Boolean?,
+        reasoningEffort: String?
     ): String? = returnValue
 }
 

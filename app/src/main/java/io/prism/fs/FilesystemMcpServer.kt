@@ -33,7 +33,9 @@ import kotlinx.serialization.json.put
  */
 class FilesystemMcpServer(
     private val fileSystemAccess: FileSystemAccess,
-    private val confirmationGate: ToolConfirmationGate
+    private val confirmationGate: ToolConfirmationGate,
+    /** UXR3 问题 10（ADR-023，guardrail M-2 修复）：工具审批模式提供者（null 时恒走确认门禁，向后兼容）。 */
+    private val approvalModeProvider: (suspend () -> io.prism.config.ToolApprovalMode)? = null
 ) {
 
     /** 已注册全部工具的 MCP Server 单例。 */
@@ -68,14 +70,22 @@ class FilesystemMcpServer(
             }
         }
 
-        addTool("list_directory", "列出目录下直接子条目", stringSchema("path")) { request ->
+        addTool(
+            "list_directory",
+            "列出授权目录下直接子条目（仅用户授权的本地文件夹，**不是** Prism 知识库；查询知识库请用 knowledge_base__ 系列工具）",
+            stringSchema("path")
+        ) { request ->
             val path = arg(request, "path") ?: return@addTool missingParam("list_directory", "path")
             execute("list_directory", request) {
                 renderEntries(fileSystemAccess.listDirectory(path))
             }
         }
 
-        addTool("directory_tree", "递归列出目录树", stringSchema("path")) { request ->
+        addTool(
+            "directory_tree",
+            "递归列出目录树（仅用户授权的本地文件夹，**不是** Prism 知识库；查询知识库请用 knowledge_base__ 系列工具）",
+            stringSchema("path")
+        ) { request ->
             val path = arg(request, "path") ?: return@addTool missingParam("directory_tree", "path")
             execute("directory_tree", request) {
                 renderEntries(fileSystemAccess.directoryTree(path))
@@ -140,6 +150,10 @@ class FilesystemMcpServer(
     /**
      * 统一执行入口：先经确认门禁，再执行文件操作。
      *
+     * UXR3 问题 8（ADR-023）：`list_allowed_directories` 之外的读/写工具在**未授权任何根目录**
+     * 时返回明确文案「未授权任何目录，请先在能力页选择授权目录」，替代泛化的「工具执行出错」，
+     * 便于 LLM 与用户理解（此前 roots 为空时 `resolveFile` 抛 IOException → 泛化错误）。
+     *
      * @param toolName 工具名（用于确认与错误文案）
      * @param request 调用请求
      * @param block 文件操作（返回成功文本）
@@ -150,12 +164,37 @@ class FilesystemMcpServer(
         request: io.modelcontextprotocol.kotlin.sdk.types.CallToolRequest,
         block: suspend () -> String
     ): CallToolResult {
-        val allowed = confirmationGate.confirm(toolName, request.params.arguments?.toFlatMap() ?: emptyMap())
-        if (!allowed) {
+        // 未授权根目录时，除 list_allowed_directories 外全部工具返回明确引导文案
+        if (toolName != "list_allowed_directories" && !fileSystemAccess.hasAuthorizedRoots()) {
             return CallToolResult(
-                content = listOf(TextContent("用户拒绝了 $toolName 调用")),
+                content = listOf(
+                    TextContent("未授权任何目录，请先在能力页的 Filesystem Server 中选择授权目录")
+                ),
                 isError = true
             )
+        }
+        // UXR3 问题 10（ADR-023，guardrail M-2 修复）：审批模式感知 ——
+        // AUTO 模式「所有工具直接放行，不询问用户」，跳过确认门禁；
+        // DISABLED 模式拒绝执行（纵深防御，即使 LLM 硬编码调用）；
+        // MANUAL / provider=null（向后兼容）按既有逻辑走确认门禁。
+        val mode = approvalModeProvider?.invoke()
+        when (mode) {
+            io.prism.config.ToolApprovalMode.AUTO -> { /* 直接放行，跳过确认 */ }
+            io.prism.config.ToolApprovalMode.DISABLED -> {
+                return CallToolResult(
+                    content = listOf(TextContent("工具调用已禁用（请在设置中开启工具审批模式）: $toolName")),
+                    isError = true
+                )
+            }
+            else -> {
+                val allowed = confirmationGate.confirm(toolName, request.params.arguments?.toFlatMap() ?: emptyMap())
+                if (!allowed) {
+                    return CallToolResult(
+                        content = listOf(TextContent("用户拒绝了 $toolName 调用")),
+                        isError = true
+                    )
+                }
+            }
         }
         return try {
             CallToolResult(content = listOf(TextContent(block())))

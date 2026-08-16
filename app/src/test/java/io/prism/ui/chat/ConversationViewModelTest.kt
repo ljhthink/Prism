@@ -319,7 +319,8 @@ class ConversationViewModelTest {
         vm.sendMessage("你好")
         advanceUntilIdle()
 
-        assertTrue("RAG 关闭时不应注入 system prompt", provider.receivedSystemPrompts.single() == null)
+        // ADR-018：RAG 关闭时 systemPrompt 应为默认 persona（不再为 null）
+        assertEquals("RAG 关闭时应注入默认 persona", ConversationViewModel.DEFAULT_PERSONA, provider.receivedSystemPrompts.single())
         assertTrue("RAG 关闭时不应注入 ragContext", provider.receivedRagContexts.single() == null)
         assertEquals("ok", vm.messages.value[1].content)
     }
@@ -349,7 +350,8 @@ class ConversationViewModelTest {
         vm.sendMessage("你好")
         advanceUntilIdle()
 
-        assertTrue("embed 失败应降级，systemPrompt 为 null", provider.receivedSystemPrompts.single() == null)
+        // ADR-018：embed 失败降级时 systemPrompt 为默认 persona
+        assertEquals("embed 失败应降级，systemPrompt 为默认 persona", ConversationViewModel.DEFAULT_PERSONA, provider.receivedSystemPrompts.single())
         assertTrue("embed 失败应降级，ragContext 为 null", provider.receivedRagContexts.single() == null)
         // G-02 修复：embed 失败应 appendDelta 提示 + AI 流式回复
         val content = vm.messages.value[1].content
@@ -384,7 +386,8 @@ class ConversationViewModelTest {
         vm.sendMessage("你好")
         advanceUntilIdle()
 
-        assertTrue("空库应降级，systemPrompt 为 null", provider.receivedSystemPrompts.single() == null)
+        // ADR-018：空库降级时 systemPrompt 为默认 persona
+        assertEquals("空库应降级，systemPrompt 为默认 persona", ConversationViewModel.DEFAULT_PERSONA, provider.receivedSystemPrompts.single())
         assertTrue("空库应降级，ragContext 为 null", provider.receivedRagContexts.single() == null)
         assertEquals("空库回复", vm.messages.value[1].content)
         assertTrue("空库时不应附引用来源", vm.messages.value[1].sources.isEmpty())
@@ -456,11 +459,15 @@ class ConversationViewModelTest {
         vm.sendMessage("查询关键信息")
         advanceUntilIdle()
 
-        // 1. systemPrompt 注入：应为 RagContextBuilder.SYSTEM_PROMPT
-        assertEquals(
-            "应注入 RAG system prompt",
-            RagContextBuilder.SYSTEM_PROMPT,
-            provider.receivedSystemPrompts.single()
+        // ADR-018：systemPrompt 注入 = 默认 persona + RAG SYSTEM_PROMPT
+        val sysPrompt = provider.receivedSystemPrompts.single()
+        assertNotNull("RAG 成功时 systemPrompt 不应为 null", sysPrompt)
+        val sp = sysPrompt!!
+        assertTrue("systemPrompt 应以默认 persona 开头", sp.startsWith(ConversationViewModel.DEFAULT_PERSONA))
+        assertTrue("systemPrompt 应包含 RAG grounding rules", sp.contains(RagContextBuilder.SYSTEM_PROMPT))
+        assertTrue(
+            "persona 应在 RAG rules 之前",
+            sp.indexOf(ConversationViewModel.DEFAULT_PERSONA) < sp.indexOf(RagContextBuilder.SYSTEM_PROMPT)
         )
 
         // 2. ragContext 注入：应含【知识库片段】头 + [来源N] 编号 + 文件信息
@@ -518,10 +525,58 @@ class ConversationViewModelTest {
         advanceUntilIdle()
 
         // 阈值过滤后为空 → NormalChat 降级，无 systemPrompt / ragContext / citations
-        assertTrue("阈值过滤空应降级，systemPrompt 为 null", provider.receivedSystemPrompts.single() == null)
+        // ADR-018：阈值过滤空降级时 systemPrompt 为默认 persona
+        assertEquals("阈值过滤空应降级，systemPrompt 为默认 persona", ConversationViewModel.DEFAULT_PERSONA, provider.receivedSystemPrompts.single())
         assertTrue("阈值过滤空应降级，ragContext 为 null", provider.receivedRagContexts.single() == null)
         assertEquals("普通回复", vm.messages.value[1].content)
         assertTrue("阈值过滤空不应附引用来源", vm.messages.value[1].sources.isEmpty())
+    }
+
+    /**
+     * T-3 边界（guardrail 补充）：similarity ∈ [0.3, 0.5) 时应被过滤（UXR3 问题 6 阈值 0.3→0.5）。
+     *
+     * 构造方式：query 为 [1,0,0,...]（单位向量），chunk 为 [0.4, √0.84, 0,...]（单位向量），
+     * COSINE 相似度 = 0.4（点积），similarity=0.4。此值 ≥ 旧阈值 0.3 但 < 新阈值 0.5，
+     * 应被过滤 → 降级为普通对话（证明阈值已提高）。
+     */
+    @Test
+    fun `rag on with similarity between old and new threshold is filtered`() = runTest(mainDispatcher) {
+        val repo = ProviderConfigRepository(boxStore)
+        val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        repo.save(active)
+        repo.setActive(repo.findByName(active.name)!!.id)
+
+        val kbRepo = KnowledgeBaseRepository(boxStore)
+        // chunk = [0.4, √0.84, 0...]，与 query = [1,0,0...] 的 COSINE 相似度 = 0.4
+        val chunkEmb = FloatArray(384)
+        chunkEmb[0] = 0.4f
+        chunkEmb[1] = kotlin.math.sqrt(0.84).toFloat()
+        kbRepo.addChunk(KnowledgeChunk(
+            title = "中相关文档.txt#1",
+            content = "中相关内容",
+            embedding = chunkEmb,
+            knowledgeBaseId = 0L
+        ))
+
+        val provider = RecordingChatStreamProvider(listOf(StreamEvent.Delta("普通回复"), StreamEvent.Done))
+        val vm = ConversationViewModel(
+            repo, provider,
+            DefaultStubEmbedder,
+            kbRepo,
+            ioDispatcher = mainDispatcher
+        ).apply { setRagTarget(RagTarget.AllLibraries) }
+
+        vm.sendMessage("查询")
+        advanceUntilIdle()
+
+        // similarity=0.4 < 0.5 新阈值 → 应被过滤 → 降级为普通对话
+        assertEquals(
+            "0.4 相似度（≥旧0.3 <新0.5）应被过滤，systemPrompt 为默认 persona",
+            ConversationViewModel.DEFAULT_PERSONA,
+            provider.receivedSystemPrompts.single()
+        )
+        assertTrue("0.4 相似度应过滤，ragContext 为 null", provider.receivedRagContexts.single() == null)
+        assertTrue("0.4 相似度不应附引用来源", vm.messages.value[1].sources.isEmpty())
     }
 
     /**
@@ -559,8 +614,9 @@ class ConversationViewModelTest {
         advanceUntilIdle()
 
         // ragTopK=0 短路 → NormalChat（embed 未被调用，无 ⚠️ 前缀）
-        assertTrue("ragTopK=0 应短路返回 NormalChat，systemPrompt 为 null",
-            provider.receivedSystemPrompts.single() == null)
+        // ADR-018：ragTopK=0 短路时 systemPrompt 为默认 persona
+        assertEquals("ragTopK=0 应短路返回 NormalChat，systemPrompt 为默认 persona",
+            ConversationViewModel.DEFAULT_PERSONA, provider.receivedSystemPrompts.single())
         assertTrue("ragTopK=0 应短路返回 NormalChat，ragContext 为 null",
             provider.receivedRagContexts.single() == null)
         assertEquals("ragTopK=0 短路内容应为纯回复（无 EmbedFailed 提示）",
@@ -592,8 +648,9 @@ class ConversationViewModelTest {
 
         assertEquals("ragTopK 负值应短路，内容为纯回复",
             "安全回复", vm.messages.value[1].content)
-        assertTrue("ragTopK 负值应短路，systemPrompt 为 null",
-            provider.receivedSystemPrompts.single() == null)
+        // ADR-018：ragTopK 负值短路时 systemPrompt 为默认 persona
+        assertEquals("ragTopK 负值应短路，systemPrompt 为默认 persona",
+            ConversationViewModel.DEFAULT_PERSONA, provider.receivedSystemPrompts.single())
     }
 
     /**
@@ -656,6 +713,81 @@ class ConversationViewModelTest {
         assertEquals("应只返回 1 条 citation", 1, vm.messages.value[1].sources.size)
         assertEquals("自建库文档.pdf", vm.messages.value[1].sources[0].documentTitle)
     }
+
+    // ===== UXR3 问题 13（ADR-023）：消息编辑重发 =====
+
+    @Test
+    fun `editUserMessageAndResend replaces message and truncates subsequent messages`() = runTest(mainDispatcher) {
+        val vm = buildVm(
+            active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        )
+        // 先发送一条消息产生 user + AI 回复
+        vm.sendMessage("原始问题")
+        advanceUntilIdle()
+        val originalUser = vm.messages.value[0]
+        assertEquals(Role.USER, originalUser.role)
+        assertEquals(2, vm.messages.value.size)
+
+        // 编辑该消息并重新发送
+        vm.editUserMessageAndResend(originalUser.id, "编辑后的问题")
+        advanceUntilIdle()
+
+        val messages = vm.messages.value
+        // 期望：编辑后的 user 消息 + 新 AI 回复（旧 AI 回复已被截断）
+        assertEquals("编辑后应剩 user + 新 AI 回复", 2, messages.size)
+        assertEquals("编辑后的内容应被替换", "编辑后的问题", messages[0].content)
+        assertEquals(Role.ASSISTANT, messages[1].role)
+        assertEquals("AI 应基于编辑后的问题重新回答", "该模型已回复", messages[1].content)
+    }
+
+    @Test
+    fun `editUserMessageAndResend ignores blank new text`() = runTest(mainDispatcher) {
+        val vm = buildVm(
+            active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        )
+        vm.sendMessage("原始问题")
+        advanceUntilIdle()
+        val originalUser = vm.messages.value[0]
+        val snapshot = vm.messages.value
+
+        vm.editUserMessageAndResend(originalUser.id, "   ")
+        advanceUntilIdle()
+
+        // 空白编辑应被忽略，消息列表不变
+        assertEquals(snapshot, vm.messages.value)
+    }
+
+    @Test
+    fun `editUserMessageAndResend ignores unknown message id`() = runTest(mainDispatcher) {
+        val vm = buildVm(
+            active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        )
+        vm.sendMessage("原始问题")
+        advanceUntilIdle()
+        val snapshot = vm.messages.value
+
+        vm.editUserMessageAndResend(99999L, "新内容")
+        advanceUntilIdle()
+
+        assertEquals("未知 id 应被忽略", snapshot, vm.messages.value)
+    }
+
+    @Test
+    fun `editUserMessageAndResend ignores non-user message`() = runTest(mainDispatcher) {
+        val vm = buildVm(
+            active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        )
+        vm.sendMessage("原始问题")
+        advanceUntilIdle()
+        // AI 消息 id 不应被编辑（仅 USER 角色）
+        val aiId = vm.messages.value[1].id
+        val snapshot = vm.messages.value
+
+        vm.editUserMessageAndResend(aiId, "新内容")
+        advanceUntilIdle()
+
+        assertEquals("AI 消息编辑应被忽略", snapshot, vm.messages.value)
+    }
 }
 
 /** 确定性 [ChatStreamProvider] fake —— 按给定序列发射事件，供 VM 测试注入。 */
@@ -666,7 +798,9 @@ private class FakeChatStreamProvider(private val events: List<StreamEvent>) : Ch
         systemPrompt: String?,
         ragContext: String?,
         tools: List<ToolDefinition>?,
-        toolChoice: ToolChoice?
+        toolChoice: ToolChoice?,
+        thinkingEnabled: Boolean?,
+        reasoningEffort: String?
     ): Flow<StreamEvent> = flow { events.forEach { emit(it) } }
 }
 
@@ -683,7 +817,9 @@ private class RecordingChatStreamProvider(private val events: List<StreamEvent>)
         systemPrompt: String?,
         ragContext: String?,
         tools: List<ToolDefinition>?,
-        toolChoice: ToolChoice?
+        toolChoice: ToolChoice?,
+        thinkingEnabled: Boolean?,
+        reasoningEffort: String?
     ): Flow<StreamEvent> {
         receivedConfigs += config
         receivedMessages += messages
@@ -704,7 +840,9 @@ private class MultiRoundRecordingProvider(private val eventSequences: List<List<
         systemPrompt: String?,
         ragContext: String?,
         tools: List<ToolDefinition>?,
-        toolChoice: ToolChoice?
+        toolChoice: ToolChoice?,
+        thinkingEnabled: Boolean?,
+        reasoningEffort: String?
     ): Flow<StreamEvent> {
         receivedMessages += messages
         val events = eventSequences[call.coerceAtMost(eventSequences.size - 1)]

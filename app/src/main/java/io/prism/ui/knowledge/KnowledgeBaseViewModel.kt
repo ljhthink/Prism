@@ -486,6 +486,23 @@ class KnowledgeBaseViewModel(
             } catch (e: CancellationException) {
                 // 协程取消必须重新抛出，不吞（Kotlin 协程铁律）
                 throw e
+            } catch (e: LinkageError) {
+                // DEF-005 止血（Bug-4）：POI/PDFBox/onnx 在真机的类加载/ServiceLoader/native
+                // 加载失败抛 Error（NoClassDefFoundError/ServiceConfigurationError/UnsatisfiedLinkError），
+                // 穿透协程闪退。此处归一化为 Failed 状态，阻断崩溃。
+                logger.log(
+                    Level.WARNING,
+                    "ingestion pipeline collect failed (linkage): ${e.javaClass.simpleName}",
+                    e
+                )
+                _uiState.update {
+                    it.copy(
+                        ingestionState = IngestionUiState.Failed(
+                            documentTitle = documentTitle,
+                            message = "文档摄入失败，请检查文件或重试"
+                        )
+                    )
+                }
             } catch (e: Exception) {
                 // G-05 修复：catch 范围从 IllegalArgumentException 扩展到 Exception，
                 // 覆盖 ObjectBox 运行期异常（DbException/磁盘满/HNSW 相关 IllegalStateException 等）。
@@ -513,6 +530,209 @@ class KnowledgeBaseViewModel(
     fun clearIngestionState() {
         // G-01 修复：原子 CAS
         _uiState.update { it.copy(ingestionState = IngestionUiState.Idle) }
+    }
+
+    /**
+     * 启动纯文本直接入库（UX-001 问题 2，ADR-021）。
+     *
+     * 复用 [startIngestion] 的进度映射逻辑（[IngestionUiState] 状态机），
+     * 经 [IngestionPipeline.ingestText] 直接文本切片 → 嵌入 → 入库。
+     *
+     * **校验**（fail-fast）：标题空白 / 文本空白时设置 Failed 状态；知识库 id 负数同样拒绝。
+     *
+     * **线程安全**：`Dispatchers.IO` collect，与 [startIngestion] 一致。
+     *
+     * @param title 文档标题（用户输入）
+     * @param text 要入库的纯文本
+     * @param knowledgeBaseId 目标知识库 id
+     */
+    fun startTextIngestion(title: String, text: String, knowledgeBaseId: Long) {
+        if (_uiState.value.ingestionState is IngestionUiState.Running) return
+        val trimmedTitle = title.trim()
+        val trimmedText = text.trim()
+        if (trimmedTitle.isEmpty()) {
+            _uiState.update {
+                it.copy(ingestionState = IngestionUiState.Failed(
+                    documentTitle = "文本笔记",
+                    message = "标题不能为空"
+                ))
+            }
+            return
+        }
+        if (trimmedText.isEmpty()) {
+            _uiState.update {
+                it.copy(ingestionState = IngestionUiState.Failed(
+                    documentTitle = trimmedTitle,
+                    message = "内容不能为空"
+                ))
+            }
+            return
+        }
+        if (knowledgeBaseId < 0) {
+            _uiState.update {
+                it.copy(ingestionState = IngestionUiState.Failed(
+                    documentTitle = trimmedTitle,
+                    message = "无效的知识库 id"
+                ))
+            }
+            return
+        }
+
+        viewModelScope.launch(Dispatchers.IO) {
+            var embedded = 0
+            var skipped = 0
+            var total = 0
+            try {
+                pipeline.ingestText(trimmedTitle, trimmedText, knowledgeBaseId).collect { event ->
+                    when (event) {
+                        is IngestionEvent.Started -> {
+                            _uiState.update {
+                                it.copy(ingestionState = IngestionUiState.Running(
+                                    documentTitle = trimmedTitle, embedded = 0, total = 0, skipped = 0
+                                ))
+                            }
+                        }
+                        is IngestionEvent.Parsed -> Unit // 文本入库无解析事件
+                        is IngestionEvent.Chunked -> {
+                            total = event.totalChunks
+                            _uiState.update {
+                                it.copy(ingestionState = IngestionUiState.Running(
+                                    documentTitle = trimmedTitle, embedded = embedded, total = total, skipped = skipped
+                                ))
+                            }
+                        }
+                        is IngestionEvent.ChunkEmbedded -> {
+                            embedded++
+                            _uiState.update {
+                                it.copy(ingestionState = IngestionUiState.Running(
+                                    documentTitle = trimmedTitle, embedded = embedded, total = event.total, skipped = skipped
+                                ))
+                            }
+                        }
+                        is IngestionEvent.ChunkSkipped -> {
+                            skipped++
+                            _uiState.update {
+                                it.copy(ingestionState = IngestionUiState.Running(
+                                    documentTitle = trimmedTitle, embedded = embedded, total = event.total, skipped = skipped
+                                ))
+                            }
+                        }
+                        is IngestionEvent.Completed -> {
+                            val (defaultCount, counts) = computeChunkCounts(libraries.value)
+                            _uiState.update {
+                                it.copy(
+                                    ingestionState = IngestionUiState.Completed(
+                                        documentTitle = trimmedTitle,
+                                        embedded = event.result.embeddedChunks,
+                                        skipped = event.result.skippedChunks,
+                                        durationMs = event.result.durationMs
+                                    ),
+                                    defaultKbChunkCount = defaultCount,
+                                    chunkCounts = counts
+                                )
+                            }
+                        }
+                        is IngestionEvent.Failed -> {
+                            logger.log(
+                                Level.WARNING,
+                                "text ingestion failed: ${event.throwable.javaClass.simpleName}",
+                                event.throwable
+                            )
+                            _uiState.update {
+                                it.copy(ingestionState = IngestionUiState.Failed(
+                                    documentTitle = trimmedTitle,
+                                    message = mapFailedToMessage(event.throwable)
+                                ))
+                            }
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: LinkageError) {
+                logger.log(Level.WARNING, "text ingestion collect failed (linkage): ${e.javaClass.simpleName}", e)
+                _uiState.update {
+                    it.copy(ingestionState = IngestionUiState.Failed(
+                        documentTitle = trimmedTitle,
+                        message = "文档摄入失败，请检查文件或重试"
+                    ))
+                }
+            } catch (e: Exception) {
+                logger.log(Level.WARNING, "text ingestion collect failed: ${e.javaClass.simpleName}", e)
+                _uiState.update {
+                    it.copy(ingestionState = IngestionUiState.Failed(
+                        documentTitle = trimmedTitle,
+                        message = "文档摄入失败，请检查文件或重试"
+                    ))
+                }
+            }
+        }
+    }
+
+    /**
+     * 列出指定知识库下的文档标题列表（UX-001 问题 2，ADR-021）。
+     *
+     * 委托 [KnowledgeBaseRepository.listDocuments]，用于 UI 展示库内文档。
+     * 同步查询（ObjectBox 快查，4GB 低端机库容量受限可接受）。
+     *
+     * @param knowledgeBaseId 知识库 id
+     * @return 文档标题列表
+     */
+    fun listDocuments(knowledgeBaseId: Long): List<String> = repository.listDocuments(knowledgeBaseId)
+
+    /**
+     * 获取指定知识库下某文档的完整内容（UXR3 问题 12，ADR-023）。
+     *
+     * 委托 [KnowledgeBaseRepository.getDocumentContent]，按分块序号升序拼接全文，
+     * 供 UI「查看内容」弹层直接展示已入库资料。
+     *
+     * @param knowledgeBaseId 知识库 id
+     * @param documentTitle 文档标题
+     * @return 文档全文（无匹配时返回空串）
+     */
+    fun getDocumentContent(knowledgeBaseId: Long, documentTitle: String): String =
+        repository.getDocumentContent(knowledgeBaseId, documentTitle)
+
+    /**
+     * 删除指定知识库下的文档（UX-001 问题 2，ADR-021）。
+     *
+     * 委托 [KnowledgeBaseRepository.deleteDocument]，删除后刷新 chunk 计数。
+     * 同步调用（ObjectBox 事务），失败静默降级（不抛异常，UI 无需感知细节）。
+     *
+     * @param knowledgeBaseId 知识库 id
+     * @param documentTitle 文档标题
+     * @return 删除的 chunk 数量
+     */
+    fun deleteDocument(knowledgeBaseId: Long, documentTitle: String): Long {
+        val removed = try {
+            repository.deleteDocument(knowledgeBaseId, documentTitle)
+        } catch (e: Exception) {
+            logger.log(Level.WARNING, "deleteDocument failed: ${e.javaClass.simpleName}", e)
+            0L
+        }
+        refreshChunkCounts(libraries.value)
+        return removed
+    }
+
+    /**
+     * 移动文档到目标知识库（UX-001 问题 2，ADR-021）。
+     *
+     * 委托 [KnowledgeBaseRepository.moveDocument]，移动后刷新 chunk 计数。
+     *
+     * @param sourceKbId 源知识库 id
+     * @param documentTitle 文档标题
+     * @param targetKbId 目标知识库 id
+     * @return 移动的 chunk 数量
+     */
+    fun moveDocument(sourceKbId: Long, documentTitle: String, targetKbId: Long): Long {
+        val moved = try {
+            repository.moveDocument(sourceKbId, documentTitle, targetKbId)
+        } catch (e: Exception) {
+            logger.log(Level.WARNING, "moveDocument failed: ${e.javaClass.simpleName}", e)
+            0L
+        }
+        refreshChunkCounts(libraries.value)
+        return moved
     }
 
     /**

@@ -102,10 +102,16 @@ class McpServerRepository(private val boxStore: BoxStore) {
     /**
      * 从预设模板创建 MCP Server 配置。
      *
+     * **UX-001 问题 5（ADR-022）查重**：若已存在同名 Server，则不重复创建，
+     * 返回已存在配置的 id（幂等）。根因：用户重复点击「从预设添加」会创建多个
+     * 同名 server → 工具名前缀 `mcp_<name>__` 重复 → OpenAI/DeepSeek 400
+     * "Tool names must be unique"。
+     *
      * @param preset 预设模板
-     * @return 新建的配置 id
+     * @return 新建的配置 id；若同名已存在则返回已有配置 id
      */
     fun createFromPreset(preset: McpServerConfig): Long {
+        findByName(preset.name)?.let { return it.id }
         val config = McpServerConfig(
             name = preset.name,
             serverType = preset.serverType,

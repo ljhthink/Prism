@@ -20,6 +20,9 @@ interface FileSystemAccess {
     /** 列出当前授权可见的根目录名称（对应 `list_allowed_directories` 工具）。 */
     suspend fun listAllowedDirectories(): List<String>
 
+    /** 是否已授权至少一个根目录（UXR3 问题 8，ADR-023；未授权时目录/文件工具应给出明确提示）。 */
+    suspend fun hasAuthorizedRoots(): Boolean
+
     /** 读取单个文件内容（对应 `read_file` 工具）。 */
     suspend fun readFile(path: String): String
 

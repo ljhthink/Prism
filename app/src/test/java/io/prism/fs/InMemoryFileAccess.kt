@@ -73,6 +73,9 @@ class InMemoryFileAccess : FileSystemAccess {
     override suspend fun listAllowedDirectories(): List<String> =
         vRoot.children.values.filter { it.isDirectory }.map { it.name }
 
+    override suspend fun hasAuthorizedRoots(): Boolean =
+        listAllowedDirectories().isNotEmpty()
+
     override suspend fun readFile(path: String): String {
         val node = resolve(path) ?: throw IOException("文件不存在：$path")
         if (node.isDirectory) throw IOException("不是文件：$path")

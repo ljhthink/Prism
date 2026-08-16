@@ -71,7 +71,13 @@ class SlidingWindowMemoryManager(
 
         // AC-2 + AC-3：超出 N 轮触发摘要压缩
         val oldMessages = messages.dropLast(windowSize)
-        val recentMessages = messages.takeLast(windowSize)
+        val rawRecent = messages.takeLast(windowSize)
+
+        // UXR5 问题 4（tool_calls 完整性保护）：按条数切分可能切断 assistant(tool_calls)
+        // 与其后 tool result 的对，导致 history 中 TOOL 消息无前置 tool_calls → DeepSeek 400
+        // "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"。
+        // 若窗口第一条是 TOOL（无前置 assistant），向前扩展窗口把前置 assistant 一并纳入。
+        val recentMessages = adjustWindowBoundary(messages, rawRecent, windowSize)
 
         // AC-1 + AC-5：摘要失败降级为截断
         val summary = summarizer.summarize(oldMessages, config) ?: truncateMessages(oldMessages)
@@ -80,6 +86,44 @@ class SlidingWindowMemoryManager(
             summary = summary,
             recentMessages = recentMessages
         )
+    }
+
+    /**
+     * UXR5 问题 4（tool_calls 完整性保护，纯函数可测）：调整滑动窗口下边界。
+     *
+     * `takeLast(windowSize)` 按条数切分，可能使窗口第一条消息是 [Role.TOOL]（tool result），
+     * 而其前置 assistant(tool_calls) 落在窗口外 → 发送给 LLM 的 history 中 TOOL 消息无
+     * 前置 tool_calls，DeepSeek 严格校验返回 400。
+     *
+     * **规则**：若窗口首条为 [Role.TOOL]，则向前扩展窗口把紧随其前的消息纳入
+     * （若窗口前仍有消息）。扩展后若仍为 TOOL（连续 tool 罕见，防御），继续向前扩展
+     * 直到窗口首条非 TOOL 或到达列表头。
+     *
+     * @param messages 完整历史
+     * @param rawRecent 原始 takeLast 结果（大小 ≤ windowSize）
+     * @param windowSize 窗口大小（用于确定可向前扩展的最大量）
+     * @return 调整后的近期消息（保证首条非 TOOL，除非整个历史都是 TOOL）
+     */
+    internal fun adjustWindowBoundary(
+        messages: List<ChatMessage>,
+        rawRecent: List<ChatMessage>,
+        windowSize: Int
+    ): List<ChatMessage> {
+        var recent = rawRecent
+        // F-02（guardrail TKN-UXR5-GUARDRAIL-001）修复：终止条件为「窗口首条非 TOOL」，
+        // 而非「无进展即停」。原 `end = indexInAll + windowSize` 上限 + `expanded.size <= recent.size`
+        // break 在窗口首条为连续 TOOL 时提前停止，违反「保证首条非 TOOL」契约。
+        while (recent.isNotEmpty() && recent.first().role == Role.TOOL) {
+            val firstInRecent = recent.first()
+            val indexInAll = messages.indexOfLast { it.id == firstInRecent.id }
+            if (indexInAll <= 0) break // 已到列表头，无法再扩展（整个历史都以 TOOL 结尾）
+            // 向前扩展一条（含其前置），窗口终点放宽到列表末尾（不再被 windowSize 卡住）
+            val start = maxOf(0, indexInAll - 1)
+            val expanded = messages.subList(start, messages.size)
+            if (expanded.size <= recent.size) break // 无进展，防死循环
+            recent = expanded
+        }
+        return recent
     }
 
     /**

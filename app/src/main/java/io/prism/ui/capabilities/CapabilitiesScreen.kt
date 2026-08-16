@@ -291,7 +291,21 @@ private fun McpPanel(
     Column {
         SectionHeader("本地内置 · ${local.size}", "管理")
         if (local.isEmpty()) EmptySection("暂无本地 Server，点击右上角 + 或下方预设添加")
-        local.forEach { McpRow(it, Modifier.padding(horizontal = 20.dp), onClick = { onServerClick(it) }, onToggle = { checked -> viewModel.setEnabled(it.id, checked) }) }
+        local.forEach { server ->
+            // UX-001 问题 8（ADR-022）：本地 Server 也观测连接状态（工具数探测），
+            // 避免「未实现工具也显示连接成功」——McpRow 默认回退 isEnabled 绿点（误导）。
+            val status: CapabilitiesViewModel.ConnectionStatus? = if (server.isEnabled) {
+                val flow = remember(server.id, server.isEnabled) { viewModel.observeConnectionStatus(server) }
+                flow.collectAsState(initial = CapabilitiesViewModel.ConnectionStatus.Connecting).value
+            } else null
+            McpRow(
+                server,
+                Modifier.padding(horizontal = 20.dp),
+                connectionStatus = status,
+                onClick = { onServerClick(server) },
+                onToggle = { checked -> viewModel.setEnabled(server.id, checked) }
+            )
+        }
 
         SectionHeader("远程模板 · ${remote.size}", "+ 自定义")
         if (remote.isEmpty()) EmptySection("暂无远程 Server，点击下方预设一键添加")

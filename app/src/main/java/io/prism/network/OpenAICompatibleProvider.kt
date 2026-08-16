@@ -71,8 +71,24 @@ class OpenAICompatibleProvider(
     private val apiKeyRepository: ApiKeyRepository
 ) : ChatStreamProvider, ChatCompletionProvider {
 
-    /** 编译时 JSON，忽略未知字段（如 `reasoning_content`），空安全。 */
-    private val json = Json { ignoreUnknownKeys = true }
+    /**
+     * 编译时 JSON，忽略未知字段（如 `reasoning_content`），空安全。
+     *
+     * **encodeDefaults = true**（DEF-002 修复）：kotlinx.serialization 默认 `encodeDefaults = false`，
+     * 会省略值等于默认值的字段。`ToolDefinition.type` 默认值为 `"function"`，导致序列化结果
+     * 缺少 `type` 字段，DeepSeek 等严格校验的 Provider 返回 400（"missing field `type`"）。
+     * 设置 `encodeDefaults = true` 确保所有带默认值的字段（含 `ToolCallWire.type`）均被输出，
+     * 与项目内 [io.prism.skill.SkillExecutor] / [io.prism.skill.ToolCallListConverter] 的 Json 配置对齐。
+     *
+     * **explicitNulls = false**（DEF-002 配套）：`encodeDefaults = true` 会将值为 null 的可空字段
+     * 也序列化为 `"field":null`，破坏 `tools = null` 时不输出 tools 字段的向后兼容行为。
+     * 设置 `explicitNulls = false` 确保 null 字段被完全省略，仅保留非空字段与非默认值字段。
+     */
+    private val json = Json {
+        ignoreUnknownKeys = true
+        encodeDefaults = true
+        explicitNulls = false
+    }
 
     /**
      * 发起流式对话请求。
@@ -91,7 +107,11 @@ class OpenAICompatibleProvider(
      * @param ragContext RAG context 文本（可选，知识库片段拼接）；null 时不注入
      * @param tools 工具定义列表（M4，null 时不序列化 tools 字段，向后兼容）
      * @param toolChoice 工具选择策略（M4，null 时不序列化 tool_choice 字段）
-     * @return [StreamEvent] 流：增量 [StreamEvent.Delta] / 工具调用事件 / 结束 [StreamEvent.Done] / 错误 [StreamEvent.Error]
+     * @param thinkingEnabled 是否开启深度思考（问题 8a，DeepSeek thinking 模式；null/true 时注入
+     *        `thinking={"type":"enabled"}`；false/null 时不注入，向后兼容所有端点）
+     * @param reasoningEffort 思考强度（问题 8a，low/high/max；仅 [thinkingEnabled] 为 true 时注入）
+     * @return [StreamEvent] 流：增量 [StreamEvent.Delta] / 思考过程 [StreamEvent.ReasoningDelta] /
+     *         工具调用事件 / 结束 [StreamEvent.Done] / 错误 [StreamEvent.Error]
      */
     override fun streamChat(
         config: ProviderConfig,
@@ -99,7 +119,9 @@ class OpenAICompatibleProvider(
         systemPrompt: String?,
         ragContext: String?,
         tools: List<ToolDefinition>?,
-        toolChoice: ToolChoice?
+        toolChoice: ToolChoice?,
+        thinkingEnabled: Boolean?,
+        reasoningEffort: String?
     ): Flow<StreamEvent> = flow {
         val endpoint = buildEndpoint(config.baseUrl)
         val apiKey = if (config.apiKeyRef.isNotBlank()) {
@@ -119,7 +141,18 @@ class OpenAICompatibleProvider(
                 buildAuthHeader(apiKey)?.let { header(HttpHeaders.Authorization, it) }
                     ?: customAuthHeader(config.headers)?.let { header(HttpHeaders.Authorization, it) }
                 applyCustomHeaders(this, config.headers)
-                setBody(buildRequestBody(config, messages, systemPrompt, ragContext, tools, toolChoice))
+                setBody(
+                    buildRequestBody(
+                        config = config,
+                        messages = messages,
+                        systemPrompt = systemPrompt,
+                        ragContext = ragContext,
+                        tools = tools,
+                        toolChoice = toolChoice,
+                        thinkingEnabled = thinkingEnabled ?: false,
+                        reasoningEffort = reasoningEffort
+                    )
+                )
             }) {
                 incoming.collect { event ->
                     val data = event.data ?: return@collect
@@ -130,7 +163,12 @@ class OpenAICompatibleProvider(
                         return@collect
                     }
                     val chunk = parseChunk(data) ?: return@collect
-                    val events = chunkToEvents(chunk, pendingToolCalls, json)
+                    // UXR4 问题 1/4/6（ADR-024）：reasoning_content 必须**始终**解析回传。
+                    // 此前 `collectReasoning = thinkingEnabled ?: false` 在开关关闭时丢弃 reasoning，
+                    // 导致工具回路第 2 轮 assistant 消息无 reasoning_content 可回传 → DeepSeek 400。
+                    // 协议层始终收集（供 [ChatMessage.thinkingChain] 反向回传），
+                    // UI 是否展示思考过程由 ConversationViewModel 的 thinkingEnabled 开关控制。
+                    val events = chunkToEvents(chunk, pendingToolCalls, json, collectReasoning = true)
                     for (e in events) {
                         if (e is StreamEvent.Done) terminated = true
                         emit(e)
@@ -142,10 +180,19 @@ class OpenAICompatibleProvider(
             throw e
         } catch (e: SSEClientException) {
             // SSE 插件对非 200 响应一律抛 SSEClientException，从 response 读取状态码区分 401 与其他 4xx。
-            emit(mapHttpError(e.response?.status?.value ?: -1))
+            // DEF-002 插桩：读取响应体提取服务器返回的具体错误信息，帮助用户诊断 400 根因。
+            // L-1 修复：logcat 输出也经 sanitizeErrorBody 脱敏，防止路径泄露到本地日志。
+            val statusCode = e.response?.status?.value ?: -1
+            val errorBody = try { e.response?.bodyAsText() } catch (_: Exception) { null }
+            val safeBody = errorBody?.let { sanitizeErrorBody(it) }
+            Log.w("OpenAIProvider", "SSE 请求失败 status=$statusCode body=$safeBody")
+            emit(mapHttpError(statusCode, errorBody))
             return@flow
         } catch (e: ClientRequestException) {
-            emit(mapHttpError(e.response.status.value))
+            val errorBody = try { e.response.bodyAsText() } catch (_: Exception) { null }
+            val safeBody = errorBody?.let { sanitizeErrorBody(it) }
+            Log.w("OpenAIProvider", "HTTP 请求失败 status=${e.response.status.value} body=$safeBody")
+            emit(mapHttpError(e.response.status.value, errorBody))
             return@flow
         } catch (e: Exception) {
             // 网络/协议错误映射为通用文案，避免内部路径/异常细节泄露（CR-05）
@@ -179,6 +226,8 @@ class OpenAICompatibleProvider(
      * @param messages 对话历史（不含 system 消息）
      * @param systemPrompt system 消息内容（可选，摘要/抽取 prompt）
      * @param ragContext RAG context 文本（可选，后台任务通常 null）
+     * @param thinkingEnabled 是否开启深度思考（问题 8a；默认 null 不开启，后台任务保持现状）
+     * @param reasoningEffort 思考强度（问题 8a；仅 thinkingEnabled 为 true 时注入）
      * @return assistant 回复内容；失败时返回 null
      * @throws kotlinx.coroutines.CancellationException 协程取消必须重抛
      */
@@ -186,7 +235,9 @@ class OpenAICompatibleProvider(
         config: ProviderConfig,
         messages: List<ChatMessage>,
         systemPrompt: String?,
-        ragContext: String?
+        ragContext: String?,
+        thinkingEnabled: Boolean?,
+        reasoningEffort: String?
     ): String? {
         val endpoint = buildEndpoint(config.baseUrl)
         val apiKey = if (config.apiKeyRef.isNotBlank()) {
@@ -202,7 +253,17 @@ class OpenAICompatibleProvider(
                 buildAuthHeader(apiKey)?.let { header(HttpHeaders.Authorization, it) }
                     ?: customAuthHeader(config.headers)?.let { header(HttpHeaders.Authorization, it) }
                 applyCustomHeaders(this, config.headers)
-                setBody(buildRequestBody(config, messages, systemPrompt, ragContext, stream = false))
+                setBody(
+                    buildRequestBody(
+                        config = config,
+                        messages = messages,
+                        systemPrompt = systemPrompt,
+                        ragContext = ragContext,
+                        stream = false,
+                        thinkingEnabled = thinkingEnabled ?: false,
+                        reasoningEffort = reasoningEffort
+                    )
+                )
             }
             val responseBody = response.bodyAsText()
             parseCompletionResponse(responseBody)
@@ -264,6 +325,9 @@ class OpenAICompatibleProvider(
      * @param tools 工具定义（null 时不序列化 tools 字段，向后兼容）
      * @param toolChoice 工具选择策略（null 时不序列化 tool_choice 字段）
      * @param stream 是否流式请求（默认 true，向后兼容；M5 Phase B 非流式路径传 false）
+     * @param thinkingEnabled 是否开启深度思考（问题 8a；默认 false，仅 true 时注入 thinking 字段，
+     *        避免向 OpenAI/Claude/Ollama 等不兼容端点发送 DeepSeek 专有参数返回 400）
+     * @param reasoningEffort 思考强度（问题 8a；仅 thinkingEnabled 为 true 时注入）
      */
     internal fun buildRequestBody(
         config: ProviderConfig,
@@ -272,7 +336,9 @@ class OpenAICompatibleProvider(
         ragContext: String? = null,
         tools: List<ToolDefinition>? = null,
         toolChoice: ToolChoice? = null,
-        stream: Boolean = true
+        stream: Boolean = true,
+        thinkingEnabled: Boolean = false,
+        reasoningEffort: String? = null
     ): String {
         val requestMessages = buildList {
             // 1. system 消息前置（若有）
@@ -298,7 +364,16 @@ class OpenAICompatibleProvider(
             tools = tools,
             toolChoice = toolChoice?.let { toolChoiceToJson(it) },
             // strict mode 需 parallel_tool_calls=false（OpenAI 限制），且减少并行幻觉
-            parallelToolCalls = if (tools != null) false else null
+            parallelToolCalls = if (tools != null) false else null,
+            // 问题 8a（ADR-020）：仅 thinkingEnabled 时注入 DeepSeek thinking 模式参数
+            // S-3（guardrail TKN-P8-GUARDRAIL-001）：reasoningEffort 纵深防御白名单，
+            // 非法值忽略而非发送（避免向 Provider 传无效 effort 返回 400）
+            thinking = if (thinkingEnabled) buildJsonObject { put("type", "enabled") } else null,
+            reasoningEffort = if (thinkingEnabled) {
+                reasoningEffort?.takeIf { it in VALID_EFFORTS }
+            } else {
+                null
+            }
         )
         return json.encodeToString(ChatCompletionRequest.serializer(), body)
     }
@@ -325,13 +400,44 @@ class OpenAICompatibleProvider(
     /**
      * 将 HTTP 状态码映射为面向用户的错误事件：
      * - 401 → 鉴权失败专属文案（BR-error-handling-003）
-     * - 其他 4xx → 携带状态码的「请求被拒绝」文案
+     * - 其他 4xx → 携带状态码与服务器返回的具体错误信息（DEF-002：帮助用户诊断 400 根因）
      * - 其余 → 通用网络错误文案
+     *
+     * **错误体脱敏**（BR-error-handling-008 第一层）：[errorBody] 来自不可信服务器响应，
+     * 拼接到 UI 可见文案前必须经 [sanitizeErrorBody] 处理（路径脱敏 + 长度截断 + 换行符替换）。
+     * 服务器业务错误信息（如 "model not found"）对用户诊断有价值，不属于内部堆栈/路径泄露
+     * （CWE-209 边界：服务器业务错误信息 ≠ 系统细节）。
      */
-    private fun mapHttpError(status: Int): StreamEvent.Error = when {
-        status == HttpStatusCode.Unauthorized.value -> StreamEvent.Error("鉴权失败，请检查 API Key")
-        status in 400..499 -> StreamEvent.Error("请求被拒绝（$status），请检查 Provider 配置")
-        else -> StreamEvent.Error("网络请求失败，请检查网络连接或 Provider 配置")
+    private fun mapHttpError(status: Int, errorBody: String? = null): StreamEvent.Error {
+        val detail = errorBody
+            ?.takeIf { it.isNotBlank() }
+            ?.let { sanitizeErrorBody(it) }
+            ?.let { "：$it" }
+            .orEmpty()
+        return when {
+            status == HttpStatusCode.Unauthorized.value -> StreamEvent.Error("鉴权失败，请检查 API Key$detail")
+            status in 400..499 -> StreamEvent.Error("请求被拒绝（$status）$detail，请检查 Provider 配置")
+            else -> StreamEvent.Error("网络请求失败，请检查网络连接或 Provider 配置")
+        }
+    }
+
+    /**
+     * 错误体脱敏（BR-error-handling-008 第一层，对齐 [io.prism.skill.SkillExecutor.sanitizeErrorMessage]）。
+     *
+     * 1. **路径脱敏**：将 `/xxx/yyy` 或 `\xxx\yyy` 替换为 `<path>`，防止非标准 Provider
+     *    返回的 HTML 错误页/堆栈跟踪中的内部 URL/文件路径泄露给用户
+     * 2. **换行符替换**：`\n` → 空格，防御日志注入
+     * 3. **长度截断**：仅保留前 200 字符，防止超长响应体污染 UI
+     *
+     * internal 便于单元测试（ADR-004 4.7 / BR-testing-004 可测性约定）。
+     */
+    internal fun sanitizeErrorBody(body: String): String {
+        val pathPattern = Regex("""[/\\][^\s"'<>]+""")
+        return body
+            .replace(pathPattern, "<path>")
+            .replace("\r", " ")
+            .replace("\n", " ")
+            .take(200)
     }
 
     /**
@@ -358,12 +464,14 @@ class OpenAICompatibleProvider(
      * 将单个 [ChatCompletionChunk] 映射为 0..N 个 [StreamEvent]（纯函数，可测）。
      *
      * **处理顺序**：
-     * 1. text delta：`choices[0].delta.content` 非空且非空白 → [StreamEvent.Delta]
-     * 2. tool_calls delta 累加：`choices[0].delta.toolCalls` 经 [processToolCallDeltas] 累加到 [state]，
+     * 1. reasoning delta：`choices[0].delta.reasoning_content` 非空且非空白 → [StreamEvent.ReasoningDelta]
+     *    （问题 8a，ADR-020：深度思考模式先输出推理过程，后输出最终答案）
+     * 2. text delta：`choices[0].delta.content` 非空且非空白 → [StreamEvent.Delta]
+     * 3. tool_calls delta 累加：`choices[0].delta.toolCalls` 经 [processToolCallDeltas] 累加到 [state]，
      *    发射 [StreamEvent.ToolCallStart] / [StreamEvent.ToolCallDelta]
-     * 3. finish_reason == "tool_calls"：[completeToolCalls] 解析累加的 arguments，
+     * 4. finish_reason == "tool_calls"：[completeToolCalls] 解析累加的 arguments，
      *    发射 [StreamEvent.ToolCallComplete]（JSON 解析失败降级为 [StreamEvent.Error]）
-     * 4. 空 `choices[]`：无 usage 视为流结束 → [StreamEvent.Done]；带 usage 为中段快照 → 忽略（CR-03）
+     * 5. 空 `choices[]`：无 usage 视为流结束 → [StreamEvent.Done]；带 usage 为中段快照 → 忽略（CR-03）
      *
      * @param state 跨 chunk 的 tool_call 累加状态（调用方持有，本函数原地修改）
      * @param json 用于 arguments JSON 解析的 Json 实例
@@ -371,23 +479,35 @@ class OpenAICompatibleProvider(
     internal fun chunkToEvents(
         chunk: ChatCompletionChunk,
         state: MutableMap<Int, ToolCallAccumulator>,
-        json: Json
+        json: Json,
+        collectReasoning: Boolean = true
     ): List<StreamEvent> {
         val events = mutableListOf<StreamEvent>()
         val choice = chunk.choices.firstOrNull()
-        // 1. text delta
+        // 1. reasoning delta（问题 8a：深度思考推理过程，先于最终答案输出）
+        // 2026-08-15 修复（markdown 渲染）：isNullOrEmpty 而非 isNullOrBlank ——
+        // 空白 delta（如纯换行 "\n"）在流式输出中作为独立 chunk 到达时不能被过滤，
+        // 否则换行丢失导致 markdown 源文本粘连，标题/表格/列表无法被解析渲染。
+        // 仅过滤 null 与空串（协议空 delta 无意义），保留空格/换行等结构字符。
+        // UXR3 问题 3（ADR-023）：开关关闭（collectReasoning=false）时丢弃 reasoning，
+        // 避免 deepseek-reasoner 原生思考模型在开关关闭后仍展示「深度思考」折叠区。
+        val reasoning = choice?.delta?.reasoningContent
+        if (collectReasoning && !reasoning.isNullOrEmpty()) {
+            events.add(StreamEvent.ReasoningDelta(reasoning))
+        }
+        // 2. text delta
         val content = choice?.delta?.content
-        if (!content.isNullOrBlank()) events.add(StreamEvent.Delta(content))
-        // 2. tool_calls delta 累加
+        if (!content.isNullOrEmpty()) events.add(StreamEvent.Delta(content))
+        // 3. tool_calls delta 累加
         val toolCallDeltas = choice?.delta?.toolCalls
         if (!toolCallDeltas.isNullOrEmpty()) {
             events.addAll(processToolCallDeltas(state, toolCallDeltas))
         }
-        // 3. finish_reason == "tool_calls" 触发完成
+        // 4. finish_reason == "tool_calls" 触发完成
         if (choice?.finishReason == FINISH_TOOL_CALLS) {
             events.addAll(completeToolCalls(state, json))
         }
-        // 4. 空 choices：无 usage = 流结束；带 usage = 中段快照忽略
+        // 5. 空 choices：无 usage = 流结束；带 usage = 中段快照忽略
         if (chunk.choices.isEmpty() && chunk.usage == null) {
             events.add(StreamEvent.Done)
         }
@@ -497,6 +617,14 @@ class OpenAICompatibleProvider(
      * - ASSISTANT → `MessageBody(role="assistant", content=非空?content:null, toolCalls=回放)`；
      *   空 content + 非空 toolCalls 时 content=null（OpenAI 允许 assistant null content + tool_calls）
      * - TOOL → `MessageBody(role="tool", content=msg.content, toolCallId=msg.toolCallId)`
+     *
+     * **UXR4 问题 1/4/6 修复（ADR-024 子决策 A）**：assistant 分支额外携带
+     * `reasoning_content = msg.thinkingChain`。DeepSeek 官方要求：携带 `tools` 参数的请求，
+     * 后续所有请求必须完整回传 `reasoning_content`（工具回路第 2 轮回放 assistant 消息时必带），
+     * 否则返回 400 "The reasoning_content in the thinking mode must be passed back to the API"。
+     * [thinkingChain] 由 UI 层流式累积（[io.prism.ui.chat.ConversationViewModel] 的
+     * `appendThinkingDelta`），此处反向序列化回请求体；thinkingChain 为空时输出 null
+     * （`explicitNulls=false` 使该字段被省略，无思考的端点零影响）。
      */
     private fun ChatMessage.toMessageBody(): MessageBody = when (role) {
         Role.USER -> MessageBody(role = USER_ROLE, content = content)
@@ -505,7 +633,8 @@ class OpenAICompatibleProvider(
             MessageBody(
                 role = ASSISTANT_ROLE,
                 content = content.takeIf { it.isNotEmpty() },
-                toolCalls = replay
+                toolCalls = replay,
+                reasoningContent = thinkingChain
             )
         }
         Role.TOOL -> MessageBody(
@@ -523,6 +652,9 @@ class OpenAICompatibleProvider(
         const val ASSISTANT_ROLE = "assistant"
         const val TOOL_ROLE = "tool"
         const val FINISH_TOOL_CALLS = "tool_calls"
+
+        /** 合法思考强度集合（S-3 纵深防御，对齐 DeepSeek API 文档 low/high/max）。 */
+        internal val VALID_EFFORTS = setOf("low", "high", "max")
     }
 }
 
@@ -531,20 +663,30 @@ class OpenAICompatibleProvider(
 /**
  * 请求体消息。M4 Phase C 扩展：[content] 可空（assistant tool_call 消息可为 null），
  * [toolCallId] role=tool 时必填，[toolCalls] role=assistant 回放 tool_calls 结构。
+ *
+ * **UXR4 问题 1/4/6 修复（ADR-024）**：新增 [reasoningContent]（`reasoning_content`）——
+ * DeepSeek 思考模式下 assistant 消息必须回传该字段（工具回路第 2 轮必带），
+ * 否则返回 400。由 [ChatMessage.toMessageBody] 从 thinkingChain 填充。
  */
 @Serializable
 private data class MessageBody(
     val role: String,
     val content: String? = null,
     @SerialName("tool_call_id") val toolCallId: String? = null,
-    @SerialName("tool_calls") val toolCalls: List<ToolCallWire>? = null
+    @SerialName("tool_calls") val toolCalls: List<ToolCallWire>? = null,
+    @SerialName("reasoning_content") val reasoningContent: String? = null
 )
 
 /**
  * chat/completions 请求体（stream=true）。M4 Phase C 扩展 tools/tool_choice/parallel_tool_calls。
+ * 问题 8a（ADR-020）扩展 thinking / reasoning_effort（DeepSeek 思考模式）。
  *
- * `stream` 无默认值，确保始终随请求序列化。tools/toolChoice/parallelToolCalls 默认 null，
- * null 时 kotlinx.serialization 默认不序列化该字段（向后兼容，既有调用零改动）。
+ * `stream` 无默认值，确保始终随请求序列化。tools/toolChoice/parallelToolCalls/thinking/
+ * reasoningEffort 默认 null，null 时 kotlinx.serialization 默认不序列化该字段（向后兼容，
+ * 既有调用零改动）。
+ *
+ * **thinking 结构**：DeepSeek 要求顶层 `thinking={"type":"enabled"}`（JsonObject），
+ * 与平级 `reasoning_effort`（"low"/"high"/"max"）配合。仅用户显式开启时非 null。
  */
 @Serializable
 private data class ChatCompletionRequest(
@@ -553,7 +695,9 @@ private data class ChatCompletionRequest(
     val stream: Boolean,
     val tools: List<ToolDefinition>? = null,
     @SerialName("tool_choice") val toolChoice: JsonElement? = null,
-    @SerialName("parallel_tool_calls") val parallelToolCalls: Boolean? = null
+    @SerialName("parallel_tool_calls") val parallelToolCalls: Boolean? = null,
+    val thinking: JsonElement? = null,
+    @SerialName("reasoning_effort") val reasoningEffort: String? = null
 )
 
 /**
@@ -578,12 +722,14 @@ internal data class Choice(
 
 /**
  * 增量 token。M4 Phase C 扩展 [role]（首个 delta 携带 assistant 角色）与 [toolCalls]。
+ * 问题 8a（ADR-020）扩展 [reasoningContent]（DeepSeek thinking 模式的 `reasoning_content`）。
  */
 @Serializable
 internal data class Delta(
     val content: String? = null,
     val role: String? = null,
-    @SerialName("tool_calls") val toolCalls: List<ToolCallDeltaWire>? = null
+    @SerialName("tool_calls") val toolCalls: List<ToolCallDeltaWire>? = null,
+    @SerialName("reasoning_content") val reasoningContent: String? = null
 )
 
 /**

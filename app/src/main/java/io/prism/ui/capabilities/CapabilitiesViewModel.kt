@@ -1,5 +1,6 @@
 package io.prism.ui.capabilities
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -131,20 +132,26 @@ class CapabilitiesViewModel(
      * 测试 MCP Server 连接（调用 listTools 验证）。
      *
      * 成功时记录工具数量，失败时记录错误描述；测试期间 [testState] 为 Testing。
+     *
+     * **UX-001 问题 8（ADR-022）**：工具数为 0 视为「连接成功但无可用工具」——
+     * 对本地未实现 server（如 Sequential Thinking 修复前）不再误导为成功。
+     * 0 工具判定为失败（无工具可用 = 功能不可用），避免「连接成功 · 0 个工具」误导。
      */
     fun testConnection(config: McpServerConfig) {
         viewModelScope.launch {
             _testState.value = TestState.Testing
             _testState.value = try {
                 val tools = mcpToolProvider.listTools(config)
-                TestState.Success(tools.size)
+                if (tools.isEmpty()) {
+                    TestState.Fail("连接成功但无可用工具（该 Server 未实现任何工具）")
+                } else {
+                    TestState.Success(tools.size)
+                }
             } catch (e: CancellationException) {
                 // 结构化并发（CR-01）：协程取消必须重新抛出，不吞掉。
                 throw e
             } catch (e: Exception) {
                 // CR-05（CWE-209）：不向 UI 暴露异常内部信息（e.message 可能含 URL/路径/头部）。
-                // 此处为第二道防线：McpClientManager 已降级返回，理论上不会抛业务异常，
-                // 但为纵深防御，失败分支仅展示通用文案，不拼接 e.message。
                 TestState.Fail("连接失败，请检查网络或 Server 配置")
             }
         }
@@ -192,14 +199,23 @@ class CapabilitiesViewModel(
                 emit(ConnectionStatus.Connecting)
                 // 探测超时保护（guardrail L-03）：共享 httpClient 未配置 HttpTimeout，
                 // 网络挂起时协同超时避免「连接中」无限期；超时降级为连接超时，不崩溃收集器。
+                // Q-02 修复（guardrail TKN-UXR2-GUARDRAIL-001）：捕获所有非取消异常，
+                // 与 [testConnection] 的 catch Exception 语义一致——否则 listTools 抛其他异常
+                // （网络错误/Server 初始化失败）会传播取消 Flow，UI 徽章永久卡「连接中」。
                 try {
                     val tools = withTimeout(CONNECT_TIMEOUT_MS) { mcpToolProvider.listTools(config) }
                     emit(
                         if (tools.isEmpty()) ConnectionStatus.Error("连接失败")
                         else ConnectionStatus.Connected(tools.size)
                     )
+                } catch (e: CancellationException) {
+                    throw e // 结构化并发：协程取消必须重抛
                 } catch (e: TimeoutCancellationException) {
                     emit(ConnectionStatus.Error("连接超时"))
+                } catch (e: Exception) {
+                    // BR-error-handling-004：记录日志（不含敏感信息），降级为连接失败
+                    Log.w("CapabilitiesViewModel", "observeConnectionStatus failed: ${e::class.simpleName}")
+                    emit(ConnectionStatus.Error("连接失败"))
                 }
             }.flowOn(Dispatchers.IO)
     }

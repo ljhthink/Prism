@@ -95,6 +95,15 @@
   - [ADR-016 M6 跨 App 调用架构（US-037）](docs/decisions/ADR-016-m6-cross-app-integration.md)（Accepted）
   - [ADR-017 M7 设备适配与降级架构（US-007）](docs/decisions/ADR-017-m7-device-adaptation.md)（Accepted）
   - [ADR-018 M8 集成与发布架构（US-044~US-047）](docs/decisions/ADR-018-m8-release-architecture.md)（Accepted）
+  - [ADR-019 Skill 渐进式加载 + 默认 persona（修复提示词污染）](docs/decisions/ADR-019-skill-progressive-disclosure.md)（Accepted）
+  - [ADR-020 深度思考 + 联网搜索（问题 8 修复）](docs/decisions/ADR-020-thinking-and-web-search.md)（Proposed）
+  - [ADR-021 用户体验问题修复](docs/decisions/ADR-021-ux-issue-fixes.md)（Proposed）
+  - [ADR-022 UX 二次反馈修复（Markdown 稳定性/工具名规范化/换行保留/MCP 状态）](docs/decisions/ADR-022-ux-r2-markdown-tool-mcp-fixes.md)（Proposed）
+  - [ADR-023 UX 三次反馈修复（键盘真机 IME/工具审批三模式/知识库内容查看/消息编辑复制）](docs/decisions/ADR-023-ux-r3-fixes.md)（Proposed）
+  - [ADR-024 UXR4 真机反馈修复（reasoning_content 回传/知识库工具/状态机/持久化）](docs/decisions/ADR-024-uxr4-fixes.md)（Proposed）
+  - [ADR-025 UXR5 真机反馈修复（markdown 流式渲染/工具 UI 时序/搜索中文/tool_calls 完整性）](docs/decisions/ADR-025-uxr5-fixes.md)（Proposed）
+  - [ADR-026 UXR6 真机反馈修复（搜索质量/工具熔断 + markdown 渲染 + RAG UI 状态 + 引用覆盖 + TTFT + 日志诊断）](docs/decisions/ADR-026-uxr6-fixes.md)（Proposed）
+  - [ADR-027 UXR7 真机反馈修复（搜索核心词重试 + markdown 表格预处理 + 引用覆盖读全文 + 熔断扩展）](docs/decisions/ADR-027-uxr7-fixes.md)（Proposed）
 
 ### Reference（参考 / 报告）
 
@@ -236,6 +245,32 @@
   - [2026-08-11-m6-phase-c-guardrail.md](docs/reports/2026-08-11-m6-phase-c-guardrail.md) —— M6 Phase C 安全与质量审计（guardrail-enforcer，两轮，M-1 双重超时竞态修复）
   - [2026-08-11-m6-phase-c-acceptance.md](docs/reports/2026-08-11-m6-phase-c-acceptance.md) —— M6 Phase C 验收测试（ac-verifier，通过，10/10 AC，DEF-01 闭合 + BR-concurrency-005 转 active）
   - [2026-08-11-m6-milestone-audit.md](docs/reports/2026-08-11-m6-milestone-audit.md) —— M6 里程碑交付审计（functional-validation-auditor，有条件交付→已闭合）
+  - [2026-08-12-prismswitch-crash-archaeology.md](docs/reports/2026-08-12-prismswitch-crash-archaeology.md) —— PrismSwitch padding 负值崩溃源码考古（code-archaeologist，spring 欠阻尼过冲根因）
+  - [2026-08-12-prismswitch-crash-guardrail.md](docs/reports/2026-08-12-prismswitch-crash-guardrail.md) —— PrismSwitch 崩溃修复安全与质量审计（guardrail-enforcer）
+  - [2026-08-12-prismswitch-crash-acceptance.md](docs/reports/2026-08-12-prismswitch-crash-acceptance.md) —— PrismSwitch 崩溃修复验收测试（ac-verifier，8/8 AC，1497 回归 0 失败）
+  - [2026-08-12-provider-save-archaeology.md](docs/reports/2026-08-12-provider-save-archaeology.md) —— Provider 配置保存功能双 Bug 源码考古（code-archaeologist，PrismSheet 容器缺陷根因）
+  - [2026-08-12-provider-save-guardrail.md](docs/reports/2026-08-12-provider-save-guardrail.md) —— Provider 配置保存功能双 Bug 修复安全与质量审计（guardrail-enforcer，通过）
+  - [2026-08-12-provider-save-acceptance.md](docs/reports/2026-08-12-provider-save-acceptance.md) —— Provider 配置保存功能双 Bug 修复验收测试（ac-verifier，受限通过，6/8 AC 通过 + 2 项待用户验证）
+  - [2026-08-14-p8-thinking-websearch-guardrail.md](docs/reports/2026-08-14-p8-thinking-websearch-guardrail.md) —— 问题 8 深度思考+联网搜索安全与质量审计（guardrail-enforcer，两轮，TKN-P8-GUARDRAIL-001/002）
+  - [2026-08-14-p8-thinking-websearch-acceptance.md](docs/reports/2026-08-14-p8-thinking-websearch-acceptance.md) —— 问题 8 深度思考+联网搜索验收测试（ac-verifier，14/14 AC，1559 回归 0 失败，TKN-P8-ACCEPTANCE-001）
+  - [2026-08-14-p17-bugfix-guardrail.md](docs/reports/2026-08-14-p17-bugfix-guardrail.md) —— 问题 1-7 真机测试修复安全与质量审计（guardrail-enforcer，四轮，TKN-P17-GUARDRAIL-001~004）
+  - [2026-08-14-p17-bugfix-acceptance.md](docs/reports/2026-08-14-p17-bugfix-acceptance.md) —— 问题 1-7 真机测试修复验收测试（ac-verifier，8/8 AC，1583 回归 0 失败，TKN-P17-ACCEPTANCE-001）
+  - [2026-08-15-uxr3-archaeology.md](docs/reports/2026-08-15-uxr3-archaeology.md) —— UXR3 真机四问题源码考古（code-archaeologist）
+  - [2026-08-15-uxr3-guardrail.md](docs/reports/2026-08-15-uxr3-guardrail.md) —— UXR3 修复安全与质量审计（guardrail-enforcer，首轮，有条件通过，TKN-UXR3-GUARDRAIL-001）
+  - [2026-08-15-uxr3-guardrail-r2.md](docs/reports/2026-08-15-uxr3-guardrail-r2.md) —— UXR3 修复复审（guardrail-enforcer，第二轮通过，TKN-UXR3-GUARDRAIL-R2）
+  - [2026-08-15-uxr3-acceptance.md](docs/reports/2026-08-15-uxr3-acceptance.md) —— UXR3 第三轮用户真机反馈修复验收测试（ac-verifier，有条件通过，14 问题 13 通过 + 3 待真机验证，1699 回归 0 失败，TKN-UXR3-ACCEPTANCE-001）
+  - [2026-08-15-uxr4-archaeology.md](docs/reports/2026-08-15-uxr4-archaeology.md) —— UXR4 真机 10 问题源码考古（code-archaeologist，reasoning_content 回传结构性缺失确认）
+  - [2026-08-15-uxr4-guardrail.md](docs/reports/2026-08-15-uxr4-guardrail.md) —— UXR4 修复安全与质量审计首轮（guardrail-enforcer，有条件通过，TKN-UXR4-GUARDRAIL-001）
+  - [2026-08-15-uxr4-guardrail-r2.md](docs/reports/2026-08-15-uxr4-guardrail-r2.md) —— UXR4 修复安全与质量审计复核（guardrail-enforcer，有条件通过，TKN-UXR4-GUARDRAIL-R2）
+  - [2026-08-15-uxr4-acceptance.md](docs/reports/2026-08-15-uxr4-acceptance.md) —— UXR4 修复验收测试（ac-verifier，通过，1721 回归 0 失败，TKN-UXR4-ACCEPTANCE-001）
+  - [2026-08-15-uxr5-archaeology.md](docs/reports/2026-08-15-uxr5-archaeology.md) —— UXR5 真机 5 问题源码考古（code-archaeologist，markdown 渲染/message 序列/搜索中文/tool_calls 完整性）
+  - [2026-08-16-uxr6-archaeology.md](docs/reports/2026-08-16-uxr6-archaeology.md) —— UXR6 真机 6 问题源码考古（code-archaeologist，搜索质量/渲染/RAG UI/流式/性能/日志）
+  - [2026-08-16-uxr7-archaeology.md](docs/reports/2026-08-16-uxr7-archaeology.md) —— UXR7 真机 3 问题深度故障定位（code-archaeologist，Bing 分词/0.26.0 无表格组件/引用读全文）
+  - [2026-08-16-uxr7-r2-guardrail.md](docs/reports/2026-08-16-uxr7-r2-guardrail.md) —— UXR7-R2 修复安全与质量审计 round 1（guardrail-enforcer，有条件通过 MED-01 假引用）
+  - [2026-08-16-uxr7-r2-guardrail-r2.md](docs/reports/2026-08-16-uxr7-r2-guardrail-r2.md) —— UXR7-R2 MED-01 修复复审（guardrail-enforcer，通过，188 用例 0 失败）
+  - [2026-08-16-uxr7-r2-guardrail-r3.md](docs/reports/2026-08-16-uxr7-r2-guardrail-r3.md) —— UXR7-R2 DEF-001/DEF-002 修复复审（guardrail-enforcer，通过，R3-01 数字容错 LOW 记录）
+  - [2026-08-16-uxr7-r2-acceptance.md](docs/reports/2026-08-16-uxr7-r2-acceptance.md) —— UXR7-R2 验收测试（ac-verifier，通过，13 AC 全 PASS + 全量回归 1792 用例 0 失败）
+  - [2026-08-16-uxr7-r2-acceptance-r2.md](docs/reports/2026-08-16-uxr7-r2-acceptance-r2.md) —— UXR7-R2 DEF-001/DEF-002 修复验收复核（ac-verifier，通过，零回归）
 
 ### 运维
 

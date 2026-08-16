@@ -190,6 +190,23 @@ class CapabilitiesViewModelTest {
         assertTrue("不得泄露异常内部信息（URL/路径）", !message.contains("internal:8080"))
     }
 
+    @Test
+    fun `testConnection empty tools is Fail not Success`() = runTest(mainDispatcher) {
+        // ADR-022 子决策 E（UX-001 问题 8 二次修复）：工具列表为空 → Fail
+        //（「连接成功但无可用工具」），不再误导为「连接成功 · 0 个工具」。
+        // 修复前：仅以「listTools 不抛异常」判定成功，本地未实现工具返回空列表仍显示成功。
+        toolProvider.tools = emptyList()
+        val vm = createViewModel()
+        val config = McpServerConfig(name = "Local", baseUrl = "")
+
+        vm.testConnection(config)
+
+        val state = vm.testState.value
+        assertTrue("空工具应判定为失败（不再误导为成功）", state is CapabilitiesViewModel.TestState.Fail)
+        val message = (state as CapabilitiesViewModel.TestState.Fail).message
+        assertTrue("失败文案应提示无可用工具", message.contains("无可用工具"))
+    }
+
     // ==================== saveApiKey ====================
 
     @Test
@@ -256,6 +273,21 @@ class CapabilitiesViewModelTest {
         assertEquals(2, statuses.size)
         assertEquals(CapabilitiesViewModel.ConnectionStatus.Connecting, statuses[0])
         assertTrue("空工具应判定为连接失败", statuses[1] is CapabilitiesViewModel.ConnectionStatus.Error)
+    }
+
+    @Test
+    fun `observeConnectionStatus emits error instead of propagating when listTools throws`() = runTest(mainDispatcher) {
+        // Q-02 修复（guardrail TKN-UXR2-GUARDRAIL-001）：listTools 抛非超时异常
+        // （网络错误/Server 初始化失败）时，Flow 应发射 Error 而非传播取消收集器，
+        // 否则 UI 徽章永久卡「连接中」。与 testConnection 的 catch Exception 语义一致。
+        toolProvider.failure = RuntimeException("boom")
+        val config = McpServerConfig(name = "FS", baseUrl = "https://fs.mcp")
+
+        val statuses = CapabilitiesViewModel.observeConnectionStatus(config, toolProvider).toList()
+
+        assertEquals(2, statuses.size)
+        assertEquals(CapabilitiesViewModel.ConnectionStatus.Connecting, statuses[0])
+        assertTrue("listTools 抛异常应判定为连接失败", statuses[1] is CapabilitiesViewModel.ConnectionStatus.Error)
     }
 
     /** 可注入的假 [McpToolProvider]，用于测试连接成功 / 失败路径。 */

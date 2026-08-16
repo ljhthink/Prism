@@ -163,40 +163,82 @@ class ConversationViewModelPhaseDTest {
         assertEquals("withTools__doStuff", tools[0].function.name)
     }
 
-    // ==================== 纯函数测试：mergeSystemPrompt ====================
+    // ==================== 问题 8b：联网搜索工具合并 ====================
 
     @Test
-    fun `mergeSystemPrompt returns null when both rag and skills empty`() {
-        val result = ConversationViewModel.mergeSystemPrompt(ragPrompt = null, enabledSkills = emptyList())
-        assertNull("RAG null + 无 Skill 应返回 null", result)
+    fun `buildTools default does not include web_search tool for backward compat`() {
+        // 默认 webSearchEnabled=false（向后兼容）：空 Skill + 不传参数 → 空 tools
+        val tools = ConversationViewModel.buildTools(emptyList())
+        assertTrue("默认不应包含 web_search 工具", tools.isEmpty())
     }
 
     @Test
-    fun `mergeSystemPrompt returns rag prompt only when skills have no systemPrompt`() {
+    fun `buildTools includes web_search tool when webSearchEnabled true`() {
+        val tools = ConversationViewModel.buildTools(emptyList(), webSearchEnabled = true)
+        assertEquals("应返回 1 个 web_search 工具", 1, tools.size)
+        assertEquals("web_search__search", tools[0].function.name)
+        assertTrue("description 应描述联网搜索", tools[0].function.description.contains("联网搜索"))
+    }
+
+    @Test
+    fun `buildTools merges skill cross_app and web_search tools`() {
+        val entry = makeSkillEntry(
+            name = "translator",
+            tools = listOf(SkillToolDecl("translate", "Translate", buildJsonObject { }))
+        )
+        val tools = ConversationViewModel.buildTools(listOf(entry), webSearchEnabled = true)
+        assertEquals("skill 1 + web_search 1 = 2", 2, tools.size)
+        assertEquals("translator__translate", tools[0].function.name)
+        assertEquals("web_search__search", tools[1].function.name)
+    }
+
+    // ==================== 纯函数测试：mergeSystemPrompt ====================
+
+    @Test
+    fun `mergeSystemPrompt returns default persona when both rag and skills empty`() {
+        // ADR-018：无 RAG + 无 Skill 时必须返回默认 persona，而非 null（避免 LLM 无身份引导）
+        val result = ConversationViewModel.mergeSystemPrompt(ragPrompt = null, enabledSkills = emptyList())
+        assertEquals("无 RAG + 无 Skill 应返回默认 persona", ConversationViewModel.DEFAULT_PERSONA, result)
+    }
+
+    @Test
+    fun `mergeSystemPrompt starts with default persona when rag provided`() {
+        // ADR-018：默认 persona 始终作为基础身份，RAG 追加在后
         val entry = makeSkillEntry(name = "translator", systemPrompt = null, tools = null)
         val result = ConversationViewModel.mergeSystemPrompt(
             ragPrompt = "RAG grounding rules",
             enabledSkills = listOf(entry)
         )
-        assertEquals("RAG grounding rules", result)
+        assertTrue("应先输出默认 persona", result.startsWith(ConversationViewModel.DEFAULT_PERSONA))
+        assertTrue("应包含 RAG prompt", result.contains("RAG grounding rules"))
+        // RAG 在 persona 之后
+        assertTrue(
+            "persona 应在 RAG 之前",
+            result.indexOf(ConversationViewModel.DEFAULT_PERSONA) < result.indexOf("RAG grounding rules")
+        )
     }
 
     @Test
-    fun `mergeSystemPrompt returns skill prompt only when rag is null`() {
+    fun `mergeSystemPrompt appends skill index instead of injecting full systemPrompt`() {
+        // ADR-018：不注入完整 systemPrompt（如"You are a translator."），改为轻量索引
         val entry = makeSkillEntry(
             name = "translator",
             systemPrompt = "You are a translator.",
-            tools = null  // 无 tools，不输出索引
+            tools = null
         )
         val result = ConversationViewModel.mergeSystemPrompt(
             ragPrompt = null,
             enabledSkills = listOf(entry)
         )
-        assertEquals("You are a translator.", result)
+        assertTrue("应包含默认 persona", result.startsWith(ConversationViewModel.DEFAULT_PERSONA))
+        assertFalse("不应注入完整 systemPrompt（避免身份污染）", result.contains("You are a translator."))
+        assertTrue("应包含 skill 索引", result.contains("可用技能"))
+        assertTrue("应包含 skill name", result.contains("translator"))
+        assertTrue("应包含 skill description", result.contains("Test skill translator"))
     }
 
     @Test
-    fun `mergeSystemPrompt concatenates rag and skill prompts in order`() {
+    fun `mergeSystemPrompt orders persona then rag then skill index`() {
         val entry = makeSkillEntry(
             name = "translator",
             systemPrompt = "You are a translator.",
@@ -206,17 +248,18 @@ class ConversationViewModelPhaseDTest {
             ragPrompt = "RAG grounding rules",
             enabledSkills = listOf(entry)
         )
-        assertTrue("应先输出 RAG prompt", result!!.startsWith("RAG grounding rules"))
-        assertTrue("应后输出 Skill prompt", result.contains("You are a translator."))
-        // 验证顺序：RAG 在前，Skill 在后
-        assertTrue(
-            "RAG 应在 Skill 之前",
-            result.indexOf("RAG grounding rules") < result.indexOf("You are a translator.")
-        )
+        assertTrue("应先输出默认 persona", result.startsWith(ConversationViewModel.DEFAULT_PERSONA))
+        val personaIdx = result.indexOf(ConversationViewModel.DEFAULT_PERSONA)
+        val ragIdx = result.indexOf("RAG grounding rules")
+        val indexIdx = result.indexOf("可用技能")
+        assertTrue("persona 应在最前", personaIdx < ragIdx)
+        assertTrue("RAG 应在 skill 索引之前", ragIdx < indexIdx)
+        assertTrue("应包含 skill name", result.contains("translator"))
     }
 
     @Test
-    fun `mergeSystemPrompt appends skill index when skill has tools`() {
+    fun `mergeSystemPrompt appends skill index regardless of tools`() {
+        // ADR-018：所有启用 skill 都输出轻量索引（name+description），不再区分有无 tools
         val entry = makeSkillEntry(
             name = "translator",
             systemPrompt = null,
@@ -226,84 +269,69 @@ class ConversationViewModelPhaseDTest {
             ragPrompt = null,
             enabledSkills = listOf(entry)
         )
-        assertNotNull("有 tools 的 Skill 应输出索引", result)
-        assertTrue("应包含「可用技能」", result!!.contains("可用技能"))
+        assertTrue("应包含「可用技能」", result.contains("可用技能"))
         assertTrue("应包含 skill name", result.contains("translator"))
+        assertTrue("应包含 skill description", result.contains("Test skill translator"))
     }
 
     @Test
-    fun `mergeSystemPrompt does not append index when skill has systemPrompt but no tools`() {
+    fun `mergeSystemPrompt keeps base identity instead of skill identity`() {
+        // ADR-018：即使启用 skill（如 rewriter），LLM 身份仍是 Prism 助手，不被"你是XX助手"污染
         val entry = makeSkillEntry(
-            name = "advisor",
-            systemPrompt = "You are an advisor.",
+            name = "rewriter",
+            systemPrompt = "你是灵活的文本改写助手。",  // 身份污染源
             tools = null
         )
         val result = ConversationViewModel.mergeSystemPrompt(
             ragPrompt = null,
             enabledSkills = listOf(entry)
         )
-        assertEquals("You are an advisor.", result)
-        assertFalse("无 tools 的 Skill 不应输出索引", result!!.contains("可用技能"))
+        assertTrue("身份保持为 Prism 助手", result.startsWith("你是 Prism AI 助手"))
+        assertFalse("不应注入 skill 身份 systemPrompt", result.contains("你是灵活的文本改写助手"))
+        assertTrue("应感知 skill 能力（索引）", result.contains("可用技能"))
     }
 
     @Test
-    fun `mergeSystemPrompt concatenates multiple skill prompts`() {
+    fun `mergeSystemPrompt concatenates multiple skill indexes in order`() {
         val entry1 = makeSkillEntry(name = "translator", systemPrompt = "Translate.", tools = null)
         val entry2 = makeSkillEntry(name = "summarizer", systemPrompt = "Summarize.", tools = null)
         val result = ConversationViewModel.mergeSystemPrompt(
             ragPrompt = null,
             enabledSkills = listOf(entry1, entry2)
         )
-        assertTrue("应包含 translator prompt", result!!.contains("Translate."))
-        assertTrue("应包含 summarizer prompt", result.contains("Summarize."))
+        assertTrue("应包含 translator 索引", result.contains("translator"))
+        assertTrue("应包含 summarizer 索引", result.contains("summarizer"))
         assertTrue(
             "translator 在 summarizer 之前（列表顺序）",
-            result.indexOf("Translate.") < result.indexOf("Summarize.")
+            result.indexOf("translator") < result.indexOf("summarizer")
         )
-    }
-
-    @Test
-    fun `mergeSystemPrompt full order is rag then skills then index`() {
-        val entry1 = makeSkillEntry(
-            name = "translator",
-            systemPrompt = "Translate.",
-            tools = listOf(SkillToolDecl("translate", "Translate", buildJsonObject { }))
-        )
-        val result = ConversationViewModel.mergeSystemPrompt(
-            ragPrompt = "RAG rules",
-            enabledSkills = listOf(entry1)
-        )
-        assertNotNull(result)
-        val ragIdx = result!!.indexOf("RAG rules")
-        val skillIdx = result.indexOf("Translate.")
-        val indexIdx = result.indexOf("可用技能")
-        assertTrue("RAG 应在最前", ragIdx < skillIdx)
-        assertTrue("Skill prompt 应在索引之前", skillIdx < indexIdx)
     }
 
     @Test
     fun `mergeSystemPrompt treats blank rag prompt as absent`() {
-        val entry = makeSkillEntry(
-            name = "translator",
-            systemPrompt = "Translate.",
-            tools = null
-        )
+        val entry = makeSkillEntry(name = "translator", systemPrompt = "Translate.", tools = null)
         val result = ConversationViewModel.mergeSystemPrompt(
             ragPrompt = "   ",  // 空白字符串
             enabledSkills = listOf(entry)
         )
-        assertEquals("空白 RAG prompt 应被视为 null，只输出 Skill prompt", "Translate.", result)
+        assertTrue("应包含默认 persona", result.startsWith(ConversationViewModel.DEFAULT_PERSONA))
+        assertFalse("不应包含空白 RAG prompt", result.contains("   "))
+        assertTrue("应包含 skill 索引", result.contains("可用技能"))
     }
 
     @Test
-    fun `mergeSystemPrompt skips blank skill systemPrompt`() {
+    fun `mergeSystemPrompt indexes skill by description even when systemPrompt blank`() {
+        // ADR-018：skill 索引基于 description，与 systemPrompt 是否空白无关
         val entry1 = makeSkillEntry(name = "blank", systemPrompt = "   ", tools = null)
         val entry2 = makeSkillEntry(name = "real", systemPrompt = "Real prompt.", tools = null)
         val result = ConversationViewModel.mergeSystemPrompt(
             ragPrompt = null,
             enabledSkills = listOf(entry1, entry2)
         )
-        assertEquals("空白 Skill prompt 应被跳过", "Real prompt.", result)
+        assertTrue("应包含默认 persona", result.startsWith(ConversationViewModel.DEFAULT_PERSONA))
+        assertTrue("应包含 blank skill 索引", result.contains("blank"))
+        assertTrue("应包含 real skill 索引", result.contains("real"))
+        assertFalse("不应注入完整 systemPrompt", result.contains("Real prompt."))
     }
 
     // ==================== 集成测试：executeLoop 分支 ====================
@@ -363,23 +391,32 @@ class ConversationViewModelPhaseDTest {
 
         assertTrue("应调用 executeLoop", fakeExecutor.executeLoopCalled)
         assertNotNull("应传递 tools 给 executeLoop", fakeExecutor.receivedTools)
-        assertEquals("应传递 1 个 tool", 1, fakeExecutor.receivedTools!!.size)
-        assertEquals("translator__translate", fakeExecutor.receivedTools!![0].function.name)
+        // UXR4 问题 2/3（ADR-024）：tools 含 3 个知识库工具（knowledge_base__*），
+        // 故过滤 skill 工具后断言
+        val skillTools = fakeExecutor.receivedTools!!.filter { it.function.name.startsWith("translator__") }
+        assertEquals("应传递 1 个 skill tool", 1, skillTools.size)
+        assertEquals("translator__translate", skillTools[0].function.name)
 
         val messages = vm.messages.value
-        // 期望：1 user + 1 aiId 占位 + 1 assistant 占位(toolCalls) + 1 tool result
+        // UXR5 问题 2（ADR-024 遗留修复）：syncToolMessages 把 assistant 占位 + tool result
+        // 插入到 aiId（最终文本）**之前**，使 _messages 按真实时序 [user, 占位, tool, aiId(文本)]。
+        // 期望：1 user + 1 assistant 占位(toolCalls) + 1 tool result + 1 aiId(最终文本)
         assertEquals("应有 4 条消息", 4, messages.size)
         assertEquals(Role.USER, messages[0].role)
         assertEquals("translate hello", messages[0].content)
         assertEquals(Role.ASSISTANT, messages[1].role)
-        assertTrue("aiId 应含 ToolCallStart 指示 + 最终回复", messages[1].content.contains("translator__translate"))
-        assertTrue("aiId 应含最终 AI 回复", messages[1].content.contains("Final AI response after tool"))
-        // syncToolMessages 追加的协议层消息
-        assertEquals(Role.ASSISTANT, messages[2].role)
-        assertEquals("", messages[2].content)
-        assertTrue("应含 toolCalls 引用", messages[2].toolCalls.isNotEmpty())
-        assertEquals(Role.TOOL, messages[3].role)
-        assertEquals("Translation result", messages[3].content)
+        // UX-001 问题 9（ADR-021）：工具调用不混入 aiId 正文
+        assertTrue("assistant 占位应带 toolCalls", messages[1].toolCalls.isNotEmpty())
+        assertEquals(Role.TOOL, messages[2].role)
+        assertEquals("Translation result", messages[2].content)
+        // aiId（最终文本）在工具之后
+        assertEquals(Role.ASSISTANT, messages[3].role)
+        assertTrue("aiId 应含最终 AI 回复", messages[3].content.contains("Final AI response after tool"))
+        assertFalse("aiId 不应含工具名（ToolCallStart 已从正文移除）", messages[3].content.contains("translator__translate"))
+        // 剩余协议层断言
+        assertEquals("", messages[1].content)
+        assertTrue("占位应含 toolCalls 引用", messages[1].toolCalls.isNotEmpty())
+        assertEquals("call_1", messages[2].toolCallId)
         assertFalse("完成后 isTyping 应为 false", vm.isTyping.value)
     }
 
@@ -532,7 +569,8 @@ class ConversationViewModelPhaseDTest {
     // ==================== handleStreamEvent 测试（通过 sendMessage 集成） ====================
 
     @Test
-    fun `handleStreamEvent ToolCallStart appends tool indicator`() = runTest(mainDispatcher) {
+    fun `handleStreamEvent ToolCallStart does not pollute content`() = runTest(mainDispatcher) {
+        // UX-001 问题 9（ADR-021）：工具调用指示不再混入正文（避免 🔧 污染最终答案）
         val repo = ProviderConfigRepository(boxStore)
         val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
         repo.save(active)
@@ -564,11 +602,50 @@ class ConversationViewModelPhaseDTest {
         advanceUntilIdle()
 
         val aiMsg = vm.messages.value[1]
-        assertTrue(
-            "ToolCallStart 应通过 appendDelta 追加 🔧 指示",
+        assertFalse(
+            "ToolCallStart 不应混入 content（避免 🔧 污染正文）",
             aiMsg.content.contains("🔧 translator__translate")
         )
         assertTrue("应含后续 Delta 文本", aiMsg.content.contains("after tool call"))
+    }
+
+    @Test
+    fun `handleStreamEvent ReasoningDelta goes to thinkingChain`() = runTest(mainDispatcher) {
+        // UX-001 问题 7（ADR-021）：深度思考推理过程独立到 thinkingChain 字段（可折叠展示），
+        // 不再混入最终答案 content（避免 [思考] 前缀污染正文）
+        val repo = ProviderConfigRepository(boxStore)
+        val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        repo.save(active)
+        repo.setActive(repo.findByName(active.name)!!.id)
+
+        val fakeExecutor = FakeSkillExecutor(
+            returnMessages = emptyList(),
+            emitEvents = listOf(
+                StreamEvent.ReasoningDelta("先推理"),
+                StreamEvent.Delta("最终答案"),
+                StreamEvent.Done
+            )
+        )
+        val vm = ConversationViewModel(
+            providerRepository = repo,
+            provider = PhaseDRecordingProvider(emptyList()),
+            embedder = StubEmbedder(),
+            knowledgeBaseRepository = KnowledgeBaseRepository(boxStore),
+            skillRegistry = StubSkillRegistry(listOf(
+                makeSkillEntry(name = "translator", tools = listOf(SkillToolDecl("translate", "Translate", buildJsonObject { })))
+            )),
+            skillExecutor = fakeExecutor,
+            mcpServerRepository = McpServerRepository(boxStore),
+            ioDispatcher = mainDispatcher
+        ).apply { setRagTarget(RagTarget.Off) }
+
+        vm.sendMessage("test")
+        advanceUntilIdle()
+
+        val aiMsg = vm.messages.value[1]
+        assertEquals("推理过程应存入 thinkingChain", "先推理", aiMsg.thinkingChain)
+        assertFalse("content 不应混入 [思考] 前缀", aiMsg.content.contains("[思考]"))
+        assertTrue("应含最终答案", aiMsg.content.contains("最终答案"))
     }
 
     @Test
@@ -956,6 +1033,269 @@ class ConversationViewModelPhaseDTest {
         assertFalse("M-2：isTyping 应为 false", vm.isTyping.value)
     }
 
+    // ==================== UXR3 问题 10（ADR-023）：工具审批模式 DISABLED ====================
+
+    @Test
+    fun `sendMessage with DISABLED approval mode injects no tools and skips executeLoop`() = runTest(mainDispatcher) {
+        val repo = ProviderConfigRepository(boxStore)
+        val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        repo.save(active)
+        repo.setActive(repo.findByName(active.name)!!.id)
+
+        // 记录 streamChat 参数的 provider（DISABLED 时走普通流式分支，tools 应为 null）
+        val provider = PhaseDRecordingProvider(listOf(
+            StreamEvent.Delta("plain response"),
+            StreamEvent.Done
+        ))
+        val fakeExecutor = FakeSkillExecutor(returnMessages = emptyList())
+        // 工具审批模式：DISABLED
+        val approvalRepo = io.prism.config.ToolApprovalConfigRepository(
+            io.prism.security.FakePreferenceDataStore(
+                androidx.datastore.preferences.core.mutablePreferencesOf(
+                    androidx.datastore.preferences.core.stringPreferencesKey("tool_approval_mode") to "DISABLED"
+                )
+            )
+        )
+
+        val vm = ConversationViewModel(
+            providerRepository = repo,
+            provider = provider,
+            embedder = StubEmbedder(),
+            knowledgeBaseRepository = KnowledgeBaseRepository(boxStore),
+            skillRegistry = StubSkillRegistry(listOf(
+                makeSkillEntry(
+                    name = "translator",
+                    tools = listOf(SkillToolDecl("translate", "Translate", buildJsonObject { }))
+                )
+            )),
+            skillExecutor = fakeExecutor,
+            mcpServerRepository = McpServerRepository(boxStore),
+            ioDispatcher = mainDispatcher,
+            // UXR3 问题 10：DISABLED 审批模式
+            toolApprovalConfigRepository = approvalRepo
+        ).apply { setRagTarget(RagTarget.Off) }
+
+        vm.sendMessage("translate hello")
+        advanceUntilIdle()
+
+        // DISABLED 模式：不注入 tools → 走普通 streamChat 分支，不调用 executeLoop
+        assertFalse("DISABLED 模式不应调用 executeLoop", fakeExecutor.executeLoopCalled)
+        assertNull("DISABLED 模式 streamChat 不应传 tools", provider.lastTools)
+        assertEquals("应走普通流式分支：1 user + 1 AI", 2, vm.messages.value.size)
+        assertEquals("plain response", vm.messages.value[1].content)
+    }
+
+    @Test
+    fun `sendMessage with MANUAL approval mode still injects tools`() = runTest(mainDispatcher) {
+        val repo = ProviderConfigRepository(boxStore)
+        val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        repo.save(active)
+        repo.setActive(repo.findByName(active.name)!!.id)
+
+        val provider = PhaseDRecordingProvider(emptyList())
+        val fakeExecutor = FakeSkillExecutor(
+            returnMessages = listOf(
+                ChatMessage(
+                    id = 100L, role = Role.ASSISTANT, content = "", timestamp = 0L,
+                    toolCalls = listOf(ToolCallRef(id = "call_1", functionName = "translator__translate", arguments = "{}"))
+                ),
+                ChatMessage(
+                    id = 101L, role = Role.TOOL, content = "ok", timestamp = 0L,
+                    toolCallId = "call_1", toolName = "translator__translate"
+                )
+            ),
+            emitEvents = listOf(StreamEvent.Delta("final"), StreamEvent.Done)
+        )
+        // 工具审批模式：MANUAL（非 DISABLED，应正常注入工具）
+        val approvalRepo = io.prism.config.ToolApprovalConfigRepository(
+            io.prism.security.FakePreferenceDataStore(
+                androidx.datastore.preferences.core.mutablePreferencesOf(
+                    androidx.datastore.preferences.core.stringPreferencesKey("tool_approval_mode") to "MANUAL"
+                )
+            )
+        )
+
+        val vm = ConversationViewModel(
+            providerRepository = repo,
+            provider = provider,
+            embedder = StubEmbedder(),
+            knowledgeBaseRepository = KnowledgeBaseRepository(boxStore),
+            skillRegistry = StubSkillRegistry(listOf(
+                makeSkillEntry(
+                    name = "translator",
+                    tools = listOf(SkillToolDecl("translate", "Translate", buildJsonObject { }))
+                )
+            )),
+            skillExecutor = fakeExecutor,
+            mcpServerRepository = McpServerRepository(boxStore),
+            ioDispatcher = mainDispatcher,
+            toolApprovalConfigRepository = approvalRepo
+        ).apply { setRagTarget(RagTarget.Off) }
+
+        vm.sendMessage("translate hello")
+        advanceUntilIdle()
+
+        assertTrue("MANUAL 模式应调用 executeLoop", fakeExecutor.executeLoopCalled)
+        // UXR4 问题 2/3（ADR-024）：tools 含 3 个知识库工具（knowledge_base__*），过滤 skill 后断言
+        val skillTools = fakeExecutor.receivedTools!!.filter { it.function.name.startsWith("translator__") }
+        assertEquals("MANUAL 模式应注入 1 个 skill tool", 1, skillTools.size)
+        assertEquals("translator__translate", skillTools[0].function.name)
+    }
+
+    // ==================== UXR3 问题 13（ADR-023）：编辑重发含 toolCalls 历史（guardrail T-2） ====================
+
+    @Test
+    fun `editUserMessageAndResend drops stale toolCalls from history before re-answer`() = runTest(mainDispatcher) {
+        val repo = ProviderConfigRepository(boxStore)
+        val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        repo.save(active)
+        repo.setActive(repo.findByName(active.name)!!.id)
+
+        val provider = PhaseDRecordingProvider(emptyList())
+        // 第一轮：FakeSkillExecutor 返回「assistant 占位(toolCalls) + tool result」，模拟真实工具回路
+        val fakeExecutor = FakeSkillExecutor(
+            returnMessages = listOf(
+                ChatMessage(
+                    id = 100L, role = Role.ASSISTANT, content = "", timestamp = 0L,
+                    toolCalls = listOf(ToolCallRef(id = "call_1", functionName = "translator__translate", arguments = "{}"))
+                ),
+                ChatMessage(
+                    id = 101L, role = Role.TOOL, content = "old translation", timestamp = 0L,
+                    toolCallId = "call_1", toolName = "translator__translate"
+                )
+            ),
+            emitEvents = listOf(StreamEvent.Delta("第一轮回答"), StreamEvent.Done)
+        )
+
+        val vm = ConversationViewModel(
+            providerRepository = repo,
+            provider = provider,
+            embedder = StubEmbedder(),
+            knowledgeBaseRepository = KnowledgeBaseRepository(boxStore),
+            skillRegistry = StubSkillRegistry(listOf(
+                makeSkillEntry(
+                    name = "translator",
+                    tools = listOf(SkillToolDecl("translate", "Translate", buildJsonObject { }))
+                )
+            )),
+            skillExecutor = fakeExecutor,
+            mcpServerRepository = McpServerRepository(boxStore),
+            ioDispatcher = mainDispatcher
+        ).apply { setRagTarget(RagTarget.Off) }
+
+        // 第一轮：正常发送触发工具回路
+        vm.sendMessage("translate hello")
+        advanceUntilIdle()
+        // 消息序列：user + aiId + assistant 占位(toolCalls) + tool result
+        val messagesAfterRound1 = vm.messages.value
+        assertEquals("第一轮应有 4 条消息", 4, messagesAfterRound1.size)
+        val userMsg = messagesAfterRound1.first { it.role == Role.USER }
+        assertTrue("第一轮历史应含 tool result", messagesAfterRound1.any { it.role == Role.TOOL })
+
+        // 编辑用户消息重新发送
+        fakeExecutor.receivedMessagesHistory.clear()  // 重置记录，聚焦第二轮历史
+        vm.editUserMessageAndResend(userMsg.id, "translate goodbye")
+        advanceUntilIdle()
+
+        // 编辑后：截断 toolCalls 相关消息（assistant 占位 + tool result 被移除），
+        // 第二轮 executeLoop 收到的历史不应含过期 toolCalls / tool result（避免 OpenAI 400）
+        val secondRoundHistory = fakeExecutor.receivedMessagesHistory.lastOrNull()
+        assertNotNull("第二轮应触发 executeLoop", secondRoundHistory)
+        assertTrue("第二轮历史应只剩编辑后的 user 消息", secondRoundHistory!!.size == 1)
+        assertEquals("编辑后的内容应进入第二轮历史", "translate goodbye", secondRoundHistory[0].content)
+        assertFalse("第二轮历史不应含过期 tool result", secondRoundHistory.any { it.role == Role.TOOL })
+        assertFalse("第二轮历史不应含过期 assistant 占位 toolCalls", secondRoundHistory.any { it.toolCalls.isNotEmpty() })
+    }
+
+    // ==================== UXR5 问题 4：孤儿 tool 防御（tool_calls 完整性） ====================
+
+    @Test
+    fun `dropOrphanToolMessages keeps paired tool results`() {
+        // 配对正常：assistant(tool_calls) → tool → assistant(文本)，全部保留
+        val msgs = listOf(
+            ChatMessage(1, Role.USER, "q", 1000L),
+            ChatMessage(2, Role.ASSISTANT, "", 2000L, toolCalls = listOf(ToolCallRef("c1", "function", "skill__t", "{}"))),
+            ChatMessage(3, Role.TOOL, "result", 3000L),
+            ChatMessage(4, Role.ASSISTANT, "final answer", 4000L)
+        )
+        val result = ConversationViewModel.dropOrphanToolMessages(msgs)
+        assertEquals("配对正常的消息应全部保留", 4, result.size)
+    }
+
+    @Test
+    fun `dropOrphanToolMessages removes orphan tool without preceding tool_calls`() {
+        // 孤儿 TOOL：前置 assistant 无 toolCalls（会话恢复丢失），应被丢弃
+        val msgs = listOf(
+            ChatMessage(1, Role.USER, "q", 1000L),
+            ChatMessage(2, Role.ASSISTANT, "no tool calls", 2000L),
+            ChatMessage(3, Role.TOOL, "orphan result", 3000L),
+            ChatMessage(4, Role.ASSISTANT, "final", 4000L)
+        )
+        val result = ConversationViewModel.dropOrphanToolMessages(msgs)
+        assertEquals("孤儿 TOOL 应被丢弃，剩 3 条", 3, result.size)
+        assertFalse("不应含孤儿 TOOL", result.any { it.role == Role.TOOL })
+    }
+
+    @Test
+    fun `dropOrphanToolMessages resets pairing state at user boundary`() {
+        // user 消息重置待配对状态：上一轮的 tool_calls 对不应跨 user 匹配
+        val msgs = listOf(
+            ChatMessage(1, Role.USER, "q1", 1000L),
+            ChatMessage(2, Role.ASSISTANT, "", 2000L, toolCalls = listOf(ToolCallRef("c1", "function", "skill__t", "{}"))),
+            ChatMessage(3, Role.TOOL, "result1", 3000L),
+            ChatMessage(4, Role.USER, "q2", 4000L),
+            ChatMessage(5, Role.TOOL, "orphan after user", 5000L),
+            ChatMessage(6, Role.ASSISTANT, "final", 6000L)
+        )
+        val result = ConversationViewModel.dropOrphanToolMessages(msgs)
+        assertFalse("user 边界后的孤儿 TOOL 应被丢弃", result.any { it.id == 5L })
+        assertTrue("配对的 tool result 应保留", result.any { it.id == 3L })
+    }
+
+    @Test
+    fun `dropOrphanToolMessages keeps parallel tool calls pairing`() {
+        // F-01（guardrail TKN-UXR5-GUARDRAIL-001）：一轮内多个并行工具调用——
+        // assistant(toolCalls=[c1,c2]) → tool(c1) → tool(c2)，两条 TOOL 都必须保留。
+        val msgs = listOf(
+            ChatMessage(1, Role.USER, "q", 1000L),
+            ChatMessage(
+                2, Role.ASSISTANT, "", 2000L,
+                toolCalls = listOf(
+                    ToolCallRef("c1", "function", "skill__a", "{}"),
+                    ToolCallRef("c2", "function", "skill__b", "{}")
+                )
+            ),
+            ChatMessage(3, Role.TOOL, "result-a", 3000L, toolCallId = "c1"),
+            ChatMessage(4, Role.TOOL, "result-b", 4000L, toolCallId = "c2"),
+            ChatMessage(5, Role.ASSISTANT, "final", 5000L)
+        )
+        val result = ConversationViewModel.dropOrphanToolMessages(msgs)
+        assertEquals("并行配对的消息应全部保留", 5, result.size)
+        assertTrue("第一个 tool result 应保留", result.any { it.id == 3L })
+        assertTrue("第二个 tool result 应保留（并行配对）", result.any { it.id == 4L })
+    }
+
+    @Test
+    fun `dropOrphanToolMessages drops only unmatched parallel tool`() {
+        // 并行配对不完整：assistant(toolCalls=[c1,c2]) → 仅 1 条 tool result → 无孤儿可丢
+        //（tool 数量 < toolCalls 数量是"缺失"而非"孤儿"，协议容忍；此处验证不误删）。
+        val msgs = listOf(
+            ChatMessage(1, Role.USER, "q", 1000L),
+            ChatMessage(
+                2, Role.ASSISTANT, "", 2000L,
+                toolCalls = listOf(
+                    ToolCallRef("c1", "function", "skill__a", "{}"),
+                    ToolCallRef("c2", "function", "skill__b", "{}")
+                )
+            ),
+            ChatMessage(3, Role.TOOL, "result-a", 3000L, toolCallId = "c1"),
+            ChatMessage(4, Role.ASSISTANT, "final", 4000L)
+        )
+        val result = ConversationViewModel.dropOrphanToolMessages(msgs)
+        // 已有 tool result 保留；未返回的 c2 结果缺失（非孤儿，不处理）
+        assertTrue("已返回的 tool result 应保留", result.any { it.id == 3L })
+    }
+
     // ==================== 辅助构造 ====================
 
     /** 构造测试用 [SkillRegistry.SkillEntry]（不依赖 Android Context）。 */
@@ -1030,6 +1370,8 @@ private class FakeSkillExecutor(
         idGenerator: () -> Long,
         skillConfigId: Long?,
         skillName: String?,
+        thinkingEnabled: Boolean?,
+        reasoningEffort: String?,
         onEvent: (StreamEvent) -> Unit
     ): List<ChatMessage> {
         executeLoopCalled = true
@@ -1109,7 +1451,9 @@ private class PhaseDRecordingProvider(
         systemPrompt: String?,
         ragContext: String?,
         tools: List<ToolDefinition>?,
-        toolChoice: io.prism.network.ToolChoice?
+        toolChoice: io.prism.network.ToolChoice?,
+        thinkingEnabled: Boolean?,
+        reasoningEffort: String?
     ): Flow<StreamEvent> {
         lastTools = tools
         lastSystemPrompt = systemPrompt
@@ -1135,7 +1479,9 @@ private class PhaseDMultiRoundProvider(
         systemPrompt: String?,
         ragContext: String?,
         tools: List<ToolDefinition>?,
-        toolChoice: io.prism.network.ToolChoice?
+        toolChoice: io.prism.network.ToolChoice?,
+        thinkingEnabled: Boolean?,
+        reasoningEffort: String?
     ): Flow<StreamEvent> {
         receivedMessages += messages
         val events = eventSequences[call.coerceAtMost(eventSequences.size - 1)]

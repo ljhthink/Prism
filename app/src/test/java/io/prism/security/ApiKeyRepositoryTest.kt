@@ -71,9 +71,21 @@ class ApiKeyRepositoryTest {
     }
 
     @Test
-    fun save_empty_string_key_round_trip() = runTest {
+    fun save_empty_string_skips_encrypt_and_storage() = runTest {
+        // BR-security-006 修复：空值跳过 —— 不加密、不落盘、readApiKey 返回 null
         repository.saveApiKey("empty", "")
-        assertEquals("空字符串应正确往返", "", repository.readApiKey("empty").first())
+        assertNull("空值不应写入 DataStore，readApiKey 返回 null", repository.readApiKey("empty").first())
+        assertTrue("空值不应调用 encrypt", cryptoService.encryptCalls.isEmpty())
+        val storedBytes = dataStore.data.first()[byteArrayPreferencesKey("empty")]
+        assertNull("DataStore 中不应存储空值对应的字节", storedBytes)
+    }
+
+    @Test
+    fun save_empty_string_does_not_overwrite_existing_key() = runTest {
+        // BR-security-006 修复：空值跳过 —— 不覆盖已有密钥
+        repository.saveApiKey("openai", "sk-old-key")
+        repository.saveApiKey("openai", "")
+        assertEquals("空值不应覆盖已有密钥", "sk-old-key", repository.readApiKey("openai").first())
     }
 
     @Test

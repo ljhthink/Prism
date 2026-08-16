@@ -6,7 +6,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -24,6 +26,15 @@ import io.prism.ui.theme.PrismTextFaint
  *
  * 实心 [PrismPanel] 底 + 顶部 18dp 圆角 + 顶部 1px `line-strong` 描边 + 顶部手柄（grip）。
  * 用法：搭配上层遮罩与 `AnimatedVisibility` 实现底部上滑（见规范第 6 节动效）。
+ *
+ * BR-ui-002：内容区使用 `weight(1f, fill = false)` + `verticalScroll`，
+ * 当 sheet 内容超出 [PrismSheetHost] 限制的最大高度时自动滚动，
+ * 防止底部按钮（如"保存配置"）被裁剪到屏幕外不可见（DEF-001 根因）。
+ *
+ * BR-ui-003：新增 `footer` 参数用于固定底部区域（不参与滚动），
+ * 将关键操作按钮（如"保存配置"）放在 footer 中确保始终可见。
+ *
+ * @param footer 固定底部区域，不参与滚动。适合放置关键操作按钮（如"保存配置"）。
  */
 @Composable
 fun PrismSheet(
@@ -31,6 +42,7 @@ fun PrismSheet(
     title: String? = null,
     subtitle: String? = null,
     headerTrailing: (@Composable () -> Unit)? = null,
+    footer: (@Composable () -> Unit)? = null,
     content: @Composable () -> Unit
 ) {
     Column(
@@ -72,8 +84,21 @@ fun PrismSheet(
                 headerTrailing?.invoke()
             }
         }
-        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp)) {
+        // BR-ui-002：weight(1f, fill=false) 让内容区在 sheet 高度受限时获得剩余空间，
+        // verticalScroll 确保超出部分可滚动；内容少时不强制填满（fill=false）。
+        Column(
+            modifier = Modifier
+                .weight(1f, fill = false)
+                .padding(horizontal = 20.dp, vertical = 14.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
             content()
+        }
+        // BR-ui-003：footer 固定在底部，不参与滚动，确保关键操作按钮始终可见。
+        if (footer != null) {
+            Box(modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
+                footer()
+            }
         }
     }
 }

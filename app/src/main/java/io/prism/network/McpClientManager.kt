@@ -9,11 +9,16 @@ import io.modelcontextprotocol.kotlin.sdk.client.StreamableHttpClientTransport
 import io.modelcontextprotocol.kotlin.sdk.types.ContentBlock
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
+import io.modelcontextprotocol.kotlin.sdk.types.Tool
 import io.prism.data.McpServerConfig
 import io.prism.security.ApiKeyRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * MCP Client 连接层 —— 基于官方 MCP Kotlin SDK（0.12.0）实现 [McpToolProvider]。
@@ -60,6 +65,44 @@ class McpClientManager(
             emptyList()
         } finally {
             closeQuietly(client)
+        }
+    }
+
+    /**
+     * 返回远程 MCP Server 上可用的工具定义（DEF-008，Bug-3）。
+     *
+     * 供 [ConversationViewModel] 注入到 LLM `tools` 列表，使 LLM 能感知并调用远程 MCP 工具。
+     * 连接失败返回空列表（不注入，不阻断对话）。
+     */
+    override suspend fun describeTools(config: McpServerConfig): List<ToolDefinition> = withContext(Dispatchers.IO) {
+        var client: Client? = null
+        try {
+            client = connect(config)
+            client.listTools().tools.map { tool ->
+                ToolDefinition(
+                    function = ToolDefinition.FunctionDef(
+                        name = tool.name,
+                        description = tool.description ?: tool.name,
+                        parameters = mcpSchemaToParameters(tool)
+                    )
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            emptyList()
+        } finally {
+            closeQuietly(client)
+        }
+    }
+
+    /** 将 MCP [Tool] 的 inputSchema 构造为 LLM 可用的 JSON schema（DEF-008）。 */
+    private fun mcpSchemaToParameters(tool: Tool): kotlinx.serialization.json.JsonElement = buildJsonObject {
+        put("type", "object")
+        tool.inputSchema.properties?.let { put("properties", it) }
+        val required = tool.inputSchema.required
+        if (!required.isNullOrEmpty()) {
+            put("required", JsonArray(required.map { JsonPrimitive(it) }))
         }
     }
 

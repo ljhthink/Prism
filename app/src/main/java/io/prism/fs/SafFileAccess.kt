@@ -68,6 +68,11 @@ class SafFileAccess(
         roots.value.keys.toList()
     }
 
+    /** 是否已授权至少一个根目录（UXR3 问题 8，ADR-023）。 */
+    override suspend fun hasAuthorizedRoots(): Boolean = withContext(Dispatchers.IO) {
+        roots.value.isNotEmpty()
+    }
+
     override suspend fun readFile(path: String): String = withContext(Dispatchers.IO) {
         val file = resolveFile(path) ?: throw IOException("文件不存在：$path")
         if (file.isFile) {

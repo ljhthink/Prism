@@ -103,6 +103,118 @@ class SkillExecutorTest {
         assertEquals("only", SkillExecutor.selectMcpServer(listOf(enabled))?.name)
     }
 
+    // ==================== UX-001 问题 5/6（ADR-022）：MCP 命名空间规范化 ====================
+
+    @Test
+    fun `toMcpNamespace replaces space with underscore`() {
+        assertEquals("Sequential_Thinking", SkillExecutor.toMcpNamespace("Sequential Thinking"))
+    }
+
+    @Test
+    fun `toMcpNamespace replaces Chinese chars with underscore`() {
+        // "跨 App 调用" = 跨 + 空格 + App + 空格 + 调用，非 [a-zA-Z0-9] 全替换为 `_`
+        assertEquals("__App___", SkillExecutor.toMcpNamespace("跨 App 调用"))
+    }
+
+    @Test
+    fun `toMcpNamespace keeps alphanumeric unchanged`() {
+        assertEquals("Filesystem", SkillExecutor.toMcpNamespace("Filesystem"))
+        assertEquals("Time", SkillExecutor.toMcpNamespace("Time"))
+    }
+
+    @Test
+    fun `selectMcpServer routes to server with space in name`() {
+        // Sequential Thinking 原始名含空格，规范化后为 Sequential_Thinking，
+        // 反查时对 server.name 同样规范化后匹配（ADR-022 二次修复）
+        val server = makeServer("Sequential Thinking", isEnabled = true)
+        val result = SkillExecutor.selectMcpServer(
+            listOf(server),
+            toolName = "mcp_Sequential_Thinking__sequentialthinking"
+        )
+        assertEquals("Sequential Thinking", result?.name)
+    }
+
+    @Test
+    fun `selectMcpServer routes to server with Chinese name`() {
+        // 跨 App 调用 中文名规范化后与构造侧一致，反查时同样规范化匹配
+        val server = makeServer("跨 App 调用", isEnabled = true)
+        val result = SkillExecutor.selectMcpServer(
+            listOf(server),
+            toolName = "mcp_${SkillExecutor.toMcpNamespace("跨 App 调用")}__open_app"
+        )
+        assertEquals("跨 App 调用", result?.name)
+    }
+
+    @Test
+    fun `selectMcpServer falls back to first enabled when namespace unmatched`() {
+        val server = makeServer("Time", isEnabled = true)
+        val result = SkillExecutor.selectMcpServer(
+            listOf(server),
+            toolName = "mcp_Unknown__get_current_time"
+        )
+        assertEquals("Time", result?.name)
+    }
+
+    // ==================== ac-verifier 补充：toMcpNamespace / selectMcpServer 边界（TKN-UXR2-ACCEPTANCE-001） ====================
+
+    @Test
+    fun `toMcpNamespace empty string returns empty`() {
+        assertEquals("", SkillExecutor.toMcpNamespace(""))
+    }
+
+    @Test
+    fun `toMcpNamespace converts dots hyphens and slashes to underscore`() {
+        assertEquals("my_server_v1", SkillExecutor.toMcpNamespace("my.server-v1"))
+        assertEquals("a_b_c", SkillExecutor.toMcpNamespace("a/b\\c"))
+    }
+
+    @Test
+    fun `toMcpNamespace preserves length one underscore per non alnum char`() {
+        // 每个非 [a-zA-Z0-9] 字符恰好替换为一个 _，输出长度与输入一致
+        assertEquals("a__b", SkillExecutor.toMcpNamespace("a  b"))
+        assertEquals(4, SkillExecutor.toMcpNamespace("a  b").length)
+        assertEquals("Filesystem_", SkillExecutor.toMcpNamespace("Filesystem ")) // 尾部空格
+    }
+
+    @Test
+    fun `toMcpNamespace handles super long alphanumeric name unchanged`() {
+        val longName = "A".repeat(200)
+        assertEquals("超长合法名不应改变", longName, SkillExecutor.toMcpNamespace(longName))
+    }
+
+    @Test
+    fun `toMcpNamespace handles super long mixed name without blank chars`() {
+        // 超长含空格名：所有空格替换为 _，长度不变，结果无空白字符
+        val longMixed = "Sequential Thinking ".repeat(20) // 360 字符
+        val norm = SkillExecutor.toMcpNamespace(longMixed)
+        assertEquals(longMixed.length, norm.length)
+        assertEquals(0, norm.count { it == ' ' })
+        assertTrue("规范化结果应只含合法字符", norm.all { it in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" })
+    }
+
+    @Test
+    fun `selectMcpServer matches namespace case insensitively`() {
+        // 反查时对 server.name 同样规范化后 equals(ignoreCase=true)，大小写不敏感
+        val server = makeServer("Sequential Thinking", isEnabled = true)
+        val result = SkillExecutor.selectMcpServer(
+            listOf(server),
+            toolName = "mcp_sequential_thinking__sequentialthinking"
+        )
+        assertEquals("Sequential Thinking", result?.name)
+    }
+
+    @Test
+    fun `selectMcpServer routes to matching server not just first enabled`() {
+        // 多个启用 Server 时，按工具名命名空间精确路由到匹配项（而非固定取第一个）
+        val first = makeServer("Time", isEnabled = true)
+        val matching = makeServer("Sequential Thinking", isEnabled = true)
+        val result = SkillExecutor.selectMcpServer(
+            listOf(first, matching),
+            toolName = "mcp_Sequential_Thinking__sequentialthinking"
+        )
+        assertEquals("Sequential Thinking", result?.name)
+    }
+
     @Test
     fun `shouldEmitMaxRoundsError true when last round had tool call and rounds exceeded`() {
         assertTrue(SkillExecutor.shouldEmitMaxRoundsError(true, 10, 10))
@@ -129,7 +241,7 @@ class SkillExecutorTest {
             StreamEvent.ToolCallComplete("call_1", "skill__tool1", mapOf("a" to "b")),
             StreamEvent.ToolCallComplete("call_2", "skill__tool2", mapOf("c" to 1))
         )
-        val msg = SkillExecutor.buildAssistantToolCallMessage(toolCalls) { 100L }
+        val msg = SkillExecutor.buildAssistantToolCallMessage(toolCalls, idGenerator = { 100L })
 
         assertEquals(100L, msg.id)
         assertEquals(Role.ASSISTANT, msg.role)
@@ -140,14 +252,53 @@ class SkillExecutorTest {
         assertEquals("{\"a\":\"b\"}", msg.toolCalls[0].arguments)
         assertEquals("call_2", msg.toolCalls[1].id)
         assertEquals("skill__tool2", msg.toolCalls[1].functionName)
+        assertNull("未传 reasoningContent 时 thinkingChain 应为 null", msg.thinkingChain)
     }
 
     @Test
     fun `buildAssistantToolCallMessage with empty toolCalls list`() {
-        val msg = SkillExecutor.buildAssistantToolCallMessage(emptyList()) { 200L }
+        val msg = SkillExecutor.buildAssistantToolCallMessage(emptyList(), idGenerator = { 200L })
         assertEquals(200L, msg.id)
         assertEquals(Role.ASSISTANT, msg.role)
         assertTrue(msg.toolCalls.isEmpty())
+    }
+
+    @Test
+    fun `buildAssistantToolCallMessage carries reasoningContent for DeepSeek replay`() {
+        // UXR4 问题 1/4/6（ADR-024）：带 tool_calls 的 assistant 占位消息必须携带 reasoning_content，
+        // 否则 DeepSeek 工具回路第 2 轮返回 400。
+        val toolCalls = listOf(
+            StreamEvent.ToolCallComplete("call_1", "web_search__search", mapOf("query" to "天气"))
+        )
+        val msg = SkillExecutor.buildAssistantToolCallMessage(
+            toolCalls,
+            idGenerator = { 300L },
+            reasoningContent = "用户询问天气，需要联网搜索"
+        )
+
+        assertEquals(300L, msg.id)
+        assertEquals(Role.ASSISTANT, msg.role)
+        assertEquals("", msg.content)
+        assertEquals(1, msg.toolCalls.size)
+        assertEquals(
+            "reasoning 应存入 thinkingChain（供 toMessageBody 回传 reasoning_content）",
+            "用户询问天气，需要联网搜索",
+            msg.thinkingChain
+        )
+    }
+
+    @Test
+    fun `buildAssistantToolCallMessage blanks reasoning when content is blank`() {
+        // 空白 reasoning 不应写入 thinkingChain（无思考的端点零影响）
+        val toolCalls = listOf(
+            StreamEvent.ToolCallComplete("call_1", "skill__tool", emptyMap())
+        )
+        val msg = SkillExecutor.buildAssistantToolCallMessage(
+            toolCalls,
+            idGenerator = { 400L },
+            reasoningContent = "   "
+        )
+        assertNull("空白 reasoning 应存为 null", msg.thinkingChain)
     }
 
     @Test
@@ -230,6 +381,26 @@ class SkillExecutorTest {
         val msg = SkillExecutor.formatRejection("my_tool")
         assertTrue(msg.contains("my_tool"))
         assertTrue(msg.contains("拒绝"))
+    }
+
+    // ==================== UX-001 问题 9（ADR-021）：工具白名单免审批 ====================
+
+    @Test
+    fun `isTrustedTool whitelists web search`() {
+        assertTrue("联网搜索应免审批", SkillExecutor.isTrustedTool("web_search__search"))
+    }
+
+    @Test
+    fun `isTrustedTool false for side-effect tools`() {
+        assertFalse("跨 App 打开应用不应免审批", SkillExecutor.isTrustedTool("cross_app__open_app"))
+        assertFalse("分享内容不应免审批", SkillExecutor.isTrustedTool("cross_app__share_content"))
+        assertFalse("文件系统工具不应免审批", SkillExecutor.isTrustedTool("filesystem__write_file"))
+    }
+
+    @Test
+    fun `isTrustedTool false for unknown tools fail-closed`() {
+        assertFalse("未知工具应 fail-closed 需审批", SkillExecutor.isTrustedTool("skill__unknown_tool"))
+        assertFalse("MCP 工具不应免审批", SkillExecutor.isTrustedTool("mcp_server__custom_tool"))
     }
 
     @Test
@@ -542,6 +713,184 @@ class SkillExecutorTest {
         executor.executeToolCall(toolCall, servers)
 
         assertEquals("translate", mcpProvider.lastToolName)
+    }
+
+    // ==================== UXR3 问题 10（ADR-023）：工具审批三模式 ====================
+
+    @Test
+    fun `executeToolCall AUTO mode skips confirmation and executes`() = runBlocking {
+        val mcpProvider = FakeMcpToolProvider(returnResult = "auto result")
+        // approve=false 的 gate：AUTO 模式下不应被调用
+        val gate = FakeConfirmationGate(approve = false)
+        val executor = SkillExecutor(
+            mcpProvider, gate, Dispatchers.Unconfined,
+            approvalModeProvider = { io.prism.config.ToolApprovalMode.AUTO }
+        )
+        val toolCall = StreamEvent.ToolCallComplete("call_1", "skill__read_file", mapOf("path" to "/tmp"))
+        val servers = listOf(makeServer("fs", isEnabled = true))
+
+        val result = executor.executeToolCall(toolCall, servers)
+
+        assertEquals("auto result", result)
+        assertFalse("AUTO 模式不应请求用户确认", gate.confirmCalled)
+        assertTrue("AUTO 模式应直接执行", mcpProvider.callToolCalled)
+    }
+
+    @Test
+    fun `executeToolCall DISABLED mode rejects without confirmation or execution`() = runBlocking {
+        val mcpProvider = FakeMcpToolProvider(returnResult = "should not be called")
+        val gate = FakeConfirmationGate(approve = true)
+        val executor = SkillExecutor(
+            mcpProvider, gate, Dispatchers.Unconfined,
+            approvalModeProvider = { io.prism.config.ToolApprovalMode.DISABLED }
+        )
+        val toolCall = StreamEvent.ToolCallComplete("call_1", "skill__read_file", emptyMap())
+        val servers = listOf(makeServer("fs", isEnabled = true))
+
+        val result = executor.executeToolCall(toolCall, servers)
+
+        assertTrue("DISABLED 模式应返回禁用文案", result.contains("已禁用"))
+        assertTrue("DISABLED 模式应含工具名", result.contains("skill__read_file"))
+        assertFalse("DISABLED 模式不应请求用户确认", gate.confirmCalled)
+        assertFalse("DISABLED 模式不应执行工具", mcpProvider.callToolCalled)
+    }
+
+    @Test
+    fun `executeToolCall MANUAL mode asks confirmation when not trusted`() = runBlocking {
+        val mcpProvider = FakeMcpToolProvider(returnResult = "manual result")
+        val gate = FakeConfirmationGate(approve = true)
+        val executor = SkillExecutor(
+            mcpProvider, gate, Dispatchers.Unconfined,
+            approvalModeProvider = { io.prism.config.ToolApprovalMode.MANUAL }
+        )
+        // 非白名单工具（skill__read_file）应请求确认
+        val toolCall = StreamEvent.ToolCallComplete("call_1", "skill__read_file", emptyMap())
+        val servers = listOf(makeServer("fs", isEnabled = true))
+
+        val result = executor.executeToolCall(toolCall, servers)
+
+        assertEquals("manual result", result)
+        assertTrue("MANUAL 模式非白名单工具应请求确认", gate.confirmCalled)
+    }
+
+    @Test
+    fun `executeToolCall MANUAL mode keeps trusted tool whitelist exemption`() = runBlocking {
+        val mcpProvider = FakeMcpToolProvider(returnResult = "search result")
+        val gate = FakeConfirmationGate(approve = false) // 若被调用会拒绝
+        val executor = SkillExecutor(
+            mcpProvider, gate, Dispatchers.Unconfined,
+            approvalModeProvider = { io.prism.config.ToolApprovalMode.MANUAL }
+        )
+        // 白名单工具（web_search__search）应免审批
+        val toolCall = StreamEvent.ToolCallComplete("call_1", "web_search__search", emptyMap())
+        val servers = listOf(makeServer("fs", isEnabled = true))
+
+        val result = executor.executeToolCall(toolCall, servers)
+
+        assertEquals("search result", result)
+        assertFalse("白名单工具在 MANUAL 模式应免审批", gate.confirmCalled)
+        assertTrue(mcpProvider.callToolCalled)
+    }
+
+    @Test
+    fun `executeToolCall default approval mode is MANUAL when provider null`() = runBlocking {
+        val mcpProvider = FakeMcpToolProvider(returnResult = "default result")
+        val gate = FakeConfirmationGate(approve = true)
+        // approvalModeProvider 缺省 null → 降级为 MANUAL（向后兼容）
+        val executor = SkillExecutor(mcpProvider, gate, Dispatchers.Unconfined)
+        val toolCall = StreamEvent.ToolCallComplete("call_1", "skill__read_file", emptyMap())
+        val servers = listOf(makeServer("fs", isEnabled = true))
+
+        executor.executeToolCall(toolCall, servers)
+
+        assertTrue("默认（provider=null）应视为 MANUAL，非白名单工具需确认", gate.confirmCalled)
+    }
+
+    @Test
+    fun `formatDisabled returns disabled message with tool name`() {
+        val msg = SkillExecutor.formatDisabled("fs__read_file")
+        assertTrue(msg.contains("已禁用"))
+        assertTrue(msg.contains("fs__read_file"))
+    }
+
+    @Test
+    fun `isFailureResult true for disabled prefix`() {
+        assertTrue(SkillExecutor.isFailureResult("工具调用已禁用（请在设置中开启工具审批模式）: fs__read"))
+    }
+
+    // ==================== UXR3 问题 2（ADR-023）：executeLoop 同名工具去重（guardrail T-5） ====================
+
+    @Test
+    fun `executeLoop dedupes same-named tool calls in one round`() = runBlocking {
+        // 同一轮内 LLM 并行声明两次同名工具（不同 call id，deepseek-reasoner 常见）
+        val provider = FakeChatStreamProvider(
+            rounds = listOf(
+                listOf(
+                    StreamEvent.ToolCallComplete("call_1", "skill__translate", mapOf("x" to 1)),
+                    StreamEvent.ToolCallComplete("call_2", "skill__translate", mapOf("x" to 2))
+                ),
+                listOf(StreamEvent.Delta("done"), StreamEvent.Done)
+            )
+        )
+        val mcpProvider = FakeMcpToolProvider(returnResult = "translated")
+        val gate = FakeConfirmationGate(approve = true)
+        val executor = SkillExecutor(mcpProvider, gate, Dispatchers.Unconfined)
+        val initialMessages = listOf(makeUserMessage("hi"))
+        val config = makeProviderConfig()
+        val tools = listOf(makeToolDefinition("skill__translate"))
+        val servers = listOf(makeServer("fs", isEnabled = true))
+
+        var idCounter = 1L
+        val result = executor.executeLoop(
+            provider, config, initialMessages,
+            systemPrompt = null, ragContext = null,
+            tools = tools, mcpServers = servers,
+            maxRounds = 10, idGenerator = { idCounter++ }
+        ) { /* ignore */ }
+
+        // 去重后只保留首个同名调用：user + assistant 占位(1 toolCall) + 1 tool result = 3 条
+        assertEquals("去重后应只保留首个同名调用", 3, result.size)
+        assertEquals(Role.ASSISTANT, result[1].role)
+        assertEquals("assistant 占位应只含 1 个 toolCall（去重）", 1, result[1].toolCalls.size)
+        assertEquals("应保留首个 call id", "call_1", result[1].toolCalls[0].id)
+        assertEquals(Role.TOOL, result[2].role)
+        assertEquals("tool result 应关联首个 call id", "call_1", result[2].toolCallId)
+        // 工具仅执行一次（首个调用）
+        assertEquals("同名工具应只执行 1 次", 1, mcpProvider.callCount)
+    }
+
+    @Test
+    fun `executeLoop keeps distinct tool calls when names differ`() = runBlocking {
+        // 对照：不同名工具不应被去重，全部执行
+        val provider = FakeChatStreamProvider(
+            rounds = listOf(
+                listOf(
+                    StreamEvent.ToolCallComplete("call_1", "skill__read", emptyMap()),
+                    StreamEvent.ToolCallComplete("call_2", "skill__write", emptyMap())
+                ),
+                listOf(StreamEvent.Delta("done"), StreamEvent.Done)
+            )
+        )
+        val mcpProvider = FakeMcpToolProvider(returnResult = "ok")
+        val gate = FakeConfirmationGate(approve = true)
+        val executor = SkillExecutor(mcpProvider, gate, Dispatchers.Unconfined)
+        val initialMessages = listOf(makeUserMessage("hi"))
+        val config = makeProviderConfig()
+        val tools = listOf(makeToolDefinition("skill__read"), makeToolDefinition("skill__write"))
+        val servers = listOf(makeServer("fs", isEnabled = true))
+
+        var idCounter = 1L
+        val result = executor.executeLoop(
+            provider, config, initialMessages,
+            systemPrompt = null, ragContext = null,
+            tools = tools, mcpServers = servers,
+            maxRounds = 10, idGenerator = { idCounter++ }
+        ) { /* ignore */ }
+
+        // user + assistant 占位(2 toolCalls) + 2 tool result = 4 条
+        assertEquals("不同名工具应全部保留", 4, result.size)
+        assertEquals("assistant 占位应含 2 个 toolCall", 2, result[1].toolCalls.size)
+        assertEquals("不同名工具应执行 2 次", 2, mcpProvider.callCount)
     }
 
     // ==================== executeLoop 集成测试 ====================
@@ -1044,7 +1393,9 @@ class SkillExecutorTest {
             systemPrompt: String?,
             ragContext: String?,
             tools: List<ToolDefinition>?,
-            toolChoice: io.prism.network.ToolChoice?
+            toolChoice: io.prism.network.ToolChoice?,
+            thinkingEnabled: Boolean?,
+            reasoningEffort: String?
         ): Flow<StreamEvent> {
             throwOnStreamChat?.let { throw it }
             lastTools = tools
@@ -1108,6 +1459,17 @@ class SkillExecutorTest {
     @Test
     fun `isFailureResult true for confirm error prefix`() {
         assertTrue(SkillExecutor.isFailureResult("用户确认失败: fs__read（超时）"))
+    }
+
+    @Test
+    fun `isFailureResult true for fetch failure prefixes`() {
+        // UXR7 问题 1 / UXR7-R2：MCP Fetch 工具全量降级文案纳入失败识别（防 LLM 反复抓取）
+        assertTrue(SkillExecutor.isFailureResult("抓取失败：网络错误或目标不可访问"))
+        assertTrue(SkillExecutor.isFailureResult("抓取失败：HTTP 404"))
+        assertTrue(SkillExecutor.isFailureResult("Fetch 工具不可用：未配置网络客户端"))
+        assertTrue(SkillExecutor.isFailureResult("仅支持抓取 http:// 或 https:// 地址"))
+        assertTrue(SkillExecutor.isFailureResult("仅支持抓取公网地址（已拒绝内网/本机地址）"))
+        assertTrue(SkillExecutor.isFailureResult("工具调用失败"))
     }
 
     @Test

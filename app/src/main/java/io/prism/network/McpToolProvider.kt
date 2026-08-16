@@ -19,6 +19,17 @@ interface McpToolProvider {
     suspend fun listTools(config: McpServerConfig): List<String>
 
     /**
+     * 返回 MCP Server 上可用的工具定义（DEF-008，Bug-3）。
+     *
+     * 供 [ConversationViewModel] 注入到 LLM `tools` 列表，使 LLM 能感知并调用 MCP 工具。
+     * 默认返回空列表（向后兼容：未实现 describeTools 的 Provider 不注入任何工具）。
+     *
+     * @param config 目标 MCP Server 配置
+     * @return 工具定义列表（可注入 LLM tools；连接失败/无工具时返回空列表）
+     */
+    suspend fun describeTools(config: McpServerConfig): List<ToolDefinition> = emptyList()
+
+    /**
      * 调用 MCP Server 上的指定工具。
      *
      * @param config 目标 MCP Server 配置

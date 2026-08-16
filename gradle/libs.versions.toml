@@ -24,6 +24,15 @@ pdfbox = "3.0.8"
 # 选型依据：charleskorn/kaml 已归档（2025-11-30），改用底层引擎 snakeyaml-engine-kmp
 # 活跃维护（最后提交 2026-08-08），KMP 原生，Apache 2.0
 snakeyamlEngineKmp = "4.0.1"
+# UX-001 问题 3（Markdown 渲染）：Compose 原生 Markdown 渲染（ADR-021/022）
+# 选型依据：mikepenz/multiplatform-markdown-renderer 活跃维护（最后提交 2026-08），
+# Compose Multiplatform 原生，与 Material3 无缝集成，支持标题/列表/代码块/表格。
+# UX-001 问题 1（ADR-022 二次修复）：0.15.0 流式渲染残留 #/-/| 符号 + 标题字号过大。
+# 版本约束（2026-08-15 二次修复）：0.28.0 起字节码引用 Compose 1.7+ 的 Compiler/Runtime ABI
+#（Composer.startReplaceGroup / TextLinkStyles），而项目 Compose BOM 2024.06.00 = Compose 1.6.8，
+# 升级到 0.28+ 会在运行期抛 NoSuchMethodError / ClassNotFoundException（编译期通过、运行期崩）。
+# 0.26.0 是兼容 Compose 1.6.8 的最高版本（无 1.7+ ABI 引用，含嵌套列表等渲染改进）。Apache 2.0
+markdownRenderer = "0.26.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -60,6 +69,7 @@ onnxruntime = { group = "com.microsoft.onnxruntime", name = "onnxruntime", versi
 poi-ooxml = { group = "org.apache.poi", name = "poi-ooxml", version.ref = "poiOoxml" }
 pdfbox = { group = "org.apache.pdfbox", name = "pdfbox", version.ref = "pdfbox" }
 snakeyaml-engine-kmp = { group = "it.krzeminski", name = "snakeyaml-engine-kmp", version.ref = "snakeyamlEngineKmp" }
+markdown-renderer-m3 = { group = "com.mikepenz", name = "multiplatform-markdown-renderer-m3", version.ref = "markdownRenderer" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

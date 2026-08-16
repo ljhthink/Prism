@@ -35,6 +35,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import io.prism.data.ProviderConfig
 import io.prism.data.ProviderPresets
+import io.prism.config.ToolApprovalMode
 import io.prism.tier.PerformanceTier
 import io.prism.tier.TierConfigRepository
 import io.prism.ui.components.PrismButton
@@ -54,6 +55,7 @@ import io.prism.ui.theme.PrismMint
 import io.prism.ui.theme.PrismText
 import io.prism.ui.theme.PrismTextDim
 import io.prism.ui.theme.PrismTextFaint
+import io.prism.ui.theme.PrismWarning
 import java.util.Locale
 
 /**
@@ -68,14 +70,24 @@ import java.util.Locale
 fun SettingsScreen(
     viewModel: SettingsViewModel = viewModel(factory = SettingsViewModel.Factory)
 ) {
-    var biometric by remember { mutableStateOf(true) }
+    // 生物识别解锁：M0 起 UI 占位（仅本地 state，未接入 BiometricPrompt）。
+    // 默认值改为 false 避免误导用户以为已启用保护（BR-ui-001）。
+    // 完整实现需新 ADR + PRD（BiometricManager + DataStore 持久化 + App 启动锁）。
+    var biometric by remember { mutableStateOf(false) }
     var tierSheetVisible by remember { mutableStateOf(false) }
     var providerListVisible by remember { mutableStateOf(false) }
     var apiKeyVisible by remember { mutableStateOf(false) }
+    var thinkingSheetVisible by remember { mutableStateOf(false) }
+    var toolApprovalSheetVisible by remember { mutableStateOf(false) }
 
     val providers by viewModel.providers.collectAsState()
     val activeProvider by viewModel.activeProvider.collectAsState()
     val selectedProvider by viewModel.selectedProvider.collectAsState()
+    // 问题 8a（ADR-020）：深度思考开关 + 思考强度（DataStore 持久化）
+    val thinkingEnabled by viewModel.thinkingEnabled.collectAsState()
+    val reasoningEffort by viewModel.reasoningEffort.collectAsState()
+    // UXR3 问题 10（ADR-023）：工具审批模式（DataStore 持久化）
+    val toolApprovalMode by viewModel.toolApprovalMode.collectAsState()
 
     // M7 Phase C（US-042）：档位 UI 由 TierViewModel 驱动（替代原 PerfTier 本地 mock state）
     val tierViewModel: TierViewModel = viewModel(factory = TierViewModel.Factory)
@@ -108,14 +120,41 @@ fun SettingsScreen(
                     onClick = { apiKeyVisible = true }
                 )
             }
+            // 问题 8a（ADR-020）：深度思考设置（开关 + 强度选择）
+            item {
+                SetRow(
+                    icon = "◔",
+                    iconColor = PrismIndigo,
+                    title = "深度思考",
+                    subtitle = if (thinkingEnabled) {
+                        "已开启 · 强度 ${effortLabel(reasoningEffort)}"
+                    } else {
+                        "关闭 · 开启后模型先推理再回答"
+                    },
+                    trailing = {
+                        PrismSwitch(checked = thinkingEnabled, onCheckedChange = { viewModel.setThinkingEnabled(it) })
+                    },
+                    onClick = { thinkingSheetVisible = true }
+                )
+            }
             item { SetSection("隐私与安全") }
             item {
                 SetRow(
                     icon = "◐",
                     iconColor = PrismCyan,
                     title = "生物识别解锁",
-                    subtitle = "可选二次解锁",
+                    subtitle = "即将支持 · 可选二次解锁",
                     trailing = { PrismSwitch(checked = biometric, onCheckedChange = { biometric = it }) }
+                )
+            }
+            // UXR3 问题 10（ADR-023）：工具审批模式（手动审批 / 自动审批 / 禁用）
+            item {
+                SetRow(
+                    icon = "⚙",
+                    iconColor = PrismIndigo,
+                    title = "工具权限",
+                    subtitle = toolApprovalSubtitle(toolApprovalMode),
+                    onClick = { toolApprovalSheetVisible = true }
                 )
             }
             item { SetSection("设备档位") }
@@ -183,6 +222,30 @@ fun SettingsScreen(
                 onClose = { tierSheetVisible = false }
             )
         }
+        // 问题 8a（ADR-020）：深度思考设置弹层（开关 + 强度选择）
+        PrismSheetHost(visible = thinkingSheetVisible, onDismiss = { thinkingSheetVisible = false }) {
+            ThinkingSheet(
+                enabled = thinkingEnabled,
+                effort = reasoningEffort,
+                onToggle = { viewModel.setThinkingEnabled(it) },
+                onSelectEffort = { effort ->
+                    viewModel.setReasoningEffort(effort)
+                    thinkingSheetVisible = false
+                },
+                onClose = { thinkingSheetVisible = false }
+            )
+        }
+        // UXR3 问题 10（ADR-023）：工具审批模式弹层（手动 / 自动 / 禁用）
+        PrismSheetHost(visible = toolApprovalSheetVisible, onDismiss = { toolApprovalSheetVisible = false }) {
+            ToolApprovalSheet(
+                current = toolApprovalMode,
+                onSelect = { mode ->
+                    viewModel.setToolApprovalMode(mode)
+                    toolApprovalSheetVisible = false
+                },
+                onClose = { toolApprovalSheetVisible = false }
+            )
+        }
     }
 }
 
@@ -220,6 +283,207 @@ private val PerformanceTier.label: String
         PerformanceTier.MINIMAL -> "极简"
         PerformanceTier.CHAT_ONLY -> "仅聊天"
     }
+
+/** 思考强度中文标签（问题 8a，仅 UI 展示，与 [ThinkingConfigRepository] 值解耦）。 */
+private fun effortLabel(effort: String): String = when (effort) {
+    "low" -> "轻"
+    "high" -> "标准"
+    "max" -> "最强"
+    else -> effort
+}
+
+/** 工具审批模式中文标签（UXR3 问题 10，仅 UI 展示，与 [ToolApprovalMode] 枚举值解耦）。 */
+private fun ToolApprovalMode.label(): String = when (this) {
+    ToolApprovalMode.MANUAL -> "手动审批"
+    ToolApprovalMode.AUTO -> "自动审批"
+    ToolApprovalMode.DISABLED -> "禁用工具"
+}
+
+/** 工具权限设置行副标题（UXR3 问题 10）。 */
+private fun toolApprovalSubtitle(mode: ToolApprovalMode): String = when (mode) {
+    ToolApprovalMode.MANUAL -> "每次调用工具需确认（默认）"
+    ToolApprovalMode.AUTO -> "所有工具直接放行"
+    ToolApprovalMode.DISABLED -> "不向 AI 提供任何工具"
+}
+
+/**
+ * 工具审批模式弹层（UXR3 问题 10，ADR-023）—— 三选一。
+ *
+ * - MANUAL（手动审批）：LLM 每次调用工具都询问用户（白名单只读工具免审批）
+ * - AUTO（自动审批）：所有工具直接放行，不需用户审核
+ * - DISABLED（禁用）：不向 LLM 注入任何工具，AI 无法调用工具
+ *
+ * 运行时即时生效（无需重启）：ConversationViewModel 与 SkillExecutor 均从配置仓库实时读取。
+ */
+@Composable
+private fun ToolApprovalSheet(
+    current: ToolApprovalMode,
+    onSelect: (ToolApprovalMode) -> Unit,
+    onClose: () -> Unit
+) {
+    PrismSheet(
+        title = "工具权限",
+        subtitle = "控制 AI 调用工具（搜索 / 文件 / MCP）的权限策略"
+    ) {
+        ToolApprovalOptionRow(
+            label = "手动审批",
+            description = "每次调用工具都需你确认（推荐）",
+            selected = current == ToolApprovalMode.MANUAL,
+            onClick = { onSelect(ToolApprovalMode.MANUAL) }
+        )
+        Spacer(Modifier.height(8.dp))
+        ToolApprovalOptionRow(
+            label = "自动审批",
+            description = "所有工具直接放行，不需审核",
+            selected = current == ToolApprovalMode.AUTO,
+            onClick = { onSelect(ToolApprovalMode.AUTO) }
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "⚠️ 自动审批下 AI 可直接读写已授权文件、打开应用、联网抓取，请谨慎开启。",
+            color = PrismWarning,
+            fontSize = 11.sp,
+            lineHeight = 16.sp
+        )
+        Spacer(Modifier.height(8.dp))
+        ToolApprovalOptionRow(
+            label = "禁用工具",
+            description = "不向 AI 提供任何工具，仅普通对话",
+            selected = current == ToolApprovalMode.DISABLED,
+            onClick = { onSelect(ToolApprovalMode.DISABLED) }
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            text = "切换后即时生效，无需重启。",
+            color = PrismTextFaint,
+            fontSize = 11.sp
+        )
+        Spacer(Modifier.height(12.dp))
+        PrismButton(text = "关闭", variant = PrismButtonVariant.Ghost, onClick = onClose)
+    }
+}
+
+/** 工具审批模式选项行（单选样式，选中态高亮，复用 [TierOptionRow] 视觉）。 */
+@Composable
+private fun ToolApprovalOptionRow(
+    label: String,
+    description: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) PrismMint.copy(alpha = 0.08f) else PrismPanel2)
+            .border(
+                1.dp,
+                if (selected) PrismMint.copy(alpha = 0.4f) else PrismLine,
+                RoundedCornerShape(12.dp)
+            )
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .background(
+                    if (selected) PrismMint.copy(alpha = 0.12f) else PrismPanel2,
+                    RoundedCornerShape(10.dp)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = if (selected) "✓" else "⚙",
+                color = if (selected) PrismMint else PrismTextDim,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = label, color = PrismText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(text = description, color = PrismTextFaint, fontSize = 11.sp)
+        }
+    }
+}
+
+/**
+ * 深度思考设置弹层（问题 8a，ADR-020）—— 开关 + 思考强度选择。
+ *
+ * **强度说明**（DeepSeek API 文档）：
+ * - low：轻度推理，适合简单任务、快速响应
+ * - high：标准推理（默认），效果与延迟平衡
+ * - max：最强推理，复杂 Agent 场景推荐（推理 token 占比高，可能压缩正文空间）
+ *
+ * **兼容性提示**：thinking/reasoning_effort 为 DeepSeek 专有参数，不兼容端点可能返回 400。
+ * 弹层内明示该限制，避免用户误用后困惑。
+ *
+ * @param enabled 当前深度思考开关状态
+ * @param effort 当前思考强度（low/high/max）
+ * @param onToggle 开关切换回调
+ * @param onSelectEffort 强度选择回调（选中后由调用方关闭弹层）
+ * @param onClose 关闭按钮回调
+ */
+@Composable
+private fun ThinkingSheet(
+    enabled: Boolean,
+    effort: String,
+    onToggle: (Boolean) -> Unit,
+    onSelectEffort: (String) -> Unit,
+    onClose: () -> Unit
+) {
+    PrismSheet(
+        title = "深度思考",
+        subtitle = "模型先推理再回答 · 运行时即时生效"
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(text = "启用深度思考", color = PrismText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            PrismSwitch(checked = enabled, onCheckedChange = onToggle)
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "开启后请求携带 thinking + reasoning_effort 参数（DeepSeek 等支持思考模式的端点）。" +
+                "不兼容的端点可能返回 400，请确认你的 Provider 支持。",
+            color = PrismTextFaint,
+            fontSize = 11.sp,
+            lineHeight = 16.sp
+        )
+        Spacer(Modifier.height(16.dp))
+        Text(text = "思考强度", color = PrismTextDim, fontSize = 12.sp, letterSpacing = 0.4.sp)
+        Spacer(Modifier.height(8.dp))
+        TierOptionRow(
+            label = "low",
+            description = "轻度推理 · 快速响应",
+            selected = effort == "low",
+            onClick = { onSelectEffort("low") }
+        )
+        Spacer(Modifier.height(8.dp))
+        TierOptionRow(
+            label = "high",
+            description = "标准推理 · 推荐",
+            selected = effort == "high",
+            onClick = { onSelectEffort("high") }
+        )
+        Spacer(Modifier.height(8.dp))
+        TierOptionRow(
+            label = "max",
+            description = "最强推理 · 复杂任务",
+            selected = effort == "max",
+            onClick = { onSelectEffort("max") }
+        )
+        Spacer(Modifier.height(16.dp))
+        PrismButton(text = "关闭", variant = PrismButtonVariant.Ghost, onClick = onClose)
+    }
+}
 
 /**
  * 性能档位选择弹层（US-042）。
@@ -430,7 +694,9 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
     var models by remember(config.id) { mutableStateOf(config.models.joinToString(", ")) }
     var apiKey by remember(config.id) { mutableStateOf("") }
     var apiKeyLoaded by remember(config.id) { mutableStateOf(false) }
-    var enabled by remember(config.id) { mutableStateOf(config.isActive) }
+    // BR-naming-002：原变量名 `enabled` 与 PrismButton.enabled 参数同名导致语义混淆（DEF-001 考古报告 §3）。
+    // 重命名为 `activateAfterSave` 明确表达「保存后是否激活此 Provider」的意图。
+    var activateAfterSave by remember(config.id) { mutableStateOf(config.isActive) }
     // 自定义请求头用 SnapshotStateList：原地改值（headers[index]=…）会触发重组，
     // 与删除/新增重建列表行为一致，避免丢输入（guardrail Q2）。
     val headers = remember(config.id) {
@@ -462,7 +728,35 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
 
     PrismSheet(
         title = if (isNew) "新建 Provider" else "编辑 ${config.name}",
-        subtitle = "端点 · 模型 · 请求头 · 激活"
+        subtitle = "端点 · 模型 · 请求头 · 激活",
+        // BR-ui-003：保存配置按钮放在 footer 固定底部，确保始终可见可点击（DEF-001 根因修复）。
+        footer = {
+            PrismButton(
+                text = "保存配置",
+                enabled = canSave,
+                onClick = {
+                    if (!canSave) { showValidation = true; return@PrismButton }
+                    viewModel.saveApiKey(config.apiKeyRef, apiKey)
+                    // 激活态绝不直接写入 isActive（会绕过单激活不变式），统一经 setActive 事务处理
+                    val savedId = viewModel.saveProvider(
+                        config.copy(
+                            name = name.trim().ifEmpty { config.name },
+                            baseUrl = baseUrl.trim(),
+                            models = models.split(",").map { it.trim() }.filter { it.isNotEmpty() },
+                            headers = validHeaders.toMap(),
+                            isActive = false
+                        )
+                    )
+                    if (activateAfterSave) {
+                        viewModel.setActive(savedId)
+                    }
+                }
+            )
+            if (showValidation && !canSave) {
+                Spacer(Modifier.height(8.dp))
+                ValidationError("请修正以上无效输入后再保存")
+            }
+        }
     ) {
         PrismField(label = "名称", value = name, onValueChange = { name = it }, placeholder = "自定义 Provider 名称")
         if (showValidation && !nameValid) {
@@ -540,39 +834,13 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
 
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(text = "设为激活 Provider", color = PrismText, fontSize = 14.sp, modifier = Modifier.weight(1f))
-            PrismSwitch(checked = enabled, onCheckedChange = { enabled = it })
-        }
-        Spacer(Modifier.height(16.dp))
-        PrismButton(
-            text = "保存配置",
-            enabled = canSave,
-            onClick = {
-                if (!canSave) { showValidation = true; return@PrismButton }
-                viewModel.saveApiKey(config.apiKeyRef, apiKey)
-                // 激活态绝不直接写入 isActive（会绕过单激活不变式），统一经 setActive 事务处理
-                val savedId = viewModel.saveProvider(
-                    config.copy(
-                        name = name.trim().ifEmpty { config.name },
-                        baseUrl = baseUrl.trim(),
-                        models = models.split(",").map { it.trim() }.filter { it.isNotEmpty() },
-                        headers = validHeaders.toMap(),
-                        isActive = false
-                    )
-                )
-                if (enabled) {
-                    viewModel.setActive(savedId)
-                }
-            }
-        )
-        if (showValidation && !canSave) {
-            Spacer(Modifier.height(8.dp))
-            ValidationError("请修正以上无效输入后再保存")
+            PrismSwitch(checked = activateAfterSave, onCheckedChange = { activateAfterSave = it })
         }
         Spacer(Modifier.height(12.dp))
         PrismButton(
             text = "激活",
             variant = PrismButtonVariant.Ghost,
-            enabled = !isNew && !enabled,
+            enabled = !isNew && !activateAfterSave,
             onClick = { viewModel.setActive(config.id) }
         )
         if (!isNew) {
@@ -631,7 +899,16 @@ private fun ApiKeySheet(providers: List<ProviderConfig>, viewModel: SettingsView
             PrismButton(
                 text = "保存 ${config.name} Key",
                 variant = PrismButtonVariant.Ghost,
-                onClick = { viewModel.saveApiKey(config.apiKeyRef, key) }
+                onClick = {
+                    // BR-security-006：空值时删除已存密钥，非空时加密保存。
+                    // 修复 guardrail-enforcer B-2：原实现空值时 saveApiKey 静默跳过，
+                    // 导致用户清空输入框后保存无法清除已存密钥。
+                    if (key.isEmpty()) {
+                        viewModel.removeApiKey(config.apiKeyRef)
+                    } else {
+                        viewModel.saveApiKey(config.apiKeyRef, key)
+                    }
+                }
             )
             Spacer(Modifier.height(16.dp))
         }

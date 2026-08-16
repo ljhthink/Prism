@@ -35,6 +35,9 @@ interface ChatCompletionProvider {
      * @param messages 对话历史（不含 system 消息，由 [systemPrompt] 单独注入）
      * @param systemPrompt system 消息内容（可选，摘要/抽取 prompt）；null 时不注入 system 消息
      * @param ragContext RAG context 文本（可选）；本接口后台任务场景通常 null
+     * @param thinkingEnabled 是否开启深度思考（问题 8a，ADR-020；默认 null 不开启，
+     *        后台任务如摘要/偏好抽取保持非思考模式以控制成本）
+     * @param reasoningEffort 思考强度（问题 8a；仅 [thinkingEnabled] 为 true 时注入）
      * @return assistant 回复内容；失败时返回 null（调用方降级处理）
      * @throws kotlinx.coroutines.CancellationException 协程取消必须重抛（BR-error-handling-007）
      */
@@ -42,6 +45,8 @@ interface ChatCompletionProvider {
         config: ProviderConfig,
         messages: List<ChatMessage>,
         systemPrompt: String? = null,
-        ragContext: String? = null
+        ragContext: String? = null,
+        thinkingEnabled: Boolean? = null,
+        reasoningEffort: String? = null
     ): String?
 }

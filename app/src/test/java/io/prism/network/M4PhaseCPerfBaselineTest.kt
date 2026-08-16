@@ -214,7 +214,8 @@ class M4PhaseCPerfBaselineTest {
         override fun streamChat(
             config: ProviderConfig, messages: List<ChatMessage>,
             systemPrompt: String?, ragContext: String?,
-            tools: List<ToolDefinition>?, toolChoice: ToolChoice?
+            tools: List<ToolDefinition>?, toolChoice: ToolChoice?,
+            thinkingEnabled: Boolean?, reasoningEffort: String?
         ): Flow<StreamEvent> {
             val idx = roundCounter.getAndIncrement().coerceAtMost(rounds.size - 1)
             val events = rounds.getOrElse(idx) { emptyList() }

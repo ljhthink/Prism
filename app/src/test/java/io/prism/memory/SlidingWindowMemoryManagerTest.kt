@@ -363,7 +363,9 @@ class SlidingWindowMemoryManagerTest {
             config: ProviderConfig,
             messages: List<ChatMessage>,
             systemPrompt: String?,
-            ragContext: String?
+            ragContext: String?,
+            thinkingEnabled: Boolean?,
+            reasoningEffort: String?
         ): String? {
             lastConfig = config
             lastMessages = messages
@@ -371,5 +373,96 @@ class SlidingWindowMemoryManagerTest {
             lastRagContext = ragContext
             return if (throwOnCall) throw RuntimeException("test error") else returnValue
         }
+    }
+
+    // ==================== UXR5 问题 4：tool_calls 完整性保护 ====================
+
+    @Test
+    fun processMessages_window_boundary_does_not_split_toolcall_tool_pair() = runBlocking {
+        // UXR5 问题 4：滑动窗口 takeLast 可能切断 assistant(tool_calls) 与其后 tool result 的对。
+        // 构造 6 条消息，window=3，使得 rawRecent 首条恰为 TOOL（其前置 assistant 在窗口外）。
+        // 消息序列：[user, assistant(tool_calls), tool, user, assistant(tool_calls), tool]
+        // takeLast(3) = [user, assistant(tool_calls), tool] → 首条非 TOOL，不需调整（对照）。
+        // 为触发"首条为 TOOL"场景，window=2 → takeLast(2) = [assistant(tool_calls), tool] 首条非 TOOL。
+        // 用 window=1 → takeLast(1) = [tool] 首条为 TOOL → 应向前扩展包含前置 assistant(tool_calls)。
+        configRepository.setWindowSize(1)
+        val messages = listOf(
+            ChatMessage(1, Role.USER, "q1", 1000L),
+            ChatMessage(2, Role.ASSISTANT, "", 2000L, toolCalls = listOf(io.prism.ui.model.ToolCallRef("c1", "function", "skill__t", "{}"))),
+            ChatMessage(3, Role.TOOL, "result1", 3000L),
+            ChatMessage(4, Role.USER, "q2", 4000L),
+            ChatMessage(5, Role.ASSISTANT, "", 5000L, toolCalls = listOf(io.prism.ui.model.ToolCallRef("c2", "function", "skill__t", "{}"))),
+            ChatMessage(6, Role.TOOL, "result2", 6000L)
+        )
+
+        val result = manager.processMessages(messages, testConfig)
+
+        // 窗口首条不能是 TOOL（否则无前置 tool_calls → DeepSeek 400）
+        assertTrue(
+            "窗口首条不应为 TOOL（tool_calls 完整性保护）",
+            result.recentMessages.isEmpty() || result.recentMessages.first().role != Role.TOOL
+        )
+        // 若窗口包含 TOOL，其前置必为 assistant(tool_calls)
+        val firstTool = result.recentMessages.indexOfFirst { it.role == Role.TOOL }
+        if (firstTool > 0) {
+            val prev = result.recentMessages[firstTool - 1]
+            assertTrue(
+                "TOOL 前置应为 assistant(tool_calls)",
+                prev.role == Role.ASSISTANT && prev.toolCalls.isNotEmpty()
+            )
+        }
+    }
+
+    @Test
+    fun adjustWindowBoundary_expands_when_first_is_tool() {
+        val messages = listOf(
+            ChatMessage(1, Role.USER, "q1", 1000L),
+            ChatMessage(2, Role.ASSISTANT, "", 2000L, toolCalls = listOf(io.prism.ui.model.ToolCallRef("c1", "function", "skill__t", "{}"))),
+            ChatMessage(3, Role.TOOL, "result1", 3000L),
+            ChatMessage(4, Role.USER, "q2", 4000L),
+            ChatMessage(5, Role.ASSISTANT, "", 5000L, toolCalls = listOf(io.prism.ui.model.ToolCallRef("c2", "function", "skill__t", "{}"))),
+            ChatMessage(6, Role.TOOL, "result2", 6000L)
+        )
+        // rawRecent = takeLast(1) = [tool(m6)]，首条为 TOOL → 应扩展为 [assistant(m5), tool(m6)]
+        val raw = messages.takeLast(1)
+        val adjusted = manager.adjustWindowBoundary(messages, raw, 1)
+        assertEquals("应向前扩展包含前置 assistant(tool_calls)", 2, adjusted.size)
+        assertEquals("扩展后首条应为 assistant", Role.ASSISTANT, adjusted[0].role)
+        assertTrue("扩展后 assistant 应带 toolCalls", adjusted[0].toolCalls.isNotEmpty())
+    }
+
+    @Test
+    fun adjustWindowBoundary_keeps_normal_window_when_first_not_tool() {
+        val messages = listOf(
+            ChatMessage(1, Role.USER, "q1", 1000L),
+            ChatMessage(2, Role.ASSISTANT, "a1", 2000L),
+            ChatMessage(3, Role.USER, "q2", 3000L),
+            ChatMessage(4, Role.ASSISTANT, "a2", 4000L)
+        )
+        // window=2 → [user, assistant]，首条非 TOOL，不做调整
+        val raw = messages.takeLast(2)
+        val adjusted = manager.adjustWindowBoundary(messages, raw, 2)
+        assertEquals("首条非 TOOL 时不做调整", raw, adjusted)
+    }
+
+    @Test
+    fun adjustWindowBoundary_expands_through_consecutive_tools() {
+        // F-02（guardrail TKN-UXR5-GUARDRAIL-001）：窗口首条为连续 TOOL 时，
+        // 必须持续向前扩展直到首条非 TOOL（并行工具对完整保留），而非提前停止。
+        val messages = listOf(
+            ChatMessage(1, Role.USER, "q", 1000L),
+            ChatMessage(2, Role.ASSISTANT, "", 2000L, toolCalls = listOf(io.prism.ui.model.ToolCallRef("c1", "function", "a", "{}"), io.prism.ui.model.ToolCallRef("c2", "function", "b", "{}"))),
+            ChatMessage(3, Role.TOOL, "r1", 3000L),
+            ChatMessage(4, Role.TOOL, "r2", 4000L),
+            ChatMessage(5, Role.ASSISTANT, "final", 5000L)
+        )
+        // 窗口首条为 tool(r2)（window=1 → takeLast(1)=[tool(r2)] 的场景）
+        // 但此处直接测 adjustWindowBoundary 纯函数：rawRecent 首条为 TOOL
+        val raw = listOf(messages[3]) // [tool(r2)]
+        val adjusted = manager.adjustWindowBoundary(messages, raw, 1)
+        assertTrue("扩展后首条应为 assistant（tool_calls 对完整）", adjusted.first().role == Role.ASSISTANT)
+        assertTrue("扩展后 assistant 应带 toolCalls", adjusted.first().toolCalls.isNotEmpty())
+        // 扩展后应包含两条 TOOL（并行配对完整）
+        assertEquals("应包含 2 条 TOOL 结果", 2, adjusted.count { it.role == Role.TOOL })
     }
 }

@@ -136,6 +136,19 @@
 -dontwarn kotlinx.coroutines.debug.**
 
 # =============================================================================
+# 9.1 markdown-renderer（UX-001 问题 3，ADR-021/022）
+# =============================================================================
+
+# mikepenz/multiplatform-markdown-renderer 无 consumer proguard rules（guardrail
+# TKN-UXR2-GUARDRAIL-001 实证：0.26.0 的 m3/core AAR 均不含 consumer-rules.pro）。
+# R8 可能混淆库内部 @Composable 组件类，导致运行期反射/组件解析失败。
+# 保留整个 com.mikepenz.markdown 包（含 Kotlin Metadata，供 Compose 组件查找）。
+-keep class com.mikepenz.markdown.** { *; }
+-dontwarn com.mikepenz.markdown.**
+-keep class org.intellij.markdown.** { *; }
+-dontwarn org.intellij.markdown.**
+
+# =============================================================================
 # 10. Ktor CIO / OkHttp 引擎（网络层 JNI / TLS）
 # =============================================================================
 

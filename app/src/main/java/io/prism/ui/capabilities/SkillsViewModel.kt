@@ -175,6 +175,21 @@ class SkillsViewModel(
         // 纯逻辑提取到 [Companion.applyEnabledUpdate]，便于纯 JVM 单元测试（BR-testing-004）
         _selectedSkill.update { current -> Companion.applyEnabledUpdate(current, id, enabled) }
         skillRepository.setEnabled(id, enabled)
+        // DEF-007（Bug-5）：持久化后刷新 SkillRegistry 内存快照（scanAndSync 为 suspend，需在协程中）。
+        // 否则 ConversationViewModel.enabledSkills() 读取的是启动时的旧快照，
+        // 导致运行时启用 skill 后 LLM 完全感知不到（需重启 App 才生效）。
+        // H-1 修复（guardrail TKN-P17-GUARDRAIL-001）：scanAndSync 涉及文件 IO + ObjectBox 同步，
+        // 异常会闪退。与 PrismApplication.onCreate 的既有防护模式一致：CancellationException 重抛，
+        // 其他异常记录警告日志（BR-error-handling-007/004）。
+        viewModelScope.launch {
+            try {
+                skillRegistry.scanAndSync()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e // BR-error-handling-007：不吞 CancellationException
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "skill scanAndSync after toggle failed: ${e::class.simpleName}", e)
+            }
+        }
     }
 
     /**

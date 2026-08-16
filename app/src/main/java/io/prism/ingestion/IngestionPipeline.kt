@@ -185,6 +185,12 @@ class IngestionPipeline(
             // Kotlin 协程铁律：CancellationException 必须重新抛出，不可吞（ADR-009 5.6）
             // 此分支必须位于 catch(Exception) 之前，否则会被吞
             throw e
+        } catch (e: LinkageError) {
+            // DEF-005 止血（Bug-4）：NoClassDefFoundError / ServiceConfigurationError /
+            // UnsatisfiedLinkError 均继承自 Error（非 Exception），POI/PDFBox/onnx 在
+            // Android 真机上的类加载/ServiceLoader/native 加载失败会抛 Error，
+            // 穿透协程导致闪退。归一化为 Failed 事件阻断崩溃，UI 展示通用安全文案。
+            emit(IngestionEvent.Failed(e))
         } catch (e: IllegalArgumentException) {
             // 编程错误（如 repository.addChunk 内部 require 失败）：直接抛给调用方，不走 Failed 事件
             // input 已被 use {} 关闭，资源安全
@@ -203,6 +209,113 @@ class IngestionPipeline(
             val base = if (lastSep >= 0) fileName.substring(lastSep + 1) else fileName
             val dot = base.lastIndexOf('.')
             return if (dot > 0) base.substring(0, dot) else base
+        }
+
+        /** 单次文本直接入库的最大字符数（防超大文本撑爆切片器/嵌入）。 */
+        internal const val MAX_TEXT_INGEST_LEN = 100_000
+    }
+
+    /**
+     * 直接以纯文本入库（UX-001 问题 2，ADR-021）—— 支持「只输入文字内容保存」。
+     *
+     * 与 [ingest] 的差异：跳过文件解析步骤（[DocumentParserRegistry]），
+     * 文本直接进入 [Chunker] → [Embedder] → [KnowledgeBaseRepository] 链路。
+     *
+     * **标题**：调用方传入 [documentTitle]（用户输入的笔记标题），
+     * chunk title 沿用 `${documentTitle}#${index+1}` 约定，可被 [listDocuments] 识别。
+     *
+     * **限制**：单次文本超过 [MAX_TEXT_INGEST_LEN] 时 fail-fast 返回 [IngestionEvent.Failed]。
+     *
+     * **事件序列**：`Started → Chunked → (ChunkEmbedded | ChunkSkipped)×N → Completed`
+     * （无 Parsed 事件，文本无需解析）。
+     *
+     * @param documentTitle 文档标题（用户输入的标题，非文件名）
+     * @param text 要入库的纯文本
+     * @param knowledgeBaseId 目标知识库 id（0L=默认库，>0=自建库，禁止负数）
+     * @return 事件流，调用方 collect 观察进度
+     */
+    fun ingestText(
+        documentTitle: String,
+        text: String,
+        knowledgeBaseId: Long
+    ): Flow<IngestionEvent> = flow {
+        // 参数校验（与 ingest 一致的 fail-fast + input 无资源需关闭）
+        require(knowledgeBaseId >= 0) {
+            "knowledgeBaseId 不能为负数（收到 $knowledgeBaseId）"
+        }
+        require(documentTitle.isNotBlank()) {
+            "documentTitle 不能为空白"
+        }
+        require(text.length <= MAX_TEXT_INGEST_LEN) {
+            "文本过长（${text.length} 字符），单次最多 $MAX_TEXT_INGEST_LEN 字符"
+        }
+
+        val startMs = System.currentTimeMillis()
+        emit(IngestionEvent.Started)
+
+        try {
+            // 文本直接切片（跳过解析）
+            val chunks = chunker.chunk(text)
+            emit(IngestionEvent.Chunked(chunks.size))
+
+            // 空文本：正常完成，不视为错误
+            if (chunks.isEmpty()) {
+                emit(IngestionEvent.Completed(IngestionResult(
+                    totalChunks = 0,
+                    embeddedChunks = 0,
+                    skippedChunks = 0,
+                    skippedDetails = emptyList(),
+                    knowledgeBaseId = knowledgeBaseId,
+                    documentTitle = documentTitle,
+                    durationMs = System.currentTimeMillis() - startMs
+                )))
+                return@flow
+            }
+
+            // 逐条嵌入 + 入库（复用 ingest 的降级逻辑）
+            val skipped = mutableListOf<SkippedChunk>()
+            var embedded = 0
+            chunks.forEachIndexed { index, chunkText ->
+                coroutineContext.ensureActive()
+                val title = "${documentTitle}#${index + 1}"
+                val embedding: FloatArray? = try {
+                    embedder.embed(chunkText)
+                } catch (e: EmbeddingException) {
+                    val reason = "嵌入失败: ${e.stage}"
+                    skipped.add(SkippedChunk(index, title, reason))
+                    emit(IngestionEvent.ChunkSkipped(index, chunks.size, title, reason))
+                    null
+                }
+                val chunk = KnowledgeChunk(
+                    title = title,
+                    content = chunkText,
+                    embedding = embedding,
+                    knowledgeBaseId = knowledgeBaseId
+                )
+                repository.addChunk(chunk)
+                if (embedding != null) {
+                    embedded++
+                    emit(IngestionEvent.ChunkEmbedded(index, chunks.size, title))
+                }
+            }
+
+            emit(IngestionEvent.Completed(IngestionResult(
+                totalChunks = chunks.size,
+                embeddedChunks = embedded,
+                skippedChunks = skipped.size,
+                skippedDetails = skipped,
+                knowledgeBaseId = knowledgeBaseId,
+                documentTitle = documentTitle,
+                durationMs = System.currentTimeMillis() - startMs
+            )))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: LinkageError) {
+            emit(IngestionEvent.Failed(e))
+        } catch (e: IllegalArgumentException) {
+            throw e
+        } catch (e: Exception) {
+            emit(IngestionEvent.Failed(e))
         }
     }
 }

@@ -15,6 +15,7 @@ import io.prism.data.KnowledgeBaseRepository
 import io.prism.data.McpServerRepository
 import io.prism.data.MyObjectBox
 import io.prism.data.ProviderConfigRepository
+import io.prism.data.SessionRepository
 import io.prism.document.Chunker
 import io.prism.document.DocumentParserRegistry
 import io.prism.embedding.Embedder
@@ -31,6 +32,7 @@ import io.prism.network.McpClientManager
 import io.prism.network.McpToolProvider
 import io.prism.network.McpToolProviderDispatcher
 import io.prism.network.OpenAICompatibleProvider
+import io.prism.network.WebSearchLocalToolExecutor
 import io.prism.security.ApiKeyRepository
 import io.prism.security.CryptoService
 import io.prism.security.KeystoreCryptoService
@@ -94,6 +96,14 @@ class PrismApplication : Application() {
             // 默认 false 时 4xx 被 SSE 插件转成普通异常，落入通用网络错误分支）。
             expectSuccess = true
             install(SSE)
+            // UXR6 问题 5（TTFT）：共享 client 此前未安装 HttpTimeout，`timeout {}` DSL 为 no-op，
+            // 连接挂起时（首 token 前的网络 RTT 无超时保护）会无限等待。此处仅配 connect/socket
+            // 超时（连接建连 + 读 socket 空闲），**不配 requestTimeoutMillis** —— 流式 SSE 长连接
+            // 会被整请求超时误杀（对话>30s 即断流）。
+            install(HttpTimeout) {
+                connectTimeoutMillis = STREAM_CONNECT_TIMEOUT_MS
+                socketTimeoutMillis = STREAM_SOCKET_TIMEOUT_MS
+            }
         }
     }
 
@@ -104,6 +114,15 @@ class PrismApplication : Application() {
 
     /** MCP Server 配置仓库（延迟初始化，供 UI 读取/管理 MCP Server 配置） */
     val mcpServerRepository: McpServerRepository by lazy { McpServerRepository(boxStore) }
+
+    /**
+     * 会话历史仓库（UX-001 问题 4，ADR-021）—— 历史对话记录 CRUD。
+     *
+     * 依赖 [boxStore]（ObjectBox 单例），会话列表 StateFlow 供
+     * [io.prism.ui.conversationlist.ConversationListScreen] 订阅，持久化由
+     * [io.prism.ui.chat.ConversationViewModel]（[io.prism.data.Session.messagesJson]）触发。
+     */
+    val sessionRepository: SessionRepository by lazy { SessionRepository(boxStore) }
 
     /** MCP Client 连接层（依赖 httpClient + apiKeyRepository，ADR-005 5.3） */
     val mcpClientManager: McpClientManager by lazy {
@@ -178,12 +197,18 @@ class PrismApplication : Application() {
 
     /** 内置 Filesystem MCP Server（US-009，ADR-006 5.5）—— SAF 访问层 + 确认门禁 */
     val filesystemMcpServer: FilesystemMcpServer by lazy {
-        FilesystemMcpServer(safFileAccess, confirmationGate)
+        FilesystemMcpServer(
+            safFileAccess,
+            confirmationGate,
+            // UXR3 问题 10（ADR-023，guardrail M-2 修复）：AUTO 模式跳过确认门禁，
+            // 使「所有工具直接放行」声明在文件系统工具上同样成立
+            approvalModeProvider = { toolApprovalConfigRepository.getMode() }
+        )
     }
 
-    /** 本地 MCP 工具提供者（进程内桥接 Filesystem Server，ADR-006 5.5） */
+    /** 本地 MCP 工具提供者（进程内桥接 Filesystem Server，ADR-006 5.5；Fetch 复用 searchHttpClient，UXR3 问题 11） */
     val localMcpToolProvider: LocalMcpToolProvider by lazy {
-        LocalMcpToolProvider(filesystemMcpServer)
+        LocalMcpToolProvider(filesystemMcpServer, searchHttpClient)
     }
 
     /** MCP 工具提供者路由（按 serverType 分发 LOCAL/REMOTE，ADR-006 5.6） */
@@ -321,6 +346,9 @@ class PrismApplication : Application() {
      * 不依赖 SkillRepository/SkillRegistry（tools + mcpServers 由调用方 Phase D ConversationViewModel 传入，
      * per phaseC 考古报告 R8：单一职责）。
      *
+     * **问题 8b（ADR-020）**：本地工具分支由 [compositeLocalToolExecutor] 组合承载
+     * （M6 跨 App `cross_app__*` + 联网搜索 `web_search__*`），SkillExecutor 零改动感知全部本地工具。
+     *
      * **安全边界**（ADR-014 5.5）：
      * - 用户确认：每个 tool_call 执行前通过 [confirmationGate]
      * - 超时防护：单次 callTool 包装 withTimeout（默认 30s）
@@ -338,7 +366,9 @@ class PrismApplication : Application() {
             mcpToolProvider = mcpToolProviderDispatcher,
             confirmationGate = confirmationGate,
             skillExecutionRepository = skillExecutionRepository,
-            localToolExecutor = crossAppLocalToolExecutor
+            localToolExecutor = compositeLocalToolExecutor,
+            // UXR3 问题 10（ADR-023）：工具审批模式 —— 从配置仓库实时读取（运行时切换即时生效）
+            approvalModeProvider = { toolApprovalConfigRepository.getMode() }
         )
     }
 
@@ -410,6 +440,62 @@ class PrismApplication : Application() {
      */
     val crossAppLocalToolExecutor: CrossAppLocalToolExecutor by lazy {
         CrossAppLocalToolExecutor(crossAppLauncher)
+    }
+
+    /**
+     * 联网搜索专用 HTTP 客户端（问题 8b，ADR-020）。
+     *
+     * **与共享 [httpClient] 的差异**：
+     * - `install(HttpTimeout)`：启用请求级超时配置（共享 client 未安装此插件，`timeout {}` DSL 为 no-op）
+     * - 不安装 SSE 插件（搜索非流式对话，无需 SSE）
+     * - `expectSuccess = true`：非 2xx（如 Bing 反爬 403/429）抛异常，由执行器降级为错误文案
+     *
+     * 仿 [downloadHttpClient] 模式（US-028），独立 client 避免与共享 client 的 SSE 插件耦合。
+     */
+    val searchHttpClient: HttpClient by lazy {
+        HttpClient(OkHttp) {
+            expectSuccess = true
+            install(HttpTimeout) {
+                requestTimeoutMillis = SEARCH_REQUEST_TIMEOUT_MS
+            }
+        }
+    }
+
+    /**
+     * 联网搜索本地工具执行器（问题 8b，ADR-020）—— 实现 LocalToolExecutor 接口。
+     *
+     * 注册 `web_search__search` 工具，通过 Bing RSS 端点（零配置免费、国内可访问）检索，
+     * 由 [skillExecutor] 的本地工具分支调用。
+     */
+    val webSearchLocalToolExecutor: WebSearchLocalToolExecutor by lazy {
+        WebSearchLocalToolExecutor(searchHttpClient)
+    }
+
+    /**
+     * 知识库本地工具执行器（UXR4 问题 2/3，ADR-024）—— 实现 LocalToolExecutor 接口。
+     *
+     * 注册 `knowledge_base__search` / `knowledge_base__list_documents` /
+     * `knowledge_base__get_document_content` 三个工具，使 LLM 能主动枚举/检索/读取
+     * Prism 知识库（解决 LLM 误把知识库当 Filesystem、RAG 只见第一篇的问题）。
+     * 依赖 [embedder] + [knowledgeBaseRepository]，由 [compositeLocalToolExecutor] 注入。
+     */
+    val knowledgeBaseLocalToolExecutor: io.prism.network.KnowledgeBaseLocalToolExecutor by lazy {
+        io.prism.network.KnowledgeBaseLocalToolExecutor(embedder, knowledgeBaseRepository)
+    }
+
+    /**
+     * 复合本地工具执行器（问题 8b，ADR-020；UXR4 问题 2/3，ADR-024 扩展）——
+     * 组合 M6 跨 App + 联网搜索 + 知识库。
+     *
+     * 将 [crossAppLocalToolExecutor]（`cross_app__*`）、[webSearchLocalToolExecutor]
+     * （`web_search__*`）与 [knowledgeBaseLocalToolExecutor]（`knowledge_base__*`）
+     * 组合为单个 [io.prism.skill.LocalToolExecutor] 门面，
+     * 注入 [skillExecutor]，使 SkillExecutor 零改动感知全部本地工具。
+     */
+    val compositeLocalToolExecutor: io.prism.skill.CompositeLocalToolExecutor by lazy {
+        io.prism.skill.CompositeLocalToolExecutor(
+            listOf(crossAppLocalToolExecutor, webSearchLocalToolExecutor, knowledgeBaseLocalToolExecutor)
+        )
     }
 
     /**
@@ -487,6 +573,32 @@ class PrismApplication : Application() {
      * 由 [slidingWindowMemoryManager] 读取 N 值，由记忆管理 UI（US-036）写入 N 值。
      */
     val memoryConfigRepository: MemoryConfigRepository by lazy { MemoryConfigRepository(memoryConfigDataStore) }
+
+    /**
+     * 深度思考配置仓库（问题 8a，ADR-020）—— 持久化深度思考开关与思考强度。
+     *
+     * 使用独立 DataStore（`prism_thinking_config`），与 API Key / 文件系统根目录 / 记忆配置 /
+     * 档位 DataStore 隔离。默认关闭（避免向不兼容端点发送 thinking 参数），用户可在设置中开启。
+     *
+     * 由 [io.prism.ui.chat.ConversationViewModel] 读取决定是否发送 thinking/reasoning_effort，
+     * 由 [io.prism.ui.settings.SettingsViewModel]（US-042 设置 UI）写入用户偏好。
+     */
+    val thinkingConfigRepository: io.prism.config.ThinkingConfigRepository by lazy {
+        io.prism.config.ThinkingConfigRepository(thinkingConfigDataStore)
+    }
+
+    /**
+     * 工具审批模式配置仓库（UXR3 问题 10，ADR-023）—— 持久化 LLM 工具调用权限策略。
+     *
+     * 使用独立 DataStore（`prism_tool_approval`），与 API Key / 文件系统根目录 / 记忆配置 /
+     * 档位 / 思考 DataStore 隔离。默认 MANUAL（手动审批，安全优先）。
+     *
+     * 由 [skillExecutor]（作为 approvalModeProvider）与 [io.prism.ui.settings.SettingsViewModel]
+     * 读取/写入。切换模式运行时即时生效（无需重启）。
+     */
+    val toolApprovalConfigRepository: io.prism.config.ToolApprovalConfigRepository by lazy {
+        io.prism.config.ToolApprovalConfigRepository(toolApprovalDataStore)
+    }
 
     /**
      * 对话摘要生成器（US-032，ADR-015 5.3）—— 使用 LLM 非流式请求对旧消息生成摘要。
@@ -646,6 +758,12 @@ class PrismApplication : Application() {
     /** 记忆系统配置 DataStore 进程级单例（ADR-015 5.3，US-032 滑动窗口 N 持久化）。 */
     private val Context.memoryConfigDataStore by preferencesDataStore(name = "prism_memory_config")
 
+    /** 深度思考配置 DataStore 进程级单例（问题 8a，ADR-020，思考开关 + 强度持久化）。 */
+    private val Context.thinkingConfigDataStore by preferencesDataStore(name = "prism_thinking_config")
+
+    /** 工具审批模式配置 DataStore 进程级单例（UXR3 问题 10，ADR-023，审批模式持久化）。 */
+    private val Context.toolApprovalDataStore by preferencesDataStore(name = "prism_tool_approval")
+
     /** 设备档位配置 DataStore 进程级单例（ADR-017 4.4，US-040 用户手动覆盖持久化）。 */
     private val Context.tierConfigDataStore by preferencesDataStore(name = "prism_tier_config")
 
@@ -665,5 +783,28 @@ class PrismApplication : Application() {
          * overlap = chunkSize / 8 ≈ 64，符合 RAG 最佳实践（保留上下文衔接又不过度冗余）。
          */
         private const val DEFAULT_CHUNK_OVERLAP = 64
+
+        /**
+         * 联网搜索请求超时（问题 8b，ADR-020）。
+         *
+         * Bing RSS 检索为同步等待结果，设置 10s 上限避免网络抖动长时间阻塞工具回路
+         * （SkillExecutor 单次工具调用外层还有 30s withTimeout 兜底）。
+         */
+        private const val SEARCH_REQUEST_TIMEOUT_MS = 10_000L
+
+        /**
+         * UXR6 问题 5：流式共享 client 的建连超时（毫秒）。
+         *
+         * 首 token 前的网络 RTT 若因建连挂起会无限等待（共享 client 此前无 HttpTimeout）。
+         * 仅约束建连与 socket 空闲读，**不约束整请求时长**（流式 SSE 长连接）。
+         */
+        internal const val STREAM_CONNECT_TIMEOUT_MS = 15_000L
+
+        /**
+         * UXR6 问题 5：流式共享 client 的 socket 读空闲超时（毫秒）。
+         *
+         * 两次数据读取间隔超过该值视为连接挂起（断流）。SSE 心跳/分块间隔通常远小于此。
+         */
+        internal const val STREAM_SOCKET_TIMEOUT_MS = 60_000L
     }
 }

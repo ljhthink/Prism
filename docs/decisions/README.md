@@ -24,6 +24,15 @@
 | ADR-016 | M6 跨 App 调用架构（US-037） | Accepted | 2026-08-11 | [ADR-016-m6-cross-app-integration.md](ADR-016-m6-cross-app-integration.md) |
 | ADR-017 | M7 设备适配与降级架构（US-007） | Accepted | 2026-08-11 | [ADR-017-m7-device-adaptation.md](ADR-017-m7-device-adaptation.md) |
 | ADR-018 | M8 集成与发布架构（US-044~US-047） | Accepted | 2026-08-11 | [ADR-018-m8-release-architecture.md](ADR-018-m8-release-architecture.md) |
+| ADR-019 | Skill 渐进式加载 + 默认 persona（修复提示词污染） | Accepted | 2026-08-12 | [ADR-019-skill-progressive-disclosure.md](ADR-019-skill-progressive-disclosure.md) |
+| ADR-020 | 深度思考 + 联网搜索（问题 8 修复） | Proposed | 2026-08-14 | [ADR-020-thinking-and-web-search.md](ADR-020-thinking-and-web-search.md) |
+| ADR-021 | 用户体验问题修复（键盘/渲染/能力开关/折叠展示/审批放宽/知识库管理/历史会话） | Proposed | 2026-08-14 | [ADR-021-ux-issue-fixes.md](ADR-021-ux-issue-fixes.md) |
+| ADR-022 | UX 二次反馈修复（Markdown 渲染稳定性/工具名规范化/换行保留/MCP 状态真实性） | Proposed | 2026-08-15 | [ADR-022-ux-r2-markdown-tool-mcp-fixes.md](ADR-022-ux-r2-markdown-tool-mcp-fixes.md) |
+| ADR-023 | UX 三次反馈修复（键盘真机 IME/工具审批三模式/知识库内容查看/消息编辑复制/工具禁用） | Proposed | 2026-08-15 | [ADR-023-ux-r3-fixes.md](ADR-023-ux-r3-fixes.md) |
+| ADR-024 | UXR4 真机反馈修复（reasoning_content 回传/知识库工具/状态机/持久化） | Proposed | 2026-08-15 | [ADR-024-uxr4-fixes.md](ADR-024-uxr4-fixes.md) |
+| ADR-025 | UXR5 真机反馈修复（markdown 流式渲染/工具 UI 时序/搜索中文/tool_calls 完整性） | Proposed | 2026-08-15 | [ADR-025-uxr5-fixes.md](ADR-025-uxr5-fixes.md) |
+| ADR-026 | UXR6 真机反馈修复（搜索质量/工具熔断 + markdown 渲染 + RAG UI 状态 + 引用覆盖 + TTFT + 日志诊断） | Proposed | 2026-08-16 | [ADR-026-uxr6-fixes.md](ADR-026-uxr6-fixes.md) |
+| ADR-027 | UXR7 真机反馈修复（搜索核心词重试 + markdown 表格预处理 + 引用覆盖读全文 + 熔断扩展） | Proposed | 2026-08-16 | [ADR-027-uxr7-fixes.md](ADR-027-uxr7-fixes.md) |
 
 ## ADR 生命周期
 

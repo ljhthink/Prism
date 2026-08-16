@@ -256,4 +256,99 @@ class SettingsViewModelTest {
 
         assertNull("不存在的 API Key 应返回 null", loaded)
     }
+
+    // ==================== removeApiKey（BR-security-006 / DEF-001 B-2 修复） ====================
+
+    /**
+     * 验证 removeApiKey 委托 apiKeyRepository.removeApiKey 删除已存密钥。
+     *
+     * 场景：用户在 ApiKeySheet 中清空输入框后点击保存，应清除已存密钥。
+     * BR-security-006 子语义 (3)：UI 层清空 → removeApiKey 删除。
+     */
+    @Test
+    fun `removeApiKey deletes existing key via repository`() = runTest(mainDispatcher) {
+        // 先保存一个密钥
+        apiKeyRepository.saveApiKey("openai", "sk-will-be-removed")
+        assertEquals("sk-will-be-removed", apiKeyRepository.readApiKey("openai").first())
+
+        val vm = createViewModel()
+        // 模拟 ApiKeySheet 清空后保存：调用 removeApiKey
+        vm.removeApiKey("openai")
+
+        assertNull("removeApiKey 后密钥应被删除", apiKeyRepository.readApiKey("openai").first())
+    }
+
+    /**
+     * 验证 removeApiKey 对不存在的 key 幂等（不抛异常）。
+     *
+     * 这是 DataStore 的 remove 操作的固有保证，但需验证 ViewModel 层委托不破坏此保证。
+     */
+    @Test
+    fun `removeApiKey for nonexistent key is idempotent`() = runTest(mainDispatcher) {
+        val vm = createViewModel()
+
+        // 调用 removeApiKey 删除从未存在的 key，不应抛异常
+        vm.removeApiKey("never-existed")
+
+        assertNull(apiKeyRepository.readApiKey("never-existed").first())
+    }
+
+    /**
+     * 验证 saveApiKey 空值跳过 + removeApiKey 显式删除的语义差异（BR-security-006 核心）。
+     *
+     * - saveApiKey(key, "") → 空值跳过，已存密钥保留（ProviderEditSheet 场景）
+     * - removeApiKey(key) → 显式删除已存密钥（ApiKeySheet 场景）
+     */
+    @Test
+    fun `saveApiKey empty skips while removeApiKey deletes`() = runTest(mainDispatcher) {
+        apiKeyRepository.saveApiKey("openai", "sk-original")
+        val vm = createViewModel()
+
+        // saveApiKey 空值：不覆盖已有密钥
+        vm.saveApiKey("openai", "")
+        assertEquals("saveApiKey 空值不应覆盖已有密钥", "sk-original", apiKeyRepository.readApiKey("openai").first())
+
+        // removeApiKey：显式删除
+        vm.removeApiKey("openai")
+        assertNull("removeApiKey 后已存密钥应被删除", apiKeyRepository.readApiKey("openai").first())
+    }
+
+    // ==================== 问题 8a：深度思考配置（ADR-020） ====================
+
+    @Test
+    fun `thinkingEnabled defaults to false without repository`() = runTest(mainDispatcher) {
+        // 未注入 ThinkingConfigRepository 时降级为默认关闭（向后兼容）
+        val vm = createViewModel()
+        assertTrue("默认关闭深度思考", !vm.thinkingEnabled.value)
+        assertEquals("默认思考强度 high", "high", vm.reasoningEffort.value)
+    }
+
+    @Test
+    fun `setThinkingEnabled persists and updates flow`() = runTest(mainDispatcher) {
+        val thinkingRepo = io.prism.config.ThinkingConfigRepository(
+            FakePreferenceDataStore(androidx.datastore.preferences.core.emptyPreferences())
+        )
+        val vm = SettingsViewModel(providerRepository, apiKeyRepository, thinkingRepo)
+        val job = launch { vm.thinkingEnabled.collect { } }
+
+        assertTrue("初始默认关闭", !vm.thinkingEnabled.value)
+        vm.setThinkingEnabled(true)
+        assertTrue("开启后 thinkingEnabled 应为 true", vm.thinkingEnabled.value)
+        assertEquals("持久化值应可读", true, thinkingRepo.getThinkingEnabled())
+        job.cancel()
+    }
+
+    @Test
+    fun `setReasoningEffort persists valid value`() = runTest(mainDispatcher) {
+        val thinkingRepo = io.prism.config.ThinkingConfigRepository(
+            FakePreferenceDataStore(androidx.datastore.preferences.core.emptyPreferences())
+        )
+        val vm = SettingsViewModel(providerRepository, apiKeyRepository, thinkingRepo)
+        val job = launch { vm.reasoningEffort.collect { } }
+
+        vm.setReasoningEffort("max")
+        assertEquals("max", vm.reasoningEffort.value)
+        assertEquals("持久化值应可读", "max", thinkingRepo.getReasoningEffort())
+        job.cancel()
+    }
 }

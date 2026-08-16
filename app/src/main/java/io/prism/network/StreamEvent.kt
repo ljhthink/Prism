@@ -16,10 +16,23 @@ package io.prism.network
  * **M4 设计**（ADR-014 5.1）：[ToolCallStart] / [ToolCallDelta] / [ToolCallComplete]
  * 命名与语义不绑定任何 Provider 协议（Provider 中立），[ToolCallComplete.arguments]
  * 已解析为 [Map]，调用方无需处理 JSON string。现有 [Delta] / [Done] / [Error] 语义不变，向后兼容。
+ *
+ * **问题 8a 设计**（ADR-020）：[ReasoningDelta] 表示深度思考模式（thinking）的推理过程增量
+ * （DeepSeek `delta.reasoning_content`），与最终答案 [Delta]（`delta.content`）语义区分。
+ * UI 可据此将思考过程与最终答案分开展示。
  */
 sealed class StreamEvent {
     /** 增量 token 内容（可能为空白，需自行 trim 判断）。 */
     data class Delta(val content: String) : StreamEvent()
+
+    /**
+     * 深度思考推理过程增量（问题 8a，ADR-020）。
+     *
+     * 深度思考模式下（`thinking` 参数开启），DeepSeek 流式响应先输出 `delta.reasoning_content`
+     * （思考过程），后输出 `delta.content`（最终答案）。本事件携带思考过程增量片段，
+     * 由调用方按需展示（如独立样式 / 折叠区域），避免与最终答案混淆。
+     */
+    data class ReasoningDelta(val content: String) : StreamEvent()
 
     /** 流式结束（`[DONE]` 或正常完成）。 */
     data object Done : StreamEvent()
