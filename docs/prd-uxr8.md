@@ -207,7 +207,7 @@
 |---|---|---|---|
 | 批次1 | Bug1（RagTarget 持久化）/ Bug2（L2 触发）/ Bug3（弹层 IME 双模式，含 OBS-2 终版） | ✅ 完成（2026-08-16） | ac-verifier 19/19 AC PASS；全量 1810 用例 0 失败；模拟器键盘场景验证（[debug 报告](../reports/2026-08-16-uxr8-b1-bug3-obs2-debug.md)）；ADR-028 |
 | 批次2 | O1（L3 画像自然语言）/ O2（MCP 描述+KeyHint）/ O3（Firecrawl+n8n+TrendsMCP 模板）/ O4（Skills：Humanizer-zh/web-research/docx/xlsx）/ O5（搜索扩容 10+合并 12-16） | ✅ 完成（2026-08-16） | ac-verifier 17/17 AC PASS（TKN-UXR8-B2-ACCEPTANCE-001）；guardrail PASS-with-notes（G2-01~04 即时闭环，G2-05 列入批次3）；全量 1873 用例 0 失败；模拟器验证 O1/O2/O3/O4 UI 全部通过；ADR-029 |
-| 批次3 | N1（用户规则文件）/ N2（反问 Phase1+2）/ N3（视觉方案 A） | ✅ 完成（2026-08-17） | ac-verifier 3/3 AC PASS（TKN-UXR8-B3-ACCEPTANCE-001）；guardrail 两轮（TKN-UXR8-B3-GUARDRAIL-001 有条件通过 → 002 复审通过）；全量 1948 用例 0 失败；lintDebug 0 errors；BR-ops-002 新增；G2-05 技术债闭环；ADR-030 |
+| 批次3 | N1（用户规则文件）/ N2（反问 Phase1+2）/ N3（视觉方案 A） | ✅ 完成（2026-08-17） | ac-verifier 3/3 AC PASS（TKN-UXR8-B3-ACCEPTANCE-001）；guardrail 两轮（TKN-UXR8-B3-GUARDRAIL-001 有条件通过 → 002 复审通过）；全量 1948 用例 0 失败；lintDebug 0 errors；BR-ops-002 新增；G2-05 技术债闭环；模拟器验证 N1/N3 UI 通过（emulator-5556，无崩溃）；ADR-030 |
 
 ---
 
