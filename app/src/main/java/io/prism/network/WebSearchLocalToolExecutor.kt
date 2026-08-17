@@ -85,7 +85,9 @@ class WebSearchLocalToolExecutor(
                 // LOW-01（guardrail TKN-UXR7R2-GUARDRAIL-001）：候选数截断前 N 个，
                 // 防止极端超长 query 产生过多候选放大串行网络请求。
                 val coreTerms = extractCoreTerms(query).take(MAX_CORE_TERM_RETRIES)
-                val primaryItems = fetchSearch(query)
+                // UXR9 Bug2 回归修复：主查询结果先做条目级过滤（丢弃仅命中单字"昔"等
+                // 分词坍缩噪声条目），再判相关性——混合集不再整体放行，噪声不进入引用来源。
+                val primaryItems = filterRelevantItems(fetchSearch(query), coreTerms)
                 val primaryRelevant = primaryItems.isNotEmpty() &&
                     (coreTerms.isEmpty() || isRelevant(primaryItems, coreTerms))
 
@@ -104,7 +106,8 @@ class WebSearchLocalToolExecutor(
                         Log.w(LOG_TAG, "primary search irrelevant for core=${term.take(LOG_QUERY_MAX_LEN)}, retrying with core term")
                         val retryItems = fetchSearch(term)
                         if (retryItems.isNotEmpty() && isRelevant(retryItems, listOf(term))) {
-                            return@withContext formatSearchResult(retryItems, maxResults)
+                            // UXR9 Bug2：重试结果同样做条目级过滤，丢弃仅含单字/子串的噪声条目
+                            return@withContext formatSearchResult(filterRelevantItems(retryItems, listOf(term)), maxResults)
                         }
                     }
                     // 所有核心词重试仍不相关 → 判定为"搜索失败"（触发 SkillExecutor 重复工具熔断，
@@ -332,6 +335,30 @@ class WebSearchLocalToolExecutor(
         if (coreTerms.isEmpty()) return true
         return items.any { item ->
             coreTerms.any { term -> item.title.contains(term) || item.snippet.contains(term) }
+        }
+    }
+
+    /**
+     * 条目级过滤（UXR9 Bug2 回归修复，TKN-UXR9-ARCHAEOLOGY-001）：仅保留含**任一完整核心词**
+     * 的结果条目。
+     *
+     * **背景**：Bing 对冷门中文新词（如"昔涟"）在长 query 中分词坍缩，可能返回**混合集**——
+     * 部分条目含完整"昔涟"，部分条目仅命中单字"昔"（噪声）。此前 [isRelevant] 是**集合级 any**
+     * 判定（任一条目含任一核心词即通过），混合集整体放行，导致"昔"单字噪声条目混入引用来源
+     *（UXR9 真机实测："多篇返回的网络资料均是只有'昔'一个字的资料"）。
+     *
+     * 本函数按**条目**过滤：title+snippet 拼接后含任一 ≥2 字核心词才保留。核心词为空
+     *（纯英文查询 / 无法提取）时不过滤，返回原列表（避免误杀英文相关结果）。
+     *
+     * @param items 搜索结果列表
+     * @param coreTerms 核心中文词候选列表（[extractCoreTerms] 的返回值，可为空）
+     * @return 过滤后的条目（仅含核心词命中的；coreTerms 为空时原样返回）
+     */
+    internal fun filterRelevantItems(items: List<SearchItem>, coreTerms: List<String>): List<SearchItem> {
+        if (items.isEmpty() || coreTerms.isEmpty()) return items
+        return items.filter { item ->
+            val haystack = item.title + "\n" + item.snippet
+            coreTerms.any { term -> term.length >= 2 && haystack.contains(term) }
         }
     }
 

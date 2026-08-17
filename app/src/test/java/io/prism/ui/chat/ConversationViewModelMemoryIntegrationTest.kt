@@ -465,8 +465,9 @@ class ConversationViewModelMemoryIntegrationTest {
             applicationScope = persistScope
         )
 
-        // 发送几条消息建立会话
-        vm.sendMessage("用简洁风格回复")
+        // 发送几条消息建立会话（UXR9 Bug4 适配：首条消息 ≥8 字且含偏好关键词，
+        // 否则被 L2 重要性过滤跳过，count=0 断言失败）
+        vm.sendMessage("我的偏好是用简洁风格回复")
         advanceUntilIdle()
         vm.sendMessage("继续")
         advanceUntilIdle()
@@ -509,8 +510,8 @@ class ConversationViewModelMemoryIntegrationTest {
             applicationScope = persistScope
         )
 
-        // 建立会话
-        vm.sendMessage("用简洁风格回复")
+        // 建立会话（UXR9 Bug4 适配：首条消息 ≥8 字且含偏好关键词）
+        vm.sendMessage("我的偏好是用简洁风格回复")
         advanceUntilIdle()
         vm.sendMessage("继续")
         advanceUntilIdle()

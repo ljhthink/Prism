@@ -356,8 +356,10 @@ class OnnxEmbedderTest {
     }
 
     companion object {
-        private const val MODEL_PATH = "src/main/assets/models/model_qint8_arm64.onnx"
-        private const val VOCAB_PATH = "src/main/assets/models/vocab.txt"
+        // Q-LOW-6（guardrail TKN-UXR9-GUARDRAIL-002）：旧英文模型仅测试使用，
+        // 已移出 main assets（生产 APK 不再打包）至 test resources
+        private const val MODEL_PATH = "src/test/resources/models/model_qint8_arm64.onnx"
+        private const val VOCAB_PATH = "src/test/resources/models/vocab.txt"
         private const val FIVE_MIN_MS = 5L * 60 * 1000
         // INT8 量化模型（ARM64 量化版在 x86 JVM 测试）与 Python golden master 对比容差：
         // 量化算子跨平台/跨实现有 1-3% 相对误差，L2 归一化后分量绝对误差 < 0.05 属正常。

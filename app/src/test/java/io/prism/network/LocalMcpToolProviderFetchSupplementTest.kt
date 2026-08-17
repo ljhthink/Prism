@@ -61,6 +61,28 @@ class LocalMcpToolProviderFetchSupplementTest {
     }
 
     @Test
+    fun `isPublicHttpUrl rejects userinfo with public-look host and private target`() {
+        // S-1（guardrail TKN-UXR9-GUARDRAIL-001，CWE-918 SSRF fail-open 回归）：
+        // `http://evil.com:80@127.0.0.1/` —— 若只 `substringBefore(':')` 会截出 `evil.com`（公网
+        // 放行），但 OkHttp 实际解析 userinfo 后发往 127.0.0.1。修复须先剥离 userinfo 再取 host。
+        assertFalse(providerWith().isPublicHttpUrl("http://evil.com:80@127.0.0.1/x"))
+        assertFalse(providerWith().isPublicHttpUrl("https://evil.com:443@10.0.0.1/x"))
+        assertFalse(providerWith().isPublicHttpUrl("http://evil.com@169.254.169.254/latest/meta-data/"))
+    }
+
+    @Test
+    fun `isPublicHttpUrl accepts public host with userinfo`() {
+        // 合法 userinfo + 公网 host：剥离 userinfo 后 host 为公网域名 → 放行
+        assertTrue(providerWith().isPublicHttpUrl("http://user:pass@www.example.com/x"))
+    }
+
+    @Test
+    fun `isPublicHttpUrl rejects unclosed ipv6 bracket`() {
+        // L-4：未闭合的 IPv6 `[` → fail-closed
+        assertFalse(providerWith().isPublicHttpUrl("http://[::1/x"))
+    }
+
+    @Test
     fun `isPublicHttpUrl rejects integer and hex encoded loopback IPs`() {
         // 整数 IP 2130706433 = 127.0.0.1；十六进制 0x7f000001 = 127.0.0.1
         assertFalse(providerWith().isPublicHttpUrl("http://2130706433/x"))

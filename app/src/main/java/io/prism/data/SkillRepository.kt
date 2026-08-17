@@ -115,9 +115,30 @@ class SkillRepository(private val boxStore: BoxStore) {
     }
 
     /**
-     * 获取所有已启用的 Skill 配置（供 ConversationViewModel 注入）。
+     * 标记 Skill 删除状态（用户删除 Skill 后置 true，扫描不再恢复）。
+     *
+     * **删除语义**（修复：内置 Skill 无法删除文件的限制）：
+     * - LOCAL_USER / REMOTE：调用方先删除磁盘目录，再置 hidden（双保险）
+     * - LOCAL_BUILTIN：无法删除 assets 文件，仅置 hidden，扫描同步时跳过恢复
+     *
+     * @param id SkillConfig id
+     * @param hidden 是否已删除（隐藏）
      */
-    fun getEnabled(): List<SkillConfig> = box.all.filter { it.isEnabled && it.isInstalled }
+    fun setHidden(id: Long, hidden: Boolean) {
+        box.get(id)?.let { config ->
+            config.isHidden = hidden
+            config.updatedAt = System.currentTimeMillis()
+            box.put(config)
+            refreshFlows()
+        }
+    }
+
+    /**
+     * 获取所有已启用的 Skill 配置（供 ConversationViewModel 注入）。
+     *
+     * 过滤条件：启用 + 已安装 + 未删除（用户删除的 Skill 不参与工具注入）。
+     */
+    fun getEnabled(): List<SkillConfig> = box.all.filter { it.isEnabled && it.isInstalled && !it.isHidden }
 
     /**
      * 刷新 Skill 列表的 Flow。

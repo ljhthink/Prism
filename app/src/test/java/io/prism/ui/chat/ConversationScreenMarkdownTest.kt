@@ -268,4 +268,34 @@ https://example.com/a
     fun `mapCrossAppResult unknown result code returns unknown`() {
         assertEquals("未知结果（resultCode=42）", mapCrossAppResult(42, null, null))
     }
+
+    // ==================== UXR9 US-908：工具参数摘要 summarizeToolArguments ====================
+
+    @Test
+    fun `summarizeToolArguments compacts whitespace`() {
+        val args = """{"query": "Prism 是什么", "topK": 5}"""
+        val out = summarizeToolArguments(args)
+        // 摘要压缩所有空白（含字符串值内的空格）为单行紧凑 JSON
+        assertEquals("""{"query":"Prism是什么","topK":5}""", out)
+    }
+
+    @Test
+    fun `summarizeToolArguments truncates long args`() {
+        val longArgs = """{"query":"${"长".repeat(200)}"}"""
+        val out = summarizeToolArguments(longArgs)
+        assertTrue("长参数应截断到上限", out.length <= 81) // 80 + 省略号
+        assertTrue("截断末尾应带省略号", out.endsWith("…"))
+    }
+
+    @Test
+    fun `summarizeToolArguments short args unchanged`() {
+        val args = """{"query":"你好"}"""
+        assertEquals(args, summarizeToolArguments(args))
+    }
+
+    @Test
+    fun `summarizeToolArguments empty input returns empty`() {
+        assertEquals("", summarizeToolArguments(""))
+        assertEquals("", summarizeToolArguments("   "))
+    }
 }

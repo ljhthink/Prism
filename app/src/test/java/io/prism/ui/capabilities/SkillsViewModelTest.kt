@@ -116,6 +116,28 @@ class SkillsViewModelTest {
         assertEquals("associateBy 重复键应取 last", "second", result[0].manifest?.description)
     }
 
+    @Test
+    fun `combineSkills filters out hidden (deleted) skills`() {
+        val visible = makeConfig(name = "translator", id = 1L, isHidden = false)
+        val deleted = makeConfig(name = "code-reviewer", id = 2L, isHidden = true)
+        val entry = makeSkillEntry(name = "translator")
+
+        val result = SkillsViewModel.combineSkills(listOf(visible, deleted), listOf(entry))
+
+        assertEquals("已删除 Skill 不应出现在列表", 1, result.size)
+        assertEquals("translator", result[0].config.name)
+    }
+
+    @Test
+    fun `combineSkills returns empty when all configs are hidden`() {
+        val deleted1 = makeConfig(name = "a", id = 1L, isHidden = true)
+        val deleted2 = makeConfig(name = "b", id = 2L, isHidden = true)
+
+        val result = SkillsViewModel.combineSkills(listOf(deleted1, deleted2), emptyList())
+
+        assertTrue("全部已删除时列表应为空", result.isEmpty())
+    }
+
     // ── toUiModel 测试 ──────────────────────────────────────────────
 
     @Test
@@ -341,7 +363,8 @@ class SkillsViewModelTest {
         id: Long = 0L,
         source: String = SkillSource.LOCAL_BUILTIN,
         isEnabled: Boolean = false,
-        displayName: String = name
+        displayName: String = name,
+        isHidden: Boolean = false
     ): SkillConfig {
         return SkillConfig(
             id = id,
@@ -349,7 +372,8 @@ class SkillsViewModelTest {
             displayName = displayName,
             source = source,
             skillDir = "/tmp/skills/$name",
-            isEnabled = isEnabled
+            isEnabled = isEnabled,
+            isHidden = isHidden
         )
     }
 

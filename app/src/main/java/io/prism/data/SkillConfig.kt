@@ -20,6 +20,7 @@ import io.objectbox.annotation.Id
  * - [skillDir] Skill 目录绝对路径（含 SKILL.md + 资源）
  * - [isEnabled] 启用开关（落库，跨会话保留，修复考古 R-6：RagTarget 仅内存态未持久化的教训）
  * - [isInstalled] 安装状态（远程下载失败可标记 false，文件缺失扫描后标记 false）
+ * - [isHidden] 用户删除标记（修复：内置/远程/本地 Skill 均支持删除，置 true 后扫描不再恢复）
  * - [version] 版本号（frontmatter version，默认 "0.0.0"）
  * - [dependsOnMcpServers] 依赖的 MCP Server name 列表（运行时检查可用性）
  * - [createdAt] / [updatedAt] 时间戳（毫秒）
@@ -42,6 +43,7 @@ data class SkillConfig(
     var skillDir: String,
     var isEnabled: Boolean = false,
     var isInstalled: Boolean = true,
+    var isHidden: Boolean = false,
     var version: String = "0.0.0",
     @Convert(converter = StringListConverter::class, dbType = String::class)
     var dependsOnMcpServers: List<String> = emptyList(),

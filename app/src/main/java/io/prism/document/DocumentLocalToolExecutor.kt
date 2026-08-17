@@ -360,12 +360,13 @@ class DocumentLocalToolExecutor(
                                             )
                                         )
                                     ),
-                                    "sheets" to JsonArray(
-                                        listOf(
-                                            JsonObject(
+                                    "sheets" to JsonObject(
+                                        mapOf(
+                                            "type" to JsonPrimitive("array"),
+                                            "description" to JsonPrimitive("工作表数组，每项含 name（表名）与 rows（二维数组，首行建议为表头）"),
+                                            "items" to JsonObject(
                                                 mapOf(
                                                     "type" to JsonPrimitive("object"),
-                                                    "description" to JsonPrimitive("工作表数组，每项含 name（表名）与 rows（二维数组，首行建议为表头）"),
                                                     "properties" to JsonObject(
                                                         mapOf(
                                                             "name" to JsonObject(

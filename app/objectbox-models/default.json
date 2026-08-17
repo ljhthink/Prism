@@ -168,7 +168,7 @@
     },
     {
       "id": "5:5658915561082424760",
-      "lastPropertyId": "12:2462113479344531503",
+      "lastPropertyId": "13:6123731124142966083",
       "name": "SkillConfig",
       "properties": [
         {
@@ -231,6 +231,11 @@
           "id": "12:2462113479344531503",
           "name": "updatedAt",
           "type": 6
+        },
+        {
+          "id": "13:6123731124142966083",
+          "name": "isHidden",
+          "type": 1
         }
       ],
       "relations": []

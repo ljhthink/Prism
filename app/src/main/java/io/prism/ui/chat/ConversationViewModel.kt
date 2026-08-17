@@ -308,6 +308,104 @@ class ConversationViewModel(
     }
 
     /**
+     * Bug fix（UXR8-R3，TKN-UXR8-R3-ARCHAEOLOGY-001 根因）：AI 回复期间用户选图被
+     * [sendMessage] 的 isTyping 守卫静默丢弃（无气泡、LLM 收不到、无提示）。
+     *
+     * 修复（guardrail H-1/M-1，TKN-UXR8-R3-GUARDRAIL-001）：改用 **FIFO 队列**暂存
+     * AI 回复期间用户选图的 data URL，AI 回复完成（isTyping 复位）后由
+     * [flushPendingImageMessage] **逐条**自动发送。
+     * - FIFO 而非单槽：AI 回复期间连选多张图不会互相覆盖（M-1）
+     * - 逐条而非批量：每次 flush 仅发一条，发送后新一轮回复的 finally 再 flush 下一条，
+     *   天然串行化多轮（避免并发 AI 回路状态撕裂，Q5 守卫语义）
+     * 值类型 Pair<String, String> = (纯文本, imageUrl)。
+     */
+    private val pendingImageQueue = ArrayDeque<Pair<String, String>>()
+
+    /**
+     * 图片编码失败等一次性系统提示队列（Bug fix UXR8-R3，guardrail M-2）。
+     *
+     * [notifyEncodingFailure] 在 isTyping=true（AI 回复中）时调用，若走 [sendMessage]
+     * 纯文本路径会被 isTyping 守卫丢弃（失败提示静默消失）。暂存于此，回复完成后
+     * 由 [flushPendingImageMessage] 逐条显示。
+     */
+    private val pendingNoticeQueue = ArrayDeque<String>()
+
+    /**
+     * 图片编码失败提示（图片选择器回调调用）。
+     *
+     * Bug fix（UXR9 Bug3，TKN-UXR9-ARCHAEOLOGY-001）：编码失败时给予用户可见提示，而非
+     * 静默丢弃；且**绝不触发 LLM 回答**（此前非回复期走 [sendMessage] → launchAnswer，
+     * 失败提示被当作一条用户问题发给 LLM）。isTyping 期间暂存队列，AI 回复完成后显示。
+     */
+    fun notifyEncodingFailure() {
+        val notice = "⚠️ 图片编码失败，请重试或选择其他图片（格式/大小限制）"
+        if (_isTyping.value) {
+            pendingNoticeQueue.addLast(notice)
+        } else {
+            appendSystemNotice(notice)
+        }
+    }
+
+    /**
+     * UXR9 US-907：文档解析失败提示（文件上传回调调用）。
+     *
+     * 与 [notifyEncodingFailure] 同语义：仅系统提示、**不触发 LLM**（不进请求历史）。
+     * isTyping 期间暂存队列，AI 回复完成后显示。
+     */
+    fun notifyDocumentError() {
+        val notice = "⚠️ 文档解析失败，请确认文件格式（支持 PDF/DOCX/XLSX/PPTX/MD/TXT/CSV）"
+        if (_isTyping.value) {
+            pendingNoticeQueue.addLast(notice)
+        } else {
+            appendSystemNotice(notice)
+        }
+    }
+
+    /**
+     * 追加一条用户可见的系统提示消息（UXR9 Bug3 修复）。
+     *
+     * 特点：直接写入 [messages]（UI 立即显示），但不走 [launchAnswer]——
+     * **不触发 LLM 回答**；且标记 [ChatMessage.isSystemNotice]=true，请求历史过滤排除，
+     * 不污染发给 LLM 的上下文。
+     */
+    private fun appendSystemNotice(notice: String) {
+        _messages.update {
+            it + ChatMessage(
+                id = nextId.getAndIncrement(),
+                role = Role.USER,
+                content = notice,
+                timestamp = System.currentTimeMillis(),
+                isSystemNotice = true
+            )
+        }
+        messagesDirty = true
+    }
+
+    /**
+     * Bug fix（UXR8-R3）：AI 回复完成后，检查是否有暂存的图片/提示并逐条发送。
+     *
+     * 在 [executeWithToolLoop] 和 [executePlainStream] 的 finally 中调用，
+     * 此时 _isTyping 已复位为 false（[sendMessage] 的守卫不再拦截）。
+     *
+     * **逐条串行**：每次调用最多发一条（优先提示，再图片），发送后新一轮回复的
+     * finally 再发下一条，避免多条消息同时触发并发 AI 回路。
+     */
+    private fun flushPendingImageMessage() {
+        // 优先展示系统提示（不触发 LLM，不进请求历史）。
+        // 注意：**处理提示后不得 return**——若此时图片队列非空仍须继续发送一张，
+        // 否则提示被消费后无新一轮 finally 触发 flush，图片队列会滞留
+        // （UXR9 Bug3 回归：溢出提示 + 多图同时入队时图片 0 送达）。
+        // 仍满足「逐条串行」：每次调用最多发送一张图片，多张图由后续轮次 finally 逐条接力。
+        val notice = pendingNoticeQueue.removeFirstOrNull()
+        if (notice != null) {
+            appendSystemNotice(notice)
+        }
+        val pending = pendingImageQueue.removeFirstOrNull() ?: return
+        // 直接调用 sendMessage 发送暂存图片（isTyping=false，守卫放行）
+        sendMessage(pending.first, pending.second)
+    }
+
+    /**
      * UXR6 问题 2：当前正在流式生成的 AI 消息 id 集合。
      *
      * 替代「全局 isTyping + lastOrNull() 推断」的每消息独立标记：
@@ -790,7 +888,22 @@ class ConversationViewModel(
         if (trimmed.isEmpty() && imageUrl.isNullOrBlank()) return
         // Q5（guardrail TKN-UXR4-GUARDRAIL-001）：AI 正在回复时忽略新发送，
         // 防止并发回路（旧回路 finally 清除新回路 isTyping）导致状态撕裂。
-        if (_isTyping.value) return
+        // Bug fix（UXR8-R3，TKN-UXR8-R3-ARCHAEOLOGY-001 根因）：带图片的消息被 isTyping
+        // 守卫静默丢弃（无气泡、LLM 收不到、无提示）。改为暂存图片消息，AI 回复完成后
+        // 由 [flushPendingImageMessage] 自动发送。纯文本消息保持原守卫行为（用户可稍后重发，
+        // 避免无限排队）。
+        if (_isTyping.value) {
+            if (!imageUrl.isNullOrBlank()) {
+                // guardrail R-4（TKN-UXR8-R3-GUARDRAIL-002）：队列加大小上限，
+                // 防止超长回复期间反复选图导致队列无限增长；超限提示并丢弃最新图。
+                if (pendingImageQueue.size >= MAX_PENDING_IMAGES) {
+                    pendingNoticeQueue.addLast("⚠️ 待发送图片过多（超过 $MAX_PENDING_IMAGES 张），最新图片未加入队列")
+                } else {
+                    pendingImageQueue.addLast(trimmed to imageUrl)
+                }
+            }
+            return
+        }
 
         val now = System.currentTimeMillis()
         _messages.update {
@@ -835,21 +948,28 @@ class ConversationViewModel(
                 appendDelta(aiId, "\n\n⚠️ 尚未配置激活的 Provider，请在「设置」中添加并激活")
                 markCompleted(aiId)
                 _isTyping.value = false
+                // guardrail R-1（TKN-UXR8-R3-GUARDRAIL-002）：早退分支兜底 flush，
+                // 避免 isTyping 期入队的图片/提示因 provider 缺失而长期残留。
+                flushPendingImageMessage()
                 return@launch
             }
 
             // UXR6 问题 3a：RAG 检索开始 —— UI 显示「正在检索知识库…」（仅真实检索期间）
             _ragRetrieving.value = true
             // RAG 注入（IO 协程，BR-concurrency-002 全程持锁，禁止 Main）
-            // G-01 修复：外层 runCatching 重抛 CancellationException（BR-error-handling-007 提议）
-            val ragResult = runCatching { buildRagPlan(userText) }
-                .getOrElse { e ->
-                    if (e is CancellationException) throw e
-                    // G-03 修复：整个 RAG 注入异常 → 仅日志记录 simpleName，用户无感（ADR-012 5.5）
-                    // 项目暂无结构化日志基建，用 android.util.Log.w 记录（不含密钥/请求体/路径）
-                    Log.w(TAG, "RAG injection failed: ${e::class.simpleName}, degrading to normal chat")
-                    RagBuildResult.NormalChat
-                }
+            // Bug fix（UXR8-R3）：先做轻量级需求预判，避免问候/闲聊/确认类消息
+            // 也触发昂贵的 embed+search（知识库片段无条件注入污染 LLM 上下文）。
+            // 判定规则见 [needsRagRetrieval]（整句归一化精确匹配，无长度/前缀过滤）。
+            val ragResult = if (needsRagRetrieval(userText)) {
+                runCatching { buildRagPlan(userText) }
+                    .getOrElse { e ->
+                        if (e is CancellationException) throw e
+                        Log.w(TAG, "RAG injection failed: ${e::class.simpleName}, degrading to normal chat")
+                        RagBuildResult.NormalChat
+                    }
+            } else {
+                RagBuildResult.NormalChat
+            }
             // UXR6 问题 3a：RAG 检索结束（无论成功/降级，避免「检索知识库」指示残留）
             _ragRetrieving.value = false
 
@@ -972,6 +1092,8 @@ class ConversationViewModel(
             //    否则下次请求丢失 tool_calls 上下文，OpenAI 返回 400
             val baseHistory = _messages.value.filterNot {
                 it.id == aiId ||
+                    // UXR9 Bug3：系统提示消息（如"图片编码失败"）仅 UI 展示，不进 LLM 历史
+                    it.isSystemNotice ||
                     (it.role == Role.ASSISTANT && it.content.isEmpty() && it.toolCalls.isEmpty())
             }
             // UXR5 问题 4（tool_calls 完整性保护，候选 3 防御）：会话恢复/旧数据可能丢失
@@ -1232,7 +1354,7 @@ class ConversationViewModel(
         applicationScope.launch {
             // L2 保存跨会话记忆（失败静默，BR-error-handling-004 已在组件内部处理日志）
             try {
-                val saved = crossSessionMemoryManager?.saveSessionMemories(sid, msgs) ?: 0
+                val saved = crossSessionMemoryManager?.saveSessionMemories(sid, msgs, providerConfig = active) ?: 0
                 // UXR8 可观测性（ADR-028）：成功路径记录触发来源与保存条数，
                 // 供 RCA"触发未执行 vs 保存 0 条"（不含消息内容等敏感信息）。
                 Log.i(TAG, "L2 memories persisted: source=$source savedCount=$saved")
@@ -1321,6 +1443,9 @@ class ConversationViewModel(
             markCompleted(aiId)
             _activeTool.value = null
             _isTyping.value = false
+            // Bug fix（UXR8-R3）：AI 回复完成，flush 期间暂存的图片消息（isTyping 已复位，
+            // sendMessage 守卫放行）
+            flushPendingImageMessage()
             // UXR4 问题 8/9（ADR-024）：工具回路结束（含最终文本回答完成）落库，
             // updatedAt=最后消息结束时刻；脏标记检查由 persistSession 内部处理。
             persistSession()
@@ -1371,6 +1496,8 @@ class ConversationViewModel(
             // 分支是否已清，此处兜底确保复位（与 catch 分支对称）。
             markCompleted(aiId)
             _isTyping.value = false
+            // Bug fix（UXR8-R3）：普通流式回复完成，flush 期间暂存的图片消息
+            flushPendingImageMessage()
         }
     }
 
@@ -1645,12 +1772,16 @@ class ConversationViewModel(
             val filtered = results.filter { it.similarity >= RAG_SIMILARITY_THRESHOLD }
             if (filtered.isEmpty()) return@withContext RagBuildResult.NormalChat  // 无相关结果 → 自然降级
 
+            // UXR9 US-901 AC-4：限制注入片段条数（top-2），控制上下文膨胀。
+            // 必须在 buildContext/buildCitations 前截断，保证 [来源N] 编号与 UI 引用一致。
+            val capped = filtered.take(RAG_MAX_INJECTED)
+
             // 4. 拼接 system prompt + ragContext + citations
             RagBuildResult.Success(
                 RagPlan(
                     systemPrompt = RagContextBuilder.SYSTEM_PROMPT,
-                    ragContext = RagContextBuilder.buildContext(filtered),
-                    citations = RagContextBuilder.buildCitations(filtered)
+                    ragContext = RagContextBuilder.buildContext(capped),
+                    citations = RagContextBuilder.buildCitations(capped)
                 )
             )
         }
@@ -1688,14 +1819,90 @@ class ConversationViewModel(
         /** Logcat 标签（G-03 修复：结构化日志基建未就绪前用 android.util.Log） */
         private const val TAG = "ConversationViewModel"
 
+        /** 图片暂存队列上限（guardrail R-4）：AI 回复期间最多暂存 8 张待发图片，防无限增长。 */
+        internal const val MAX_PENDING_IMAGES = 8
+
         /** RAG top-k 默认值（ADR-012 5.6，4GB 低端机约束；M7 ADR-017 4.7 改为按档位动态） */
         internal const val DEFAULT_RAG_TOP_K = 3
 
-        /** RAG 相似度阈值（ADR-012 5.6，过滤无关结果污染 context） */
-        // UXR3 问题 6（ADR-023）：0.3 → 0.5。用户反馈「打开知识库检索功能后第一份资料必被塞入」，
-        // 根因是阈值过低：库中仅有的片段（无论与问题是否相关）都会命中并注入上下文。
-        // 提高阈值过滤低相关片段，只有足够相关的资料才进入 context 与引用来源。
+        /**
+         * RAG 注入片段条数上限（UXR9 US-901 AC-4）。
+         *
+         * buildRagPlan 阈值过滤后再截断为 top-2 注入 LLM 上下文与引用来源，
+         * 控制上下文膨胀（多语言模型相关片段实测 0.58~0.66，2 条足够作为事实依据）。
+         */
+        internal const val RAG_MAX_INJECTED = 2
+
+        /**
+         * RAG 相似度阈值（ADR-012 5.6，过滤无关结果污染 context）。
+         *
+         * UXR3 问题 6（ADR-023）：0.3 → 0.5。用户反馈「打开知识库检索功能后第一份资料必被塞入」，
+         * 根因是阈值过低：库中仅有的片段（无论与问题是否相关）都会命中并注入上下文。
+         * 提高阈值过滤低相关片段，只有足够相关的资料才进入 context 与引用来源。
+         *
+         * **UXR9 实测校准**（ChineseSimilarityDiagnosticTest，多语言 MiniLM qint8 + Unigram）：
+         * 0.5 在多语言模型下仍是最优分隔点——相关中文句对 0.582/0.655，无关中文句对
+         * 最大 0.322（旧英文模型无关片段 0.4~0.7 是 RAG 污染结构性根因，已换模型根治）。
+         */
         private const val RAG_SIMILARITY_THRESHOLD = 0.5
+
+        /**
+         * 纯确认/寒暄/无实质内容消息的**整句**短语集（命中即跳过 RAG 检索）。
+         *
+         * Bug fix（UXR8-R3，guardrail H-1 修复）：**禁止前缀匹配**。此前用
+         * `startsWith` 匹配使"你好，帮我查一下xxx""谢谢，请总结一下…"等真实查询被
+         * 整句跳过（误伤面比长度过滤更广）。现改为**整句归一化精确匹配**：
+         * - [needsRagRetrieval] 先对消息 lower-case + 剥离空白/标点归一化
+         * - 归一化结果**整句**命中本集合才跳过（如"好的，谢谢"→"好的谢谢"）
+         * - 含实际查询内容的消息归一化后不在集合内 → 照常走相似度阈值过滤
+         *
+         * 不替代 [buildRagPlan] 的相似度防线，两者叠加（先按需、再按相关度）。
+         */
+        private val RAG_SKIP_PHRASES = setOf(
+            // 寒暄/问候
+            "你好", "您好", "hi", "hello", "嗨", "哈喽", "在吗", "早上好", "下午好", "晚上好",
+            // 确认/回应
+            "好", "好的", "好的好的", "好吧", "行", "行吧", "嗯", "嗯嗯", "哦", "哦哦", "啊",
+            "明白", "明白了", "知道", "知道了", "了解", "了解了", "收到", "ok", "okay", "okok",
+            "对", "对的", "没错", "同意", "没问题", "可以", "可以的",
+            // 礼貌回应
+            "谢谢", "谢谢你", "感谢", "辛苦了", "多谢", "thanks", "thankyou",
+            // 结束/离开
+            "再见", "拜拜", "晚安",
+            // 复合确认语（归一化后整句）
+            "好的谢谢", "谢谢好的", "好谢谢", "好的没问题", "没问题谢谢", "明白了谢谢", "知道了谢谢",
+            "嗯嗯好的", "好的了解", "收到谢谢", "好嘞", "好嘞谢谢", "可以的谢谢",
+            // 中英混合确认语
+            "ok谢谢", "ok好的", "谢谢ok", "好的ok"
+        )
+
+        /**
+         * 归一化 RAG 预判输入：lower-case + 仅保留字母/数字（剥离空白与中文标点）。
+         * 如"好的，谢谢。"→"好的谢谢"。纯函数（BR-testing-004）。
+         */
+        private fun normalizeRagText(text: String): String =
+            text.lowercase().filter { it.isLetterOrDigit() }
+
+        /**
+         * 判断一条用户消息是否有检索知识库的需求（纯函数，BR-testing-004）。
+         *
+         * Bug fix（UXR8-R3，TKN-UXR8-R3-ARCHAEOLOGY-001 根因）：`buildRagPlan` 对**每条**
+         * 用户消息无条件执行 embed+search，导致问候/闲聊/确认类消息也触发知识库片段注入，
+         * 污染 LLM 上下文。本函数做轻量级需求预判：
+         * - 消息归一化后**整句**命中 [RAG_SKIP_PHRASES] → 跳过（纯确认/寒暄，无检索意图）
+         * - 其余消息（包括短查询如"查询"，以及含查询内容的长句）照常走相似度阈值过滤
+         *
+         * 启发式是**保守过滤器**：仅拦截明显无需求的消息，其余照常走相似度阈值过滤。
+         * 不替代 [buildRagPlan] 的相似度防线，两者叠加（先按需、再按相关度）。
+         *
+         * @param queryText 已 trim 的用户消息
+         * @return true=应尝试 RAG 检索；false=跳过
+         */
+        internal fun needsRagRetrieval(queryText: String): Boolean {
+            // 空白消息无检索需求
+            if (queryText.isBlank()) return false
+            return normalizeRagText(queryText) !in RAG_SKIP_PHRASES
+        }
 
         /**
          * 默认通用 persona（ADR-018，综合 DeepSeek/Claude 最佳实践）。

@@ -135,7 +135,7 @@ class OnnxEmbedderPerformanceBenchmark {
     }
 
     companion object {
-        private const val MODEL_PATH = "src/main/assets/models/model_qint8_arm64.onnx"
-        private const val VOCAB_PATH = "src/main/assets/models/vocab.txt"
+        private const val MODEL_PATH = "src/test/resources/models/model_qint8_arm64.onnx"
+        private const val VOCAB_PATH = "src/test/resources/models/vocab.txt"
     }
 }

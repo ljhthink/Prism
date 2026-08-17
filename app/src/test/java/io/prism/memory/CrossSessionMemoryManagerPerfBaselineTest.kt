@@ -50,7 +50,7 @@ class CrossSessionMemoryManagerPerfBaselineTest {
         boxStore = MyObjectBox.builder().directory(tempDir).build()
         memoryRepository = MemoryRepository(boxStore)
         embedder = FakeEmbedder()
-        manager = CrossSessionMemoryManager(embedder, memoryRepository)
+        manager = CrossSessionMemoryManager(embedder, memoryRepository, retrievalThreshold = 0.0)
     }
 
     @After

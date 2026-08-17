@@ -79,6 +79,19 @@ open class SkillRegistry(
     )
 
     /**
+     * 缺失 Skill 的处置动作（[syncToRepository] 对 `diff.toMarkUninstalled` 每个条目）。
+     *
+     * - [KEEP_HIDDEN]: 已标记 hidden 的条目 → 保持 DB 行不变（过滤已经生效，无需变更）
+     * - [PURGE_BUILTIN]: 内置 Skill 已从 assets 删除 → 删除 DB 行，避免幽灵条目残留
+     * - [MARK_UNINSTALLED]: 用户/远程文件缺失 → 标记 isInstalled=false（临时删除，可恢复）
+     */
+    enum class DisposeAction {
+        KEEP_HIDDEN,
+        PURGE_BUILTIN,
+        MARK_UNINSTALLED
+    }
+
+    /**
      * 同步差异（[Companion.computeSyncDiff] 输出）。
      *
      * @property toInsert 新增的 SkillConfig（id=0，isEnabled=false）
@@ -121,8 +134,11 @@ open class SkillRegistry(
         // 3. 扫描用户自建（最高优先级，覆盖同名远程/内置）
         discovered += Companion.scanDirectory(userSkillsDir, SkillSource.LOCAL_USER)
 
-        // 4. 按优先级去重（保留高优先级）
-        val deduped = Companion.dedupByPriority(discovered)
+        // 4. 过滤已删除（isHidden）的 Skill，避免用户删除后下次扫描又恢复
+        //    （修复：内置 Skill 无法删除文件，仅靠置 hidden 阻止扫描恢复）
+        val hiddenNames = Companion.hiddenNameSet(skillRepository.getAll())
+        val dedupedRaw = Companion.dedupByPriority(discovered)
+        val deduped = Companion.filterOutHidden(dedupedRaw, hiddenNames)
 
         // 5. 同步到 SkillRepository
         syncToRepository(deduped)
@@ -202,8 +218,24 @@ open class SkillRegistry(
             skillRepository.save(config)
         }
         for (config in diff.toMarkUninstalled) {
-            skillRepository.setInstalled(config.id, false)
-            android.util.Log.i(TAG, "Skill '${config.name}' no longer found, marked isInstalled=false")
+            // 已删除（isHidden）的 Skill：保留 DB 行以维持隐藏标记（否则内置 Skill 下次扫描恢复）。
+            // 已被 UI 置 hidden 的条目不参与 isInstalled 变更（隐藏标记已使其不出现在 UI）。
+            when (Companion.disposeMissingConfigAction(config)) {
+                DisposeAction.KEEP_HIDDEN -> {
+                    // isHidden 条目：保留 DB 行（隐藏标记由 hiddenNameSet 过滤持续生效）
+                }
+                DisposeAction.PURGE_BUILTIN -> {
+                    // 修复（删除内置 Skill）：内置 Skill 已从 assets 移除（如废弃的旧内置 Skill），
+                    // 直接删除 DB 行而非标记 isInstalled=false —— 否则 UI 列表残留「解析失败」幽灵条目
+                    // （manifest 为 null 且 isInstalled=false）。内置 Skill 无源文件可恢复，删除即彻底。
+                    skillRepository.remove(config.id)
+                    android.util.Log.i(TAG, "Builtin Skill '${config.name}' removed from assets, purged from DB")
+                }
+                DisposeAction.MARK_UNINSTALLED -> {
+                    skillRepository.setInstalled(config.id, false)
+                    android.util.Log.i(TAG, "Skill '${config.name}' no longer found, marked isInstalled=false")
+                }
+            }
         }
     }
 
@@ -230,11 +262,59 @@ open class SkillRegistry(
         }
 
         /**
+         * 收集已删除（isHidden=true）Skill 的 name 集合（纯函数，BR-testing-004）。
+         *
+         * 供 [scanAndSync] 过滤已删除 Skill（用户删除后，任何来源下次扫描都不恢复）。
+         *
+         * @param configs 全部持久化 SkillConfig 列表
+         * @return isHidden=true 的 name 集合
+         */
+        internal fun hiddenNameSet(configs: List<SkillConfig>): Set<String> =
+            configs.filter { it.isHidden }.map { it.name }.toSet()
+
+        /**
+         * 过滤掉已删除（isHidden）Skill 条目（纯函数，BR-testing-004）。
+         *
+         * [scanAndSync] 在去重后调用，确保用户删除的内置 Skill 不会因 assets 仍存在而恢复。
+         *
+         * @param entries 去重后的 SkillEntry 列表
+         * @param hiddenNames 已删除 Skill 的 name 集合（[hiddenNameSet] 产出）
+         * @return 过滤后的列表（不含 hidden 条目）
+         */
+        internal fun filterOutHidden(
+            entries: List<SkillEntry>,
+            hiddenNames: Set<String>
+        ): List<SkillEntry> = entries.filterNot { it.config.name in hiddenNames }
+
+        /**
+         * 缺失 Skill 的处置动作（纯函数，BR-testing-004）。
+         *
+         * [syncToRepository] 对 `toMarkUninstalled`（表里有但扫描未发现）条目决定处置方式：
+         * - [DisposeAction.KEEP_HIDDEN]：已删除（isHidden）条目 —— 保留 DB 行以维持隐藏标记，
+         *   不改变 isInstalled（隐藏过滤已使其不出现在 UI、不注入工具）
+         * - [DisposeAction.PURGE_BUILTIN]：内置 Skill 已从 assets 移除 —— 直接删除 DB 行，
+         *   避免 UI 残留「解析失败」幽灵条目（manifest 为 null 且 isInstalled=false）
+         * - [DisposeAction.MARK_UNINSTALLED]：用户/远程 Skill 文件缺失 —— 标记 isInstalled=false
+         *   （文件可能暂时被移动/删除，保留行待后续扫描恢复）
+         *
+         * @param config 待处置的缺失 SkillConfig
+         */
+        internal fun disposeMissingConfigAction(config: SkillConfig): DisposeAction = when {
+            config.isHidden -> DisposeAction.KEEP_HIDDEN
+            config.source == SkillSource.LOCAL_BUILTIN -> DisposeAction.PURGE_BUILTIN
+            else -> DisposeAction.MARK_UNINSTALLED
+        }
+
+        /**
          * 解析 SKILL.md 内容为 [SkillEntry]（含新建的 [SkillConfig]，id=0 待入库分配）。
          *
          * 解析失败返回 null（已记录日志），不抛异常（隔离失败）。
          *
          * **纯函数**（US-022 AC-5 可测性补强）：仅依赖 [SkillManifestParser]（object，无状态）。
+         *
+         * **displayName 提取策略**（BUG 修复：原用 description 首行，现在优先找 body 中第一个一级标题 #）：
+         * 1. body 第一个 `# ` 开头的行 → 提取为 displayName（最长 60 字符）—— SKILL.md 格式惯例
+         * 2. fallback → description 首行 → name
          */
         internal fun parseToEntry(
             content: String,
@@ -248,10 +328,15 @@ open class SkillRegistry(
                     return null
                 }
             val manifest = result.manifest
+            val body = result.body
+            val candidateDisplayName = findFirstHeading(body)
+                ?: manifest.description.lineSequence().firstOrNull()
+                ?: manifest.name
+            val displayName = candidateDisplayName.take(60)
             val config = SkillConfig(
                 id = 0L, // 待 syncToRepository 匹配已有记录或新建
                 name = manifest.name,
-                displayName = manifest.description.lineSequence().firstOrNull()?.take(60) ?: manifest.name,
+                displayName = displayName,
                 source = source,
                 sourceUri = sourceUri,
                 skillDir = skillDir,
@@ -260,6 +345,25 @@ open class SkillRegistry(
                 version = manifest.version ?: "0.0.0"
             )
             return SkillEntry(config = config, manifest = manifest)
+        }
+
+        /**
+         * 在 Markdown body 中找第一个一级标题（以 `# ` 开头的行）。
+         *
+         * SKILL.md 规范：一级标题即为 Skill 的人类可读名称，用于 UI 展示。
+         *
+         * @return 找到的标题文本（无前缀 `# `），未找到返回 null
+         */
+        internal fun findFirstHeading(body: String): String? {
+            val firstLine = body.lineSequence()
+                .map { it.trim() }
+                .firstOrNull { it.isNotEmpty() }
+                ?: return null
+            return if (firstLine.startsWith("# ")) {
+                firstLine.removePrefix("# ").trim().takeIf { it.isNotEmpty() }
+            } else {
+                null
+            }
         }
 
         /**
@@ -380,6 +484,6 @@ open class SkillRegistry(
          * **纯函数**（US-022 AC-5 可测性补强）。
          */
         internal fun filterEnabledSkills(skills: List<SkillEntry>): List<SkillEntry> =
-            skills.filter { it.config.isEnabled && it.config.isInstalled }
+            skills.filter { it.config.isEnabled && it.config.isInstalled && !it.config.isHidden }
     }
 }

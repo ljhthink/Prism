@@ -86,10 +86,14 @@ class KnowledgeBaseLocalToolExecutor(
             } else {
                 knowledgeBaseRepository.search(vector, k = topK, knowledgeBaseId = kbId)
             }
-            if (results.isEmpty()) return "知识库中未找到与「$query」相关的片段"
+            // UXR9 Bug1 修复：相似度阈值过滤（此前不过滤，无关片段全量回灌 LLM 污染上下文）。
+            // 低相关片段不作为 LLM 的事实依据。
+            val relevant = results.filter { it.similarity >= SIMILARITY_THRESHOLD }
+            if (relevant.isEmpty()) return "知识库中未找到与「$query」相关的片段"
             buildString {
                 append("【知识库内容，来源为已上传的个人资料】\n")
-                results.forEachIndexed { i, r ->
+                // UXR9 US-901 AC-3：结果条数上限（top-2），控制上下文膨胀
+                relevant.take(MAX_INJECTED).forEachIndexed { i, r ->
                     append("[来源${i + 1}] 文件=${r.documentTitle}")
                     r.chunkIndex?.let { append(" 片段=$it") }
                     append(" 相似度=${(r.similarity * 100).toInt() / 100.0}\n")
@@ -220,6 +224,21 @@ class KnowledgeBaseLocalToolExecutor(
 
         /** 检索 top-k 上限（防 token 溢出）。 */
         private const val MAX_TOP_K = 10
+
+        /**
+         * 检索相似度阈值（UXR9 Bug1 修复，TKN-UXR9-ARCHAEOLOGY-001 实测校准）：
+         * `knowledge_base__search` 此前**不过滤相似度**，top-k 全量回灌 LLM——即使用户
+         * 问题与库中片段无关也会被当作事实依据。
+         *
+         * **实测校准**（ChineseSimilarityDiagnosticTest，多语言 MiniLM qint8 + Unigram）：
+         * - 相关中文句对：0.582 / 0.655
+         * - 无关中文句对：-0.067 ~ 0.322（max=0.322）
+         * - 0.5 阈值可干净分隔相关与无关（考古预测 0.62~0.65 基于旧英文模型分布，偏保守）。
+         */
+        private const val SIMILARITY_THRESHOLD = 0.5
+
+        /** 检索结果注入 LLM 的条数上限（US-901 AC-3，控制上下文膨胀）。 */
+        private const val MAX_INJECTED = 2
 
         /** 单条片段最大长度（字符，防 token 溢出）。 */
         private const val SNIPPET_MAX_LEN = 500

@@ -208,7 +208,8 @@ fun CapabilitiesScreen(
                 SkillDetailSheet(
                     skill = it,
                     executionRecords = executionRecords,
-                    onToggle = { enabled -> skillsViewModel.setSkillEnabled(it.config.id, enabled) }
+                    onToggle = { enabled -> skillsViewModel.setSkillEnabled(it.config.id, enabled) },
+                    onDelete = { skillsViewModel.deleteSkill(it.config.id) }
                 )
             }
         }
@@ -832,33 +833,105 @@ internal fun sourceToLabel(source: String): String = when (source) {
  * - 标题：displayName（fallback 到 slug name）
  * - 副标题：来源标签 + 版本号
  * - 描述（manifest.description，缺失时降级提示）
- * - 指令正文（manifest.body，截断到 500 字符避免弹层过长）
+ * - 指令正文（manifest.body，默认截断预览，可点击展开全文）
  * - 工具声明（manifest.tools，如有）
- * - systemPrompt 片段（如有，截断到 200 字符）
+ * - systemPrompt 片段（如有，默认截断预览，可点击展开全文）
  * - 元数据：maxRounds / isInstalled / 时间戳
  * - 启用/禁用开关（落库）
  * - 执行记录（US-029）：最近 10 次，每条含开始时间 / 耗时 / 状态 / 可展开工具调用链
+ * - 删除按钮（修复：缺失删除功能，任何来源 Skill 均可删除）
  *
- * **manifest==null 降级**：仅展示 config 信息 + "解析失败" 提示，仍允许启停。
+ * **manifest==null 降级**：仅展示 config 信息 + "解析失败" 提示，仍允许启停与删除。
  *
  * @param skill 当前选中的 Skill UI 模型
  * @param executionRecords 该 Skill 的最近 10 次执行记录（按 startedAt 降序，来自 [SkillsViewModel.executionRecords]）
  * @param onToggle 启用/禁用回调（落库）
+ * @param onDelete 删除回调（落库 isHidden + 清理执行记录 + 刷新注册中心）
  */
 @Composable
 private fun SkillDetailSheet(
     skill: SkillUiModel,
     executionRecords: List<io.prism.data.SkillExecutionRecord>,
-    onToggle: (Boolean) -> Unit
+    onToggle: (Boolean) -> Unit,
+    onDelete: () -> Unit
 ) {
     val config = skill.config
     val manifest = skill.manifest
     val sourceLabel = sourceToLabel(config.source)
     val versionText = manifest?.version?.let { "v$it" } ?: "v${config.version}"
+    // 展开全文状态（body / systemPrompt 默认收起，点击展开避免弹层过长）
+    var bodyExpanded by remember(config.id) { mutableStateOf(false) }
+    var promptExpanded by remember(config.id) { mutableStateOf(false) }
+    // 删除二次确认
+    var showDeleteConfirm by remember(config.id) { mutableStateOf(false) }
 
     PrismSheet(
         title = config.displayName.ifEmpty { config.name },
-        subtitle = "$sourceLabel · $versionText"
+        subtitle = "$sourceLabel · $versionText",
+        // BR-ui-003（guardrail TKN-UXR8-FIX-GUARDRAIL-001 LOW#3）：关键操作按钮置于 footer
+        // 固定底部，长内容（指令/执行记录）滚动时删除按钮始终可见，不随内容滚出屏幕。
+        footer = {
+            Column {
+                PrismButton(
+                    text = "删除 Skill",
+                    variant = PrismButtonVariant.Danger,
+                    leadingIcon = {
+                        Icon(Icons.Filled.Delete, contentDescription = null, tint = PrismDanger, modifier = Modifier.size(16.dp))
+                    },
+                    onClick = { showDeleteConfirm = true }
+                )
+                // 删除二次确认（内联于 footer，避免误触）
+                if (showDeleteConfirm) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 10.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(PrismDanger.copy(alpha = 0.06f))
+                            .border(1.dp, PrismDanger.copy(alpha = 0.25f), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 14.dp, vertical = 12.dp)
+                    ) {
+                        Column {
+                            Text(
+                                text = "确认删除「${config.displayName.ifEmpty { config.name }}」？",
+                                color = PrismText,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "删除后该 Skill 将从列表移除且不再恢复（含执行记录）。" +
+                                    (if (config.source == io.prism.data.SkillSource.LOCAL_BUILTIN)
+                                        "内置 Skill 无法删除文件，将标记为隐藏。"
+                                    else
+                                        "磁盘目录将被删除。"),
+                                color = PrismTextDim,
+                                fontSize = 11.sp,
+                                lineHeight = 16.sp,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                            Spacer(Modifier.height(10.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                PrismButton(
+                                    text = "取消",
+                                    variant = PrismButtonVariant.Ghost,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = { showDeleteConfirm = false }
+                                )
+                                PrismButton(
+                                    text = "确认删除",
+                                    variant = PrismButtonVariant.Danger,
+                                    modifier = Modifier.weight(1f),
+                                    onClick = {
+                                        showDeleteConfirm = false
+                                        onDelete()
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
     ) {
         // 描述
         DetailSection("描述") {
@@ -871,17 +944,14 @@ private fun SkillDetailSheet(
         }
         Spacer(Modifier.height(14.dp))
 
-        // 指令正文（截断到 500 字符，避免弹层过长）
+        // 指令正文（默认截断预览，点击展开全文 —— 修复内容被截断的问题）
         if (manifest != null && manifest.body.isNotBlank()) {
             DetailSection("指令") {
-                val body = if (manifest.body.length > BODY_PREVIEW_MAX_LEN) {
-                    manifest.body.take(BODY_PREVIEW_MAX_LEN) + "\n…（已截断，完整内容见 SKILL.md）"
-                } else {
-                    manifest.body
-                }
-                Text(
-                    text = body,
-                    color = PrismTextDim,
+                ExpandableText(
+                    text = manifest.body,
+                    expanded = bodyExpanded,
+                    onToggle = { bodyExpanded = !bodyExpanded },
+                    previewMaxLen = BODY_PREVIEW_MAX_LEN,
                     fontSize = 12.sp,
                     lineHeight = 17.sp
                 )
@@ -905,17 +975,14 @@ private fun SkillDetailSheet(
             Spacer(Modifier.height(14.dp))
         }
 
-        // systemPrompt 片段（如有，截断到 200 字符）
+        // systemPrompt 片段（默认截断预览，点击展开全文 —— 修复内容被截断的问题）
         if (manifest?.systemPrompt?.isNotBlank() == true) {
             DetailSection("System Prompt") {
-                val prompt = if (manifest.systemPrompt.length > PROMPT_PREVIEW_MAX_LEN) {
-                    manifest.systemPrompt.take(PROMPT_PREVIEW_MAX_LEN) + "…"
-                } else {
-                    manifest.systemPrompt
-                }
-                Text(
-                    text = prompt,
-                    color = PrismTextDim,
+                ExpandableText(
+                    text = manifest.systemPrompt,
+                    expanded = promptExpanded,
+                    onToggle = { promptExpanded = !promptExpanded },
+                    previewMaxLen = PROMPT_PREVIEW_MAX_LEN,
                     fontSize = 11.5.sp,
                     lineHeight = 16.sp
                 )
@@ -956,6 +1023,59 @@ private fun SkillDetailSheet(
                     ExecutionRecordItem(record)
                     Spacer(Modifier.height(8.dp))
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 可展开文本（默认截断预览，点击展开全文 —— 修复 Skill 内容被截断的问题）。
+ *
+ * - [expanded] 为 true 时展示完整文本
+ * - 为 false 且文本超过 [previewMaxLen] 时截断 + 展示「展开全文」提示
+ * - 文本未超限时直接展示完整内容（无展开按钮）
+ *
+ * @param text 原始文本
+ * @param expanded 是否展开全文
+ * @param onToggle 展开/收起切换回调
+ * @param previewMaxLen 预览截断长度（字符）
+ * @param fontSize / [lineHeight] 文本样式
+ */
+@Composable
+private fun ExpandableText(
+    text: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    previewMaxLen: Int,
+    fontSize: androidx.compose.ui.unit.TextUnit,
+    lineHeight: androidx.compose.ui.unit.TextUnit
+) {
+    val truncated = text.length > previewMaxLen
+    Column {
+        Text(
+            text = if (expanded || !truncated) text else text.take(previewMaxLen) + "\n…",
+            color = PrismTextDim,
+            fontSize = fontSize,
+            lineHeight = lineHeight
+        )
+        if (truncated) {
+            Row(
+                modifier = Modifier
+                    .padding(top = 4.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onToggle
+                    )
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = if (expanded) "▲ 收起" else "▼ 展开全文",
+                    color = PrismIndigo,
+                    fontSize = 11.sp
+                )
             }
         }
     }

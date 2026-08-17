@@ -19,6 +19,7 @@
 - **UXR8 批次1 修复完成（ADR-028，1810 回归 0 失败）**（2026-08-16）—— RagTarget 持久化（关闭后新对话不再重置）/ L2 跨会话记忆保存生产触发 / 配置弹层键盘顶出修复（OBS-2 双模式终版）
 - **UXR8 批次2 优化完成（ADR-029，1873 回归 0 失败）**（2026-08-16）—— O1 L3 画像自然语言化（key 冲突保护）/ O2 MCP 模板 description+keyHint / O3 新模板（Firecrawl/n8n/TrendsMCP）/ O4 Skills（document 工具 + firecrawl/humanizer-zh/web-research 3 新 Skill）/ O5 搜索扩容（10 条 + 多查询合并 16 条 + 预算感知）。G2-05（saveProfile VM 级集成测试）已由批次3 闭环（MemoryManagementViewModelSaveProfileIntegrationTest，6 用例）
 - **UXR8 批次3 新功能完成（ADR-030，guardrail 两轮通过 + ac-verifier 3/3，1948 回归 0 失败）**（2026-08-17）—— N1 用户规则文件（UserRulesRepository「关于我+如何回答」双字段，systemPrompt 最高优先级层）/ N2 LLM 反问（Phase1 persona 澄清策略 + Phase2 ask_user__ask 本地工具 + 提问卡片 + StopAtTools 中断回路）/ N3 文本模型视觉（image_url 多模态直传 + 含图 400 降级 + inSampleSize 降采样防 OOM）。G2-05 技术债闭环。已知技术债：图片 base64 随会话 JSON 膨胀（后续可降采样存储）；N3 方案 B（云端旁路+OCR）留作后续迭代
+- **UXR9 真机问题修复 + 体验增强完成（ADR-031，guardrail 三论 + ac-verifier 31/33 PASS + 2052 回归 0 失败 + 模拟器验证通过）**（2026-08-18）—— 5 Bug 根治 + 3 体验增强：US-901 RAG 换多语言嵌入模型（paraphrase-multilingual-MiniLM-L12-v2 qint8 113MB + Unigram tokenizer，阈值 0.5 + top-2，**设备端实测摄入嵌入成功**）/ US-902 搜索条目级过滤 / US-903 图片双解码链路（ImageDecoder→BitmapFactory）+ flush 队列 + 失败不触发 LLM（**模拟器实测图片气泡渲染成功**）/ US-904 L2 重要性过滤 + LLM 摘要 + MIN_SUMMARY_TURNS=3 门槛 / US-905 Fetch MCP（expectSuccess + SSRF userinfo/IPv6/IDN + 响应体 1MB 硬上限）/ US-906 发送后收起键盘 / US-907 "＋"折叠栏（相册+文件）+ PPTX 解析 + 文本直发（**模拟器实测折叠栏展开 + 摄入 2 分片**）/ US-908 SkillCallCard 工具卡片（复用 isFailureResult）。已知限制：真机待补（US-903 3 图 / US-905 Fetch / US-906 键盘 / US-907-908 UI 交互）；M-1 旧知识库索引需重建（换模型不兼容）；Q-MED-2 应用内重建提示推迟
 
 ### 里程碑明细
 
@@ -36,6 +37,7 @@
 | UXR8-B1 | 批次1 修复（RagTarget 持久化 / L2 触发 / 弹层键盘） | ADR-028，ac-verifier 19/19，1810 回归 0 失败 | 2026-08-16 |
 | UXR8-B2 | 批次2 优化（L3 画像自然语言 / MCP 模板增强 / Skills / 搜索扩容） | ADR-029，ac-verifier 17/17，1873 回归 0 失败 | 2026-08-16 |
 | UXR8-B3 | 批次3 新功能（N1 用户规则文件 / N2 LLM 反问 / N3 文本模型视觉） | ADR-030，guardrail 两轮通过 + ac-verifier 3/3，1942 回归 0 失败 | 2026-08-17 |
+| UXR9 | 真机问题修复（RAG 换多语言模型 / 搜索过滤 / 图片修复 / L2 记忆 / Fetch）+ 体验增强（键盘收起 / ＋折叠栏上传 / Skills 反馈） | ADR-031，guardrail 三轮 + ac-verifier 31/33 + 2052 回归 0 失败 + 模拟器验证 | 2026-08-18 |
 
 ## 用户故事清单
 

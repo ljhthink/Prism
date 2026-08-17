@@ -44,7 +44,7 @@ class BertWordPieceTokenizer(
     private val clsToken: String = "[CLS]",
     private val sepToken: String = "[SEP]",
     private val padToken: String = "[PAD]"
-) {
+) : TokenEncoder {
 
     /** 单次分词结果 —— 对齐 BERT 模型三个输入张量。 */
     data class TokenizationResult(
@@ -79,7 +79,7 @@ class BertWordPieceTokenizer(
      * @param maxLength 最大序列长度（含 [CLS]/[SEP]），all-MiniLM-L6-v2 上限 512
      * @return [TokenizationResult]，三张量等长且等于实际 token 数（不 padding）
      */
-    fun encode(text: String, maxLength: Int = 512): TokenizationResult {
+    override fun encode(text: String, maxLength: Int): TokenizationResult {
         require(maxLength >= 2) { "maxLength 至少容纳 [CLS]+[SEP]=2，收到: $maxLength" }
         val tokens = tokenize(text)
         // 预留 [CLS] + [SEP] 两个位置
@@ -99,6 +99,15 @@ class BertWordPieceTokenizer(
         val tokenTypeIds = LongArray(full.size) { 0L }
         return TokenizationResult(inputIds, attentionMask, tokenTypeIds)
     }
+
+    /**
+     * 便捷重载（UXR9 US-901 引入）：以默认最大序列长度 512 编码。
+     *
+     * 背景：Kotlin 禁止 override 声明默认参数值（默认值仅接口声明），
+     * 但具体类型调用方（如 BertWordPieceTokenizerTest 的 `tokenizer.encode("")`）
+     * 无法继承接口默认值。故增加本单参重载保持具体类型 API 兼容。
+     */
+    fun encode(text: String): TokenizationResult = encode(text, DEFAULT_MAX_LENGTH)
 
     /** 完整分词：basic_tokenize → wordpiece_tokenize（暴露用于测试与调试）。 */
     fun tokenize(text: String): List<String> {
@@ -242,6 +251,9 @@ class BertWordPieceTokenizer(
 
     companion object {
         private val WHITESPACE_REGEX = Regex("\\s+")
+
+        /** 默认最大序列长度（含 [CLS]/[SEP]，与 TokenEncoder 接口默认值对齐）。 */
+        private const val DEFAULT_MAX_LENGTH = 512
 
         /**
          * 从 vocab.txt 加载词表：每行一个 token，行号 = id。

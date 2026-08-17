@@ -193,6 +193,62 @@ class SkillsViewModel(
     }
 
     /**
+     * 删除 Skill（用户从详情弹层触发）。
+     *
+     * **删除语义**（修复：内置 Skill 无法删除文件，改用 isHidden 标记）：
+     * - LOCAL_USER / REMOTE：尝试删除磁盘目录（best-effort），再置 hidden 双保险
+     * - LOCAL_BUILTIN：无法删除 assets 文件，仅置 hidden（扫描同步已过滤隐藏项，不会恢复）
+     * - 级联清理 [SkillExecutionRepository.removeBySkill]（执行记录随 Skill 删除）
+     *
+     * 删除后触发 [SkillRegistry.scanAndSync] 刷新，并关闭详情弹层（[_selectedSkill] 置 null）。
+     * 协程取消遵循 BR-error-handling-007（CancellationException 重抛，不吞）。
+     *
+     * @param id SkillConfig id
+     */
+    fun deleteSkill(id: Long) {
+        val config = skillRepository.get(id) ?: return
+        // 1. 清理执行记录（级联）
+        try {
+            skillExecutionRepository.removeBySkill(id)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "remove execution records failed: skillId=$id", e)
+        }
+        // 2. 删除磁盘目录（仅用户自建 / 远程下载；内置 Skill 在 assets 内不可删，跳过）。
+        //    guardrail TKN-UXR8-FIX-GUARDRAIL-001 MEDIUM#1：deleteRecursively 为同步递归 IO
+        //    （REMOTE 可达 10MB 多文件），移入 Dispatchers.IO 避免主线程 ANR/掉帧。
+        if (config.source != io.prism.data.SkillSource.LOCAL_BUILTIN) {
+            viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val dir = java.io.File(config.skillDir)
+                    if (dir.isDirectory) {
+                        dir.deleteRecursively()
+                    }
+                } catch (e: CancellationException) {
+                    throw e // BR-error-handling-007：不吞 CancellationException
+                } catch (e: Exception) {
+                    // 目录删除失败不阻断删除流程（仅记录日志；isHidden 标记兜底保证 UI 不残留）
+                    android.util.Log.w(TAG, "delete skill dir failed: ${config.skillDir}", e)
+                }
+            }
+        }
+        // 3. 标记删除（持久化）—— 核心：扫描同步已过滤 isHidden，任何来源都不会恢复
+        skillRepository.setHidden(id, true)
+        // 4. 刷新注册中心 + 关闭详情弹层
+        viewModelScope.launch {
+            try {
+                skillRegistry.scanAndSync()
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007：不吞 CancellationException
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "scanAndSync after delete failed: ${e::class.simpleName}", e)
+            }
+        }
+        selectSkill(null)
+    }
+
+    /**
      * 远程安装 Skill（US-028，ADR-013 5.6）。
      *
      * **流程**：
@@ -279,6 +335,9 @@ class SkillsViewModel(
         /**
          * 合并持久化 config 列表与内存 manifest 列表为 UI 模型（纯函数，BR-testing-004）。
          *
+         * 过滤条件：排除已删除（isHidden=true）的 Skill —— 用户删除后 UI 不再展示，
+         * 避免内置 Skill 因文件无法删除而在列表残留。
+         *
          * @param configs 来自 SkillRepository 的持久化配置（实时响应 setEnabled）
          * @param entries 来自 SkillRegistry 的加载条目（含 manifest）
          * @return UI 模型列表，按 config.createdAt 升序（与 Repository 一致）
@@ -288,10 +347,13 @@ class SkillsViewModel(
             entries: List<SkillRegistry.SkillEntry>
         ): List<SkillUiModel> {
             val manifestByName = entries.associateBy { it.config.name }
-            return configs.map { config ->
-                val manifest = manifestByName[config.name]?.manifest
-                Companion.toUiModel(config, manifest)
-            }
+            return configs.asSequence()
+                .filterNot { it.isHidden }
+                .map { config ->
+                    val manifest = manifestByName[config.name]?.manifest
+                    Companion.toUiModel(config, manifest)
+                }
+                .toList()
         }
 
         /**

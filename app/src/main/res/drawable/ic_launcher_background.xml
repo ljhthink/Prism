@@ -1,5 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
-<shape xmlns:android="http://schemas.android.com/apk/res/android"
-    android:shape="rectangle">
-    <solid android:color="#FF1F6FEB" />
-</shape>
+<!--
+    Prism launcher background · 深空近黑（Concept A）
+    实体化表面：中心微亮 → 边缘渐深，径向纵深营造「深空」母题，去玻璃感。
+    对齐 deep-space-glass v0.4：bg #0a0a0f / surface #16161d。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="54"
+                android:centerY="50"
+                android:gradientRadius="80"
+                android:startColor="#FF17171E"
+                android:centerColor="#FF101015"
+                android:endColor="#FF0A0A0F" />
+        </aapt:attr>
+    </path>
+</vector>

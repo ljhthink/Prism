@@ -5,7 +5,10 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
 import android.net.Uri
+import android.os.Build
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -16,7 +19,10 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -57,6 +63,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -67,20 +74,24 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.CancellationException
 import com.mikepenz.markdown.m3.Markdown
 import com.mikepenz.markdown.m3.markdownTypography
 import com.mikepenz.markdown.model.MarkdownTypography
 import io.prism.crossapp.AppLauncherBridge
 import io.prism.crossapp.CrossAppLauncher
 import io.prism.data.ProviderConfig
+import io.prism.document.DocumentParserRegistry
 import io.prism.network.WebSearchLocalToolExecutor
 import io.prism.rag.RagTarget
 import io.prism.skill.AskUserQuestion
+import io.prism.skill.SkillExecutor
 import io.prism.ui.components.PrismAvatar
 import io.prism.ui.components.PrismButton
 import io.prism.ui.components.PrismButtonVariant
@@ -94,6 +105,7 @@ import io.prism.ui.model.ChatMessage
 import io.prism.ui.model.Role
 import io.prism.ui.model.SearchResult
 import io.prism.ui.theme.PrismCyan
+import io.prism.ui.theme.PrismError
 import io.prism.ui.theme.PrismIndigo
 import io.prism.ui.theme.PrismIndigoSoft
 import io.prism.ui.theme.PrismLine
@@ -104,6 +116,9 @@ import io.prism.ui.theme.PrismText
 import io.prism.ui.theme.PrismTextDim
 import io.prism.ui.theme.PrismTextFaint
 import java.io.ByteArrayOutputStream
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 聊天屏幕 —— 深空玻璃肌理（设计规范 v0.2 第 8.1 节）。
@@ -144,6 +159,8 @@ fun ConversationScreen(
     val messages by viewModel.messages.collectAsState()
     val isTyping by viewModel.isTyping.collectAsState()
     val activeTool by viewModel.activeTool.collectAsState()
+    // UXR9 US-906：发送后自动收起键盘（LocalSoftwareKeyboardController 需在组合内获取）
+    val keyboardController = LocalSoftwareKeyboardController.current
     // UXR6 问题 2：每消息独立流式标记（替代「isTyping && lastOrNull()」全局推断）
     val streamingIds by viewModel.streamingIds.collectAsState()
     // UXR6 问题 3a：当前是否正在 RAG 检索（真实检索状态驱动「检索知识库」指示）
@@ -208,14 +225,46 @@ fun ConversationScreen(
     // UXR8 N3（ADR-030）：图片消息 —— 系统图片选择器 → data URL → sendMessage(imageUrl)
     // 图片经 resize（最长边 1024px）+ JPEG 压缩（质量 80）后 base64，控制请求体大小。
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val imagePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
         if (uri != null) {
-            val dataUrl = encodeImageToDataUrl(context, uri)
-            if (dataUrl != null) {
-                viewModel.sendMessage(input, dataUrl)
-                input = ""
+            // Q-MED-4（guardrail TKN-UXR9-GUARDRAIL-002）：图片解码+压缩+base64 是重 CPU
+            // 操作（BitmapFactory/ImageDecoder 兜底路径需全尺寸 bounds 读取），移入 IO 协程，
+            // 与文件解析（下方 filePickerLauncher）对称，避免大图在 ActivityResult 回调（主线程）
+            // 同步执行导致卡顿。
+            scope.launch {
+                val dataUrl = withContext(Dispatchers.IO) { encodeImageToDataUrl(context, uri) }
+                if (dataUrl != null) {
+                    viewModel.sendMessage(input, dataUrl)
+                    input = ""
+                } else {
+                    // Bug fix（UXR8-R3，guardrail M-2 修复）：编码失败时给予用户可见提示，
+                    // 而非静默丢弃。走 notifyEncodingFailure —— isTyping（AI 回复中）期间
+                    // 暂存队列，回复完成后显示，不被 sendMessage 守卫丢弃。
+                    viewModel.notifyEncodingFailure()
+                }
+            }
+        }
+    }
+
+    // UXR9 US-907：文件上传 —— 系统文件选择器（PDF/DOCX/XLSX/PPTX/MD/TXT/CSV）。
+    // 本地解析提取文本 → 作为用户消息发送 LLM（PRD D-2 决策：方案 A，文本直发）。
+    // 解析在 IO 协程执行（不阻塞主线程），失败走系统提示通道（不触发 LLM）。
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            scope.launch {
+                val parsed = withContext(Dispatchers.IO) { extractDocumentText(context, uri) }
+                if (parsed != null) {
+                    viewModel.sendMessage(parsed)
+                    // L-3（guardrail TKN-UXR9-GUARDRAIL-001）：**不清空**用户已输入的文本——
+                    // 文档内容作为独立用户消息发送，用户输入框中的草稿应保留
+                } else {
+                    viewModel.notifyDocumentError()
+                }
             }
         }
     }
@@ -297,6 +346,11 @@ fun ConversationScreen(
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 items(messages, key = { it.id }) { message ->
+                    // UXR9 US-908：预构建 工具调用 id → 参数 查找表（assistant 消息携带的
+                    // toolCalls 反向映射），供 TOOL 消息渲染「参数摘要」。
+                    val toolArgsById = remember(messages) {
+                        messages.flatMap { it.toolCalls }.associateBy { it.id }
+                    }
                     MessageBubble(
                         message = message,
                         // UXR3 问题 13（ADR-023）：复制 / 编辑
@@ -314,7 +368,9 @@ fun ConversationScreen(
                         // UXR6 改用**每消息独立流式标记**（streamingIds），替代「isTyping &&
                         // lastOrNull()」全局推断 —— 后者在工具回路 Error 清 isTyping、或多消息
                         // 并发时误判，导致完成消息被 Markdown 渲染不完整中间态。
-                        isStreaming = message.id in streamingIds
+                        isStreaming = message.id in streamingIds,
+                        // UXR9 US-908：工具调用卡片参数查找表
+                        toolArgsById = toolArgsById
                     )
                 }
                 // UX-001 问题 7（ADR-022）：工具调用状态可视化 —— 调用中显示「正在调用工具: xxx」
@@ -358,9 +414,24 @@ fun ConversationScreen(
                             viewModel.sendMessage(input)
                         }
                         input = ""
+                        // UXR9 US-906：发送后自动收起键盘，给 LLM 输出留出可视空间
+                        keyboardController?.hide()
                     },
-                    // UXR8 N3（ADR-030）：图片发送入口（系统图片选择器）
-                    onImagePick = { imagePickerLauncher.launch("image/*") }
+                    // UXR9 US-907：移除独立图片入口，统一走"＋"折叠栏（相册 / 文件）
+                    onImagePick = { imagePickerLauncher.launch("image/*") },
+                    onFilePick = {
+                        filePickerLauncher.launch(
+                            arrayOf(
+                                "application/pdf",
+                                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                                "text/plain",
+                                "text/markdown",
+                                "text/csv"
+                            )
+                        )
+                    }
                 )
             }
         }
@@ -686,7 +757,9 @@ private fun MessageBubble(
     /** UXR4 问题 1/4/6（ADR-024）：是否展示「深度思考」折叠区。协议层仍回传 reasoning_content，UI 展示由开关控制。 */
     showThinking: Boolean,
     /** UXR5 问题 1（ADR-024 遗留）：该消息是否为当前正在流式生成的 AI 回复（流式期间用纯文本渲染）。 */
-    isStreaming: Boolean
+    isStreaming: Boolean,
+    /** UXR9 US-908：工具调用 id → 参数引用 查找表（渲染工具卡片参数摘要）。 */
+    toolArgsById: Map<String, io.prism.ui.model.ToolCallRef> = emptyMap()
 ) {
     val isUser = message.role == Role.USER
     val isTool = message.role == Role.TOOL
@@ -707,8 +780,11 @@ private fun MessageBubble(
                 horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
             ) {
                 when {
+                    // UXR9 Bug3：系统提示消息（如"图片编码失败"）→ 居中弱化提示气泡，
+                    // 不触发 LLM、不进请求历史（ConversationViewModel 已处理）
+                    message.isSystemNotice -> SystemNoticeBubble(message)
                     isUser -> UserBubble(message)
-                    isTool -> ToolBubble(message)
+                    isTool -> SkillCallCard(message, toolArgsById)
                     else -> AiBubble(message, showThinking, isStreaming)
                 }
                 // UXR3 问题 13（ADR-023）：消息操作行（复制 / 编辑）
@@ -783,7 +859,31 @@ private fun copyToClipboard(context: android.content.Context, text: String) {
     clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Prism 消息", text))
 }
 
-/** 用户消息气泡（靛蓝渐变，原有样式不变）。 */
+/**
+ * 系统提示气泡（UXR9 Bug3）：居中、弱化（小字号 + 淡色背景），无头像无操作行。
+ * 用于"图片编码失败"等**不触发 LLM** 的一次性提示。
+ */
+@Composable
+private fun SystemNoticeBubble(message: ChatMessage) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Text(
+            text = message.content,
+            color = PrismTextFaint,
+            fontSize = 12.sp,
+            lineHeight = 18.sp,
+            modifier = Modifier
+                .clip(RoundedCornerShape(10.dp))
+                .background(PrismPanel2.copy(alpha = 0.6f))
+                .padding(horizontal = 12.dp, vertical = 6.dp)
+        )
+    }
+}
+
 @Composable
 private fun UserBubble(message: ChatMessage) {
     Box(
@@ -843,15 +943,82 @@ private fun decodeImageDataUrl(dataUrl: String): Bitmap? {
  * 将图片 Uri 编码为 data URL（UXR8 N3，ADR-030，零新增依赖）。
  *
  * 读图 → 降采样解码 → 最长边缩放至 [MAX_IMAGE_EDGE_PX]（控请求体大小）→ JPEG 压缩（质量 80）
- * → base64 → `data:image/jpeg;base64,...`。读取/解码失败返回 null（调用方忽略）。
+ * → base64 → `data:image/jpeg;base64,...`。读取/解码失败返回 null（调用方走
+ * [ConversationViewModel.notifyEncodingFailure] 提示）。
  *
- * **Q-MED-4（guardrail TKN-UXR8-B3-GUARDRAIL-001）**：先 `inJustDecodeBounds` 读尺寸计算
- * `inSampleSize` 降采样解码，避免高分辨率照片（如 48MP ≈ 192MB ARGB）全尺寸解码在
- * 3GB 档设备（MINIMAL/CHAT_ONLY）上 OOM。解码后最长边 ∈ [1024, 2048)，再等比缩放至 1024。
+ * **UXR9 Bug3 修复（TKN-UXR9-ARCHAEOLOGY-001）**：
+ * - **双解码链路**：优先 [ImageDecoder]（API 28+，原生支持 HEIC/HEIF，解码时直接
+ *   `setTargetSize` 降采样），失败回退 [BitmapFactory]（API 26-27 / ImageDecoder 不可用）。
+ *   此前仅 BitmapFactory，小米真机相册 HEIC 图片解码失败 → 全部图片提示"编码失败"。
+ * - **可观测性**：失败路径补结构化日志（Log.w + 阶段 + 异常类型/消息），真机 logcat
+ *   可定位根因（此前 catch 吞掉所有异常且零日志）。
+ * - **OOM 捕获**：`OutOfMemoryError` 是 Error 而非 Exception，`catch (e: Exception)` 抓不到，
+ *   单独捕获并提示。
  *
  * **隐私**：data URL 仅存在于内存与发送给用户自配的模型端点，不落盘、不入库。
  */
-private fun encodeImageToDataUrl(context: Context, uri: Uri): String? = try {
+private fun encodeImageToDataUrl(context: Context, uri: Uri): String? {
+    val bitmap = try {
+        decodeImageBitmap(context, uri)
+    } catch (e: OutOfMemoryError) {
+        Log.w(IMAGE_ENCODE_TAG, "图片解码 OOM（图片过大或内存不足）", e)
+        null
+    } catch (e: Exception) {
+        Log.w(IMAGE_ENCODE_TAG, "图片解码失败: ${e::class.simpleName}: ${e.message}", e)
+        null
+    } ?: return null
+
+    return try {
+        val out = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 80, out)
+        val b64 = android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
+        "data:image/jpeg;base64,$b64"
+    } catch (e: OutOfMemoryError) {
+        Log.w(IMAGE_ENCODE_TAG, "图片压缩 OOM", e)
+        null
+    } catch (e: Exception) {
+        Log.w(IMAGE_ENCODE_TAG, "图片压缩/编码失败: ${e::class.simpleName}: ${e.message}", e)
+        null
+    } finally {
+        bitmap.recycle()
+    }
+}
+
+/**
+ * 解码图片 Bitmap（UXR9 Bug3 双解码链路）。
+ *
+ * **ImageDecoder 优先**（API 28+）：原生支持 HEIC/HEIF/WebP 等格式，且解码时通过
+ * `setTargetSize` 直接降采样到 [MAX_IMAGE_EDGE_PX]，避免全尺寸位图驻留堆内存。
+ * **BitmapFactory 兜底**（API 26-27 或 ImageDecoder 失败）：保持原有 inSampleSize
+ * 降采样 + 等比缩放逻辑。
+ *
+ * @return 解码并缩放到 MAX_IMAGE_EDGE_PX 的 Bitmap；失败返回 null（调用方已记录日志）
+ */
+private fun decodeImageBitmap(context: Context, uri: Uri): Bitmap? {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        try {
+            val source = ImageDecoder.createSource(context.contentResolver, uri)
+            return ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                val maxEdge = MAX_IMAGE_EDGE_PX.toFloat()
+                val scale = minOf(maxEdge / info.size.width, maxEdge / info.size.height, 1f)
+                if (scale < 1f) {
+                    decoder.setTargetSize(
+                        (info.size.width * scale).toInt().coerceAtLeast(1),
+                        (info.size.height * scale).toInt().coerceAtLeast(1)
+                    )
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(IMAGE_ENCODE_TAG, "ImageDecoder 解码失败，回退 BitmapFactory: ${e::class.simpleName}: ${e.message}")
+        }
+    }
+    return decodeWithBitmapFactory(context, uri)
+}
+
+/** BitmapFactory 降采样解码 + 等比缩放（API 26-27 / ImageDecoder 兜底路径）。 */
+private fun decodeWithBitmapFactory(context: Context, uri: Uri): Bitmap? {
     // 1. 仅读尺寸（inJustDecodeBounds 不分配像素内存）→ 计算 inSampleSize
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
     context.contentResolver.openInputStream(uri)?.use { input ->
@@ -868,24 +1035,18 @@ private fun encodeImageToDataUrl(context: Context, uri: Uri): String? = try {
     // 3. 等比缩放至 MAX_IMAGE_EDGE_PX（控 base64 体积：1024px JPEG q80 ≈ 200-500KB）
     val maxEdge = MAX_IMAGE_EDGE_PX.toFloat()
     val scale = minOf(maxEdge / bitmap.width, maxEdge / bitmap.height, 1f)
-    val scaled = if (scale < 1f) {
-        Bitmap.createScaledBitmap(
+    return if (scale < 1f) {
+        val scaled = Bitmap.createScaledBitmap(
             bitmap,
             (bitmap.width * scale).toInt().coerceAtLeast(1),
             (bitmap.height * scale).toInt().coerceAtLeast(1),
             true
         )
+        if (scaled != bitmap) bitmap.recycle()
+        scaled
     } else {
         bitmap
     }
-    val out = ByteArrayOutputStream()
-    scaled.compress(Bitmap.CompressFormat.JPEG, 80, out)
-    val b64 = android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
-    if (scaled != bitmap) scaled.recycle()
-    bitmap.recycle()
-    "data:image/jpeg;base64,$b64"
-} catch (e: Exception) {
-    null
 }
 
 /**
@@ -905,6 +1066,65 @@ private fun computeInSampleSize(origWidth: Int, origHeight: Int, targetEdge: Int
 /** UXR8 N3（ADR-030）：图片最长边像素上限（等比缩放，控请求体大小）。 */
 private const val MAX_IMAGE_EDGE_PX = 1024
 
+/** UXR9 Bug3：图片编码/解码日志标签（真机 logcat 定位根因用）。 */
+private const val IMAGE_ENCODE_TAG = "ImageEncode"
+
+/** UXR9 US-907：文档消息发送给 LLM 的最大字符数（超长截断，控 token 开销）。 */
+private const val DOCUMENT_MESSAGE_MAX_LEN = 30000
+
+/** UXR9 US-907：文档解析日志标签。 */
+private const val DOCUMENT_PARSE_TAG = "DocumentParse"
+
+/**
+ * UXR9 US-907：从文件选择器返回的 [Uri] 本地解析文档并提取文本（IO 线程调用）。
+ *
+ * **流程**：查询显示名（OpenableColumns.DISPLAY_NAME）→ [DocumentParserRegistry] 按扩展名
+ * 分发解析器 → 提取文本 → 以 `【文档：文件名】` 前缀包装（供 LLM 感知来源）→ 超长截断。
+ *
+ * **降级**：解析失败 / 空文本返回 null（调用方走系统提示通道，不触发 LLM）。
+ * 与知识库 ingest 共用同一批解析器（PDF/DOCX/XLSX/PPTX/MD/TXT/CSV），零新增依赖。
+ *
+ * @param context 用于 contentResolver 读取
+ * @param uri 文件选择器返回的文档 Uri
+ * @return 包装后的文档文本；解析失败返回 null
+ */
+private fun extractDocumentText(context: Context, uri: Uri): String? {
+    val displayName = queryDocumentDisplayName(context, uri) ?: "document"
+    return try {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            val parser = DocumentParserRegistry().parserFor(displayName)
+            val text = parser.parse(input)
+            if (text.isBlank()) return null
+            buildString {
+                append("【文档：$displayName】\n")
+                append(text.take(DOCUMENT_MESSAGE_MAX_LEN))
+                if (text.length > DOCUMENT_MESSAGE_MAX_LEN) {
+                    append("\n…（文档过长，已截断，仅展示前 ${DOCUMENT_MESSAGE_MAX_LEN} 字）")
+                }
+            }
+        }
+    } catch (e: Exception) {
+        // CWE-209：日志不含完整堆栈/路径细节；记录类型供真机排查。
+        // Q-LOW-4（guardrail TKN-UXR9-GUARDRAIL-002）：文件名可能含 PII（如"身份证.pdf"），
+        // 对齐 BR-error-handling-016 截断至 120 字符后再入日志。
+        Log.w(DOCUMENT_PARSE_TAG, "文档解析失败: ${e::class.simpleName}: ${displayName.take(120)}")
+        null
+    }
+}
+
+/** 查询文件选择器返回 Uri 的显示名（OpenableColumns.DISPLAY_NAME），不可得返回 null。 */
+private fun queryDocumentDisplayName(context: Context, uri: Uri): String? = try {
+    context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+        if (cursor.moveToFirst()) {
+            val idx = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (idx >= 0) cursor.getString(idx) else null
+        } else null
+    }
+} catch (e: Exception) {
+    Log.w(DOCUMENT_PARSE_TAG, "查询文档名失败: ${e::class.simpleName}")
+    null
+}
+
 /**
  * LLM 反问/澄清提问卡片（UXR8 N2 Phase 2，ADR-030）。
  *
@@ -919,10 +1139,24 @@ private fun AskUserSheet(
     onSubmit: (String) -> Unit,
     onSkip: () -> Unit
 ) {
-    // 每个问题的选中选项（question index → 已选 option label 集合；multiSelect 支持）
-    val selected = remember { mutableStateMapOf<Int, MutableSet<String>>() }
+    // Bug fix（UXR8-R3, TKN-UXR8-R3-ARCHAEOLOGY-001 根因）：此前用 MutableSet<String> 作为
+    // mutableStateMapOf 的 value，但 MutableSet 不是 Compose 快照类型，.add/remove/clear
+    // 不触发重组——选项点击选中态 UI 永不刷新，用户感知"无法点击"。
+    // 改为用 Set<String>（不可变），每次点击替换整个 value 引用，写快照触发重组。
+    val selected = remember { mutableStateMapOf<Int, Set<String>>() }
     // 每个问题的自由文本补充（question index → 文本）
     val freeTexts = remember { mutableStateMapOf<Int, String>() }
+
+    /** 点击选项的选中态切换（快照安全，替换整个 set 引用）。 */
+    fun toggleOption(qIndex: Int, label: String, multiSelect: Boolean) {
+        val current = selected[qIndex] ?: emptySet()
+        selected[qIndex] = if (multiSelect) {
+            if (label in current) current - label else current + label
+        } else {
+            // 单选：直接替换为含 label 的 set
+            setOf(label)
+        }
+    }
 
     PrismSheet(
         title = "AI 需要确认",
@@ -953,20 +1187,12 @@ private fun AskUserSheet(
             )
             Spacer(Modifier.height(8.dp))
             q.options.forEach { option ->
-                val optionSet = selected.getOrPut(index) { mutableSetOf() }
-                val isSelected = option.label in optionSet
+                val isSelected = option.label in (selected[index] ?: emptySet())
                 AskUserOptionChip(
                     label = option.label,
                     description = option.description,
                     selected = isSelected,
-                    onClick = {
-                        if (q.multiSelect) {
-                            if (isSelected) optionSet.remove(option.label) else optionSet.add(option.label)
-                        } else {
-                            optionSet.clear()
-                            optionSet.add(option.label)
-                        }
-                    }
+                    onClick = { toggleOption(index, option.label, q.multiSelect) }
                 )
                 Spacer(Modifier.height(6.dp))
             }
@@ -1157,37 +1383,100 @@ private fun AiBubble(message: ChatMessage, showThinking: Boolean, isStreaming: B
 }
 
 /**
- * 工具结果气泡（UX-001 问题 9，ADR-021）—— 紧凑展示工具名 + 截断内容，不混入 AI 正文。
+ * UXR9 US-908：Skill/工具调用卡片 —— 会话内嵌工具调用反馈。
  *
- * **UX-001 问题 6（ADR-022 二次反馈）**：联网搜索（web_search__search）的 TOOL 消息
- * 不再渲染气泡 —— 其结果已由 AI 消息下方的 [CollapsibleSearchCard] 折叠卡片结构化展示，
- * 独立 TOOL 气泡属于冗余（用户反馈「多余的联网搜索气泡」）。空 content 的 TOOL 消息也不渲染。
+ * 展示：工具名（完整命名空间 `skillName__toolName`）+ 参数摘要 + 执行结果片段 + 状态徽标。
+ * - 成功（结果文本不含错误标记）→ 绿色「✓ 成功」
+ * - 失败（结果以"工具执行出错"/"⚠️"等开头）→ 红色「✕ 失败」
+ * - 联网搜索 / 知识库结果继续由 [CollapsibleSearchCard] / 引用来源展示，此处跳过冗余卡片
+ *
+ * 满足 US-908 AC-1/AC-2：LLM 调用 skill 时界面有明确反馈（工具名 + 参数摘要 + 状态），
+ * 与既有「正在调用工具: xxx」执行中指示（[ToolCallIndicator]）互补不冲突。
  */
 @Composable
-private fun ToolBubble(message: ChatMessage) {
-    val content = message.content.trim().replace('\n', ' ')
-    // 联网搜索结果已由 CollapsibleSearchCard 展示，跳过冗余 TOOL 气泡；
+private fun SkillCallCard(
+    message: ChatMessage,
+    toolArgsById: Map<String, io.prism.ui.model.ToolCallRef>
+) {
+    val content = message.content.trim()
+    // 联网搜索结果已由 CollapsibleSearchCard 展示，跳过冗余 TOOL 卡片；
     // 空 content（协议占位）不渲染
     if (message.toolName == WebSearchLocalToolExecutor.TOOL_SEARCH || content.isEmpty()) return
 
-    val toolLabel = message.toolName?.substringAfterLast("__") ?: "工具"
+    val toolFullName = message.toolName ?: "工具"
+    // 状态判定（Q-LOW-7 修复，guardrail TKN-UXR9-GUARDRAIL-002/003）：复用 SkillExecutor 的
+    // 单一事实来源 isFailureResult（固定失败前缀集合），而非 UI 自造启发式（此前
+    // `contains("失败：")` 会把含该子串的成功结果误判为失败）。
+    val isFailed = SkillExecutor.isFailureResult(content)
+    val statusColor = if (isFailed) PrismError else PrismMint
+    val statusText = if (isFailed) "✕ 失败" else "✓ 成功"
+
+    // 参数摘要：按 toolCallId 从 assistant 消息的 toolCalls 反查 arguments JSON
+    val argsSummary = toolArgsById[message.toolCallId]?.arguments
+        ?.let { summarizeToolArguments(it) }
+
     Column(
         modifier = Modifier
+            .fillMaxWidth()
             .clip(RoundedCornerShape(10.dp))
             .background(PrismPanel.copy(alpha = 0.5f))
             .border(1.dp, PrismLine, RoundedCornerShape(10.dp))
-            .padding(horizontal = 10.dp, vertical = 6.dp)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
-        Text(text = "◈ $toolLabel", color = PrismMint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "◈ $toolFullName",
+                color = PrismText,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
+            )
+            Spacer(Modifier.weight(1f))
+            Text(
+                text = statusText,
+                color = statusColor,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        if (argsSummary != null) {
+            Text(
+                text = "参数：$argsSummary",
+                color = PrismTextFaint,
+                fontSize = 10.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
         Text(
-            text = content.take(120) + if (content.length > 120) "…" else "",
-            color = PrismTextFaint,
+            text = if (isFailed) content.take(160) else content.take(120) + if (content.length > 120) "…" else "",
+            color = if (isFailed) PrismError else PrismTextFaint,
             fontSize = 11.sp,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis
         )
     }
 }
+
+/**
+ * UXR9 US-908：将工具参数 JSON 压缩为单行摘要（纯函数，可测）。
+ *
+ * 去除空白/换行，截断至 [TOOL_ARGS_SUMMARY_MAX_LEN]，避免卡片被长参数撑爆。
+ */
+internal fun summarizeToolArguments(argumentsJson: String): String {
+    val compact = argumentsJson.replace(Regex("\\s+"), "")
+    return compact.take(TOOL_ARGS_SUMMARY_MAX_LEN) +
+        if (compact.length > TOOL_ARGS_SUMMARY_MAX_LEN) "…" else ""
+}
+
+/** UXR9 US-908：工具参数摘要最大字符数。 */
+private const val TOOL_ARGS_SUMMARY_MAX_LEN = 80
 
 /**
  * 思维链折叠卡片（UX-001 问题 7，ADR-021）。
@@ -1476,91 +1765,158 @@ private fun ToolCallIndicator(toolName: String) {
             }
         }
         Text(
-            text = "正在调用工具: $toolName",
+            text = "◈ $toolName",
             color = PrismMint,
             fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(start = 8.dp)
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .padding(start = 8.dp)
+                .weight(1f, fill = false)
         )
+        Spacer(Modifier.weight(1f))
+        // UXR9 US-908：执行中状态徽标（与完成卡片的「✓ 成功 / ✕ 失败」互补）
+        Text(text = "⟳ 执行中", color = PrismMint, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 
-/** 底部输入栏 —— 玻璃胶囊输入框 + 靛蓝渐变圆形发送钮（带光晕）+ 图片附件钮（UXR8 N3）。 */
+/**
+ * 底部输入栏（UXR9 US-907 重构）—— 玻璃胶囊输入框 + 发送钮 + "＋"折叠栏上传。
+ *
+ * **UXR9 US-907 变更**：移除原独立「🖼 图片」按钮，改为在发送按钮右侧新增「＋」按钮，
+ * 点击展开折叠栏显示两种上传方式：相册（图片）/ 文件（PDF/DOCX/XLSX/PPTX 等）。
+ * **UXR9 US-906**：发送后键盘自动收起由调用方（onSend 内）执行。
+ */
 @Composable
 private fun MessageInputBar(
     value: String,
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
-    /** UXR8 N3（ADR-030）：图片发送入口回调（系统图片选择器）。 */
-    onImagePick: () -> Unit
+    /** UXR9 US-907：相册上传入口（系统图片选择器）。 */
+    onImagePick: () -> Unit,
+    /** UXR9 US-907：文件上传入口（系统文件选择器）。 */
+    onFilePick: () -> Unit
 ) {
-    Row(
+    var uploadBarExpanded by remember { mutableStateOf(false) }
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
+            .padding(horizontal = 20.dp, vertical = 10.dp)
     ) {
-        // UXR8 N3（ADR-030）：图片附件按钮
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clip(CircleShape)
-                .background(PrismPanel, CircleShape)
-                .border(1.dp, PrismLine, CircleShape)
-                .clickable { onImagePick() },
-            contentAlignment = Alignment.Center
+        // UXR9 US-907：折叠栏 —— 点击"＋"展开，显示「相册 / 文件」两个上传入口。
+        // 展开时挤占输入区上方空间（与键盘不同时使用：选完自动收起 + 收起键盘）。
+        AnimatedVisibility(
+            visible = uploadBarExpanded,
+            enter = expandVertically(),
+            exit = shrinkVertically()
         ) {
-            Text(
-                text = "🖼",
-                color = PrismTextDim,
-                fontSize = 16.sp
-            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                UploadActionChip(label = "🖼 相册", onClick = {
+                    uploadBarExpanded = false
+                    onImagePick()
+                })
+                UploadActionChip(label = "📄 文件", onClick = {
+                    uploadBarExpanded = false
+                    onFilePick()
+                })
+            }
         }
-        Box(
-            modifier = Modifier
-                .weight(1f)
-                .background(PrismPanel, RoundedCornerShape(24.dp))
-                .border(1.dp, PrismLine, RoundedCornerShape(24.dp))
-                .padding(horizontal = 16.dp, vertical = 13.dp)
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            if (value.isEmpty()) {
-                Text(
-                    text = "输入问题…",
-                    color = PrismTextFaint,
-                    fontSize = 14.sp
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .background(PrismPanel, RoundedCornerShape(24.dp))
+                    .border(1.dp, PrismLine, RoundedCornerShape(24.dp))
+                    .padding(horizontal = 16.dp, vertical = 13.dp)
+            ) {
+                if (value.isEmpty()) {
+                    Text(
+                        text = "输入问题…",
+                        color = PrismTextFaint,
+                        fontSize = 14.sp
+                    )
+                }
+                BasicTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    textStyle = androidx.compose.ui.text.TextStyle(
+                        color = PrismText,
+                        fontSize = 14.sp
+                    ),
+                    cursorBrush = SolidColor(PrismCyan),
+                    maxLines = 4,
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
-            BasicTextField(
-                value = value,
-                onValueChange = onValueChange,
-                textStyle = androidx.compose.ui.text.TextStyle(
-                    color = PrismText,
-                    fontSize = 14.sp
-                ),
-                cursorBrush = SolidColor(PrismCyan),
-                maxLines = 4,
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
-        Box(
-            modifier = Modifier
-                .size(44.dp)
-                .clip(CircleShape)
-                .background(
-                    Brush.linearGradient(listOf(PrismIndigo, PrismIndigoSoft)),
-                    CircleShape
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(
+                        Brush.linearGradient(listOf(PrismIndigo, PrismIndigoSoft)),
+                        CircleShape
+                    )
+                    .border(1.dp, PrismIndigo.copy(alpha = 0.5f), CircleShape)
+                    .clickable(enabled = value.isNotBlank()) { onSend() },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "➤",
+                    color = Color.White,
+                    fontSize = 17.sp
                 )
-                .border(1.dp, PrismIndigo.copy(alpha = 0.5f), CircleShape)
-                .clickable(enabled = value.isNotBlank()) { onSend() },
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = "➤",
-                color = Color.White,
-                fontSize = 17.sp
-            )
+            }
+            // UXR9 US-907："＋"折叠栏开关（发送按钮右侧）—— 相册 / 文件两种上传方式
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (uploadBarExpanded) PrismIndigoSoft.copy(alpha = 0.5f) else PrismPanel,
+                        CircleShape
+                    )
+                    .border(1.dp, if (uploadBarExpanded) PrismIndigo else PrismLine, CircleShape)
+                    .clickable { uploadBarExpanded = !uploadBarExpanded },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = if (uploadBarExpanded) "✕" else "＋",
+                    color = if (uploadBarExpanded) PrismIndigo else PrismTextDim,
+                    fontSize = 18.sp
+                )
+            }
         }
+    }
+}
+
+/** UXR9 US-907：折叠栏内的上传方式胶囊按钮（相册 / 文件）。 */
+@Composable
+private fun UploadActionChip(label: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(PrismPanel2.copy(alpha = 0.6f))
+            .border(1.dp, PrismLine, RoundedCornerShape(10.dp))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(text = label, color = PrismTextDim, fontSize = 12.sp)
     }
 }
 

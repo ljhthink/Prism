@@ -206,9 +206,9 @@ class PrismApplication : Application() {
         )
     }
 
-    /** 本地 MCP 工具提供者（进程内桥接 Filesystem Server，ADR-006 5.5；Fetch 复用 searchHttpClient，UXR3 问题 11） */
+    /** 本地 MCP 工具提供者（进程内桥接 Filesystem Server，ADR-006 5.5；Fetch 用独立 fetchHttpClient） */
     val localMcpToolProvider: LocalMcpToolProvider by lazy {
-        LocalMcpToolProvider(filesystemMcpServer, searchHttpClient)
+        LocalMcpToolProvider(filesystemMcpServer, fetchHttpClient)
     }
 
     /** MCP 工具提供者路由（按 serverType 分发 LOCAL/REMOTE，ADR-006 5.6） */
@@ -284,9 +284,12 @@ class PrismApplication : Application() {
      */
     val embedder: Embedder by lazy {
         if (tierManager.currentTier.isEmbedderEnabled) {
+            // UXR9 US-901：多语言嵌入模型（paraphrase-multilingual-MiniLM-L12-v2 qint8，
+            // ~113MB）+ Unigram tokenizer（tokenizer.json ~9MB）。英文 MiniLM 对中文语义
+            // 区分度差（无关中文片段余弦 0.4~0.7），多语言模型是中文 RAG 治本方案。
             assets.open(EmbedderFactory.DEFAULT_MODEL_PATH).use { modelInput ->
-                assets.open(EmbedderFactory.DEFAULT_VOCAB_PATH).use { vocabInput ->
-                    EmbedderFactory.create(modelInput, vocabInput)
+                assets.open(EmbedderFactory.DEFAULT_TOKENIZER_PATH).use { tokenizerInput ->
+                    EmbedderFactory.createMultilingual(modelInput, tokenizerInput)
                 }
             }
         } else {
@@ -458,6 +461,29 @@ class PrismApplication : Application() {
             install(HttpTimeout) {
                 requestTimeoutMillis = SEARCH_REQUEST_TIMEOUT_MS
             }
+        }
+    }
+
+    /**
+     * Fetch MCP 工具专用 HTTP 客户端（UXR9 Bug5 修复，TKN-UXR9-ARCHAEOLOGY-001）。
+     *
+     * **与 [searchHttpClient] 的差异**：
+     * - `expectSuccess = false`：非 2xx **返回响应**交由 [LocalMcpToolProvider] 按状态码
+     *   生成可诊断文案（如 "HTTP 404"）。此前复用 searchHttpClient（expectSuccess=true），
+     *   非 2xx 在 `client.get` 处抛异常落入通用失败文案"抓取失败：网络错误"，且工具内
+     *   的 `if (!response.status.isSuccess())` 分支成为**不可达死代码**（测试-生产行为漂移）。
+     * - 独立超时（Fetch 目标站多样，给足缓冲）
+     */
+    val fetchHttpClient: HttpClient by lazy {
+        HttpClient(OkHttp) {
+            expectSuccess = false
+            install(HttpTimeout) {
+                requestTimeoutMillis = FETCH_REQUEST_TIMEOUT_MS
+            }
+            // Q-LOW-3（guardrail TKN-UXR9-GUARDRAIL-002）：**不安装 HttpRedirect 插件**——
+            // Ktor OkHttp engine 默认不跟随 3xx 重定向，这是 Fetch 工具 SSRF 纵深防御的
+            // 关键不变量（重定向到内网地址的绕过不可达）。如未来需要重定向支持，必须先在
+            // LocalMcpToolProvider 侧校验重定向目标仍为公网，禁止在此静默开启。
         }
     }
 
@@ -697,7 +723,9 @@ class PrismApplication : Application() {
      * 由 [io.prism.ui.chat.ConversationViewModel]（US-035）在会话结束时和首条消息时调用。
      */
     val crossSessionMemoryManager: CrossSessionMemoryManager by lazy {
-        CrossSessionMemoryManager(embedder, memoryRepository)
+        // UXR9 US-904 AC-2：注入 conversationSummarizer，会话结束时对有价值内容做 LLM 摘要入库
+        //（失败由 CrossSessionMemoryManager 内部降级为规则抽取逐对存储）。
+        CrossSessionMemoryManager(embedder, memoryRepository, conversationSummarizer)
     }
 
     /**
@@ -738,6 +766,16 @@ class PrismApplication : Application() {
         // M7 嵌入闲置卸载调度（ADR-017 4.5）：FULL 档 5min / STANDARD 档 2min 闲置后 session.close()
         // MINIMAL/CHAT_ONLY 档不加载 embedder（NullEmbedder），checkIntervalMs=0 跳过调度
         startEmbedderUnloadScheduler()
+        // UXR9 US-901（guardrail Q-HIGH-2 修复）：embedder 是重资源 lazy（113MB ONNX 读取 +
+        // 9MB tokenizer.json 解析 + 250k 词条 HashMap 构建）。若由 ConversationViewModel.Factory
+        // （主线程）首次触发会同步阻塞导致首开聊天页卡顿/ANR。此处用 appScope(IO) 预预热，
+        // 将加载移出主线程。by lazy 默认 SYNCHRONIZED 线程安全：IO 预热失败不缓存，后续
+        // 访问（含主线程）会重试，优雅降级。
+        appScope.launch {
+            runCatching { embedder }.onFailure { e ->
+                android.util.Log.e("PrismApplication", "embedder 预热失败（后续按需重试）", e)
+            }
+        }
         // 异步加载持久化授权根目录到 SAF 访问层（ADR-006 5.3），与 registerFilesystemRoot 经
         // rootsMutex 串行化（C3），失败静默（容错，不阻断启动）
         appScope.launch {
@@ -857,6 +895,9 @@ class PrismApplication : Application() {
          * （SkillExecutor 单次工具调用外层还有 30s withTimeout 兜底）。
          */
         private const val SEARCH_REQUEST_TIMEOUT_MS = 10_000L
+
+        /** Fetch MCP 工具请求超时（UXR9 Bug5 修复）：目标站多样，15s 缓冲。 */
+        private const val FETCH_REQUEST_TIMEOUT_MS = 15_000L
 
         /**
          * UXR6 问题 5：流式共享 client 的建连超时（毫秒）。

@@ -39,7 +39,7 @@ Prism 是一款 Android 原生 AI 聊天应用，核心定位是**个人 Agent �
 
 复用 OpenClaw SKILL.md 设计，支持本地与远程加载：
 
-- 内置 5 个 Skill：通用助手、代码解释、翻译、摘要、写作
+- 内置 3 个 Skill：中文人性化改写、联网深度调研、网页数据抓取
 - 通过 `SKILL.md` 声明工具定义，snakeyaml 安全解析
 - 远程下载 HTTPS + 9 层安全校验 + zip slip 防护
 - 渐进式加载：仅启用时加载，不污染 system prompt

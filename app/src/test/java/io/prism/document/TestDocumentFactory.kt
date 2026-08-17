@@ -2,6 +2,7 @@ package io.prism.document
 
 import org.apache.poi.xssf.usermodel.XSSFWorkbook
 import org.apache.poi.xwpf.usermodel.XWPFDocument
+import org.apache.poi.xslf.usermodel.XMLSlideShow
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
 import org.apache.pdfbox.pdmodel.PDPageContentStream
@@ -12,7 +13,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 
 /**
- * 测试样例文档工厂 —— 在 JVM 单测中动态生成 PDF / DOCX / XLSX 样例。
+ * 测试样例文档工厂 —— 在 JVM 单测中动态生成 PDF / DOCX / XLSX / PPTX 样例。
  *
  * 避免在仓库维护二进制测试资源文件（PDF/Office 文件体积大且不可 diff），
  * 用解析器同源库（PDFBox/POI）在内存中构造样例，再经解析器抽取文本并断言。
@@ -76,6 +77,25 @@ object TestDocumentFactory {
             return ByteArrayInputStream(out.toByteArray())
         } finally {
             workbook.close()
+        }
+    }
+
+    /** 生成含多页文本的 PPTX 字节流（UXR9 US-907 新增）。 */
+    fun pptxByteStream(slides: List<List<String>>): ByteArrayInputStream {
+        val ppt = XMLSlideShow()
+        try {
+            slides.forEach { texts ->
+                val slide = ppt.createSlide()
+                texts.forEach { text ->
+                    val shape = slide.createTextBox()
+                    shape.setText(text)
+                }
+            }
+            val out = ByteArrayOutputStream()
+            ppt.write(out)
+            return ByteArrayInputStream(out.toByteArray())
+        } finally {
+            ppt.close()
         }
     }
 }

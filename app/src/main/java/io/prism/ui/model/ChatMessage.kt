@@ -104,5 +104,14 @@ data class ChatMessage(
      * 纯文本端点（如 DeepSeek）收到该结构返回 400 → 协议层按「含图 + 400」信号降级
      * 提示「当前模型不支持图片」。默认 null（向后兼容既有测试与持久化数据）。
      */
-    val imageUrl: String? = null
+    val imageUrl: String? = null,
+    /**
+     * UXR9 Bug3 修复（TKN-UXR9-ARCHAEOLOGY-001）：系统提示标记（如"图片编码失败"）。
+     *
+     * 为 true 的消息仅供 UI 展示为提示气泡，**不进入 LLM 请求历史**（见
+     * ConversationViewModel 历史过滤）也**不触发 launchAnswer**（LLM 不被调用）。
+     * 默认 false（向后兼容既有测试与持久化数据；kotlinx.serialization 对缺失字段
+     * 应用默认值）。
+     */
+    val isSystemNotice: Boolean = false
 )

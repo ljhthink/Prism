@@ -1,11 +1,69 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Prism launcher foreground: a white triangle evoking a prism. -->
+<!--
+    Prism launcher foreground · 三棱镜折射（Concept A）
+    母题「光穿过三棱镜折射出知识」：白光自左上入射棱镜顶点 → 棱镜内经折射偏折 →
+    分光为靛蓝紫 / 青 / 薄荷光谱射出（单一 Agent 平台汇聚多元能力）。
+    对齐 deep-space-glass v0.4：主色 #6E62FF / 青 #22C7E0 / 薄荷 #2FBF8F，
+    实心线稿 + 圆头线帽 + 极淡玻璃填充，内容落在 66dp 安全区内。
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+
+    <!-- 棱镜内部：极淡靛蓝玻璃填充 -->
     <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M54,30 L78,72 L30,72 Z" />
+        android:fillColor="#1F6E62FF"
+        android:pathData="M54,32 L74,76 L34,76 Z" />
+
+    <!-- 棱镜外轮廓：主色描边（圆头圆角） -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#6E62FF"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M54,32 L74,76 L34,76 Z" />
+
+    <!-- 入射白光：左上 → 棱镜顶点 -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#EAEAF0"
+        android:strokeWidth="5.5"
+        android:strokeLineCap="round"
+        android:pathData="M34,22 L54,32" />
+
+    <!-- 棱镜内折射光路：顶点 → 右下偏折 -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#EAEAF0"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M54,32 L66,50" />
+
+    <!-- 光谱分光（自折射点射出） -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#6E62FF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M66,50 L80,62" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#22C7E0"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round"
+        android:pathData="M66,50 L76,72" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#2FBF8F"
+        android:strokeWidth="3.5"
+        android:strokeLineCap="round"
+        android:pathData="M66,50 L68,78" />
+
+    <!-- 折射分光点：白色光点锚定光谱起点 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M66,50 m-2.6,0 a2.6,2.6 0 1,0 5.2,0 a2.6,2.6 0 1,0 -5.2,0" />
 </vector>

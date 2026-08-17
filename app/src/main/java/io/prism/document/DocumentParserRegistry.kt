@@ -30,6 +30,8 @@ class DocumentParserRegistry {
         return when (type) {
             DocumentType.PDF -> PdfDocumentParser(fileName)
             DocumentType.DOCX, DocumentType.XLSX -> OfficeDocumentParser(fileName, type)
+            // UXR9 US-907：PPTX 新增解析器（POI XSLF，零新增依赖）
+            DocumentType.PPTX -> PptxDocumentParser(fileName)
             else -> PlainTextDocumentParser(fileName, type)
         }
     }

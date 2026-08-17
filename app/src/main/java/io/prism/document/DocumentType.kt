@@ -16,6 +16,8 @@ enum class DocumentType(val extension: String) {
     DOCX("docx"),
     /** Microsoft Excel 2007+，Apache POI XSSF 抽取文本 */
     XLSX("xlsx"),
+    /** Microsoft PowerPoint 2007+，Apache POI XSLF 抽取文本（UXR9 US-907 新增） */
+    PPTX("pptx"),
     /** Markdown，自研解析器（剥离标记符号） */
     MD("md"),
     /** 纯文本，自研解析器（原样返回） */

@@ -361,4 +361,56 @@ class DocumentLocalToolExecutorTest {
             assertEquals("object", params!!["type"].toString().trim('"'))
         }
     }
+
+    /**
+     * BR-testing-008 / BR-interface-016（TKN-UXR8-FIX-ACVERIFY-001 建议 #1）：
+     * 工具 schema 数组属性结构断言 —— 防 Provider（DeepSeek 等）对全请求返回 400
+     * `Invalid schema for function 'xxx'` 复发。
+     *
+     * 根因回顾：document__create_xlsx 的 `sheets` 参数曾写成裸 JsonArray 字面量
+     * （非法 JSON Schema），导致真机上包括图片消息在内的**所有请求** 400。
+     * 常规 execute 测试无法发现，只有 schema 结构断言能捕获。
+     */
+    @Test
+    fun `xlsx sheets schema uses type array with items object structure`() {
+        val defs = DocumentLocalToolExecutor.buildToolDefinitions()
+        val xlsx = defs.first { it.function.name == DocumentLocalToolExecutor.TOOL_CREATE_XLSX }
+        val params = xlsx.function.parameters as kotlinx.serialization.json.JsonObject
+        assertEquals("object", params["type"].toString().trim('"'))
+
+        val props = params["properties"] as? kotlinx.serialization.json.JsonObject
+        assertNotNull("properties 应存在", props)
+        val sheets = props?.get("sheets") as? kotlinx.serialization.json.JsonObject
+        assertNotNull("sheets 应为 JsonObject（禁止裸 JsonArray 字面量）", sheets)
+        assertEquals("array", sheets!!["type"].toString().trim('"'))
+        assertNotNull("sheets.items 必须存在（合法 JSON Schema）", sheets["items"])
+
+        // items 应为对象结构（含 type/properties/required），而非空占位
+        val items = sheets["items"] as? kotlinx.serialization.json.JsonObject
+        assertEquals("object", items!!["type"].toString().trim('"'))
+        assertNotNull("items.properties 应存在", items["properties"])
+        assertNotNull("items.required 应存在", items["required"])
+    }
+
+    @Test
+    fun `all array properties across tool schemas have items definition`() {
+        // 全量结构断言：任何 type:array 属性必须带 items（BR-testing-008 纵深防御）
+        val defs = DocumentLocalToolExecutor.buildToolDefinitions()
+        defs.forEach { def ->
+            val params = def.function.parameters as? kotlinx.serialization.json.JsonObject
+                ?: return@forEach
+            val props = params["properties"] as? kotlinx.serialization.json.JsonObject
+                ?: return@forEach
+            props.values.forEach { prop ->
+                val propObj = prop as? kotlinx.serialization.json.JsonObject
+                    ?: return@forEach
+                if (propObj["type"].toString().trim('"') == "array") {
+                    assertNotNull(
+                        "array 属性必须带 items（def=${def.function.name}, prop=$propObj）",
+                        propObj["items"]
+                    )
+                }
+            }
+        }
+    }
 }

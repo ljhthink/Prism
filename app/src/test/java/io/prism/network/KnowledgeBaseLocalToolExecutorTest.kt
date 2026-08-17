@@ -198,12 +198,20 @@ class KnowledgeBaseLocalToolExecutorTest {
 
     // ==================== 辅助 ====================
 
+    /**
+     * 预置默认知识库（UXR9 Bug1 适配：search 的相似度阈值过滤）。
+     *
+     * chunk 的 embedding 使用与查询一致的 [FakeEmbedder] 向量（`FakeEmbedder().embed("Prism 是什么")`），
+     * 使检索余弦相似度 = 1.0 ≥ 阈值 0.62，正向路径可命中。
+     * （此前存零向量 → 相似度 ≈ 0 被新阈值过滤 → "未找到"，测试回归。）
+     */
     private fun seedDefaultKb() {
+        val relevantVector = FakeEmbedder().embed("Prism 是什么")
         repo.addChunk(
             KnowledgeChunk(
                 title = "architecture.md#1",
                 content = "Prism 是一个 AI 助手应用",
-                embedding = FloatArray(384),
+                embedding = relevantVector,
                 knowledgeBaseId = KnowledgeBaseRepository.DEFAULT_KB_ID
             )
         )
@@ -211,7 +219,7 @@ class KnowledgeBaseLocalToolExecutorTest {
             KnowledgeChunk(
                 title = "architecture.md#2",
                 content = "支持 MCP 工具与个人知识库",
-                embedding = FloatArray(384),
+                embedding = relevantVector,
                 knowledgeBaseId = KnowledgeBaseRepository.DEFAULT_KB_ID
             )
         )

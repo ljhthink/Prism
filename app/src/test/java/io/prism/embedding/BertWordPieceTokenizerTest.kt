@@ -138,7 +138,7 @@ class BertWordPieceTokenizerTest {
         @BeforeClass
         @JvmStatic
         fun setUpClass() {
-            val vocabStream = java.io.File("src/main/assets/models/vocab.txt").inputStream()
+            val vocabStream = java.io.File("src/test/resources/models/vocab.txt").inputStream()
             val vocab = BertWordPieceTokenizer.loadVocab(vocabStream)
             tokenizer = BertWordPieceTokenizer(vocab)
         }

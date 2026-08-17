@@ -3,9 +3,12 @@ package io.prism.network
 import android.util.Log
 import io.ktor.client.request.get
 import io.ktor.client.request.header
+import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.contentLength
 import io.ktor.http.isSuccess
+import io.ktor.utils.io.readRemaining
+import kotlinx.io.readByteArray
 import io.modelcontextprotocol.kotlin.sdk.client.Client
 import io.modelcontextprotocol.kotlin.sdk.server.ServerSession
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
@@ -199,7 +202,25 @@ class LocalMcpToolProvider(
             if (!response.status.isSuccess()) {
                 return "抓取失败：HTTP ${response.status.value}"
             }
-            val body = response.bodyAsText()
+            // Q-LOW-5 修复（guardrail TKN-UXR9-GUARDRAIL-002）：Content-Length 缺失/分块
+            // 传输时 `bodyAsText()` 会全量读入（资源耗尽边界）。改用 channel 限读——
+            // `readRemaining(MAX_FETCH_READ_CAP+1)` 最多读该上限字节即返回（不等待 EOF），
+            // 读满即判定为病态超大响应并拒绝；正常响应（< MAX_FETCH_READ_CAP）照常读取，
+            // 由下方 `text.take(maxLength)` 做常规截断（maxLength 语义不变）。
+            val body = try {
+                val bytes = response.bodyAsChannel()
+                    .readRemaining(MAX_FETCH_READ_CAP.toLong() + 1)
+                    .readByteArray()
+                if (bytes.size > MAX_FETCH_READ_CAP) {
+                    return "抓取失败：响应过大"
+                }
+                bytes.toString(Charsets.UTF_8)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(LOG_TAG, "fetch body read failed: ${e::class.simpleName}")
+                return "抓取失败：网络错误或目标不可访问"
+            }
             val text = if (raw) body else stripHtmlTags(body)
             text.trim().take(maxLength)
         } catch (e: CancellationException) {
@@ -233,12 +254,36 @@ class LocalMcpToolProvider(
      */
     internal fun isPublicHttpUrl(url: String): Boolean {
         if (!url.startsWith("http://") && !url.startsWith("https://")) return false
-        val host = runCatching { java.net.URI(url).host }.getOrNull()
-            ?.trim()?.lowercase()
-            ?: return false
+        // UXR9 Bug5 修复：改用正则提取 host（避免 `java.net.URI(url)` 对含中文/非 ASCII
+        // 路径的 URL 抛 URISyntaxException 而误拒——如 `https://baike.baidu.com/item/昔涟`）。
+        // S-1（guardrail TKN-UXR9-GUARDRAIL-001，CWE-918 SSRF fail-open 修复）：
+        // 必须先剥离 userinfo（`scheme://user:pass@host`），否则 `http://evil.com:80@127.0.0.1/`
+        // 会被截出 host=evil.com（公网放行）而 OkHttp 实际解析 userinfo 后发往 127.0.0.1。
+        // L-4：IPv6 字面量 `[::1]:8080` 需先去方括号再校验（避免 `substringBefore(':')` 截出 `[`）。
+        // 中文域名（IDN）主机经 IDN.toASCII 归一化后再解析。
+        val authority = Regex("""^https?://([^/?#]+)""").find(url)?.groupValues?.get(1) ?: return false
+        // Q-LOW-2 修复（guardrail TKN-UXR9-GUARDRAIL-002）：先剥离 userinfo 再判 IPv6 字面量。
+        // 此前顺序（先判 `[` 后剥 userinfo）对 `user:pass@[::1]:8080` 会残留左方括号 `[::1`
+        // → IDN 归一化失败 → fail-closed 拒绝（安全但主机提取不精确）。统一改为：
+        // 1) substringAfterLast('@') 剥离 userinfo；2) 若剩余以 `[` 开头按 IPv6 字面量处理。
+        val hostPort = authority.substringAfterLast('@')
+        val host = if (hostPort.startsWith("[")) {
+            // IPv6 字面量：`[::1]:8080` → `::1`
+            val end = hostPort.indexOf(']')
+            if (end < 0) return false // 未闭合的 `[` → 非法，拒绝（fail-closed）
+            hostPort.substring(1, end)
+        } else {
+            // 剥离端口：`host:port` → `host`
+            hostPort.substringBefore(':')
+        }.trim().lowercase()
         if (host.isEmpty()) return false
+        val asciiHost = try {
+            java.net.IDN.toASCII(host)
+        } catch (e: Exception) {
+            return false // 非法主机名（无法 IDN 归一化）→ 拒绝（fail-closed）
+        }
         // 主机名到 IP 解析（域名 / IP 字面量均处理）
-        val addresses = runCatching { java.net.InetAddress.getAllByName(host) }.getOrNull()
+        val addresses = runCatching { java.net.InetAddress.getAllByName(asciiHost) }.getOrNull()
             ?: return false // 解析失败 → 拒绝（fail-closed）
         return addresses.none { isBlockedInetAddress(it) }
     }
@@ -363,6 +408,15 @@ class LocalMcpToolProvider(
 
         /** Fetch 内容最大长度（上限，防 token 溢出）。 */
         const val MAX_FETCH_LEN = 10_000
+
+        /**
+         * Fetch 病态超大响应读上限（字节，Q-LOW-5）。
+         *
+         * 仅用于 Content-Length 缺失/分块传输时的**读取**硬上限（防恶意响应全量读入内存）。
+         * 正常响应（< 1MB）照常读取并由 [MAX_FETCH_LEN] 截断；超过该上限才判定为病态拒绝。
+         * 与 Content-Length 预检（[MAX_FETCH_LEN] 阈值）为两层独立防御。
+         */
+        const val MAX_FETCH_READ_CAP = 1_000_000
 
         /** Fetch 请求 User-Agent（部分站点对无 UA 请求降级/拒绝）。 */
         private const val FETCH_USER_AGENT =

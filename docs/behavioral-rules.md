@@ -451,6 +451,98 @@
 - 适用场景：dev
 - 状态：active
 
+#### BR-testing-008: OpenAI 工具 schema 合法性须有结构断言测试，防 Provider 400 复发
+
+- 类别：testing
+- 规则：凡是构建 OpenAI 兼容工具定义（`buildToolDefinitions()` / `buildToolDefinition()`）的模块，测试必须包含**结构断言**：`parameters` 为 `type:object`、`properties` 存在、任何数组属性（`sheets`/`questions`/`options` 等）的 value 是 `{"type":"array","items":{...}}` 结构（而非裸数组字面量）。根因：数组属性 schema 非法时，Provider（DeepSeek/OpenAI）对**所有请求**返回 400 `Invalid schema for function 'xxx'`，常规单元测试（测 execute 生成文件）无法发现，只有 schema 结构断言能捕获。参见 [BR-interface-016]。
+- 反例：`DocumentLocalToolExecutorTest` 仅测 `parseMarkdownBlocks`/`sanitizeFilename`/`execute` 生成文件，未断言 `buildToolDefinitions()` 的 schema 结构 —— document__create_xlsx sheets 裸 JsonArray 未被测试发现，真机全请求 400 视觉不可用
+- 正例：`buildToolDefinitions()` 测试断言 `parameters["type"]=="object"`、`properties["sheets"]["type"]=="array"`、`properties["sheets"]["items"] != null`；全库 `to JsonArray(` 扫描确认仅 enum/required 合法用法
+- 来源：UXR8 真机测试 Bug1（TKN-UXR8-FIX-ACVERIFY-001，ac-verifier 建议 #1 schema 结构断言回归锚点）
+- 添加日期：2026-08-17
+- 适用场景：dev / bugfix
+- 状态：active（guardrail TKN-UXR8-FIX-GUARDRAIL-001/002 + ac-verifier TKN-UXR8-FIX-ACVERIFY-001 确认，2026-08-17 转 active）
+
+#### BR-testing-009: Compose 可点选状态的 MutableSet 必须用不可变 Set + 值替换，禁止原地改值
+
+- 类别：testing
+- 规则：`mutableStateMapOf<Int, MutableSet<String>>()` 中 MutableSet 作为 map value 时，其 `.add`/`.remove`/`.clear` 等原地改值操作**不触发 Compose 重组**（MutableSet 不是 Compose 快照类型，Snapshot mutation 检测依赖委托对象被替换引用）。必须改为 `mutableStateMapOf<Int, Set<String>>()`，每次修改通过**替换整个 value 引用**触发重组（如 `selected[key] = newSet`）。`mutableStateListOf` 快照列表可原地改值；`mutableStateMapOf` 的 value 修改必须靠引用替换。
+- 反例：`val selected = mutableStateMapOf<Int, MutableSet<String>>(); selected[0]?.add("A")` —— 点击后选中态 UI 不更新，用户感知"无法点击"
+- 正例：`val selected = mutableStateMapOf<Int, Set<String>>(); selected[0] = (selected[0] ?: emptySet()) + "A"` —— 替换 value 引用，快照识别变化触发重组
+- 来源：UXR8-R3 Bug3 AskUserSheet 选中态修复（guardrail TKN-UXR8-R3-GUARDRAIL-001/002 + ac-verifier TKN-UXR8-R3-ACCEPTANCE-001 确认）
+- 添加日期：2026-08-17
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-interface-017: 关键词过滤必须整句归一化精确匹配，禁止前缀匹配
+
+- 类别：interface
+- 规则：实现启发式关键词过滤（如跳过 RAG 检索、跳过工具调用等）时，必须使用**整句归一化精确匹配**（先 lower-case + 剥离标点空白归约，再判断归约结果是否属于跳过集合）。**禁止前缀匹配**（`startsWith`）——前缀匹配会错误拦截"你好，帮我查一下xxx"（含真实查询内容）、"谢谢，请总结一下…"（含明确检索意图）等**含查询内容的**长句，造成漏检/功能异常。归约函数必须为纯函数且可测。
+- 反例：`RAG_SKIP_KEYWORDS.any { queryText.lowercase().startsWith(it) }` —— "你好，帮我查一下知识库"因前缀"你好"被拦截，检索请求被静默跳过
+- 正例：`normalizeRagText(queryText) !in RAG_SKIP_PHRASES` —— 归约后整句精确匹配，"你好帮我查一下知识库"不在集合内 → 照常检索
+- 来源：UXR8-R3 Bug1 RAG 预判误伤（guardrail H-1 TKN-UXR8-R3-GUARDRAIL-001 + ac-verifier TKN-UXR8-R3-ACCEPTANCE-001 确认）
+- 添加日期：2026-08-17
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-error-handling-017: isTyping 守卫期间的消息/提示不得静默丢弃，必须入队或给用户可见反馈
+
+- 类别：error-handling
+- 规则：`sendMessage` 的 `isTyping` 守卫（防并发 AI 回路状态撕裂）期间，**带图消息**和**系统提示**（如编码失败提示）不得静默丢弃——用户感知为"上传了但没反应"或"点了几次没效果"。必须：
+  (1) 带图消息入 FIFO 队列（`ArrayDeque`），AI 回复完成后由 `finally` 自动逐条发送；
+  (2) 系统提示（如编码失败）入独立提示队列，回复完成后优先显示；
+  (3) 队列加大小上限（如 8 张），超限提示用户而非静默丢弃；
+  (4) 纯文本消息保持原守卫行为（用户可稍后重发，避免无限排队）。
+- 反例：`if (_isTyping.value) return` —— 带图消息被静默丢弃，无气泡/无提示/LLM 收不到，用户感知"图片无法上传"
+- 正例：`if (_isTyping.value) { if (!imageUrl.isNullOrBlank()) { pendingImageQueue.addLast(trimmed to imageUrl) }; return }` —— 暂存队列 + finally flush
+- 来源：UXR8-R3 Bug2 图片无法上传修复（guardrail TKN-UXR8-R3-GUARDRAIL-001/002 + ac-verifier TKN-UXR8-R3-ACCEPTANCE-001 确认）
+- 添加日期：2026-08-17
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-error-handling-018: 暂存队列 flush 处理完提示后不得 return，必须继续处理队列主体
+
+- 类别：error-handling
+- 规则：当暂存队列同时含有「一次性系统提示」与「待处理主体」（如图片/消息）时，`flush` 方法在处理完提示后**不得提前 return**——提示写入不会触发新一轮回调/finally 来驱动下一次 flush，若 return 则主体（图片等）永久滞留，表现为"溢出提示出现了但图片 0 张送达"。正确的 flush 语义：处理提示后仍须继续消费并处理一条主体（保持逐条串行：每次最多处理一条主体，多条由后续轮次 finally 接力）。
+- 反例：`if (notice != null) { appendSystemNotice(notice); return }` —— 溢出提示 + 多图同时入队时图片 0 送达（UXR9 回归测试实际发现）
+- 正例：`if (notice != null) { appendSystemNotice(notice) }; val pending = queue.removeFirstOrNull() ?: return; sendMessage(...)` —— 提示与一条主体在同一 flush 内先后处理
+- 来源：UXR9 Bug3 图片上传回归（image queue overflow 测试 0 送达，主 Agent 定位）
+- 添加日期：2026-08-18
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-interface-018: Kotlin override 一律不得声明默认参数值（默认值只在接口/基类声明）
+
+- 类别：interface
+- 规则：Kotlin 规则——**无论基类是否声明默认值，override 函数一律不得再声明默认参数值**（编译报 `An overriding function is not allowed to specify default values for its parameters`）。默认值只能在接口/基类声明一次，override 只写参数类型。若具体类型调用方需要省略参数（接口默认值经接口类型调用才生效，经具体类型调用不生效），须在具体类中增加一个**非 override 的单参便捷重载**委托到主函数（`fun encode(text: String) = encode(text, 512)`）。
+- 反例：`interface T { fun e(s: String, n: Int = 512) }` + `class C : T { override fun e(s: String, n: Int = 512) }` → 编译错误；或去掉接口默认值后各 override 自带默认 → 同一错误
+- 正例：接口声明默认值 `fun e(s: String, n: Int = 512)`；override 不声明默认值 `override fun e(s: String, n: Int)`；具体类型需省参时加非 override 便捷重载
+- 来源：UXR9 US-901 多语言 tokenizer 抽象（BertWordPieceTokenizer/UnigramTokenizer 编译失败，主 Agent 修正）
+- 添加日期：2026-08-18
+- 适用场景：dev
+- 状态：active
+
+#### BR-ops-003: Edit 报告成功后必须用 git diff 验证磁盘持久化（防写竞争回滚）
+
+- 类别：ops
+- 规则：本会话多次出现「Edit 工具报告成功（回显含修改内容）但磁盘文件随后被回滚到旧内容」，直至编译报 Unresolved reference 才发现。为防此类静默丢失：对**关键文件**（多轮编辑过的文件）执行 Edit 后，必须用 `git diff <file> | Select-String <关键词>` 或 Read 立即验证目标改动已落盘；若发现回滚，改用 **Write 全量重写**（已证可靠）而非重复 Edit。同文件多处修改务必按 BR-ops-002 串行执行。
+- 反例：Edit 回显显示 `PrismError` 已替换，但 git diff 显示磁盘仍为 `PrismRed`，编译 `Unresolved reference 'PrismRed'`（UXR9 实际发生 3 次）
+- 正例：Edit 后立即 `git diff` 验证关键词存在；确认回滚后用 Write 整文件重写并再次 git diff 验证
+- 来源：UXR9 开发期（ConversationScreen.kt / TestDocumentFactory.kt / CrossSessionMemoryManager.kt 多次 Edit 回滚）
+- 添加日期：2026-08-18
+- 适用场景：dev
+- 状态：active
+
+#### BR-error-handling-019: RAG 嵌入模型必须匹配检索语种，英文模型对中文语义区分度差
+
+- 类别：error-handling
+- 规则：端侧嵌入模型（embedding）必须与知识库实际语种匹配。**英文 BERT 词表模型（如 all-MiniLM-L6-v2 uncased）对中文语义区分度极差**——无关中文片段余弦相似度普遍 0.4~0.7，任何单一阈值都无法干净分隔相关/无关，表现为「无关资料必被注入引用来源」的结构性 RAG 污染。治本方案是换多语言模型（如 paraphrase-multilingual-MiniLM-L12-v2 + 对应 tokenizer）并**用真实模型实测句对相似度分布校准阈值**（相关 0.58+/无关 ≤0.32 → 阈值取分隔区）。禁止仅靠调阈值缓解英文模型的中文 RAG 污染（多次证明无效）。
+- 反例：英文 MiniLM 阈值 0.5 拦不住无关中文片段（0.4~0.7），多轮修复无效
+- 正例：多语言 MiniLM qint8 + Unigram tokenizer，实测分布后阈值 0.5，相关/无关干净分隔
+- 来源：UXR9 Bug1 RAG 无关资料注入（多轮未愈老 Bug，换模型根治，ChineseSimilarityDiagnosticTest 实测校准）
+- 添加日期：2026-08-18
+- 适用场景：dev / bugfix
+- 状态：active
+
 ### docs
 
 （暂无规则，待累积）
@@ -770,6 +862,17 @@
 - 适用场景：dev
 - 状态：active
 
+#### BR-interface-016: OpenAI 工具 schema 的数组属性必须为 type:array + items 对象结构，禁止裸 JsonArray 字面量
+
+- 类别：interface
+- 规则：构建 OpenAI 兼容工具定义（ToolDefinition.parameters）时，任何数组属性（如 `sheets`、`questions`、`options`）的 JSON Schema 必须是「`type: "array"` + `items: <元素结构>`」的 JsonObject 结构。**禁止**直接把 Kotlin 的 `JsonArray`（数组字面量）作为属性的 value——那会产生非法 JSON Schema（`{"sheets": [...]}` 而非 `{"sheets": {"type":"array","items":{...}}}`），主流 Provider（DeepSeek/OpenAI 等）会对**整个请求**返回 400 `Invalid schema for function 'xxx'`，导致所有功能（含与本工具无关的图片消息、老/新会话）全部不可用。构建后用 schema 结构断言测试固化。
+- 反例：`"sheets" to JsonArray(listOf(JsonObject(mapOf("type" to ...))))` —— DeepSeek 对全部请求返回 400 Invalid schema，视觉功能完全不可用（UXR8 真机实测）
+- 正例：`"sheets" to JsonObject(mapOf("type" to JsonPrimitive("array"), "items" to JsonObject(mapOf("type" to JsonPrimitive("object"), "properties" to ...))))` —— 合法 JSON Schema，Provider 正常接受
+- 来源：UXR8 真机测试 Bug1（document__create_xlsx schema 无效导致全请求 400，TKN-UXR8-FIX-GUARDRAIL-001）
+- 添加日期：2026-08-17
+- 适用场景：dev / bugfix
+- 状态：active（guardrail TKN-UXR8-FIX-GUARDRAIL-001/002 确认修复正确 + ac-verifier TKN-UXR8-FIX-ACVERIFY-001 验收通过，2026-08-17 转 active）
+
 #### BR-ops-002: 同一文件的多个修改必须串行单条 Edit，禁止同批并行 Edit 同文件
 
 - 类别：ops
@@ -789,6 +892,28 @@
 - 正例：`hasRequestBudget(elapsed)` 纯函数判据 + 每个 `fetchSearch` 前检查，不足 `break` 保留已有结果；单测断言 `TOTAL_TOOL_BUDGET_MS == SkillExecutor.DEFAULT_TOOL_TIMEOUT_MS`
 - 来源：UXR8 批次2 guardrail G-03（TKN-UXR8-B2-GUARDRAIL-001，搜索子请求拖穿总超时）
 - 添加日期：2026-08-16
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-testing-010: 算法与外部参考实现对齐必须用真实参考输出作 golden data 锁定，禁止仅注释声明
+
+- 类别：testing / interface
+- 规则：任何声称与外部参考实现对齐的核心算法（如 Unigram Viterbi 分词与 HuggingFace `tokenizers` Rust 对齐），**必须**用真实参考实现（官方库/参考工具）生成的输出作为 golden data 写入测试并逐断言锁定，禁止仅在 KDoc/注释里写"15/15 样本匹配"而无任何测试。同时参数默认值必须与参考默认一致（如 `maxInputCharsPerSegment` 应为 HF Unigram 默认 100 而非自定 64），不一致会静默偏离训练时行为（长无空格 CJK 段退化为逐字符）且无测试可拦截。golden data 生成脚本须入库（可复现），生成器环境版本记录在生成文件头。
+- 反例：`UnigramTokenizer` 的 KDoc 声明"15/15 样本与 transformers 一致"但 `app/src/test` 零 UnigramTokenizer 单测，且 `maxInputCharsPerSegment=64` 与参考默认 100 不一致——guardrail Q-HIGH-1 判定"静默降低核心功能质量且零测试锁定"
+- 正例：`tools/gen_unigram_reference.py`（HF `tokenizers` 0.22.2 Rust）生成 8 样本参考表 → `UnigramTokenizerReference.kt`（含 88 字符 CJK 边界样本）→ `UnigramTokenizerTest` 逐样本断言 `tokenizeIds` 输出完全一致；`maxInputCharsPerSegment` 校准为 100
+- 来源：UXR9 US-901 guardrail Q-HIGH-1（TKN-UXR9-GUARDRAIL-002，UnigramTokenizer 对齐无测试锁定 + 段长上限与参考不一致）
+- 添加日期：2026-08-18
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-concurrency-007: 重资源 by lazy 初始化必须在启动期 IO 线程预热，禁止主线程首次触发
+
+- 类别：concurrency / performance
+- 规则：`by lazy` 初始化为重资源（大模型读取、大 JSON 解析、DB 构建）时，若该 lazy 会被 UI 层（ViewModel Factory、Composable）在主线程首次访问，必须在 `Application.onCreate` 用 `appScope(IO)` 预触发（`runCatching { lazyRef }`，失败不缓存、后续按需重试），将加载移出主线程。lazy 默认 SYNCHRONIZED 线程安全，并发访问安全。禁止依赖"首次访问时后台线程恰好加载"的偶然性。
+- 反例：`PrismApplication.embedder by lazy { 读 113MB ONNX + 解析 9MB tokenizer.json + 250k 词条 HashMap }` 由 `ConversationViewModel.Factory`（主线程）首次触发——慢设备首开聊天页卡顿/ANR（guardrail Q-HIGH-2）
+- 正例：`onCreate` 内 `appScope.launch { runCatching { embedder }.onFailure { Log.e(...) } }` 预热，加载移出主线程；lazy 失败不缓存，后续访问（含主线程）重试优雅降级
+- 来源：UXR9 US-901 guardrail Q-HIGH-2（TKN-UXR9-GUARDRAIL-002，embedder 主线程 lazy 初始化 ANR 风险）
+- 添加日期：2026-08-18
 - 适用场景：dev / bugfix
 - 状态：active
 
@@ -847,3 +972,4 @@
 | 2026-08-16 | guardrail-enforcer + ac-verifier | 新增 BR-error-handling-015/016 | UXR7-R2 三问题修复闭环（TKN-UXR7R2-*，ADR-027 修订）。根因判定：首轮修复代码未进入真机 APK（APK 构建 01:37 早于源码 04:42-04:58，dex 字符串验证无新函数）——"多次修复依然存在"的直接根因是交付链断裂。网络调研 + 深度推理修正三处方案缺陷：搜索多候选核心词短整词降级重试（Bing OOV 分词坍缩，SearXNG #4964 同机制）、markdown 表格支持无分隔行紧凑表格（0.26.0 无表格组件）、引用池工具调用参数反向映射 + 成功读取过滤。guardrail 三轮（MED-01 假引用→R2 通过，DEF-001/002→R3 通过）+ ac-verifier 两轮（13 AC 全 PASS，全量回归 1792 用例 0 失败）。2 条新规则：BR-error-handling-015（LLM JSON 字段须显式拒绝 JsonNull/"null" 字面量防假引用）、BR-error-handling-016（日志记录用户输入必须截断防 CWE-532） |
 | 2026-08-16 | guardrail-enforcer + ac-verifier | 新增 BR-interface-015 + BR-performance-002 | UXR8 批次2 优化闭环（TKN-UXR8-B2-GUARDRAIL-001/002 + ACCEPTANCE-001，ADR-029）。O1-O5 五项优化 + 6 项 guardrail 修复（G-01 画像静默覆盖 / G-03 搜索预算 / G-04 sheet 上限 / G-05 skill 工具名 / G-07 测试缺口 / G-09 公式注入）+ G2-01~04 即时闭环。guardrail 复审 PASS-with-notes（6 项全 FIXED）+ ac-verifier 17/17 AC PASS + 全量 1873 用例 0 失败 + 模拟器验证 O1/O2/O3/O4 UI 全部通过。2 条新规则：BR-interface-015（派生 key 冲突须生成唯一 key 防静默覆盖）、BR-performance-002（串行子请求须预算感知防总超时丢结果） |
 | 2026-08-17 | guardrail-enforcer + ac-verifier | 新增 BR-ops-002 | UXR8 批次3 新功能闭环（TKN-UXR8-B3-GUARDRAIL-001/002 + ACCEPTANCE-001，ADR-030）。N1 用户规则文件 / N2 LLM 反问（Phase1+2）/ N3 文本模型视觉（方案 A）。guardrail 首轮有条件通过（4 MEDIUM + 2 可修 LOW 全修复：Q-MED-1 userRules runCatching 违规 / Q-MED-2 末轮 ask_user 误报循环上限 / Q-MED-3 历史图片污染 400 归因 / Q-MED-4 大图 OOM，Q-LOW-1 解析失败静默 / Q-LOW-2 占位孤儿）→ 复审通过。ac-verifier 3/3 AC PASS + 全量 1942 用例 0 失败 + lintDebug 0 errors。1 条新规则：BR-ops-002（同一文件多处修改必须串行单条 Edit，禁止同批并行 Edit 同文件——开发期实际踩坑：并行 Edit 写竞争导致改动丢失编译失败） |
+| 2026-08-17 | 主 Agent | 新增 BR-interface-016 + BR-testing-008 | 真机测试 Bug 修复闭环（TKN-UXR8-FIX-GUARDRAIL-001/002 + ACCEPTANCE-001）。根因 1：document__create_xlsx 工具 `sheets` 参数 schema 为裸 JsonArray 字面量（非法 JSON Schema）→ DeepSeek 对**全部请求**（含图片请求、新/老会话）返回 400 Invalid schema，视觉功能完全不可用。修复为合法 `type:array + items:object` 结构。根因 2：Skill displayName 取 description 首行导致显示长句而非原名 → 改为优先取 SKILL.md body 首个 `# 一级标题`。根因 3：Skill 详情 body/systemPrompt 硬截断 500/200 字符 → 改为 ExpandableText 预览+展开全文。根因 4：Skills 缺失删除功能 → 新增 deleteSkill（isHidden 标记持久化 + 执行记录级联清理 + 非内置删磁盘目录），同时移除 5 个废弃内置 Skill（code-reviewer/meeting-notes/rewriter/summarizer/translator），scanAndSync 对 assets 已消失的内置 Skill 删除 DB 行（PURGE_BUILTIN）、对 isHidden 条目保留行（KEEP_HIDDEN）、对用户/远程文件缺失标记未安装（MARK_UNINSTALLED）。guardrail 两轮通过 + ac-verifier 6/6 AC PASS + 全量 1967 用例 0 失败 + 模拟器验证（5 内置 Skill 正确 purge、无崩溃）。2 条新规则：BR-interface-016（OpenAI 工具 schema 的 array 属性必须为 type:array + items 对象结构，禁止裸 JsonArray 字面量）、BR-testing-008（工具 schema 合法性须有结构断言测试防 400 复发） |

@@ -47,18 +47,30 @@ import kotlin.math.sqrt
  */
 class OnnxEmbedder(
     private val modelBytes: ByteArray,
-    vocab: Map<String, Int>,
+    tokenizer: TokenEncoder,
     private val clock: Clock = Clock { System.currentTimeMillis() },
     private val maxSeqLen: Int = 512,
     private val embeddingDim: Int = 384
 ) : Embedder {
+
+    /**
+     * 向后兼容构造（UXR9 US-901）：以 BERT 词表构造 [BertWordPieceTokenizer]。
+     * 既有测试与调用方（`OnnxEmbedder(modelBytes, vocab)`）不受影响。
+     */
+    constructor(
+        modelBytes: ByteArray,
+        vocab: Map<String, Int>,
+        clock: Clock = Clock { System.currentTimeMillis() },
+        maxSeqLen: Int = 512,
+        embeddingDim: Int = 384
+    ) : this(modelBytes, BertWordPieceTokenizer(vocab), clock, maxSeqLen, embeddingDim)
 
     /** 时间源接口，便于测试注入虚拟时钟验证闲置卸载。 */
     fun interface Clock {
         fun currentTimeMillis(): Long
     }
 
-    private val tokenizer = BertWordPieceTokenizer(vocab)
+    private val tokenizer: TokenEncoder = tokenizer
     private val env: OrtEnvironment = OrtEnvironment.getEnvironment()
     private val lock = ReentrantLock()
 
@@ -205,7 +217,15 @@ class OnnxEmbedder(
         require(names.size >= 2) {
             "BERT 模型应至少有 input_ids 与 attention_mask 两个输入，实际: $names"
         }
-        // 不强制名称完全匹配（不同导出可能命名不同），仅按位置取用
+        // 不强制名称完全匹配（不同导出可能命名不同），仅按位置取用。
+        // Q-LOW-8（guardrail TKN-UXR9-GUARDRAIL-002）：位置取用对输入顺序敏感，若顺序
+        // 变化会静默错位——这里对非规范命名打警告日志，便于发现模型切换导致的行为漂移。
+        if (names.first() !in CANONICAL_INPUT_NAMES) {
+            android.util.Log.w(
+                "OnnxEmbedder",
+                "模型输入名非常规 BERT 顺序，位置取用可能错位: $names"
+            )
+        }
     }
 
     /**
@@ -266,5 +286,8 @@ class OnnxEmbedder(
         const val INPUT_IDS_IDX = 0
         const val ATTENTION_MASK_IDX = 1
         const val TOKEN_TYPE_IDS_IDX = 2
+
+        /** 规范 BERT 输入名（首输入应为 input_ids；XLM-R 亦为 input_ids）。 */
+        val CANONICAL_INPUT_NAMES = setOf("input_ids", "input_0")
     }
 }

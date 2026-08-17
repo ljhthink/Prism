@@ -46,7 +46,8 @@ class SkillRegistryTest {
         isEnabled: Boolean = false,
         isInstalled: Boolean = true,
         id: Long = 0,
-        version: String = "1.0.0"
+        version: String = "1.0.0",
+        isHidden: Boolean = false
     ): SkillConfig = SkillConfig(
         id = id,
         name = name,
@@ -56,6 +57,7 @@ class SkillRegistryTest {
         skillDir = "/skills/$name",
         isEnabled = isEnabled,
         isInstalled = isInstalled,
+        isHidden = isHidden,
         version = version
     )
 
@@ -68,9 +70,10 @@ class SkillRegistryTest {
         isEnabled: Boolean = false,
         isInstalled: Boolean = true,
         id: Long = 0,
-        manifestVersion: String? = "1.0.0"
+        manifestVersion: String? = "1.0.0",
+        isHidden: Boolean = false
     ): SkillRegistry.SkillEntry = SkillRegistry.SkillEntry(
-        config = makeConfig(name, source, isEnabled, isInstalled, id, version = manifestVersion ?: "0.0.0"),
+        config = makeConfig(name, source, isEnabled, isInstalled, id, version = manifestVersion ?: "0.0.0", isHidden = isHidden),
         manifest = makeManifest(name, version = manifestVersion)
     )
 
@@ -162,7 +165,7 @@ class SkillRegistryTest {
         )
         assertNotNull("Should parse valid SKILL.md", entry)
         assertEquals("translator", entry!!.config.name)
-        assertEquals("中英互译翻译助手", entry.config.displayName)
+        assertEquals("翻译助手", entry.config.displayName) // 从 body 第一个一级标题 # 提取
         assertEquals(SkillSource.LOCAL_BUILTIN, entry.config.source)
         assertEquals("1.0.0", entry.config.version)
         assertTrue("isInstalled default true", entry.config.isInstalled)
@@ -243,6 +246,58 @@ class SkillRegistryTest {
         )
         assertNotNull(entry)
         assertEquals("首行作为显示名，这是较长的描述", entry!!.config.displayName)
+    }
+
+    @Test
+    fun `parseToEntry prefers first body heading for displayName`() {
+        val content = """
+            ---
+            name: humanizer-zh
+            description: 中文人性化改写，消除 AI 语感痕迹
+            ---
+            # 中文人性化改写
+            ## 使用说明
+        """.trimIndent()
+        val entry = SkillRegistry.parseToEntry(
+            content = content,
+            source = SkillSource.LOCAL_BUILTIN,
+            sourceUri = null,
+            skillDir = "/test"
+        )
+        assertNotNull(entry)
+        assertEquals("中文人性化改写", entry!!.config.displayName)
+    }
+
+    // ============ findFirstHeading ============
+
+    @Test
+    fun `findFirstHeading returns first H1 heading`() {
+        assertEquals("中文人性化改写", SkillRegistry.findFirstHeading("# 中文人性化改写\n## 使用说明"))
+    }
+
+    @Test
+    fun `findFirstHeading ignores leading blank lines`() {
+        assertEquals("标题", SkillRegistry.findFirstHeading("\n\n# 标题\n正文"))
+    }
+
+    @Test
+    fun `findFirstHeading returns null for empty body`() {
+        assertNull(SkillRegistry.findFirstHeading(""))
+    }
+
+    @Test
+    fun `findFirstHeading returns null for body without H1`() {
+        assertNull(SkillRegistry.findFirstHeading("普通段落\n## 二级标题"))
+    }
+
+    @Test
+    fun `findFirstHeading returns null for H2 heading only`() {
+        assertNull(SkillRegistry.findFirstHeading("## 二级标题\n正文"))
+    }
+
+    @Test
+    fun `findFirstHeading returns null for bare hash text`() {
+        assertNull(SkillRegistry.findFirstHeading("#\n正文"))
     }
 
     // ============ scanDirectory ============
@@ -564,6 +619,105 @@ class SkillRegistryTest {
         )
         val result = SkillRegistry.filterEnabledSkills(skills)
         assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `filterEnabledSkills excludes hidden skill even if enabled and installed`() {
+        val skills = listOf(
+            makeEntry("deleted", SkillSource.LOCAL_BUILTIN, isEnabled = true, isInstalled = true, isHidden = true),
+            makeEntry("normal", SkillSource.LOCAL_BUILTIN, isEnabled = true, isInstalled = true, isHidden = false)
+        )
+        val result = SkillRegistry.filterEnabledSkills(skills)
+        assertEquals(1, result.size)
+        assertEquals("normal", result[0].config.name)
+    }
+
+    @Test
+    fun `filterEnabledSkills excludes only hidden and keeps enabled installed visible`() {
+        val skills = listOf(
+            makeEntry("hidden-enabled", SkillSource.LOCAL_USER, isEnabled = true, isInstalled = true, isHidden = true),
+            makeEntry("visible-enabled", SkillSource.LOCAL_USER, isEnabled = true, isInstalled = true, isHidden = false),
+            makeEntry("visible-disabled", SkillSource.LOCAL_USER, isEnabled = false, isInstalled = true, isHidden = false)
+        )
+        val result = SkillRegistry.filterEnabledSkills(skills)
+        assertEquals(1, result.size)
+        assertEquals("visible-enabled", result[0].config.name)
+    }
+
+    // ============ hiddenNameSet / filterOutHidden / disposeMissingConfigAction（guardrail MEDIUM#2）============
+
+    @Test
+    fun `hiddenNameSet returns names of hidden skills only`() {
+        val configs = listOf(
+            makeConfig("a", isHidden = true),
+            makeConfig("b", isHidden = false),
+            makeConfig("c", isHidden = true)
+        )
+        assertEquals(setOf("a", "c"), SkillRegistry.hiddenNameSet(configs))
+    }
+
+    @Test
+    fun `hiddenNameSet returns empty for no hidden skills`() {
+        val configs = listOf(makeConfig("a", isHidden = false), makeConfig("b", isHidden = false))
+        assertTrue(SkillRegistry.hiddenNameSet(configs).isEmpty())
+    }
+
+    @Test
+    fun `filterOutHidden removes hidden entries and keeps others`() {
+        val entries = listOf(
+            makeEntry("deleted", SkillSource.LOCAL_BUILTIN, isHidden = true),
+            makeEntry("keep", SkillSource.LOCAL_BUILTIN, isHidden = false)
+        )
+        val result = SkillRegistry.filterOutHidden(entries, setOf("deleted"))
+        assertEquals(1, result.size)
+        assertEquals("keep", result[0].config.name)
+    }
+
+    @Test
+    fun `filterOutHidden returns all entries when hiddenNames empty`() {
+        val entries = listOf(
+            makeEntry("a", SkillSource.LOCAL_BUILTIN),
+            makeEntry("b", SkillSource.LOCAL_BUILTIN)
+        )
+        assertEquals(2, SkillRegistry.filterOutHidden(entries, emptySet()).size)
+    }
+
+    @Test
+    fun `filterOutHidden returns empty when all entries hidden`() {
+        val entries = listOf(makeEntry("a", SkillSource.LOCAL_BUILTIN, isHidden = true))
+        assertTrue(SkillRegistry.filterOutHidden(entries, setOf("a")).isEmpty())
+    }
+
+    @Test
+    fun `disposeMissingConfigAction keeps hidden config`() {
+        val config = makeConfig("hidden", SkillSource.LOCAL_BUILTIN, isHidden = true)
+        assertEquals(
+            SkillRegistry.DisposeAction.KEEP_HIDDEN,
+            SkillRegistry.disposeMissingConfigAction(config)
+        )
+    }
+
+    @Test
+    fun `disposeMissingConfigAction purges non-hidden builtin`() {
+        val config = makeConfig("removed-builtin", SkillSource.LOCAL_BUILTIN, isHidden = false)
+        assertEquals(
+            SkillRegistry.DisposeAction.PURGE_BUILTIN,
+            SkillRegistry.disposeMissingConfigAction(config)
+        )
+    }
+
+    @Test
+    fun `disposeMissingConfigAction marks user and remote as uninstalled`() {
+        val user = makeConfig("user-skill", SkillSource.LOCAL_USER, isHidden = false)
+        val remote = makeConfig("remote-skill", SkillSource.REMOTE, isHidden = false)
+        assertEquals(
+            SkillRegistry.DisposeAction.MARK_UNINSTALLED,
+            SkillRegistry.disposeMissingConfigAction(user)
+        )
+        assertEquals(
+            SkillRegistry.DisposeAction.MARK_UNINSTALLED,
+            SkillRegistry.disposeMissingConfigAction(remote)
+        )
     }
 
     // ============ SyncDiff 数据类 ============

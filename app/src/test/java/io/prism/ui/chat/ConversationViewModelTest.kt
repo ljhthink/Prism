@@ -347,7 +347,7 @@ class ConversationViewModelTest {
             ioDispatcher = mainDispatcher  // 注入 test dispatcher，避免 withContext(IO) 脱离 test scheduler
         ).apply { setRagTarget(RagTarget.AllLibraries) }
 
-        vm.sendMessage("你好")
+        vm.sendMessage("查询一下知识库内容")
         advanceUntilIdle()
 
         // ADR-018：embed 失败降级时 systemPrompt 为默认 persona
@@ -383,7 +383,7 @@ class ConversationViewModelTest {
             ioDispatcher = mainDispatcher
         ).apply { setRagTarget(RagTarget.AllLibraries) }
 
-        vm.sendMessage("你好")
+        vm.sendMessage("查询一下知识库内容")
         advanceUntilIdle()
 
         // ADR-018：空库降级时 systemPrompt 为默认 persona
@@ -818,6 +818,47 @@ class ConversationViewModelTest {
         assertEquals("自建库文档.pdf", vm.messages.value[1].sources[0].documentTitle)
     }
 
+    // ===== Bug fix（UXR8-R3）：RAG 按需检索预判（needsRagRetrieval 纯函数） =====
+
+    @Test
+    fun `needsRagRetrieval skips greetings and confirmations`() {
+        // 寒暄/确认类消息：无检索需求，应跳过
+        assertFalse("你好 应跳过", ConversationViewModel.needsRagRetrieval("你好"))
+        assertFalse("好的 应跳过", ConversationViewModel.needsRagRetrieval("好的"))
+        assertFalse("谢谢 应跳过", ConversationViewModel.needsRagRetrieval("谢谢"))
+        assertFalse("嗯 应跳过", ConversationViewModel.needsRagRetrieval("嗯"))
+        assertFalse("hello 应跳过", ConversationViewModel.needsRagRetrieval("hello"))
+        assertFalse("hi 应跳过", ConversationViewModel.needsRagRetrieval("hi"))
+        // 前缀命中（如"好的，谢谢"）也应跳过
+        assertFalse("好的，谢谢 应跳过", ConversationViewModel.needsRagRetrieval("好的，谢谢"))
+    }
+
+    @Test
+    fun `needsRagRetrieval keeps short queries and real questions`() {
+        // 短但明确的查询：不应被过滤（Bug fix：不能因消息短就跳过检索）
+        assertTrue("查询 应保留", ConversationViewModel.needsRagRetrieval("查询"))
+        assertTrue("总结 应保留", ConversationViewModel.needsRagRetrieval("总结"))
+        assertTrue("搜索 应保留", ConversationViewModel.needsRagRetrieval("搜索"))
+        // 正常问题消息应保留
+        assertTrue("普通问题应保留", ConversationViewModel.needsRagRetrieval("Prism 支持哪些平台？"))
+        assertTrue("查询知识库内容应保留", ConversationViewModel.needsRagRetrieval("查询一下知识库内容"))
+    }
+
+    @Test
+    fun `needsRagRetrieval greeting prefix with real query must not be skipped`() {
+        // guardrail H-1 回归：寒暄/确认前缀 + 真实查询内容 = 有检索需求（禁止前缀匹配整句跳过）
+        assertTrue("你好+查询应保留", ConversationViewModel.needsRagRetrieval("你好，帮我查一下知识库"))
+        assertTrue("谢谢+总结应保留", ConversationViewModel.needsRagRetrieval("谢谢，请总结一下要点"))
+        assertTrue("了解+查询应保留", ConversationViewModel.needsRagRetrieval("了解一下 Prism 架构"))
+        assertTrue("前缀命中但含疑问应保留", ConversationViewModel.needsRagRetrieval("对这个问题你怎么看"))
+    }
+
+    @Test
+    fun `needsRagRetrieval blank message returns false`() {
+        assertFalse("空白消息应跳过", ConversationViewModel.needsRagRetrieval(""))
+        assertFalse("纯空白应跳过", ConversationViewModel.needsRagRetrieval("   "))
+    }
+
     // ===== UXR3 问题 13（ADR-023）：消息编辑重发 =====
 
     @Test
@@ -892,6 +933,82 @@ class ConversationViewModelTest {
 
         assertEquals("AI 消息编辑应被忽略", snapshot, vm.messages.value)
     }
+
+    // ===== Bug fix（UXR8-R3，guardrail M-1/M-2）：图片发送队列与编码失败提示 =====
+
+    @Test
+    fun `images sent during ai reply are queued not dropped then flushed after reply`() = runTest(mainDispatcher) {
+        val repo = ProviderConfigRepository(boxStore)
+        val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        repo.save(active)
+        repo.setActive(repo.findByName(active.name)!!.id)
+        val provider = GatedStreamProvider()
+        val vm = ConversationViewModel(
+            repo, provider, DefaultStubEmbedder, KnowledgeBaseRepository(boxStore),
+            ioDispatcher = mainDispatcher
+        ).apply { setRagTarget(RagTarget.Off) }
+
+        // 第一轮进行中（isTyping=true）时选两张图
+        vm.sendMessage("第一问")
+        provider.awaitFirstRoundStarted()  // 确保第一轮已挂起（isTyping=true）
+        val imgA = "data:image/jpeg;base64,AAAA"
+        val imgB = "data:image/jpeg;base64,BBBB"
+        vm.sendMessage("图A", imgA)
+        vm.sendMessage("图B", imgB)
+
+        // 放行第一轮 → 完成 → finally 逐条 flush 图A、图B（每轮一条，串行）
+        provider.releaseFirstRound()
+        advanceUntilIdle()
+
+        val userMsgs = vm.messages.value.filter { it.role == Role.USER }
+        assertTrue("图A 不应被丢弃", userMsgs.any { it.imageUrl?.endsWith("AAAA") == true })
+        assertTrue("图B 不应被丢弃", userMsgs.any { it.imageUrl?.endsWith("BBBB") == true })
+        // 无图纯文本的"图A/图B"文本内容（随图发送）
+        assertTrue("图A 文本内容应随图发送", userMsgs.any { it.content == "图A" && it.imageUrl != null })
+        assertTrue("图B 文本内容应随图发送", userMsgs.any { it.content == "图B" && it.imageUrl != null })
+    }
+
+    @Test
+    fun `notifyEncodingFailure during ai reply is queued then shown after reply`() = runTest(mainDispatcher) {
+        val repo = ProviderConfigRepository(boxStore)
+        val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        repo.save(active)
+        repo.setActive(repo.findByName(active.name)!!.id)
+        val provider = GatedStreamProvider()
+        val vm = ConversationViewModel(
+            repo, provider, DefaultStubEmbedder, KnowledgeBaseRepository(boxStore),
+            ioDispatcher = mainDispatcher
+        ).apply { setRagTarget(RagTarget.Off) }
+
+        vm.sendMessage("第一问")
+        provider.awaitFirstRoundStarted()
+        vm.notifyEncodingFailure()  // isTyping=true → 暂存队列，不应被守卫丢弃
+
+        provider.releaseFirstRound()
+        advanceUntilIdle()
+
+        val userMsgs = vm.messages.value.filter { it.role == Role.USER }
+        assertTrue("编码失败提示应最终显示", userMsgs.any { it.content.contains("图片编码失败") })
+    }
+
+    @Test
+    fun `notifyEncodingFailure when not typing sends immediately`() = runTest(mainDispatcher) {
+        val repo = ProviderConfigRepository(boxStore)
+        val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        repo.save(active)
+        repo.setActive(repo.findByName(active.name)!!.id)
+        val vm = ConversationViewModel(
+            repo, RecordingChatStreamProvider(listOf(StreamEvent.Delta("ok"), StreamEvent.Done)),
+            DefaultStubEmbedder, KnowledgeBaseRepository(boxStore),
+            ioDispatcher = mainDispatcher
+        ).apply { setRagTarget(RagTarget.Off) }
+
+        vm.notifyEncodingFailure()  // isTyping=false → 立即发送
+        advanceUntilIdle()
+
+        val userMsgs = vm.messages.value.filter { it.role == Role.USER }
+        assertTrue("非回复期间提示应立即显示", userMsgs.any { it.content.contains("图片编码失败") })
+    }
 }
 
 /** 确定性 [ChatStreamProvider] fake —— 按给定序列发射事件，供 VM 测试注入。 */
@@ -906,6 +1023,45 @@ private class FakeChatStreamProvider(private val events: List<StreamEvent>) : Ch
         thinkingEnabled: Boolean?,
         reasoningEffort: String?
     ): Flow<StreamEvent> = flow { events.forEach { emit(it) } }
+}
+
+/**
+ * 门控流式 fake（UXR8-R3 M-1/M-2 测试）—— 第一轮挂起直到 [releaseFirstRound] 放行，
+ * 用于模拟「AI 回复进行中（isTyping=true）」窗口；后续轮次立即完成。
+ */
+private class GatedStreamProvider : ChatStreamProvider {
+    private val firstRoundStarted = kotlinx.coroutines.CompletableDeferred<Unit>()
+    private val releaseGate = kotlinx.coroutines.CompletableDeferred<Unit>()
+    private var round = 0
+
+    suspend fun awaitFirstRoundStarted() = firstRoundStarted.await()
+
+    fun releaseFirstRound() {
+        releaseGate.complete(Unit)
+    }
+
+    override fun streamChat(
+        config: ProviderConfig,
+        messages: List<ChatMessage>,
+        systemPrompt: String?,
+        ragContext: String?,
+        tools: List<ToolDefinition>?,
+        toolChoice: ToolChoice?,
+        thinkingEnabled: Boolean?,
+        reasoningEffort: String?
+    ): Flow<StreamEvent> = flow {
+        val current = round++
+        if (current == 0) {
+            // 第一轮：发射后挂起，保持 isTyping=true
+            firstRoundStarted.complete(Unit)
+            emit(StreamEvent.Delta("回复中"))
+            releaseGate.await()
+            emit(StreamEvent.Done)
+        } else {
+            emit(StreamEvent.Delta("后续"))
+            emit(StreamEvent.Done)
+        }
+    }
 }
 
 /** 记录每次传入 [messages] 与 [config] 的 fake，用于断言请求历史与目标 Provider（CR-02 / US-007 / US-019）。 */
