@@ -1,7 +1,10 @@
 package io.prism.ui.chat
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResult
@@ -15,6 +18,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -50,6 +54,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -59,6 +64,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -73,10 +80,12 @@ import io.prism.crossapp.CrossAppLauncher
 import io.prism.data.ProviderConfig
 import io.prism.network.WebSearchLocalToolExecutor
 import io.prism.rag.RagTarget
+import io.prism.skill.AskUserQuestion
 import io.prism.ui.components.PrismAvatar
 import io.prism.ui.components.PrismButton
 import io.prism.ui.components.PrismButtonVariant
 import io.prism.ui.components.PrismGlassCard
+import io.prism.ui.components.PrismField
 import io.prism.ui.components.PrismSheet
 import io.prism.ui.components.PrismSheetHost
 import io.prism.ui.components.PrismTopBar
@@ -94,6 +103,7 @@ import io.prism.ui.theme.PrismPanel2
 import io.prism.ui.theme.PrismText
 import io.prism.ui.theme.PrismTextDim
 import io.prism.ui.theme.PrismTextFaint
+import java.io.ByteArrayOutputStream
 
 /**
  * 聊天屏幕 —— 深空玻璃肌理（设计规范 v0.2 第 8.1 节）。
@@ -143,6 +153,8 @@ fun ConversationScreen(
     val ragTarget by viewModel.ragTarget.collectAsState()
     val thinkingEnabled by viewModel.thinkingEnabled.collectAsState()
     val webSearchEnabled by viewModel.webSearchEnabledFlow.collectAsState()
+    // UXR8 N2 Phase 2（ADR-030）：LLM 反问/澄清待答问题（null = 无待答问题，不显示卡片）
+    val pendingAskUser by viewModel.pendingAskUser.collectAsState()
     var providerSelectorVisible by remember { mutableStateOf(false) }
     var ragSelectorVisible by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
@@ -190,6 +202,21 @@ fun ConversationScreen(
     DisposableEffect(crossAppLauncher) {
         onDispose {
             crossAppLauncher?.cancelAll()
+        }
+    }
+
+    // UXR8 N3（ADR-030）：图片消息 —— 系统图片选择器 → data URL → sendMessage(imageUrl)
+    // 图片经 resize（最长边 1024px）+ JPEG 压缩（质量 80）后 base64，控制请求体大小。
+    val context = LocalContext.current
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val dataUrl = encodeImageToDataUrl(context, uri)
+            if (dataUrl != null) {
+                viewModel.sendMessage(input, dataUrl)
+                input = ""
+            }
         }
     }
 
@@ -331,7 +358,9 @@ fun ConversationScreen(
                             viewModel.sendMessage(input)
                         }
                         input = ""
-                    }
+                    },
+                    // UXR8 N3（ADR-030）：图片发送入口（系统图片选择器）
+                    onImagePick = { imagePickerLauncher.launch("image/*") }
                 )
             }
         }
@@ -353,6 +382,29 @@ fun ConversationScreen(
                 onSelect = { viewModel.setRagTarget(it); ragSelectorVisible = false },
                 onClose = { ragSelectorVisible = false }
             )
+        }
+
+        // UXR8 N2 Phase 2（ADR-030）：LLM 反问/澄清提问卡片。
+        // pendingAskUser 非空时展示（工具回路已由 executeLoop 中断）——用户答复作为
+        // 下一条 user 消息进入下一轮（sendMessage + clearAskUser）；跳过则发送跳过
+        // 消息让 LLM 基于已有信息直接回答。dismiss 仅清状态（不额外发消息）。
+        pendingAskUser?.let { questions ->
+            PrismSheetHost(
+                visible = true,
+                onDismiss = { viewModel.clearAskUser() }
+            ) {
+                AskUserSheet(
+                    questions = questions,
+                    onSubmit = { answer ->
+                        viewModel.sendMessage(answer)
+                        viewModel.clearAskUser()
+                    },
+                    onSkip = {
+                        viewModel.sendMessage(SKIP_ASK_USER_MESSAGE)
+                        viewModel.clearAskUser()
+                    }
+                )
+            }
         }
     }
 }
@@ -655,7 +707,7 @@ private fun MessageBubble(
                 horizontalAlignment = if (isUser) Alignment.End else Alignment.Start
             ) {
                 when {
-                    isUser -> UserBubble(message.content)
+                    isUser -> UserBubble(message)
                     isTool -> ToolBubble(message)
                     else -> AiBubble(message, showThinking, isStreaming)
                 }
@@ -733,7 +785,7 @@ private fun copyToClipboard(context: android.content.Context, text: String) {
 
 /** 用户消息气泡（靛蓝渐变，原有样式不变）。 */
 @Composable
-private fun UserBubble(content: String) {
+private fun UserBubble(message: ChatMessage) {
     Box(
         modifier = Modifier
             .background(
@@ -743,14 +795,269 @@ private fun UserBubble(content: String) {
             .border(1.dp, PrismIndigo.copy(alpha = 0.4f), RoundedCornerShape(topStart = 18.dp, topEnd = 6.dp, bottomStart = 18.dp, bottomEnd = 18.dp))
             .padding(horizontal = 15.dp, vertical = 11.dp)
     ) {
+        Column(horizontalAlignment = Alignment.End) {
+            // UXR8 N3（ADR-030）：图片消息渲染（data URL 解码 → Bitmap → Image）
+            message.imageUrl?.let { dataUrl ->
+                decodeImageDataUrl(dataUrl)?.let { bitmap ->
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "用户发送的图片",
+                        modifier = Modifier
+                            .fillMaxWidth(0.7f)
+                            .clip(RoundedCornerShape(10.dp)),
+                        contentScale = ContentScale.Fit
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+            }
+            if (message.content.isNotBlank()) {
+                Text(
+                    text = message.content,
+                    color = PrismText,
+                    fontSize = 14.sp,
+                    lineHeight = 23.sp
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 解码图片 data URL 为 [Bitmap]（UXR8 N3，ADR-030，零新增依赖）。
+ *
+ * data URL 格式：`data:image/jpeg;base64,<payload>`。解码失败返回 null（UI 降级不渲染）。
+ */
+private fun decodeImageDataUrl(dataUrl: String): Bitmap? {
+    val marker = "base64,"
+    val idx = dataUrl.indexOf(marker)
+    if (idx < 0) return null
+    return try {
+        val bytes = android.util.Base64.decode(dataUrl.substring(idx + marker.length), android.util.Base64.DEFAULT)
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+    } catch (e: Exception) {
+        null
+    }
+}
+
+/**
+ * 将图片 Uri 编码为 data URL（UXR8 N3，ADR-030，零新增依赖）。
+ *
+ * 读图 → 降采样解码 → 最长边缩放至 [MAX_IMAGE_EDGE_PX]（控请求体大小）→ JPEG 压缩（质量 80）
+ * → base64 → `data:image/jpeg;base64,...`。读取/解码失败返回 null（调用方忽略）。
+ *
+ * **Q-MED-4（guardrail TKN-UXR8-B3-GUARDRAIL-001）**：先 `inJustDecodeBounds` 读尺寸计算
+ * `inSampleSize` 降采样解码，避免高分辨率照片（如 48MP ≈ 192MB ARGB）全尺寸解码在
+ * 3GB 档设备（MINIMAL/CHAT_ONLY）上 OOM。解码后最长边 ∈ [1024, 2048)，再等比缩放至 1024。
+ *
+ * **隐私**：data URL 仅存在于内存与发送给用户自配的模型端点，不落盘、不入库。
+ */
+private fun encodeImageToDataUrl(context: Context, uri: Uri): String? = try {
+    // 1. 仅读尺寸（inJustDecodeBounds 不分配像素内存）→ 计算 inSampleSize
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    context.contentResolver.openInputStream(uri)?.use { input ->
+        BitmapFactory.decodeStream(input, null, bounds)
+    } ?: return null
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    val sample = computeInSampleSize(bounds.outWidth, bounds.outHeight, MAX_IMAGE_EDGE_PX)
+
+    // 2. 降采样解码（像素尺寸 ≈ target~2×target 边，内存可控）
+    val bitmap = context.contentResolver.openInputStream(uri)?.use { input ->
+        BitmapFactory.decodeStream(input, null, BitmapFactory.Options().apply { inSampleSize = sample })
+    } ?: return null
+
+    // 3. 等比缩放至 MAX_IMAGE_EDGE_PX（控 base64 体积：1024px JPEG q80 ≈ 200-500KB）
+    val maxEdge = MAX_IMAGE_EDGE_PX.toFloat()
+    val scale = minOf(maxEdge / bitmap.width, maxEdge / bitmap.height, 1f)
+    val scaled = if (scale < 1f) {
+        Bitmap.createScaledBitmap(
+            bitmap,
+            (bitmap.width * scale).toInt().coerceAtLeast(1),
+            (bitmap.height * scale).toInt().coerceAtLeast(1),
+            true
+        )
+    } else {
+        bitmap
+    }
+    val out = ByteArrayOutputStream()
+    scaled.compress(Bitmap.CompressFormat.JPEG, 80, out)
+    val b64 = android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
+    if (scaled != bitmap) scaled.recycle()
+    bitmap.recycle()
+    "data:image/jpeg;base64,$b64"
+} catch (e: Exception) {
+    null
+}
+
+/**
+ * 计算解码降采样率（UXR8 N3，ADR-030，Q-MED-4 修复，纯函数）。
+ *
+ * 返回 2 的幂，使解码后最长边 ∈ [targetEdge, 2*targetEdge)。例如 8000px + target=1024 →
+ * sample=4 → 解码边 2000px（约 12MB ARGB），再缩放至 1024。防止全尺寸位图驻留堆内存。
+ */
+private fun computeInSampleSize(origWidth: Int, origHeight: Int, targetEdge: Int): Int {
+    var sample = 1
+    while (maxOf(origWidth, origHeight) / (sample * 2) >= targetEdge) {
+        sample *= 2
+    }
+    return sample
+}
+
+/** UXR8 N3（ADR-030）：图片最长边像素上限（等比缩放，控请求体大小）。 */
+private const val MAX_IMAGE_EDGE_PX = 1024
+
+/**
+ * LLM 反问/澄清提问卡片（UXR8 N2 Phase 2，ADR-030）。
+ *
+ * [ConversationScreen] 在 [ConversationViewModel.pendingAskUser] 非空时展示。
+ * 每道问题渲染文本 + 建议选项（单选/多选按 [AskUserQuestion.multiSelect]）+ 自由文本补充。
+ * 「提交回答」→ 答复作为下一条 user 消息进入下一轮（sendMessage + clearAskUser）；
+ * 「跳过，直接回答」→ 发送跳过消息让 LLM 基于已有信息继续。
+ */
+@Composable
+private fun AskUserSheet(
+    questions: List<AskUserQuestion>,
+    onSubmit: (String) -> Unit,
+    onSkip: () -> Unit
+) {
+    // 每个问题的选中选项（question index → 已选 option label 集合；multiSelect 支持）
+    val selected = remember { mutableStateMapOf<Int, MutableSet<String>>() }
+    // 每个问题的自由文本补充（question index → 文本）
+    val freeTexts = remember { mutableStateMapOf<Int, String>() }
+
+    PrismSheet(
+        title = "AI 需要确认",
+        subtitle = "为准确回答，先澄清以下问题",
+        footer = {
+            Column {
+                PrismButton(
+                    text = "提交回答",
+                    onClick = {
+                        onSubmit(buildAskUserAnswer(questions, selected, freeTexts))
+                    }
+                )
+                Spacer(Modifier.height(8.dp))
+                PrismButton(
+                    text = "跳过，直接回答",
+                    variant = PrismButtonVariant.Ghost,
+                    onClick = onSkip
+                )
+            }
+        }
+    ) {
+        questions.forEachIndexed { index, q ->
+            Text(
+                text = "${index + 1}. ${q.question}",
+                color = PrismText,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(8.dp))
+            q.options.forEach { option ->
+                val optionSet = selected.getOrPut(index) { mutableSetOf() }
+                val isSelected = option.label in optionSet
+                AskUserOptionChip(
+                    label = option.label,
+                    description = option.description,
+                    selected = isSelected,
+                    onClick = {
+                        if (q.multiSelect) {
+                            if (isSelected) optionSet.remove(option.label) else optionSet.add(option.label)
+                        } else {
+                            optionSet.clear()
+                            optionSet.add(option.label)
+                        }
+                    }
+                )
+                Spacer(Modifier.height(6.dp))
+            }
+            Spacer(Modifier.height(8.dp))
+            PrismField(
+                label = if (q.options.isEmpty()) "回答" else "其他回答（可选）",
+                value = freeTexts[index] ?: "",
+                onValueChange = { freeTexts[index] = it },
+                placeholder = "输入你的回答…"
+            )
+            Spacer(Modifier.height(16.dp))
+        }
         Text(
-            text = content,
-            color = PrismText,
-            fontSize = 14.sp,
-            lineHeight = 23.sp
+            text = "你的回答将作为下一条消息发给 AI（仅发送到自配的模型端点）",
+            color = PrismTextFaint,
+            fontSize = 11.sp
         )
     }
 }
+
+/** 反问选项卡片（UXR8 N2 Phase 2，ADR-030）—— 可点选，选中态靛蓝描边 + 实心圆标。 */
+@Composable
+private fun AskUserOptionChip(
+    label: String,
+    description: String?,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) PrismIndigoSoft else PrismPanel2)
+            .border(
+                1.dp,
+                if (selected) PrismIndigo.copy(alpha = 0.5f) else PrismLine,
+                RoundedCornerShape(10.dp)
+            )
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            text = if (selected) "◉" else "○",
+            color = if (selected) PrismIndigo else PrismTextFaint,
+            fontSize = 13.sp
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = label, color = PrismText, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            if (!description.isNullOrBlank()) {
+                Text(text = description, color = PrismTextFaint, fontSize = 11.sp)
+            }
+        }
+    }
+}
+
+/**
+ * 汇总提问卡片回答（UXR8 N2 Phase 2，ADR-030，纯函数可测）。
+ *
+ * 逐题生成「N. 问题\n回答：Y」段落：
+ * - 选中选项 + 自由文本均有时 → 「选项（文本）」
+ * - 仅选项 / 仅文本 → 各自内容
+ * - 均未作答 → 「未回答」
+ * 多题以空行分隔。空问题列表返回空串（调用方不发送）。
+ */
+private fun buildAskUserAnswer(
+    questions: List<AskUserQuestion>,
+    selected: Map<Int, Set<String>>,
+    freeTexts: Map<Int, String>
+): String {
+    if (questions.isEmpty()) return ""
+    return questions.mapIndexed { index, q ->
+        val optionsText = selected[index]?.joinToString("、").orEmpty()
+        val freeText = freeTexts[index]?.trim().orEmpty()
+        val answer = when {
+            optionsText.isNotEmpty() && freeText.isNotEmpty() -> "$optionsText（$freeText）"
+            optionsText.isNotEmpty() -> optionsText
+            freeText.isNotEmpty() -> freeText
+            else -> "未回答"
+        }
+        "${index + 1}. ${q.question}\n回答：$answer"
+    }.joinToString("\n\n")
+}
+
+/** UXR8 N2 Phase 2（ADR-030）：用户跳过反问时发送的消息（让 LLM 基于已有信息直接回答）。 */
+private const val SKIP_ASK_USER_MESSAGE = "（已跳过反问）请基于已有信息直接回答我之前的请求。"
 
 /**
  * Prism Markdown 排版（UX-001 问题 1 二次反馈，ADR-022）—— 压低标题字号，紧凑工整。
@@ -1178,12 +1485,14 @@ private fun ToolCallIndicator(toolName: String) {
     }
 }
 
-/** 底部输入栏 —— 玻璃胶囊输入框 + 靛蓝渐变圆形发送钮（带光晕）。 */
+/** 底部输入栏 —— 玻璃胶囊输入框 + 靛蓝渐变圆形发送钮（带光晕）+ 图片附件钮（UXR8 N3）。 */
 @Composable
 private fun MessageInputBar(
     value: String,
     onValueChange: (String) -> Unit,
-    onSend: () -> Unit
+    onSend: () -> Unit,
+    /** UXR8 N3（ADR-030）：图片发送入口回调（系统图片选择器）。 */
+    onImagePick: () -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -1192,6 +1501,22 @@ private fun MessageInputBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        // UXR8 N3（ADR-030）：图片附件按钮
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(PrismPanel, CircleShape)
+                .border(1.dp, PrismLine, CircleShape)
+                .clickable { onImagePick() },
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = "🖼",
+                color = PrismTextDim,
+                fontSize = 16.sp
+            )
+        }
         Box(
             modifier = Modifier
                 .weight(1f)

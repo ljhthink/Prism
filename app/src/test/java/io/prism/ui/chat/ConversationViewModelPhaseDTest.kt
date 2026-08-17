@@ -357,6 +357,37 @@ class ConversationViewModelPhaseDTest {
         assertFalse("不应注入完整 systemPrompt", result.contains("Real prompt."))
     }
 
+    // ==================== UXR8 N1（ADR-030）：userRules 层 ====================
+
+    @Test
+    fun `mergeSystemPrompt injects userRules after persona and before rag`() {
+        // ADR-030：用户显式规则注入在 persona 之后、RAG 之前，声明最高优先级
+        val result = ConversationViewModel.mergeSystemPrompt(
+            ragPrompt = "RAG grounding rules",
+            userRules = "[用户规则 · 除安全限制外最高优先级]\n关于我：后端开发者",
+            enabledSkills = emptyList()
+        )
+        assertTrue("应先输出默认 persona", result.startsWith(ConversationViewModel.DEFAULT_PERSONA))
+        val personaIdx = result.indexOf(ConversationViewModel.DEFAULT_PERSONA)
+        val rulesIdx = result.indexOf("用户规则")
+        val ragIdx = result.indexOf("RAG grounding rules")
+        assertTrue("persona 应在 userRules 之前", personaIdx < rulesIdx)
+        assertTrue("userRules 应在 RAG 之前（最高优先级）", rulesIdx < ragIdx)
+    }
+
+    @Test
+    fun `mergeSystemPrompt skips blank userRules`() {
+        // null/空 userRules 向后兼容：不注入 userRules 层
+        val r1 = ConversationViewModel.mergeSystemPrompt(
+            ragPrompt = "RAG", userRules = null, enabledSkills = emptyList()
+        )
+        assertFalse("null userRules 不应注入", r1.contains("用户规则"))
+        val r2 = ConversationViewModel.mergeSystemPrompt(
+            ragPrompt = "RAG", userRules = "   ", enabledSkills = emptyList()
+        )
+        assertFalse("空白 userRules 不应注入", r2.contains("用户规则"))
+    }
+
     // ==================== 集成测试：executeLoop 分支 ====================
 
     @Test

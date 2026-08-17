@@ -94,5 +94,15 @@ data class ChatMessage(
     val toolName: String? = null,
     val toolCalls: List<ToolCallRef> = emptyList(),
     val thinkingChain: String? = null,
-    val searchResults: List<SearchResult>? = null
+    val searchResults: List<SearchResult>? = null,
+    /**
+     * UXR8 N3（ADR-030）：用户消息附带图片（多模态直传）。
+     *
+     * 值为 data URL（`data:image/...;base64,...`）或公网图片 URL。非空时请求体
+     * 该 user 消息的 content 由字符串改为 OpenAI 兼容多模态数组：
+     * `[{"type":"text","text":...},{"type":"image_url","image_url":{"url":...}}]`。
+     * 纯文本端点（如 DeepSeek）收到该结构返回 400 → 协议层按「含图 + 400」信号降级
+     * 提示「当前模型不支持图片」。默认 null（向后兼容既有测试与持久化数据）。
+     */
+    val imageUrl: String? = null
 )

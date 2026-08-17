@@ -83,4 +83,17 @@ sealed class StreamEvent {
         val toolName: String,
         val arguments: Map<String, Any?>
     ) : StreamEvent()
+
+    /**
+     * LLM 主动反问/澄清（UXR8 N2 Phase 2，ADR-030）。
+     *
+     * `ask_user__ask` 本地工具被执行后由 [io.prism.skill.SkillExecutor.executeLoop]
+     * 检测结果标记前缀并发射本事件，同时中断当前工具回路（StopAtTools 语义）。
+     * 调用方（UI 层）收到后展示结构化提问卡片，用户答复作为下一条 user 消息进入下一轮。
+     *
+     * @property questions 澄清问题列表（来自 LLM 生成，长度已截断校验）
+     */
+    data class AskUser(
+        val questions: List<io.prism.skill.AskUserQuestion>
+    ) : StreamEvent()
 }

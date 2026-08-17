@@ -34,6 +34,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -604,6 +605,8 @@ class OpenAICompatibleProviderTest {
                             is StreamEvent.ToolCallStart,
                             is StreamEvent.ToolCallDelta,
                             is StreamEvent.ToolCallComplete -> {}
+                            // UXR8 N2（ADR-030）：反问事件由 ask_user 工具触发，本测试不注入。
+                            is StreamEvent.AskUser -> {}
                         }
                     }
                 } catch (e: kotlinx.coroutines.CancellationException) {
@@ -1483,5 +1486,144 @@ class OpenAICompatibleProviderTest {
         val sanitized = provider.sanitizeErrorBody(body)
         assertTrue("应保留业务错误信息 missing field", sanitized.contains("missing field"))
         assertTrue("应保留 invalid_request_error", sanitized.contains("invalid_request_error"))
+    }
+
+    // ==================== UXR8 N3（ADR-030）：多模态直传 + 视觉降级 ====================
+
+    @Test
+    fun `buildRequestBody serializes multimodal array when user message has imageUrl`() {
+        val config = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        val messages = listOf(
+            ChatMessage(
+                id = 0, role = Role.USER, content = "看看这张图",
+                timestamp = 0,
+                imageUrl = "data:image/jpeg;base64,AAAA"
+            )
+        )
+        val body = provider.buildRequestBody(config, messages)
+        // 多模态 content 应为数组：text + image_url
+        assertTrue("应包含 type:text 段", body.contains("\"type\":\"text\""))
+        assertTrue("应包含 text 内容", body.contains("看看这张图"))
+        assertTrue("应包含 type:image_url 段", body.contains("\"type\":\"image_url\""))
+        assertTrue("应包含图片 URL", body.contains("data:image/jpeg;base64,AAAA"))
+        assertFalse("多模态时 content 不应为纯字符串", body.contains("\"content\":\"看看这张图\""))
+    }
+
+    @Test
+    fun `buildRequestBody keeps plain string content when no image`() {
+        val config = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        val messages = listOf(ChatMessage(id = 0, role = Role.USER, content = "普通文本", timestamp = 0))
+        val body = provider.buildRequestBody(config, messages)
+        // 无图时仍为字符串 content（向后兼容）
+        assertTrue("无图应保持字符串 content", body.contains("\"content\":\"普通文本\""))
+        assertFalse("无图不应含 image_url", body.contains("image_url"))
+    }
+
+    @Test
+    fun `buildRequestBody omits image when imageUrl blank`() {
+        val config = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
+        val messages = listOf(
+            ChatMessage(id = 0, role = Role.USER, content = "文本", timestamp = 0, imageUrl = "   ")
+        )
+        val body = provider.buildRequestBody(config, messages)
+        assertFalse("空白 imageUrl 不应触发多模态", body.contains("image_url"))
+        assertTrue("应为字符串 content", body.contains("\"content\":\"文本\""))
+    }
+
+    @Test
+    fun `streamChat emits vision degradation message when image request gets 400`() = runBlocking {
+        // 纯文本端点（如 DeepSeek）收到多模态数组返回 400 → 降级提示「不支持图片」
+        val server = embeddedServer(Netty, port = 0) {
+            routing {
+                route("/chat/completions", HttpMethod.Post) {
+                    handle { call.respond(HttpStatusCode.BadRequest) }
+                }
+            }
+        }
+        server.start(wait = false)
+        try {
+            val port = server.engine.resolvedConnectors().first().port
+            val config = ProviderConfig(
+                name = "DeepSeek", baseUrl = "http://127.0.0.1:$port",
+                apiKeyRef = "deepseek", models = listOf("deepseek-chat")
+            )
+            val messages = listOf(
+                ChatMessage(
+                    id = 0, role = Role.USER, content = "看图",
+                    timestamp = 0,
+                    imageUrl = "data:image/jpeg;base64,AAAA"
+                )
+            )
+            val events = provider.streamChat(
+                config, messages, systemPrompt = null, ragContext = null,
+                tools = null, toolChoice = null, thinkingEnabled = null, reasoningEffort = null
+            ).toList()
+            val error = events.filterIsInstance<StreamEvent.Error>().firstOrNull()
+            assertNotNull("含图 + 400 应发射 Error 事件", error)
+            assertTrue("应提示当前模型不支持图片", error!!.message.contains("不支持图片"))
+        } finally {
+            server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
+        }
+    }
+
+    @Test
+    fun `streamChat keeps generic 400 message when no image in request`() = runBlocking {
+        // 无图时 400 仍是通用「请求被拒绝」文案（不误报视觉降级）
+        val server = embeddedServer(Netty, port = 0) {
+            routing {
+                route("/chat/completions", HttpMethod.Post) {
+                    handle { call.respond(HttpStatusCode.BadRequest) }
+                }
+            }
+        }
+        server.start(wait = false)
+        try {
+            val port = server.engine.resolvedConnectors().first().port
+            val config = ProviderConfig(
+                name = "OpenAI", baseUrl = "http://127.0.0.1:$port",
+                apiKeyRef = "openai", models = listOf("gpt-4o")
+            )
+            val events = provider.streamChat(config, sampleMessages()).toList()
+            val error = events.filterIsInstance<StreamEvent.Error>().firstOrNull()
+            assertNotNull(error)
+            assertTrue("无图 400 应为通用文案", error!!.message.contains("请求被拒绝"))
+            assertFalse("无图不应提示图片降级", error.message.contains("不支持图片"))
+        } finally {
+            server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
+        }
+    }
+
+    @Test
+    fun `streamChat keeps generic 400 when last user message has no image despite earlier image in history`() = runBlocking {
+        // Q-MED-3（guardrail TKN-UXR8-B3-GUARDRAIL-001）：历史图片消息不应污染后续纯文本请求的
+        // 400 归因——图片入历史后，同会话后续纯文本请求的任意 400（模型名错误等）应保持通用文案，
+        // 不误报「不支持图片」（requestHasImage 仅判断最后一条 user 消息）。
+        val server = embeddedServer(Netty, port = 0) {
+            routing {
+                route("/chat/completions", HttpMethod.Post) {
+                    handle { call.respond(HttpStatusCode.BadRequest) }
+                }
+            }
+        }
+        server.start(wait = false)
+        try {
+            val port = server.engine.resolvedConnectors().first().port
+            val config = ProviderConfig(
+                name = "DeepSeek", baseUrl = "http://127.0.0.1:$port",
+                apiKeyRef = "deepseek", models = listOf("deepseek-chat")
+            )
+            val messages = listOf(
+                ChatMessage(id = 0, role = Role.USER, content = "看看这张图", timestamp = 0, imageUrl = "data:image/jpeg;base64,AAAA"),
+                ChatMessage(id = 1, role = Role.ASSISTANT, content = "这张图是…", timestamp = 1),
+                ChatMessage(id = 2, role = Role.USER, content = "谢谢，换个问题", timestamp = 2) // 最后一条 user 无图
+            )
+            val events = provider.streamChat(config, messages, systemPrompt = null, ragContext = null, tools = null, toolChoice = null, thinkingEnabled = null, reasoningEffort = null).toList()
+            val error = events.filterIsInstance<StreamEvent.Error>().firstOrNull()
+            assertNotNull(error)
+            assertTrue("最后一条 user 无图时应为通用 400 文案", error!!.message.contains("请求被拒绝"))
+            assertFalse("历史图片不应触发视觉降级", error.message.contains("不支持图片"))
+        } finally {
+            server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
+        }
     }
 }

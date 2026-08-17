@@ -129,7 +129,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 ## 架构概览
 
-```
+```text
 Prism/
 ├── app/
 │   └── src/main/java/io/prism/
@@ -191,6 +191,6 @@ Prism/
 ## 相关文档
 
 - [AGENTS.md](AGENTS.md) —— 项目进度与治理记录（面向 AI Agent 与开发者）
-- [docs/decisions/](docs/decisions/README.md) —— 架构决策记录（ADR-001~ADR-027）
+- [docs/decisions/](docs/decisions/README.md) —— 架构决策记录（ADR-001~ADR-030）
 - [docs/PRD.md](docs/PRD.md) —— 产品需求文档 v0.1
 - [CLAUDE.md](CLAUDE.md) —— AI 编程行为最高准则

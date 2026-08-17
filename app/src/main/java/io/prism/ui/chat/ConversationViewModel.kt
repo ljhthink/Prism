@@ -28,6 +28,7 @@ import io.prism.network.WebSearchLocalToolExecutor
 import io.prism.network.KnowledgeBaseLocalToolExecutor
 import io.prism.rag.RagContextBuilder
 import io.prism.rag.RagTarget
+import io.prism.skill.AskUserLocalToolExecutor
 import io.prism.skill.SkillExecutor
 import io.prism.skill.SkillRegistry
 import io.prism.ui.model.ChatMessage
@@ -233,7 +234,24 @@ class ConversationViewModel(
      * 默认 false（向后兼容既有测试：无 Skill + 无开关时 tools 为空，走纯流式分支）。
      * 生产环境由 [Factory] 显式传 true（纯本地能力，无开关，LLM 始终可感知）。
      */
-    private val documentToolsEnabled: Boolean = false
+    private val documentToolsEnabled: Boolean = false,
+    /**
+     * UXR8 N1（ADR-030）：用户规则配置仓库（DataStore 持久化「关于我」+「如何回答」）。
+     *
+     * 注入为 systemPrompt 最高优先级层（persona 之后、RAG 之前，除安全限制外最高优先级）。
+     * null 时降级为不注入 userRules 层（向后兼容既有测试：无用户规则场景）。
+     * 生产环境由 [Factory] 从 [PrismApplication.userRulesRepository] 注入。
+     */
+    private val userRulesConfigRepository: io.prism.config.UserRulesRepository? = null,
+    /**
+     * UXR8 N2（ADR-030）：反问工具执行器（`ask_user__ask`）—— LLM 主动澄清提问。
+     *
+     * 非 null 时注入 `ask_user__ask` 工具定义到 [buildTools]，LLM 在需求歧义时可调用
+     * 以提问卡片形式向用户澄清（中断当前 executeLoop 轮次，用户答复作为下一条 user 消息）。
+     * null 时降级为不注册反问工具（向后兼容既有测试）。
+     * 生产环境由 [Factory] 从 [PrismApplication.askUserLocalToolExecutor] 注入。
+     */
+    private val askUserLocalToolExecutor: io.prism.skill.AskUserLocalToolExecutor? = null
 ) : ViewModel() {
 
     /**
@@ -274,6 +292,20 @@ class ConversationViewModel(
      */
     private val _activeTool = MutableStateFlow<String?>(null)
     val activeTool: StateFlow<String?> = _activeTool.asStateFlow()
+
+    /**
+     * UXR8 N2 Phase 2（ADR-030）：LLM 主动反问/澄清的待答问题（null = 无待答问题）。
+     *
+     * [handleStreamEvent] 收到 [StreamEvent.AskUser] 时设置（中断工具回路后）——
+     * UI 展示结构化提问卡片；用户答复作为下一条 user 消息后由 [clearAskUser] 清除。
+     */
+    private val _pendingAskUser = MutableStateFlow<List<io.prism.skill.AskUserQuestion>?>(null)
+    val pendingAskUser: StateFlow<List<io.prism.skill.AskUserQuestion>?> = _pendingAskUser.asStateFlow()
+
+    /** 清除待答反问（用户答复作为下一条 user 消息后调用）。 */
+    fun clearAskUser() {
+        _pendingAskUser.value = null
+    }
 
     /**
      * UXR6 问题 2：当前正在流式生成的 AI 消息 id 集合。
@@ -752,15 +784,24 @@ class ConversationViewModel(
     private fun stripThinkingChain(msgs: List<ChatMessage>): List<ChatMessage> =
         msgs.map { if (it.thinkingChain != null) it.copy(thinkingChain = null) else it }
 
-    fun sendMessage(text: String) {
+    fun sendMessage(text: String, imageUrl: String? = null) {
         val trimmed = text.trim()
-        if (trimmed.isEmpty()) return
+        // UXR8 N3（ADR-030）：图片消息允许空文本（用户只发图不配字）；纯文本消息空则忽略
+        if (trimmed.isEmpty() && imageUrl.isNullOrBlank()) return
         // Q5（guardrail TKN-UXR4-GUARDRAIL-001）：AI 正在回复时忽略新发送，
         // 防止并发回路（旧回路 finally 清除新回路 isTyping）导致状态撕裂。
         if (_isTyping.value) return
 
         val now = System.currentTimeMillis()
-        _messages.update { it + ChatMessage(nextId.getAndIncrement(), Role.USER, trimmed, now) }
+        _messages.update {
+            it + ChatMessage(
+                id = nextId.getAndIncrement(),
+                role = Role.USER,
+                content = trimmed,
+                timestamp = now,
+                imageUrl = imageUrl?.takeIf { img -> img.isNotBlank() }
+            )
+        }
         // UXR4 问题 8/9（ADR-024）：新消息置脏标记，回答完成后落库并刷新 updatedAt
         messagesDirty = true
 
@@ -842,7 +883,9 @@ class ConversationViewModel(
             val enabledSkills = skillRegistry?.enabledSkills() ?: emptyList()
             val baseTools = Companion.buildTools(
                 enabledSkills, crossAppLauncher, _webSearchEnabled.value,
-                documentToolsEnabled = documentToolsEnabled
+                documentToolsEnabled = documentToolsEnabled,
+                // UXR8 N2 Phase 2（ADR-030）：反问/澄清工具（ask_user__ask，纯本地能力）
+                askUserExecutor = askUserLocalToolExecutor
             )
             // UXR4 问题 2/3（ADR-024）：知识库工具在 **RAG 开启 + 嵌入可用** 时注入
             //（LLM 可主动枚举/检索/读取知识库，解决 RAG 仅自动注入、LLM 无知识库感知能力的问题）。
@@ -943,12 +986,27 @@ class ConversationViewModel(
             // 降级策略：L1 失败降级为 null summary + 原始 history（不阻断对话）
             val memoryContext = buildMemoryContext(filteredHistory, active)
 
-            // 合并 systemPrompt（ADR-015 决策4 顺序：RAG → L1 摘要 → L2 跨会话 → L3 画像 → Skill）
+            // UXR8 N1（ADR-030）：用户显式规则（「关于我」+「如何回答」）—— 除安全限制外
+            // 最高优先级层（persona 之后、RAG 之前）。读取失败/未配置 → null 跳过注入（降级）。
+            // BR-error-handling-007：suspend DataStore 读取禁止 runCatching（会吞 CancellationException），
+            // 必须显式 try-catch 重抛（对齐同文件 L1069+/L1113+ 既有模式）。
+            val userRulesSection = try {
+                userRulesConfigRepository?.getRules()?.toSystemPromptSection()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // BR-error-handling-004：记录日志（不含敏感信息），降级为不注入 userRules 层
+                Log.w(TAG, "read userRules failed: ${e::class.simpleName}")
+                null
+            }
+
+            // 合并 systemPrompt（ADR-015 决策4 + ADR-030 顺序：用户规则 → RAG → L1 摘要 → L2 跨会话 → L3 画像 → Skill）
             val mergedSystemPrompt = Companion.mergeSystemPrompt(
                 ragPrompt = ragPlan?.systemPrompt,
                 l1Summary = memoryContext.l1Summary,
                 l2Memories = memoryContext.l2Memories,
                 l3Profiles = memoryContext.l3Profiles,
+                userRules = userRulesSection,
                 enabledSkills = enabledSkills
             )
 
@@ -1395,6 +1453,12 @@ class ConversationViewModel(
                 _isTyping.value = true
                 _activeTool.value = event.toolName.substringAfterLast(SkillExecutor.NAMESPACE_SEPARATOR)
             }
+            is StreamEvent.AskUser -> {
+                // UXR8 N2 Phase 2（ADR-030）：LLM 主动反问 → 设置待答问题供 UI 展示提问卡片。
+                // 工具回路已由 executeLoop 中断（StopAtTools），isTyping/activeTool 由
+                // executeWithToolLoop finally 统一复位。
+                _pendingAskUser.value = event.questions
+            }
         }
     }
 
@@ -1650,7 +1714,8 @@ class ConversationViewModel(
 1. 基于事实与上下文准确回答；不确定时明确说明，不虚构
 2. 遵循用户的语言与表达偏好，保持回复清晰、结构化、易读
 3. 当用户需求匹配下方列出的技能时，按需使用对应能力（不改变你的基础身份）
-4. 不做超出能力范围的承诺，必要时说明限制"""
+4. 不做超出能力范围的承诺，必要时说明限制
+5. （UXR8 N2 Phase 1，ADR-030）当用户需求存在实体/版本/标准等歧义、且缺失信息会实质改变答案时，先向用户澄清追问（一次一问、给出建议选项），不要反复用同义词重试搜索"""
 
         /**
          * M4 命名空间分隔符（与 [SkillExecutor.NAMESPACE_SEPARATOR] 对齐）。
@@ -2004,7 +2069,8 @@ class ConversationViewModel(
             enabledSkills: List<SkillRegistry.SkillEntry>,
             crossAppLauncher: CrossAppLauncher? = null,
             webSearchEnabled: Boolean = false,
-            documentToolsEnabled: Boolean = false
+            documentToolsEnabled: Boolean = false,
+            askUserExecutor: AskUserLocalToolExecutor? = null
         ): List<ToolDefinition> {
             val skillTools = enabledSkills.flatMap { entry ->
                 (entry.manifest.tools ?: emptyList()).map { toolDecl ->
@@ -2032,14 +2098,23 @@ class ConversationViewModel(
             } else {
                 emptyList()
             }
-            return skillTools + crossAppTools + webSearchTools + documentTools
+            // UXR8 N2 Phase 2（ADR-030）：反问/澄清工具（ask_user__ask），
+            // askUserExecutor 非 null 时注入（实例路径恒传 executor，纯本地能力）
+            val askUserTools = if (askUserExecutor != null) {
+                listOf(AskUserLocalToolExecutor.buildToolDefinition())
+            } else {
+                emptyList()
+            }
+            return skillTools + crossAppTools + webSearchTools + documentTools + askUserTools
         }
 
         /**
          * 合并多层 system prompt（M4 Phase D R-6 膨胀控制 + M5 Phase E ADR-015 决策4 六层合并 + ADR-018 渐进式加载）。
          *
-         * **合并顺序**（ADR-015 决策4 + ADR-018）：
+         * **合并顺序**（ADR-015 决策4 + ADR-018 + ADR-030）：
          * 0. [DEFAULT_PERSONA] 默认 persona（始终作为基础身份，ADR-018）
+         * 0.5. 用户规则 [userRules]（UXR8 N1，ADR-030：persona 之后、RAG 之前，
+         *      **除安全限制外最高优先级**——语义对齐 Claude Code 分层记忆：用户显式规则 > 自动记忆 > 通用 persona）
          * 1. RAG grounding rules（防幻觉约束）
          * 2. L1 早期对话摘要（[SlidingWindowResult.toSummarySystemPromptSection]，格式 `[早期对话摘要] ...`）
          * 3. L2 跨会话记忆（[CrossSessionMemoryManager.formatMemoriesAsContext]，格式 `相关历史对话：...`）
@@ -2059,6 +2134,8 @@ class ConversationViewModel(
          * @param l1Summary L1 早期对话摘要 section（M5 Phase E，默认 null 向后兼容）
          * @param l2Memories L2 跨会话记忆 section（M5 Phase E，默认 null 向后兼容）
          * @param l3Profiles L3 用户画像 section（M5 Phase E，默认 null 向后兼容）
+         * @param userRules 用户显式规则 section（UXR8 N1，ADR-030：persona 之后、RAG 之前，
+         *     **除安全限制外最高优先级**；默认 null 向后兼容既有测试）
          * @param enabledSkills 已启用的 Skill 列表（已过滤 isEnabled && isInstalled）
          * @return 合并后的 systemPrompt；**始终非空**（至少含 [DEFAULT_PERSONA]）
          */
@@ -2067,8 +2144,10 @@ class ConversationViewModel(
             l1Summary: String? = null,
             l2Memories: String? = null,
             l3Profiles: String? = null,
+            userRules: String? = null,
             enabledSkills: List<SkillRegistry.SkillEntry>
         ): String {
+            val hasUserRules = !userRules.isNullOrBlank()
             val hasRag = !ragPrompt.isNullOrBlank()
             val hasL1 = !l1Summary.isNullOrBlank()
             val hasL2 = !l2Memories.isNullOrBlank()
@@ -2084,6 +2163,11 @@ class ConversationViewModel(
             return buildString {
                 // ADR-018：默认 persona 始终作为基础身份
                 append(DEFAULT_PERSONA)
+                // ADR-030：用户规则（除安全限制外最高优先级）—— persona 之后、RAG 之前
+                if (hasUserRules) {
+                    append("\n\n")
+                    append(userRules)
+                }
                 // ADR-015 决策4 合并顺序：RAG → L1 摘要 → L2 跨会话 → L3 画像 → Skill 索引
                 if (hasRag) {
                     append("\n\n")
@@ -2155,7 +2239,11 @@ class ConversationViewModel(
                     // UXR8 Bug1（ADR-028）：RAG 检索目标持久化（关闭后新对话不再重置为全库）
                     ragTargetConfigRepository = app.ragTargetConfigRepository,
                     // O4（PRD UXR8）：文档生成工具（docx/xlsx，纯本地能力，恒注入）
-                    documentToolsEnabled = true
+                    documentToolsEnabled = true,
+                    // UXR8 N1（ADR-030）：用户显式规则（「关于我」+「如何回答」）
+                    userRulesConfigRepository = app.userRulesRepository,
+                    // UXR8 N2 Phase 2（ADR-030）：反问/澄清工具（ask_user__ask，纯本地能力）
+                    askUserLocalToolExecutor = app.askUserLocalToolExecutor
                 )
             }
         }

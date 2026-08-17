@@ -497,13 +497,24 @@ class PrismApplication : Application() {
     }
 
     /**
-     * 复合本地工具执行器（问题 8b，ADR-020；UXR4 问题 2/3，ADR-024 扩展；O4/PRD UXR8 扩展）——
-     * 组合 M6 跨 App + 联网搜索 + 知识库 + 文档生成。
+     * 反问/澄清本地工具执行器（UXR8 N2 Phase 2，ADR-030）—— `ask_user__ask`。
+     *
+     * LLM 面对需求歧义时主动向用户澄清：工具"执行"= 返回特殊标记前缀，
+     * [skillExecutor] 检测后发射 [io.prism.network.StreamEvent.AskUser] 并中断回路，
+     * UI 展示提问卡片，用户答复作为下一条 user 消息进入下一轮。无 Android 依赖。
+     */
+    val askUserLocalToolExecutor: io.prism.skill.AskUserLocalToolExecutor by lazy {
+        io.prism.skill.AskUserLocalToolExecutor()
+    }
+
+    /**
+     * 复合本地工具执行器（问题 8b，ADR-020；UXR4 问题 2/3，ADR-024 扩展；O4/PRD UXR8 扩展；
+     * N2/ADR-030 扩展）—— 组合 M6 跨 App + 联网搜索 + 知识库 + 文档生成 + 反问。
      *
      * 将 [crossAppLocalToolExecutor]（`cross_app__*`）、[webSearchLocalToolExecutor]
-     * （`web_search__*`）、[knowledgeBaseLocalToolExecutor]（`knowledge_base__*`）与
-     * [documentLocalToolExecutor]（`document__*`）组合为单个
-     * [io.prism.skill.LocalToolExecutor] 门面，
+     * （`web_search__*`）、[knowledgeBaseLocalToolExecutor]（`knowledge_base__*`）、
+     * [documentLocalToolExecutor]（`document__*`）与 [askUserLocalToolExecutor]
+     * （`ask_user__*`）组合为单个 [io.prism.skill.LocalToolExecutor] 门面，
      * 注入 [skillExecutor]，使 SkillExecutor 零改动感知全部本地工具。
      */
     val compositeLocalToolExecutor: io.prism.skill.CompositeLocalToolExecutor by lazy {
@@ -512,7 +523,8 @@ class PrismApplication : Application() {
                 crossAppLocalToolExecutor,
                 webSearchLocalToolExecutor,
                 knowledgeBaseLocalToolExecutor,
-                documentLocalToolExecutor
+                documentLocalToolExecutor,
+                askUserLocalToolExecutor
             )
         )
     }
@@ -632,6 +644,20 @@ class PrismApplication : Application() {
      */
     val ragTargetConfigRepository: io.prism.config.RagTargetConfigRepository by lazy {
         io.prism.config.RagTargetConfigRepository(ragConfigDataStore)
+    }
+
+    /**
+     * 用户规则配置仓库（UXR8 N1，ADR-030）—— 持久化「关于我」+「如何回答」双字段。
+     *
+     * 使用独立 DataStore（`prism_user_rules`），与 API Key / 思考 / 记忆 / RAG / 审批
+     * DataStore 隔离。默认空（未配置规则时不注入 userRules 层，向后兼容）。
+     *
+     * 由 [io.prism.ui.chat.ConversationViewModel] 读取并作为 systemPrompt 最高优先级层
+     * 注入（persona 之后、RAG 之前）；由 [io.prism.ui.settings.SettingsViewModel]
+     * 写入用户偏好（设置页双字段编辑器）。
+     */
+    val userRulesRepository: io.prism.config.UserRulesRepository by lazy {
+        io.prism.config.UserRulesRepository(userRulesDataStore)
     }
 
     /**
@@ -800,6 +826,9 @@ class PrismApplication : Application() {
 
     /** RAG 检索目标配置 DataStore 进程级单例（UXR8 Bug1，ADR-028，RagTarget 持久化）。 */
     private val Context.ragConfigDataStore by preferencesDataStore(name = "prism_rag_config")
+
+    /** 用户规则配置 DataStore 进程级单例（UXR8 N1，ADR-030，关于我+如何回答持久化）。 */
+    private val Context.userRulesDataStore by preferencesDataStore(name = "prism_user_rules")
 
     /** 设备档位配置 DataStore 进程级单例（ADR-017 4.4，US-040 用户手动覆盖持久化）。 */
     private val Context.tierConfigDataStore by preferencesDataStore(name = "prism_tier_config")

@@ -79,6 +79,8 @@ fun SettingsScreen(
     var apiKeyVisible by remember { mutableStateOf(false) }
     var thinkingSheetVisible by remember { mutableStateOf(false) }
     var toolApprovalSheetVisible by remember { mutableStateOf(false) }
+    // UXR8 N1（ADR-030）：用户规则编辑弹层（「关于我」+「如何回答」双字段）
+    var userRulesSheetVisible by remember { mutableStateOf(false) }
 
     val providers by viewModel.providers.collectAsState()
     val activeProvider by viewModel.activeProvider.collectAsState()
@@ -88,6 +90,9 @@ fun SettingsScreen(
     val reasoningEffort by viewModel.reasoningEffort.collectAsState()
     // UXR3 问题 10（ADR-023）：工具审批模式（DataStore 持久化）
     val toolApprovalMode by viewModel.toolApprovalMode.collectAsState()
+    // UXR8 N1（ADR-030）：用户规则（「关于我」+「如何回答」双字段，DataStore 持久化）
+    val userRulesAboutMe by viewModel.userRulesAboutMe.collectAsState()
+    val userRulesHowToRespond by viewModel.userRulesHowToRespond.collectAsState()
 
     // M7 Phase C（US-042）：档位 UI 由 TierViewModel 驱动（替代原 PerfTier 本地 mock state）
     val tierViewModel: TierViewModel = viewModel(factory = TierViewModel.Factory)
@@ -137,6 +142,17 @@ fun SettingsScreen(
                     onClick = { thinkingSheetVisible = true }
                 )
             }
+            // UXR8 N1（ADR-030）：用户规则（类 ChatGPT Custom Instructions 双字段）
+            item { SetSection("用户规则") }
+            item {
+                SetRow(
+                    icon = "✎",
+                    iconColor = Color(0xFF9BB8FF),
+                    title = "AI 行为偏好",
+                    subtitle = userRulesSubtitle(userRulesAboutMe, userRulesHowToRespond),
+                    onClick = { userRulesSheetVisible = true }
+                )
+            }
             item { SetSection("隐私与安全") }
             item {
                 SetRow(
@@ -155,6 +171,15 @@ fun SettingsScreen(
                     title = "工具权限",
                     subtitle = toolApprovalSubtitle(toolApprovalMode),
                     onClick = { toolApprovalSheetVisible = true }
+                )
+            }
+            // UXR8 N3（ADR-030）：图片直传隐私说明（方案 A 无云端旁路，图片直达用户自配端点）
+            item {
+                SetRow(
+                    icon = "🖼",
+                    iconColor = Color(0xFF9BB8FF),
+                    title = "图片消息",
+                    subtitle = "图片直传你配置的模型端点（无云端旁路），不支持视觉的模型会提示降级"
                 )
             }
             item { SetSection("设备档位") }
@@ -246,7 +271,32 @@ fun SettingsScreen(
                 onClose = { toolApprovalSheetVisible = false }
             )
         }
+        // UXR8 N1（ADR-030）：用户规则编辑弹层（「关于我」+「如何回答」双字段）
+        PrismSheetHost(visible = userRulesSheetVisible, onDismiss = { userRulesSheetVisible = false }) {
+            UserRulesSheet(
+                aboutMe = userRulesAboutMe,
+                howToRespond = userRulesHowToRespond,
+                onSave = { about, respond ->
+                    viewModel.saveUserRules(about, respond)
+                    userRulesSheetVisible = false
+                },
+                onClose = { userRulesSheetVisible = false }
+            )
+        }
     }
+}
+
+/**
+ * 用户规则行副标题（UXR8 N1，ADR-030）。
+ *
+ * 两字段均空 → "未配置 · 告诉我你的背景与回复偏好"；仅配置一个 → 显示已配置字数；
+ * 两个都配置 → "关于我 ✓ · 如何回答 ✓"。
+ */
+private fun userRulesSubtitle(aboutMe: String, howToRespond: String): String = when {
+    aboutMe.isBlank() && howToRespond.isBlank() -> "未配置 · 告诉我你的背景与回复偏好"
+    aboutMe.isBlank() -> "仅「如何回答」已配置 · 最高优先级约束 LLM"
+    howToRespond.isBlank() -> "仅「关于我」已配置 · 最高优先级约束 LLM"
+    else -> "「关于我」+「如何回答」已配置 · 最高优先级约束 LLM"
 }
 
 /**
@@ -964,9 +1014,70 @@ private fun SetRow(
             }
             Column(modifier = Modifier.weight(1f)) {
                 Text(text = title, color = PrismText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                Text(text = subtitle, color = PrismTextFaint, fontSize = 11.sp)
+                Text(text = subtitle, color = PrismTextFaint, fontSize = 11.sp) 
             }
             trailing()
         }
+    }
+}
+
+/**
+ * 用户规则编辑弹层（UXR8 N1，ADR-030）—— 类 ChatGPT Custom Instructions 双字段。
+ *
+ * - 「关于我」：身份/背景/场景（如"我是 Python 开发者，主要做后端"）
+ * - 「如何回答」：语气/格式/禁忌（如"回答用中文，简洁，先给结论再解释"）
+ *
+ * 两字段分别 ≤ [io.prism.config.UserRulesRepository.MAX_RULE_LEN] 字符，本地先截断
+ * （纵深防御，仓库层 fail-fast 兜底）。保存后下一轮对话生效（最高优先级约束 LLM）。
+ *
+ * @param aboutMe 当前「关于我」内容
+ * @param howToRespond 当前「如何回答」内容
+ * @param onSave 保存回调（aboutMe, howToRespond）
+ * @param onClose 关闭按钮回调
+ */
+@Composable
+private fun UserRulesSheet(
+    aboutMe: String,
+    howToRespond: String,
+    onSave: (String, String) -> Unit,
+    onClose: () -> Unit
+) {
+    val maxLen = io.prism.config.UserRulesRepository.MAX_RULE_LEN
+    var about by remember { mutableStateOf(aboutMe) }
+    var respond by remember { mutableStateOf(howToRespond) }
+    PrismSheet(
+        title = "AI 行为偏好",
+        subtitle = "用户规则 · 除安全限制外最高优先级"
+    ) {
+        Text(
+            text = "类 ChatGPT Custom Instructions：告诉 AI 关于你的背景与回复偏好，每轮对话自动生效。",
+            color = PrismTextFaint,
+            fontSize = 11.sp,
+            lineHeight = 16.sp
+        )
+        Spacer(Modifier.height(16.dp))
+        PrismField(
+            label = "关于我",
+            value = about,
+            onValueChange = { about = it.take(maxLen) },
+            placeholder = "如：我是 Python 开发者，主要做后端服务"
+        )
+        Spacer(Modifier.height(8.dp))
+        PrismField(
+            label = "如何回答",
+            value = respond,
+            onValueChange = { respond = it.take(maxLen) },
+            placeholder = "如：用中文，简洁，先给结论再解释"
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "每字段最多 $maxLen 字符 · 本地存储 · 仅发送到你自配的模型端点",
+            color = PrismTextFaint,
+            fontSize = 11.sp
+        )
+        Spacer(Modifier.height(20.dp))
+        PrismButton(text = "保存", onClick = { onSave(about, respond) })
+        Spacer(Modifier.height(8.dp))
+        PrismButton(text = "关闭", variant = PrismButtonVariant.Ghost, onClick = onClose)
     }
 }

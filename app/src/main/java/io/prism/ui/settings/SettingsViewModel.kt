@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.UUID
@@ -45,7 +46,9 @@ class SettingsViewModel(
     /** 问题 8a（ADR-020）：深度思考配置仓库；null 时深度思考相关状态降级为默认值（向后兼容） */
     private val thinkingConfigRepository: ThinkingConfigRepository? = null,
     /** UXR3 问题 10（ADR-023）：工具审批模式配置仓库；null 时审批模式状态降级为默认值（向后兼容） */
-    private val toolApprovalConfigRepository: ToolApprovalConfigRepository? = null
+    private val toolApprovalConfigRepository: ToolApprovalConfigRepository? = null,
+    /** UXR8 N1（ADR-030）：用户规则配置仓库（「关于我」+「如何回答」双字段）；null 时降级为默认空（向后兼容） */
+    private val userRulesRepository: io.prism.config.UserRulesRepository? = null
 ) : ViewModel() {
 
     /** Provider 已配置列表。 */
@@ -127,6 +130,42 @@ class SettingsViewModel(
                 throw e // BR-error-handling-007：不吞 CancellationException
             } catch (e: Exception) {
                 Log.w("SettingsViewModel", "设置工具审批模式失败: $mode", e)
+            }
+        }
+    }
+
+    /**
+     * 用户规则（UXR8 N1，ADR-030）——「关于我」。
+     *
+     * 默认空。DataStore 首次读取完成前显示默认值，随后自动推送持久化值。
+     */
+    val userRulesAboutMe: StateFlow<String> =
+        (userRulesRepository?.rules()?.map { it.aboutMe } ?: flowOf(""))
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "")
+
+    /**
+     * 用户规则（UXR8 N1，ADR-030）——「如何回答」。
+     *
+     * 默认空。DataStore 首次读取完成前显示默认值，随后自动推送持久化值。
+     */
+    val userRulesHowToRespond: StateFlow<String> =
+        (userRulesRepository?.rules()?.map { it.howToRespond } ?: flowOf(""))
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "")
+
+    /**
+     * 保存用户规则（持久化到 DataStore，运行时即时生效，下一轮对话生效）。
+     *
+     * 超长由 [io.prism.config.UserRulesRepository] fail-fast 拒绝（BR-security-005），
+     * 此处捕获异常并结构化日志（BR-error-handling-004），UI 层已先截断/提示。
+     */
+    fun saveUserRules(aboutMe: String, howToRespond: String) {
+        viewModelScope.launch {
+            try {
+                userRulesRepository?.setRules(aboutMe, howToRespond)
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007：不吞 CancellationException
+            } catch (e: Exception) {
+                Log.w("SettingsViewModel", "保存用户规则失败: ${e.message}", e)
             }
         }
     }
@@ -214,7 +253,9 @@ class SettingsViewModel(
                     apiKeyRepository = app.apiKeyRepository,
                     thinkingConfigRepository = app.thinkingConfigRepository,
                     // UXR3 问题 10（ADR-023）：工具审批模式配置仓库
-                    toolApprovalConfigRepository = app.toolApprovalConfigRepository
+                    toolApprovalConfigRepository = app.toolApprovalConfigRepository,
+                    // UXR8 N1（ADR-030）：用户规则配置仓库（「关于我」+「如何回答」）
+                    userRulesRepository = app.userRulesRepository
                 )
             }
         }

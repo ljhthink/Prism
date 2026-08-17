@@ -130,6 +130,14 @@ class OpenAICompatibleProvider(
             null
         }
 
+        // UXR8 N3（ADR-030）：请求是否包含图片消息（多模态直传）。
+        // 纯文本端点（如 DeepSeek）收到多模态数组 content 返回 400 —— 以此信号降级提示。
+        // Q-MED-3（guardrail TKN-UXR8-B3-GUARDRAIL-001）：仅判断**最后一条 user 消息**是否含图，
+        // 而非全量历史——图片消息入历史后，同会话后续纯文本请求的任意 400（模型名错误、
+        // Tool names must be unique、reasoning_content 回传等常见 400）不应被误报为「不支持图片」。
+        val requestHasImage = messages.lastOrNull { it.role == Role.USER }
+            ?.imageUrl?.isNotBlank() == true
+
         // tool_calling 跨 chunk 状态：index → 累加器。flow{} 作用域内单协程访问（flowOn IO），无需同步。
         val pendingToolCalls = mutableMapOf<Int, ToolCallAccumulator>()
         var terminated = false
@@ -186,13 +194,13 @@ class OpenAICompatibleProvider(
             val errorBody = try { e.response?.bodyAsText() } catch (_: Exception) { null }
             val safeBody = errorBody?.let { sanitizeErrorBody(it) }
             Log.w("OpenAIProvider", "SSE 请求失败 status=$statusCode body=$safeBody")
-            emit(mapHttpError(statusCode, errorBody))
+            emit(mapHttpError(statusCode, errorBody, requestHasImage))
             return@flow
         } catch (e: ClientRequestException) {
             val errorBody = try { e.response.bodyAsText() } catch (_: Exception) { null }
             val safeBody = errorBody?.let { sanitizeErrorBody(it) }
             Log.w("OpenAIProvider", "HTTP 请求失败 status=${e.response.status.value} body=$safeBody")
-            emit(mapHttpError(e.response.status.value, errorBody))
+            emit(mapHttpError(e.response.status.value, errorBody, requestHasImage))
             return@flow
         } catch (e: Exception) {
             // 网络/协议错误映射为通用文案，避免内部路径/异常细节泄露（CR-05）
@@ -343,7 +351,7 @@ class OpenAICompatibleProvider(
         val requestMessages = buildList {
             // 1. system 消息前置（若有）
             if (!systemPrompt.isNullOrBlank()) {
-                add(MessageBody(role = SYSTEM_ROLE, content = systemPrompt))
+                add(MessageBody(role = SYSTEM_ROLE, content = JsonPrimitive(systemPrompt)))
             }
             // 2. 转换对话历史（含 role=tool 结果回灌 + assistant tool_calls 回放）
             messages.forEach { add(it.toMessageBody()) }
@@ -351,9 +359,9 @@ class OpenAICompatibleProvider(
             if (!ragContext.isNullOrBlank()) {
                 val lastUserIndex = indexOfLast { it.role == USER_ROLE }
                 if (lastUserIndex == -1) {
-                    add(MessageBody(role = USER_ROLE, content = ragContext))
+                    add(MessageBody(role = USER_ROLE, content = JsonPrimitive(ragContext)))
                 } else {
-                    add(lastUserIndex, MessageBody(role = USER_ROLE, content = ragContext))
+                    add(lastUserIndex, MessageBody(role = USER_ROLE, content = JsonPrimitive(ragContext)))
                 }
             }
         }
@@ -400,6 +408,8 @@ class OpenAICompatibleProvider(
     /**
      * 将 HTTP 状态码映射为面向用户的错误事件：
      * - 401 → 鉴权失败专属文案（BR-error-handling-003）
+     * - 400 且请求含图片（[requestHasImage]）→ 视觉降级文案（UXR8 N3，ADR-030：
+     *   纯文本端点收到多模态数组返回 400，提示用户更换支持视觉的模型或移除图片）
      * - 其他 4xx → 携带状态码与服务器返回的具体错误信息（DEF-002：帮助用户诊断 400 根因）
      * - 其余 → 通用网络错误文案
      *
@@ -408,7 +418,11 @@ class OpenAICompatibleProvider(
      * 服务器业务错误信息（如 "model not found"）对用户诊断有价值，不属于内部堆栈/路径泄露
      * （CWE-209 边界：服务器业务错误信息 ≠ 系统细节）。
      */
-    private fun mapHttpError(status: Int, errorBody: String? = null): StreamEvent.Error {
+    private fun mapHttpError(
+        status: Int,
+        errorBody: String? = null,
+        requestHasImage: Boolean = false
+    ): StreamEvent.Error {
         val detail = errorBody
             ?.takeIf { it.isNotBlank() }
             ?.let { sanitizeErrorBody(it) }
@@ -416,6 +430,8 @@ class OpenAICompatibleProvider(
             .orEmpty()
         return when {
             status == HttpStatusCode.Unauthorized.value -> StreamEvent.Error("鉴权失败，请检查 API Key$detail")
+            status == 400 && requestHasImage ->
+                StreamEvent.Error("当前模型端点不支持图片（多模态）。请在 Provider 配置中切换到支持视觉的模型，或移除图片后重发")
             status in 400..499 -> StreamEvent.Error("请求被拒绝（$status）$detail，请检查 Provider 配置")
             else -> StreamEvent.Error("网络请求失败，请检查网络连接或 Provider 配置")
         }
@@ -627,19 +643,42 @@ class OpenAICompatibleProvider(
      * （`explicitNulls=false` 使该字段被省略，无思考的端点零影响）。
      */
     private fun ChatMessage.toMessageBody(): MessageBody = when (role) {
-        Role.USER -> MessageBody(role = USER_ROLE, content = content)
+        Role.USER -> {
+            // UXR8 N3（ADR-030）：用户消息附带图片时，content 改为 OpenAI 兼容多模态数组：
+            // [{"type":"text","text":...},{"type":"image_url","image_url":{"url":...}}]
+            val img = imageUrl?.takeIf { it.isNotBlank() }
+            MessageBody(
+                role = USER_ROLE,
+                content = if (img != null) {
+                    JsonArray(
+                        listOf(
+                            buildJsonObject {
+                                put("type", "text")
+                                put("text", content)
+                            },
+                            buildJsonObject {
+                                put("type", "image_url")
+                                putJsonObject("image_url") { put("url", img) }
+                            }
+                        )
+                    )
+                } else {
+                    JsonPrimitive(content)
+                }
+            )
+        }
         Role.ASSISTANT -> {
             val replay = toolCalls.takeIf { it.isNotEmpty() }?.map { ToolCallWire.fromRef(it) }
             MessageBody(
                 role = ASSISTANT_ROLE,
-                content = content.takeIf { it.isNotEmpty() },
+                content = content.takeIf { it.isNotEmpty() }?.let { JsonPrimitive(it) },
                 toolCalls = replay,
                 reasoningContent = thinkingChain
             )
         }
         Role.TOOL -> MessageBody(
             role = TOOL_ROLE,
-            content = content,
+            content = JsonPrimitive(content),
             toolCallId = toolCallId
         )
     }
@@ -671,7 +710,7 @@ class OpenAICompatibleProvider(
 @Serializable
 private data class MessageBody(
     val role: String,
-    val content: String? = null,
+    val content: JsonElement? = null,
     @SerialName("tool_call_id") val toolCallId: String? = null,
     @SerialName("tool_calls") val toolCalls: List<ToolCallWire>? = null,
     @SerialName("reasoning_content") val reasoningContent: String? = null

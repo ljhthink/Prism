@@ -77,6 +77,7 @@
 | **TrendRadar** | 社区 | ❌ 仅本地自建（FastMCP） | 无 Key | ❌ 无法做填 Key 模板 | ⭐（可选项） |
 
 **TrendRadar 无法做"填 Key 模板"的确切原因**（TKN-UXR8-TRENDRADAR-RESEARCH-001）：
+
 1. **无官方托管端点**：只有源码仓库，无 `.com/mcp` 公网端点；
 2. **无 API Key 认证机制**：其 Key 是给爬虫平台/推送渠道用的，不是给 MCP 客户端远程认证用；
 3. **必须自建常驻运行**：跑在用户自己的 Docker/Python 里（stdio 连接），手机端无法拉起；
@@ -84,6 +85,7 @@
 5. **传输不兼容**：自建后也是 localhost stdio/HTTP，非公网 Streamable HTTP，Prism 无法直连。
 
 **同类功能托管 MCP 候选（可做填 Key 模板）**：
+
 - **TrendsMCP（trendsmcp.ai）—— 最契合**：跨 25+ 平台趋势/热榜聚合（Google/YouTube/TikTok/Reddit/X Trending/GitHub 等），托管端点 `https://api.trendsmcp.ai/mcp`（SHTTP）+ Bearer API Key，免费 100 请求/月，是 TrendRadar 的托管化等价物。弱项：偏全球英文生态，无微博/抖音/知乎中文热榜。
 - **Search1API（superagents-lab）—— 次选**：搜索/新闻/抓取/trending 全能，托管端点 `https://mcp.search1api.com/mcp` + Bearer，免费 100 credits，支持 B 站/微信等中文源。弱项：trending 目前仅 GitHub/HN。
 - **中文热榜（微博/抖音/知乎）正解（中期）**：腾讯云 MCP 广场 Hosted 托管（mcp-trends-hub 20+ 中文热榜、微博 MCP 热搜），但输出为 **SSE 传输**——Prism 当前仅支持 STREAMABLE_HTTP（SSE 预留未实现），需补 SSE 传输支持后才可接入，国内可达性最佳。
@@ -180,6 +182,7 @@
 
 > 以下为需用户决策的异议/方案选择项。用户确认后主 Agent 按确认范围执行。
 > **已确认（2026-08-16）**：
+>
 > - **D-1**：仅修复开关语义（RagTarget 持久化 + 新对话不重置），不做意图门控 ✅
 > - **D-2**：MCP 新模板 = n8n + Firecrawl + **TrendsMCP（TrendRadar 替代）** ✅
 > - **D-3（TrendRadar）**：调研确认无法做填 Key 模板，**改用 TrendsMCP（trendsmcp.ai）** ✅
@@ -204,7 +207,7 @@
 |---|---|---|---|
 | 批次1 | Bug1（RagTarget 持久化）/ Bug2（L2 触发）/ Bug3（弹层 IME 双模式，含 OBS-2 终版） | ✅ 完成（2026-08-16） | ac-verifier 19/19 AC PASS；全量 1810 用例 0 失败；模拟器键盘场景验证（[debug 报告](../reports/2026-08-16-uxr8-b1-bug3-obs2-debug.md)）；ADR-028 |
 | 批次2 | O1（L3 画像自然语言）/ O2（MCP 描述+KeyHint）/ O3（Firecrawl+n8n+TrendsMCP 模板）/ O4（Skills：Humanizer-zh/web-research/docx/xlsx）/ O5（搜索扩容 10+合并 12-16） | ✅ 完成（2026-08-16） | ac-verifier 17/17 AC PASS（TKN-UXR8-B2-ACCEPTANCE-001）；guardrail PASS-with-notes（G2-01~04 即时闭环，G2-05 列入批次3）；全量 1873 用例 0 失败；模拟器验证 O1/O2/O3/O4 UI 全部通过；ADR-029 |
-| 批次3 | N1（用户规则文件）/ N2（反问 Phase1+2）/ N3（视觉方案 A） | ⏳ 待启动 | — |
+| 批次3 | N1（用户规则文件）/ N2（反问 Phase1+2）/ N3（视觉方案 A） | ✅ 完成（2026-08-17） | ac-verifier 3/3 AC PASS（TKN-UXR8-B3-ACCEPTANCE-001）；guardrail 两轮（TKN-UXR8-B3-GUARDRAIL-001 有条件通过 → 002 复审通过）；全量 1942 用例 0 失败；lintDebug 0 errors；BR-ops-002 新增；ADR-030 |
 
 ---
 

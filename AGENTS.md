@@ -18,6 +18,7 @@
 - **UXR1~7 真机迭代修复完成（ADR-021~027，全量回归 1792 用例 0 失败）**（2026-08-16）—— 搜索质量（Bing 冷词分词坍缩 → 多候选核心词短整词降级重试）/ markdown 渲染（0.26.0 无表格组件 → 预处理列表）/ 引用来源（工具调用参数反向映射引用池）/ 工具回路熔断 / 流式渲染 / 会话持久化 / 工具审批模式等
 - **UXR8 批次1 修复完成（ADR-028，1810 回归 0 失败）**（2026-08-16）—— RagTarget 持久化（关闭后新对话不再重置）/ L2 跨会话记忆保存生产触发 / 配置弹层键盘顶出修复（OBS-2 双模式终版）
 - **UXR8 批次2 优化完成（ADR-029，1873 回归 0 失败）**（2026-08-16）—— O1 L3 画像自然语言化（key 冲突保护）/ O2 MCP 模板 description+keyHint / O3 新模板（Firecrawl/n8n/TrendsMCP）/ O4 Skills（document 工具 + firecrawl/humanizer-zh/web-research 3 新 Skill）/ O5 搜索扩容（10 条 + 多查询合并 16 条 + 预算感知）。已知技术债：G2-05 saveProfile VM 级集成测试列入批次3
+- **UXR8 批次3 新功能完成（ADR-030，guardrail 两轮通过 + ac-verifier 3/3，1942 回归 0 失败）**（2026-08-17）—— N1 用户规则文件（UserRulesRepository「关于我+如何回答」双字段，systemPrompt 最高优先级层）/ N2 LLM 反问（Phase1 persona 澄清策略 + Phase2 ask_user__ask 本地工具 + 提问卡片 + StopAtTools 中断回路）/ N3 文本模型视觉（image_url 多模态直传 + 含图 400 降级 + inSampleSize 降采样防 OOM）。已知技术债：图片 base64 随会话 JSON 膨胀（后续可降采样存储）；N3 方案 B（云端旁路+OCR）留作后续迭代
 
 ### 里程碑明细
 
@@ -34,6 +35,7 @@
 | UXR1-7 | 真机迭代修复（搜索/渲染/引用/工具回路/UI） | ADR-021~027，1792 回归 0 失败 | 2026-08-16 |
 | UXR8-B1 | 批次1 修复（RagTarget 持久化 / L2 触发 / 弹层键盘） | ADR-028，ac-verifier 19/19，1810 回归 0 失败 | 2026-08-16 |
 | UXR8-B2 | 批次2 优化（L3 画像自然语言 / MCP 模板增强 / Skills / 搜索扩容） | ADR-029，ac-verifier 17/17，1873 回归 0 失败 | 2026-08-16 |
+| UXR8-B3 | 批次3 新功能（N1 用户规则文件 / N2 LLM 反问 / N3 文本模型视觉） | ADR-030，guardrail 两轮通过 + ac-verifier 3/3，1942 回归 0 失败 | 2026-08-17 |
 
 ## 用户故事清单
 

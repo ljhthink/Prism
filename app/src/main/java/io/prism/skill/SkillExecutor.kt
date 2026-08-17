@@ -249,6 +249,9 @@ open class SkillExecutor(
             var currentMessages = messages
             var rounds = 0
             var lastRoundHadToolCall = false
+            // UXR8 N2 Phase 2（ADR-030）：反问/澄清触发标记 —— 检测到 ask_user 结果标记
+            // 前缀后置 true，中断当前工具回路（用户需先答复，不能继续自动执行）。
+            var askUserPending = false
             // UXR6 问题 1：重复工具熔断状态。
             // - effectiveTools：可被熔断置空（熔断后 LLM 无工具可用，只能纯文本回答）
             // - effectiveSystemPrompt：熔断时追加"不要再调用工具"提示
@@ -261,6 +264,9 @@ open class SkillExecutor(
                 rounds++
                 lastRoundHadToolCall = false
                 val completedToolCalls = mutableListOf<StreamEvent.ToolCallComplete>()
+                // Q-LOW-2（guardrail TKN-UXR8-B3-GUARDRAIL-001）：本轮已实际执行的 tool_call id。
+                // ask_user 中断时若本轮有未执行 tool_call，assistant 占位须裁剪为已执行子集。
+                val executedToolCallIds = mutableListOf<String>()
                 // UXR4 问题 1/4/6（ADR-024）：累积本轮流式响应中的 reasoning_content。
                 // DeepSeek 要求携带 tool_calls 的 assistant 消息必须含 reasoning_content，
                 // 否则工具回路第 2 轮请求返回 400。此处收集后传给
@@ -376,6 +382,8 @@ open class SkillExecutor(
                     if (isFailureResult(result)) {
                         toolStatus = ExecutionStatus.FAIL
                     }
+                    // Q-LOW-2：记录已执行（拿到结果）的 tool_call id，供 ask_user 中断后裁剪占位
+                    executedToolCallIds.add(toolCall.toolCallId)
                     // UXR6 问题 1：重复工具熔断计数（同一工具连续失败累加，成功则清零）。
                     // 记录在 executeToolCall 返回之后、tool result 回灌之前，供循环末尾熔断判断。
                     consecutiveToolFailures[toolCall.toolName] =
@@ -401,6 +409,58 @@ open class SkillExecutor(
                         idGenerator = idGenerator
                     )
                     currentMessages = currentMessages + toolResultMessage
+
+                    // UXR8 N2 Phase 2（ADR-030）：反问/澄清 —— ask_user 结果带标记前缀 →
+                    // 发射 AskUser 事件 + 中断当前回路（StopAtTools 语义）。
+                    // 工具结果仍回灌历史（协议一致），UI 收到 AskUser 展示提问卡片，
+                    // 用户答复作为下一条 user 消息进入下一轮。
+                    if (result.startsWith(AskUserLocalToolExecutor.RESULT_MARKER)) {
+                        val payload = parseAskUserPayload(
+                            result.removePrefix(AskUserLocalToolExecutor.RESULT_MARKER)
+                        )
+                        if (payload != null && payload.questions.isNotEmpty()) {
+                            Log.i(TAG, "ask_user tool triggered, stopping loop to collect user input")
+                            onEvent(StreamEvent.AskUser(payload.questions))
+                            // Q-MED-2（guardrail TKN-UXR8-B3-GUARDRAIL-001）：中断前复位
+                            // lastRoundHadToolCall —— ask_user 为主动终止工具循环（等价熔断语义），
+                            // 若发生在第 maxRounds 轮，shouldEmitMaxRoundsError 不应误发「循环达上限」，
+                            // 执行记录也不应误标 FAIL。
+                            lastRoundHadToolCall = false
+                            askUserPending = true
+                            break
+                        } else {
+                            // Q-LOW-1（guardrail TKN-UXR8-B3-GUARDRAIL-001）：解析失败/空问题 →
+                            // 降级为 Error 事件 + 不中断回路（LLM 可基于已回灌的 ask_user 结果文本
+                            // 恢复；避免 UI 无提问卡片且回路静默中断导致无响应）。
+                            Log.w(TAG, "ask_user payload invalid, treating as tool result")
+                            onEvent(StreamEvent.Error("反问内容解析失败，请重新提问"))
+                        }
+                    }
+                }
+                // 反问触发：中断外层 while 回路（后续不再请求 LLM）。
+                // Q-LOW-2（guardrail TKN-UXR8-B3-GUARDRAIL-001）：ask_user 中断时若本轮尚有
+                // 未执行的 tool_call（LLM 偶发一轮多 tool_call 且 ask_user 非末尾），assistant
+                // 占位消息仍携带其 tool_calls 引用但无对应 TOOL 结果 → 下一轮协议 400
+                // （"Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"）。
+                // 将占位消息裁剪为「已执行 tool_calls」子集（未执行引用剔除），保证配对一致。
+                if (askUserPending) {
+                    val executedIds = executedToolCallIds.toSet()
+                    if (executedIds.size < uniqueToolCalls.size) {
+                        val trimmed = buildAssistantToolCallMessage(
+                            uniqueToolCalls.filter { it.toolCallId in executedIds },
+                            idGenerator,
+                            roundReasoning.toString()
+                        )
+                        val placeholderIndex = currentMessages.indexOfLast {
+                            it.role == Role.ASSISTANT && it.toolCalls.isNotEmpty()
+                        }
+                        if (placeholderIndex >= 0) {
+                            currentMessages = currentMessages.toMutableList().also { list ->
+                                list[placeholderIndex] = trimmed
+                            }
+                        }
+                    }
+                    break
                 }
 
                 // 5. 重复工具熔断（UXR6 问题 1）：同一工具连续失败达阈值时，
@@ -522,6 +582,12 @@ open class SkillExecutor(
         private val argumentsJson = Json {
             encodeDefaults = true
             prettyPrint = false
+        }
+
+        /** ask_user 载荷解析用 Json 实例（UXR8 N2，ADR-030，容错未知字段）。 */
+        private val askUserJson = Json {
+            ignoreUnknownKeys = true
+            encodeDefaults = true
         }
 
         /**
@@ -651,7 +717,24 @@ open class SkillExecutor(
                 // "工具调用失败"（Filesystem 桥接兜底），避免 LLM 反复用同参数重试直至熔断。
                 result.startsWith("仅支持抓取") ||
                 result.startsWith("仅支持抓取公网地址") ||
-                result.startsWith("工具调用失败")
+                result.startsWith("工具调用失败") ||
+                // UXR8 N2 Phase 2（ADR-030）：ask_user 反问结果不在失败识别之列
+                //（其为"等待用户输入"语义，非失败；由 executeLoop 检测标记前缀单独处理）。
+                false
+
+        /**
+         * 解析 ask_user 工具结果载荷（UXR8 N2 Phase 2，ADR-030，纯函数可测）。
+         *
+         * [AskUserLocalToolExecutor.execute] 返回 `【需要用户回答】` + AskUserPayload JSON。
+         * 本函数解析 JSON 为 [AskUserQuestion] 列表；解析失败返回 null（调用方降级，
+         * 不崩溃、不发射事件）。
+         */
+        internal fun parseAskUserPayload(payloadJson: String): AskUserPayload? = try {
+            askUserJson.decodeFromString(AskUserPayload.serializer(), payloadJson)
+        } catch (e: Exception) {
+            Log.w(TAG, "ask_user payload parse failed: ${e::class.simpleName}")
+            null
+        }
 
         /**
          * 构造 assistant 占位消息（携带 toolCalls 引用，OpenAI 要求下次请求回放）。
