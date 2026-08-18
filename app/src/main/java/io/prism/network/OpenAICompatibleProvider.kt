@@ -408,8 +408,11 @@ class OpenAICompatibleProvider(
     /**
      * 将 HTTP 状态码映射为面向用户的错误事件：
      * - 401 → 鉴权失败专属文案（BR-error-handling-003）
-     * - 400 且请求含图片（[requestHasImage]）→ 视觉降级文案（UXR8 N3，ADR-030：
-     *   纯文本端点收到多模态数组返回 400，提示用户更换支持视觉的模型或移除图片）
+     * - 429 → 限流专属文案（R2/UXR10，ADR-032：提示用户稍等重试，而非「检查 Provider 配置」）
+     * - 400 且请求含图片（[requestHasImage]）→ **不再盲目**报「不支持图片」（R2/UXR10，ADR-032）：
+     *   [isVisionUnsupportedError] 检查服务端错误详情，仅当错误明确含图片不支持信号时才降级
+     *   视觉文案（UXR8 N3，ADR-030 原始意图）；否则多模态模型（如 kimi-k2.6）也可能因
+     *   图片格式/大小/URL 问题返回 400，此时应展示服务端具体错误供诊断
      * - 其他 4xx → 携带状态码与服务器返回的具体错误信息（DEF-002：帮助用户诊断 400 根因）
      * - 其余 → 通用网络错误文案
      *
@@ -429,12 +432,32 @@ class OpenAICompatibleProvider(
             ?.let { "：$it" }
             .orEmpty()
         return when {
-            status == HttpStatusCode.Unauthorized.value -> StreamEvent.Error("鉴权失败，请检查 API Key$detail")
-            status == 400 && requestHasImage ->
+            status == HttpStatusCode.Unauthorized.value ->
+                StreamEvent.Error("鉴权失败，请检查 API Key$detail")
+            status == HttpStatusCode.TooManyRequests.value ->
+                StreamEvent.Error("请求过于频繁，触发服务端限流（429）。请稍等几秒后重试$detail")
+            status == 400 && requestHasImage && isVisionUnsupportedError(detail) ->
                 StreamEvent.Error("当前模型端点不支持图片（多模态）。请在 Provider 配置中切换到支持视觉的模型，或移除图片后重发")
+            status == 400 && requestHasImage ->
+                StreamEvent.Error("图片请求被拒绝（400）$detail。若该模型支持视觉，请确认图片格式/大小后重试")
             status in 400..499 -> StreamEvent.Error("请求被拒绝（$status）$detail，请检查 Provider 配置")
             else -> StreamEvent.Error("网络请求失败，请检查网络连接或 Provider 配置")
         }
+    }
+
+    /**
+     * R2（UXR10，ADR-032）：判断服务端 400 错误详情是否为「模型不支持图片」。
+     *
+     * **背景**：UXR8 N3（ADR-030）原本约定「含图 + 400 → 报不支持图片」，但真机实测
+     * 多模态模型 kimi-k2.6 发图也会收到 400（图片格式/大小/URL 等其它原因），被误报为
+     * 「不支持图片」误导用户。因此改为**仅当错误详情明确含图片不支持信号**时才降级视觉文案。
+     *
+     * 关键词覆盖 OpenAI / DeepSeek / Kimi / Qwen / Claude 常见拒绝文案（小写匹配）。
+     * [detail] 已由 [sanitizeErrorBody] 脱敏（路径替换、换行替换、200 字符截断）。
+     */
+    private fun isVisionUnsupportedError(detail: String): Boolean {
+        val lower = detail.lowercase()
+        return VISION_UNSUPPORTED_KEYWORDS.any { lower.contains(it) }
     }
 
     /**
@@ -694,6 +717,27 @@ class OpenAICompatibleProvider(
 
         /** 合法思考强度集合（S-3 纵深防御，对齐 DeepSeek API 文档 low/high/max）。 */
         internal val VALID_EFFORTS = setOf("low", "high", "max")
+
+        /**
+         * R2（ADR-032）：模型侧「不支持图片」的常见拒绝文案关键词（小写匹配）。
+         * 覆盖 OpenAI / DeepSeek / Kimi / Qwen / Claude 官方错误消息：
+         * - "does not support images" / "images are not supported"
+         * - "image input is not supported" / "does not accept image"
+         * - "not support vision" / "does not support vision"
+         * - "multimodal"（模型侧拒绝含图的多模态请求）
+         * - "image_url"（端点明确拒绝 image_url 结构）
+         */
+        internal val VISION_UNSUPPORTED_KEYWORDS = listOf(
+            "does not support image",
+            "images are not supported",
+            "image input is not supported",
+            "does not accept image",
+            "image not supported",
+            "not support vision",
+            "does not support vision",
+            "multimodal",
+            "image_url"
+        )
     }
 }
 

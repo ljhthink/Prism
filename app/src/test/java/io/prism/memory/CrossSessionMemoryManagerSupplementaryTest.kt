@@ -524,11 +524,12 @@ class CrossSessionMemoryManagerSupplementaryTest {
 
     @Test
     fun `saveSessionMemories summary failure falls back to pair storage`() = runBlocking {
-        // LLM 摘要失败（返回 null）→ 降级为规则抽取（逐对存储重要轮次）
-        val completionProvider = FakeCompletionProvider(null)
+        // UXR11 U5（ADR-033）语义：LLM 记忆抽取**抛异常**（调用失败）→ 降级为规则抽取（逐对存储）。
+        // 注意与「LLM 成功但返回空/无」区分：后者（无价值记忆）→ return 0 不落库。
+        val completionProvider = FakeCompletionProvider(null, throwOnCall = true)
         val summarizer = ConversationSummarizer(completionProvider)
         val summaryManager = CrossSessionMemoryManager(embedder, memoryRepository, summarizer)
-        // Q-MED-3 门槛：≥3 重要轮次才触发摘要 → 摘要失败后逐对存储 3 条
+        // Q-MED-3 门槛：≥3 重要轮次才触发抽取 → 抽取失败后逐对存储 3 条
         val messages = listOf(
             ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
             ChatMessage(2, Role.ASSISTANT, "协程是轻量级线程", 2000L),
@@ -538,10 +539,10 @@ class CrossSessionMemoryManagerSupplementaryTest {
             ChatMessage(6, Role.ASSISTANT, "Flow 是冷数据流", 6000L)
         )
         val saved = summaryManager.saveSessionMemories("s1", messages, providerConfig = TEST_CONFIG)
-        assertEquals("摘要失败应降级为逐对存储，保存 3 条轮次对", 3, saved)
+        assertEquals("抽取失败应降级为逐对存储，保存 3 条轮次对", 3, saved)
         val records = memoryRepository.getBySession("s1")
         assertEquals("降级应存 3 条轮次对", 3, records.size)
-        assertFalse("降级记录不应是摘要前缀", records[0].content.startsWith(CrossSessionMemoryManager.MEMORY_SUMMARY_PREFIX))
+        assertFalse("降级记录不应是记忆前缀", records[0].content.startsWith(CrossSessionMemoryManager.MEMORY_SUMMARY_PREFIX))
     }
 
     @Test
@@ -640,7 +641,8 @@ class CrossSessionMemoryManagerSupplementaryTest {
 
 /** 测试用 [ChatCompletionProvider] fake（AC-2 摘要路径）。 */
 private class FakeCompletionProvider(
-    private val returnValue: String? = null
+    private val returnValue: String? = null,
+    private val throwOnCall: Boolean = false
 ) : ChatCompletionProvider {
     var callCount: Int = 0
         private set
@@ -654,6 +656,7 @@ private class FakeCompletionProvider(
         reasoningEffort: String?
     ): String? {
         callCount++
+        if (throwOnCall) throw RuntimeException("test LLM failure")
         return returnValue
     }
 }

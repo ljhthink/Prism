@@ -1,5 +1,6 @@
 package io.prism.document
 
+import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import org.apache.pdfbox.pdmodel.PDDocument
 import org.apache.pdfbox.pdmodel.PDPage
 import org.apache.pdfbox.pdmodel.PDPageContentStream
@@ -10,12 +11,20 @@ import org.apache.poi.xssf.usermodel.XSSFWorkbook
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
+import org.robolectric.annotation.Config
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 
 /**
  * ac-verifier 补充边界/极端用例（US-012 文档解析器）。
+ *
+ * R1（ADR-032）：PDF 用例经 Robolectric 运行（生产解析器为 pdfbox-android，依赖 android.graphics）；
+ * 其余格式（docx/xlsx/txt/md）在 Robolectric 下运行不受影响。夹具由桌面 pdfbox 生成。
  *
  * 覆盖现有测试（DocumentTypeTest / DocumentParserRegistryTest / PdfDocumentParserTest /
  * OfficeDocumentParserTest / PlainTextDocumentParserTest）未触及的边界：
@@ -26,10 +35,22 @@ import java.io.ByteArrayOutputStream
  * - MD 嵌套链接 / 链接内含括号（记录正则实际行为，断言不崩溃）
  * - XLSX 小数单元格 / BLANK 空单元格
  * - PDF 多页抽取
+ *
+ * **application 指定**：`application = android.app.Application::class` 避免 Robolectric 按
+ * AndroidManifest 加载 [io.prism.PrismApplication]（其 onCreate 初始化 ObjectBox native，
+ * Windows JVM 无该 native 库 → LinkageError，全量回归时毒化静态状态导致失败）。本测试
+ * 仅需基础 Application 作为 Context 初始化 [PDFBoxResourceLoader]。
  */
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [34], application = android.app.Application::class)
 class DocumentParserEdgeCaseTest {
 
     private val registry = DocumentParserRegistry()
+
+    @Before
+    fun initPdfBox() {
+        PDFBoxResourceLoader.init(RuntimeEnvironment.getApplication())
+    }
 
     // ---------- 空输入流（各格式） ----------
 

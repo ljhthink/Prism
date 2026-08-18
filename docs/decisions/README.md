@@ -37,6 +37,8 @@
 | ADR-029 | UXR8 批次2 优化（L3 画像自然语言化 + MCP 模板增强 + Skills 文档工具 + 搜索扩容） | Accepted | 2026-08-16 | [ADR-029-uxr8-b2-optimizations.md](ADR-029-uxr8-b2-optimizations.md) |
 | ADR-030 | UXR8 批次3 新功能（用户规则文件 + LLM 反问 + 文本模型视觉） | Accepted | 2026-08-17 | [ADR-030-uxr8-b3-new-features.md](ADR-030-uxr8-b3-new-features.md) |
 | ADR-031 | UXR9 多语言嵌入模型 + L2 记忆选择性增强 | Proposed | 2026-08-18 | [ADR-031-uxr9-multilingual-embedding-and-l2-memory.md](ADR-031-uxr9-multilingual-embedding-and-l2-memory.md) |
+| ADR-032 | UXR10 真机问题修复（上传崩溃 + 多模态误判 + Fetch 限流 + Skills 感知 + 上传交互） | Proposed | 2026-08-18 | [ADR-032-uxr10-real-device-fixes.md](ADR-032-uxr10-real-device-fixes.md) |
+| ADR-033 | UXR11 真机问题修复（RAG 误注入 + 搜索限流 + Fetch 反爬 + 乱码 + L2 记忆 + Skills 反馈 + 思考动画） | Proposed | 2026-08-18 | [ADR-033-uxr11-real-device-fixes.md](ADR-033-uxr11-real-device-fixes.md) |
 
 ## ADR 生命周期
 

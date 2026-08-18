@@ -191,16 +191,28 @@ class LocalMcpToolProvider(
         val raw = arguments["raw"] as? Boolean ?: false
 
         return try {
-            val response: io.ktor.client.statement.HttpResponse = client.get(rawUrl) {
-                header(io.ktor.http.HttpHeaders.UserAgent, FETCH_USER_AGENT)
-            }
+            // UXR11 U3（ADR-033）：fetchWithRedirects 手动跟随 3xx 重定向（每次重定向目标
+            // 重新过 isPublicHttpUrl SSRF 校验），并携带完整浏览器请求头降低反爬拦截率。
+            val response: io.ktor.client.statement.HttpResponse =
+                fetchWithRedirects(client, rawUrl, FETCH_HTTP_HEADERS, 0)
             // Content-Length 预检（防超大响应全量读入，guardrail L-3/M-1）
             val contentLength = response.contentLength()
             if (contentLength != null && contentLength > MAX_FETCH_LEN) {
                 return "抓取失败：响应过大（${contentLength} 字节）"
             }
             if (!response.status.isSuccess()) {
-                return "抓取失败：HTTP ${response.status.value}"
+                // R3（UXR10，ADR-032）：反爬场景可诊断文案。网络调研（webfetch-mcp / 官方
+                // server-fetch 等 MCP 实现）确认：Fetch 被 Cloudflare/Paywall 等反爬系统
+                // 拦截（403）或被目标站限流（429）是**常态**，并非 URL 错误。此前统一返回
+                // "抓取失败：HTTP xxx" 会让 LLM 误以为 URL 写错而**反复重试同一 URL**，
+                // 放大请求频率 → 叠加 LLM 端点（如 kimi RPM=3）限流。改为按状态码给出
+                // 可诊断文案并**显式标注勿重试**，引导 LLM 换来源或降级。
+                return when (response.status.value) {
+                    403 -> "抓取失败：目标站点拒绝访问（403，可能反爬或需登录）。请勿反复重试同一 URL，改用其他来源或基于已有信息回答"
+                    404 -> "抓取失败：目标页面不存在（404）。请勿反复重试，改用其他来源"
+                    429 -> "抓取失败：目标站点限流（429）。请稍后再试或改用其他来源，勿连续抓取"
+                    else -> "抓取失败：HTTP ${response.status.value}。请勿反复重试同一 URL，可改用其他来源"
+                }
             }
             // Q-LOW-5 修复（guardrail TKN-UXR9-GUARDRAIL-002）：Content-Length 缺失/分块
             // 传输时 `bodyAsText()` 会全量读入（资源耗尽边界）。改用 channel 限读——
@@ -229,6 +241,57 @@ class LocalMcpToolProvider(
             Log.w(LOG_TAG, "fetch failed: ${e::class.simpleName}")
             "抓取失败：网络错误或目标不可访问"
         }
+    }
+
+    /**
+     * UXR11 U3（ADR-033）：Fetch 请求 + 手动跟随 3xx 重定向（SSRF 安全）。
+     *
+     * **背景**：很多网页（短链、http→https 升级、CMS 跳转）返回 3xx。fetchHttpClient 出于
+     * SSRF 纵深防御**不安装 HttpRedirect 插件**（Q-LOW-3 不变量，重定向到内网地址的绕过
+     * 不可达），此前 3xx 直接落入"抓取失败：HTTP 3xx"（LLM 误以为 URL 错而反复重试）。
+     * 本函数手动跟随重定向，**每次重定向目标都重新过 [isPublicHttpUrl] SSRF 校验**
+     * （fail-closed：目标非公网/解析失败则返回原始 3xx，不跟随）。
+     *
+     * - 请求头：完整浏览器典型头（[FETCH_HTTP_HEADERS]），降低 Cloudflare/Paywall 等
+     *   反爬系统对"裸 UA 请求"的拦截率（网络调研 webfetch-mcp / readerfi：浏览器头是
+     *   把 403 变 200 的最廉价手段；**不设 Accept-Encoding**，交由 OkHttp 透明 gzip 解压）。
+     * - 重定向上限 [FETCH_REDIRECT_MAX]（3），防重定向环。
+     * - 相对 Location：用 [java.net.URI.resolve] 与当前 URL 解析拼接。
+     * - 跟随前取消 3xx 响应（丢弃 body 释放连接，Ktor HttpResponse 懒式 body）。
+     * - CancellationException 重抛（BR-error-handling-007）。
+     */
+    private suspend fun fetchWithRedirects(
+        client: io.ktor.client.HttpClient,
+        url: String,
+        headers: Map<String, String>,
+        hop: Int
+    ): io.ktor.client.statement.HttpResponse {
+        val response = client.get(url) {
+            headers.forEach { (k, v) -> header(k, v) }
+        }
+        if (hop >= FETCH_REDIRECT_MAX) return response
+        val status = response.status.value
+        if (status !in 300..399) return response
+        val location = response.headers[io.ktor.http.HttpHeaders.Location] ?: return response
+        val next = try {
+            java.net.URI(url).resolve(location).toString()
+        } catch (e: CancellationException) {
+            throw e // BR-error-handling-007
+        } catch (e: Exception) {
+            null
+        } ?: return response
+        // 重定向目标必须重新过 SSRF 校验（fail-closed：非公网/解析失败则不跟随）
+        if (!isPublicHttpUrl(next)) return response
+        // 丢弃 3xx body 释放连接（懒式 HttpResponse 未消费会挂起连接）。经 bodyAsChannel 取消
+        // 读取通道，避免 3xx body 残留占用连接；失败不阻断重定向（响应随连接回收释放）。
+        try {
+            response.bodyAsChannel().cancel(null)
+        } catch (e: CancellationException) {
+            throw e // BR-error-handling-007
+        } catch (e: Exception) {
+            // 取消失败可忽略：HttpResponse 在调用链结束时由 engine 回收
+        }
+        return fetchWithRedirects(client, next, headers, hop + 1)
     }
 
     /**
@@ -421,6 +484,35 @@ class LocalMcpToolProvider(
         /** Fetch 请求 User-Agent（部分站点对无 UA 请求降级/拒绝）。 */
         private const val FETCH_USER_AGENT =
             "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
+
+        /**
+         * UXR11 U3（ADR-033）：Fetch 请求浏览器典型请求头集合（降低反爬拦截率）。
+         *
+         * 反爬系统（Cloudflare/Paywall）常按请求头指纹识别自动化请求（缺 Accept /
+         * Accept-Language / Sec-Fetch-* 等即判 bot）。网络调研（webfetch-mcp / readerfi
+         * 60-line MCP）：补全浏览器头是把 403 变 200 的最廉价手段。
+         *
+         * **刻意不设 Accept-Encoding**：Ktor OkHttp 在未手动设置该头时透明 gzip 解压，
+         * 手动声明 `gzip, br` 会关掉 OkHttp 自动解压 → 响应乱码（与 UXR11 U4 的乱码同族风险）。
+         */
+        private val FETCH_HTTP_HEADERS: Map<String, String> = mapOf(
+            "User-Agent" to FETCH_USER_AGENT,
+            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language" to "zh-CN,zh;q=0.9,en;q=0.8",
+            "Cache-Control" to "no-cache",
+            "Pragma" to "no-cache",
+            "Connection" to "keep-alive",
+            "Upgrade-Insecure-Requests" to "1",
+            "Sec-Fetch-Dest" to "document",
+            "Sec-Fetch-Mode" to "navigate",
+            "Sec-Fetch-Site" to "none",
+            "Sec-Fetch-User" to "?1"
+        )
+
+        /**
+         * UXR11 U3（ADR-033）：Fetch 手动重定向最大跳数（防重定向环）。
+         */
+        private const val FETCH_REDIRECT_MAX = 3
 
         /** Time 本地 server 的工具定义（零配置，返回当前时间）。 */
         private val TIME_TOOLS: List<ToolDefinition> = listOf(

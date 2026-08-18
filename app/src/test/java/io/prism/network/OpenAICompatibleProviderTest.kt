@@ -8,10 +8,12 @@ import io.ktor.client.request.url
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.ContentType
 import io.ktor.server.application.install
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import io.ktor.server.response.respond
+import io.ktor.server.response.respondText
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import io.ktor.server.sse.ServerSSESession
@@ -498,11 +500,12 @@ class OpenAICompatibleProviderTest {
 
     @Test
     fun `streamChat emits generic rejected message for non 401 4xx`() = runBlocking {
-        // 非 401 的 4xx（如 429）：应发射「请求被拒绝」文案而非鉴权文案（BR-error-handling-003）
+        // 非 401/429 的 4xx（如 403）：应发射「请求被拒绝」文案而非鉴权文案（BR-error-handling-003）
+        // R2（ADR-032）：429 已有专属限流文案，此处用 403 验证通用 4xx 分支。
         val server = embeddedServer(Netty, port = 0) {
             routing {
                 route("/chat/completions", HttpMethod.Post) {
-                    handle { call.respond(HttpStatusCode.TooManyRequests) }
+                    handle { call.respond(HttpStatusCode.Forbidden) }
                 }
             }
         }
@@ -515,7 +518,7 @@ class OpenAICompatibleProviderTest {
             )
             val events = provider.streamChat(config, sampleMessages()).toList()
             val err = events.filterIsInstance<StreamEvent.Error>().single()
-            assertTrue("非 401 4xx 应含状态码文案，且不含鉴权误导", err.message.contains("请求被拒绝（429）"))
+            assertTrue("非 401/429 4xx 应含状态码文案，且不含鉴权误导", err.message.contains("请求被拒绝（403）"))
         } finally {
             server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
         }
@@ -1531,12 +1534,17 @@ class OpenAICompatibleProviderTest {
     }
 
     @Test
-    fun `streamChat emits vision degradation message when image request gets 400`() = runBlocking {
-        // 纯文本端点（如 DeepSeek）收到多模态数组返回 400 → 降级提示「不支持图片」
+    fun `streamChat emits vision degradation message when image request gets 400 with vision-unsupported body`() = runBlocking {
+        // R2（UXR10，ADR-032）：仅当服务端错误详情明确含「不支持图片」信号时才降级视觉文案
         val server = embeddedServer(Netty, port = 0) {
             routing {
                 route("/chat/completions", HttpMethod.Post) {
-                    handle { call.respond(HttpStatusCode.BadRequest) }
+                    handle {
+                        call.respondText(
+                            """{"error":{"message":"This model does not support images"}}""",
+                            ContentType.Application.Json, HttpStatusCode.BadRequest
+                        )
+                    }
                 }
             }
         }
@@ -1559,8 +1567,82 @@ class OpenAICompatibleProviderTest {
                 tools = null, toolChoice = null, thinkingEnabled = null, reasoningEffort = null
             ).toList()
             val error = events.filterIsInstance<StreamEvent.Error>().firstOrNull()
-            assertNotNull("含图 + 400 应发射 Error 事件", error)
+            assertNotNull("含图 + 400（不支持图片）应发射 Error 事件", error)
             assertTrue("应提示当前模型不支持图片", error!!.message.contains("不支持图片"))
+        } finally {
+            server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
+        }
+    }
+
+    @Test
+    fun `streamChat does not report vision-unsupported for 400 without vision signal`() = runBlocking {
+        // R2（UXR10，ADR-032）：多模态模型（如 kimi-k2.6）发图 400 可能因图片格式/大小/URL 等问题，
+        // 服务端错误详情不含「不支持图片」信号时，不得误报——应展示具体错误供诊断。
+        val server = embeddedServer(Netty, port = 0) {
+            routing {
+                route("/chat/completions", HttpMethod.Post) {
+                    handle {
+                        call.respondText(
+                            """{"error":{"message":"image payload too large, max 5MB"}}""",
+                            ContentType.Application.Json, HttpStatusCode.BadRequest
+                        )
+                    }
+                }
+            }
+        }
+        server.start(wait = false)
+        try {
+            val port = server.engine.resolvedConnectors().first().port
+            val config = ProviderConfig(
+                name = "Kimi", baseUrl = "http://127.0.0.1:$port",
+                apiKeyRef = "kimi", models = listOf("kimi-k2.6")
+            )
+            val messages = listOf(
+                ChatMessage(
+                    id = 0, role = Role.USER, content = "看图",
+                    timestamp = 0,
+                    imageUrl = "data:image/jpeg;base64,AAAA"
+                )
+            )
+            val events = provider.streamChat(
+                config, messages, systemPrompt = null, ragContext = null,
+                tools = null, toolChoice = null, thinkingEnabled = null, reasoningEffort = null
+            ).toList()
+            val error = events.filterIsInstance<StreamEvent.Error>().firstOrNull()
+            assertNotNull("含图 + 400 应发射 Error 事件", error)
+            assertFalse("错误详情无视觉信号时不得误报「不支持图片」", error!!.message.contains("不支持图片"))
+            assertTrue("应展示服务端具体错误供诊断", error.message.contains("图片请求被拒绝"))
+        } finally {
+            server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
+        }
+    }
+
+    @Test
+    fun `streamChat reports rate limit message on 429`() = runBlocking {
+        // R2（UXR10，ADR-032）：429 限流应有专属文案（提示稍等重试），而非「检查 Provider 配置」
+        val server = embeddedServer(Netty, port = 0) {
+            routing {
+                route("/chat/completions", HttpMethod.Post) {
+                    handle {
+                        call.respondText(
+                            """{"error":{"message":"request reached organization max RPM: 3"}}""",
+                            ContentType.Application.Json, HttpStatusCode.TooManyRequests
+                        )
+                    }
+                }
+            }
+        }
+        server.start(wait = false)
+        try {
+            val port = server.engine.resolvedConnectors().first().port
+            val config = ProviderConfig(
+                name = "Kimi", baseUrl = "http://127.0.0.1:$port",
+                apiKeyRef = "kimi", models = listOf("kimi-k2.6")
+            )
+            val events = provider.streamChat(config, sampleMessages()).toList()
+            val error = events.filterIsInstance<StreamEvent.Error>().firstOrNull()
+            assertNotNull("429 应发射 Error 事件", error)
+            assertTrue("429 应提示限流稍等重试", error!!.message.contains("限流"))
         } finally {
             server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
         }

@@ -427,8 +427,13 @@ open class SkillRegistry(
                 val manifest = entry.manifest
                 val existingConfig = existing[entry.config.name]
                 if (existingConfig == null) {
-                    // 新增：默认不启用（用户主动启用）
-                    toInsert.add(entry.config.copy(isEnabled = false))
+                    // R4（UXR10，ADR-032）：内置 Skill 首次安装**默认启用**——内置预设（assets）
+                    // 是应用自带能力，应开箱即用，否则 enabledSkills() 为空、LLM 完全感知不到
+                    // Skills（真机实测：web-research 等内置 Skill 未启用 → 深度调研指令无响应）。
+                    // 内置 Skill 无源文件可"删除"，用户改通过 UI 禁用；禁用状态由 toUpdate 分支
+                    // 保留（copy 自 existingConfig），不会因重启被重新启用。
+                    // 用户自建 / 远程下载 Skill 仍默认不启用（由用户主动启用）。
+                    toInsert.add(entry.config.copy(isEnabled = entry.config.source == SkillSource.LOCAL_BUILTIN))
                 } else {
                     // 更新：保留 id + isEnabled，更新其他字段
                     toUpdate.add(

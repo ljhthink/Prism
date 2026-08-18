@@ -60,6 +60,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -117,6 +118,7 @@ import io.prism.ui.theme.PrismTextDim
 import io.prism.ui.theme.PrismTextFaint
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -177,6 +179,12 @@ fun ConversationScreen(
     var input by remember { mutableStateOf("") }
     // UXR3 问题 13（ADR-023）：待编辑的用户消息 id（非 null 时发送改为编辑重发）
     var editingMessageId by remember { mutableStateOf<Long?>(null) }
+    // R5（UXR10，ADR-032）：待发送附件草稿 —— 选择图片/文件后**不立即发送**，
+    // 暂存于此并显示预览，用户输入需求文本后点发送统一发出。图片与文件互斥
+    // （后选替换前选）；发送/移除/切换会话后清空。
+    var pendingImageDataUrl by remember { mutableStateOf<String?>(null) }
+    var pendingFileName by remember { mutableStateOf<String?>(null) }
+    var pendingFileText by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
 
     // ============ M6 Phase C：跨 App 调用 UI 集成（US-039，ADR-016 5.5） ============
@@ -237,8 +245,11 @@ fun ConversationScreen(
             scope.launch {
                 val dataUrl = withContext(Dispatchers.IO) { encodeImageToDataUrl(context, uri) }
                 if (dataUrl != null) {
-                    viewModel.sendMessage(input, dataUrl)
-                    input = ""
+                    // R5（UXR10，ADR-032）：不再立即发送 —— 暂存为待发送草稿，
+                    // 用户输入需求文本后点发送统一发出（图片与文件互斥，替换旧附件）。
+                    pendingImageDataUrl = dataUrl
+                    pendingFileName = null
+                    pendingFileText = null
                 } else {
                     // Bug fix（UXR8-R3，guardrail M-2 修复）：编码失败时给予用户可见提示，
                     // 而非静默丢弃。走 notifyEncodingFailure —— isTyping（AI 回复中）期间
@@ -257,11 +268,14 @@ fun ConversationScreen(
     ) { uri: Uri? ->
         if (uri != null) {
             scope.launch {
+                val name = queryDocumentDisplayName(context, uri) ?: "document"
                 val parsed = withContext(Dispatchers.IO) { extractDocumentText(context, uri) }
                 if (parsed != null) {
-                    viewModel.sendMessage(parsed)
-                    // L-3（guardrail TKN-UXR9-GUARDRAIL-001）：**不清空**用户已输入的文本——
-                    // 文档内容作为独立用户消息发送，用户输入框中的草稿应保留
+                    // R5（UXR10，ADR-032）：不再立即发送 —— 暂存为待发送草稿，
+                    // 用户输入需求文本后点发送统一发出（文件与图片互斥，替换旧附件）。
+                    pendingFileName = name
+                    pendingFileText = parsed
+                    pendingImageDataUrl = null
                 } else {
                     viewModel.notifyDocumentError()
                 }
@@ -411,11 +425,33 @@ fun ConversationScreen(
                             viewModel.editUserMessageAndResend(editingId, input)
                             editingMessageId = null
                         } else {
-                            viewModel.sendMessage(input)
+                            // R5（UXR10，ADR-032）：统一发送附件草稿 + 需求文本。
+                            // - 文件附件：文档文本与用户需求合并为一条用户消息（LLM 同轮收到内容+指令）
+                            // - 图片附件：走 sendMessage(text, imageUrl) 多模态直传
+                            // - 无附件：普通文本消息
+                            val fileText = pendingFileText
+                            if (fileText != null) {
+                                viewModel.sendMessage(
+                                    if (input.isBlank()) fileText else fileText + "\n\n" + input
+                                )
+                            } else {
+                                viewModel.sendMessage(input, pendingImageDataUrl)
+                            }
                         }
                         input = ""
+                        pendingImageDataUrl = null
+                        pendingFileName = null
+                        pendingFileText = null
                         // UXR9 US-906：发送后自动收起键盘，给 LLM 输出留出可视空间
                         keyboardController?.hide()
+                    },
+                    // R5：待发送附件草稿预览 + 移除
+                    pendingImageDataUrl = pendingImageDataUrl,
+                    pendingFileName = pendingFileName,
+                    onRemoveAttachment = {
+                        pendingImageDataUrl = null
+                        pendingFileName = null
+                        pendingFileText = null
                     },
                     // UXR9 US-907：移除独立图片入口，统一走"＋"折叠栏（相册 / 文件）
                     onImagePick = { imagePickerLauncher.launch("image/*") },
@@ -1363,7 +1399,9 @@ private fun AiBubble(message: ChatMessage, showThinking: Boolean, isStreaming: B
                 )
             } else {
                 Markdown(
-                    content = sanitizeMarkdownLinks(sanitizeMarkdownTables(message.content)),
+                    content = sanitizeToolCallSyntax(
+                        sanitizeMarkdownLinks(sanitizeMarkdownTables(message.content))
+                    ),
                     modifier = Modifier.fillMaxWidth(),
                     typography = prismMarkdownTypography()
                 )
@@ -1399,9 +1437,12 @@ private fun SkillCallCard(
     toolArgsById: Map<String, io.prism.ui.model.ToolCallRef>
 ) {
     val content = message.content.trim()
-    // 联网搜索结果已由 CollapsibleSearchCard 展示，跳过冗余 TOOL 卡片；
-    // 空 content（协议占位）不渲染
-    if (message.toolName == WebSearchLocalToolExecutor.TOOL_SEARCH || content.isEmpty()) return
+    // UXR11 U6（ADR-033）：空 content（协议占位）不渲染；**不再跳过 web_search 工具**——
+    // 联网搜索也是 Skill 能力（web-research 等 Skill 依赖 web_search__search），
+    // 用户反馈"LLM 调 skills 时无界面反馈"，此卡片给出明确的「工具被调用 ✓/✕」反馈，
+    // 搜索结果正文仍由下方 CollapsibleSearchCard 完整展示（不重复）。
+    if (content.isEmpty()) return
+    val isWebSearch = message.toolName == WebSearchLocalToolExecutor.TOOL_SEARCH
 
     val toolFullName = message.toolName ?: "工具"
     // 状态判定（Q-LOW-7 修复，guardrail TKN-UXR9-GUARDRAIL-002/003）：复用 SkillExecutor 的
@@ -1455,7 +1496,13 @@ private fun SkillCallCard(
             )
         }
         Text(
-            text = if (isFailed) content.take(160) else content.take(120) + if (content.length > 120) "…" else "",
+            // UXR11 U6：web_search 结果由 CollapsibleSearchCard 完整展示，卡片只给确认文本不重复摘要
+            text = when {
+                isWebSearch && !isFailed -> "搜索结果见下方来源卡片"
+                isWebSearch -> "搜索失败，详见下方"
+                isFailed -> content.take(160)
+                else -> content.take(120) + if (content.length > 120) "…" else ""
+            },
             color = if (isFailed) PrismError else PrismTextFaint,
             fontSize = 11.sp,
             maxLines = 2,
@@ -1694,7 +1741,22 @@ private fun CollapsibleSourcesCard(sources: List<io.prism.ui.model.Citation>) {
 @Composable
 private fun TypingIndicator(isRagOn: Boolean) {
     val transition = rememberInfiniteTransition(label = "typing")
-    val statusText = if (isRagOn) "正在检索知识库…" else "正在思考…"
+    val baseText = if (isRagOn) "正在检索知识库" else "正在思考"
+    // UXR11 U7（ADR-033）：真机（MIUI 低帧率/省电模式）下 rememberInfiniteTransition 的
+    // 圆点呼吸动画可能不推进（模拟器正常、真机静止——用户实测）。加 LaunchedEffect 驱动的
+    // 动态省略号，文字本身轮换 …/。。。/.. ，即使圆点动画不跑，文字变化也提供明确"进行中"反馈。
+    var dotIndex by remember { mutableIntStateOf(0) }
+    LaunchedEffect(isRagOn) {
+        while (true) {
+            dotIndex = (dotIndex + 1) % 3
+            delay(500)
+        }
+    }
+    val statusText = baseText + when (dotIndex) {
+        0 -> "…"
+        1 -> "。。"
+        else -> ".."
+    }
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
@@ -1787,6 +1849,11 @@ private fun ToolCallIndicator(toolName: String) {
  * **UXR9 US-907 变更**：移除原独立「🖼 图片」按钮，改为在发送按钮右侧新增「＋」按钮，
  * 点击展开折叠栏显示两种上传方式：相册（图片）/ 文件（PDF/DOCX/XLSX/PPTX 等）。
  * **UXR9 US-906**：发送后键盘自动收起由调用方（onSend 内）执行。
+ *
+ * **R5（UXR10，ADR-032）变更**：图片/文件选择后**不再立即发送**，而是暂存为待发送
+ * 附件草稿（[pendingImageDataUrl] / [pendingFileName]），在输入框上方显示预览卡片
+ * （图片缩略图 / 文件名），用户可继续输入需求文本或移除附件，点发送统一发出。
+ * 发送按钮启用条件：输入框非空 **或** 存在待发送附件（允许"只发图/文件不配字"）。
  */
 @Composable
 private fun MessageInputBar(
@@ -1796,7 +1863,13 @@ private fun MessageInputBar(
     /** UXR9 US-907：相册上传入口（系统图片选择器）。 */
     onImagePick: () -> Unit,
     /** UXR9 US-907：文件上传入口（系统文件选择器）。 */
-    onFilePick: () -> Unit
+    onFilePick: () -> Unit,
+    /** R5：待发送图片草稿（data URL，非空时显示缩略图预览）。 */
+    pendingImageDataUrl: String? = null,
+    /** R5：待发送文件草稿文件名（非空时显示文件名预览）。 */
+    pendingFileName: String? = null,
+    /** R5：移除当前待发送附件草稿。 */
+    onRemoveAttachment: () -> Unit = {}
 ) {
     var uploadBarExpanded by remember { mutableStateOf(false) }
     Column(
@@ -1804,6 +1877,77 @@ private fun MessageInputBar(
             .fillMaxWidth()
             .padding(horizontal = 20.dp, vertical = 10.dp)
     ) {
+        // R5：待发送附件草稿预览卡片（图片缩略图 / 文件名 + 移除）。置于折叠栏与输入行之间。
+        val hasAttachment = pendingImageDataUrl != null || pendingFileName != null
+        AnimatedVisibility(
+            visible = hasAttachment,
+            enter = expandVertically(),
+            exit = shrinkVertically()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(PrismPanel2.copy(alpha = 0.7f))
+                    .border(1.dp, PrismLine, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                val imageDataUrl = pendingImageDataUrl
+                if (imageDataUrl != null) {
+                    // 图片草稿：解码缩略图预览（remember 缓存，避免重组时重复解码）
+                    val bmp = remember(imageDataUrl) {
+                        decodeImageDataUrl(imageDataUrl)
+                    }
+                    if (bmp != null) {
+                        Image(
+                            bitmap = bmp.asImageBitmap(),
+                            contentDescription = "待发送图片预览",
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(8.dp)),
+                            contentScale = ContentScale.Crop
+                        )
+                    }
+                    Text(
+                        text = "待发送图片",
+                        color = PrismTextDim,
+                        fontSize = 12.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                } else {
+                    Text(
+                        text = "📄 ${pendingFileName ?: "文档"}",
+                        color = PrismTextDim,
+                        fontSize = 12.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Text(
+                    text = "输入需求后发送",
+                    color = PrismTextFaint,
+                    fontSize = 11.sp
+                )
+                Box(
+                    modifier = Modifier
+                        .size(24.dp)
+                        .clip(CircleShape)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onRemoveAttachment
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(text = "✕", color = PrismTextFaint, fontSize = 14.sp)
+                }
+            }
+        }
+
         // UXR9 US-907：折叠栏 —— 点击"＋"展开，显示「相册 / 文件」两个上传入口。
         // 展开时挤占输入区上方空间（与键盘不同时使用：选完自动收起 + 收起键盘）。
         AnimatedVisibility(
@@ -1868,7 +2012,8 @@ private fun MessageInputBar(
                         CircleShape
                     )
                     .border(1.dp, PrismIndigo.copy(alpha = 0.5f), CircleShape)
-                    .clickable(enabled = value.isNotBlank()) { onSend() },
+                    // R5：附件存在时也可发送（"只发图/文件不配字"场景）
+                    .clickable(enabled = value.isNotBlank() || hasAttachment) { onSend() },
                 contentAlignment = Alignment.Center
             ) {
                 Text(
@@ -1964,6 +2109,115 @@ internal fun sanitizeMarkdownLinks(markdown: String): String {
         }
     }
 }
+
+/**
+ * UXR11 U4（ADR-033）：净化 LLM 输出中的工具调用语法块（纯函数，可测）。
+ *
+ * **背景（真机实测）**：LLM（如 kimi-k2.6）在工具回路外/思考阶段会把工具调用意图
+ * 写成 XML 风格文本块（`<tool_calls><invoke name="mcp_Fetch__fetch">…</invoke></tool_calls>`），
+ * 或 `<|tool_calls|>` / `<|invoke|>` 管道符分隔变体（真机渲染为 `<｜…｜>` 乱码）。
+ * mikepenz markdown-renderer **0.26.0** 会把 `<...>` 当 HTML/XML 标签解析，标签内字符
+ * 被替换/错乱（真机出现 `<｜｜DSML｜｜tool_calls>` 乱码）。本函数在 Markdown 渲染前做单遍净化：
+ * 1. **剥离完整工具调用块**（`<tool_calls>…</tool_calls>`、`<invoke …>…</invoke>` 及其
+ *    `|`/`｜` 分隔变体）——这些是 LLM 幻觉输出的工具调用计划，不属于最终答案正文。
+ *    用**深度计数状态机**配对开/闭标签（支持嵌套 + 自闭合 `/>`），跨行块整体剥离。
+ * 2. **转义残余疑似标签起始 `<`**（仅当 `<` 后紧跟字母、`/` 或管道符 `|`/`｜`，
+ *    即 HTML/XML 标签语法），使用户看到 LLM 实际输出文本而非乱码。
+ *
+ * **不触碰**：
+ * - **代码围栏内的所有内容**（``` / ~~~ 状态机）：不剥离工具块、不转义 `<`，由
+ *   markdown-renderer 按 code block 原样渲染（guardrail F5）
+ * - 普通文本中的比较符（`a < b`，`<` 后是空格，不匹配）
+ * - 已在 [sanitizeMarkdownLinks] 处理后的 markdown 链接语法（`](` 不匹配）
+ *
+ * @param markdown 待渲染的 markdown
+ * @return 剥离工具调用块并转义标签起始 `<` 后的 markdown
+ */
+internal fun sanitizeToolCallSyntax(markdown: String): String {
+    // 缓冲式深度状态机单遍处理（guardrail F5）：
+    // - 工具块**仅在闭合时剥离**：检测到开标签后把后续行缓冲，闭合标签到达（深度归零）时丢弃缓冲
+    //   （= 剥离整块）；若块未闭合就遇到代码围栏 / 输入结束，放弃块判定并 flush 缓冲（正文不丢失）
+    // - 代码围栏（``` / ~~~）内的内容原样保留（不剥离、不转义）
+    // - 自闭合/单行完整块按普通行转义显示（可见文本，非乱码）
+    val out = mutableListOf<String>()
+    var pending: MutableList<String>? = null
+    var depth = 0
+    var inFence = false
+    for (line in markdown.split('\n')) {
+        val trimmed = line.trimStart()
+        if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
+            // 围栏边界：若在块判定中则放弃（flush），围栏内容不参与块剥离
+            if (pending != null) { flushPending(pending, out); pending = null; depth = 0 }
+            inFence = !inFence
+            out.add(line)
+            continue
+        }
+        if (inFence) {
+            if (pending != null) { flushPending(pending, out); pending = null; depth = 0 }
+            out.add(line)
+            continue
+        }
+        // 围栏外：统计本行非自闭合开标签与闭标签的净深度
+        val openMatches = TOOL_BLOCK_OPEN_REGEX.findAll(line).toList()
+        val blockOpens = openMatches.count { !it.value.trimEnd().endsWith("/>") }
+        val closes = TOOL_BLOCK_CLOSE_REGEX.findAll(line).count()
+        val delta = blockOpens - closes
+        if (pending == null) {
+            if (delta > 0) {
+                // 打开工具块：保留开标签前的正文（转义后），仅从开标签起缓冲
+                val firstOpen = openMatches.first { !it.value.trimEnd().endsWith("/>") }
+                val prefix = line.substring(0, firstOpen.range.first)
+                if (prefix.isNotEmpty()) {
+                    out.add(prefix.replace(TAG_START_REGEX, "&lt;"))
+                }
+                pending = mutableListOf(line.substring(firstOpen.range.first))
+                depth = delta
+            } else {
+                // 普通行 / 自闭合 / 单行完整块 → 转义显示
+                out.add(line.replace(TAG_START_REGEX, "&lt;"))
+            }
+        } else {
+            // 已在块判定中：缓冲 + 更新深度；深度归零 = 块闭合 → 丢弃缓冲（剥离）
+            pending.add(line)
+            depth += delta
+            if (depth <= 0) {
+                pending = null
+                depth = 0
+            }
+        }
+    }
+    // 输入结束块仍未闭合 → 放弃块判定，flush（正文不丢失）
+    if (pending != null) flushPending(pending, out)
+    return out.joinToString("\n")
+}
+
+/** 放弃块判定时，把缓冲行作为普通文本转义后输出（不丢失正文）。 */
+private fun flushPending(pending: List<String>, out: MutableList<String>) {
+    out.addAll(pending.map { it.replace(TAG_START_REGEX, "&lt;") })
+}
+
+/**
+ * 工具调用块开标签（`<tool_calls>` / `<invoke…>` 及其 `|`/`｜`（U+FF5C）分隔变体）。
+ * `(?!/)` 负向前瞻排除闭合标签；`[^\w>]{0,4}?` 容忍 `<` 与关键词间的 0~4 个非单词字符。
+ */
+private val TOOL_BLOCK_OPEN_REGEX = Regex(
+    """<(?!/)[^\w>]{0,4}?(?:tool_calls|invoke)[^>\n]*>""",
+    RegexOption.IGNORE_CASE
+)
+
+/**
+ * 工具调用块闭标签（`</tool_calls>` / `</invoke>` 及其分隔变体）。
+ */
+private val TOOL_BLOCK_CLOSE_REGEX = Regex(
+    """</[^\w>]{0,4}?(?:tool_calls|invoke)\s*[^\w>]{0,2}?>""",
+    RegexOption.IGNORE_CASE
+)
+
+/**
+ * 疑似 HTML/XML 标签或管道符分隔标签的起始 `<`（后跟字母 / 斜杠 / `|` / 全角 `｜` / `!` / `?`）。
+ * 不触碰：比较符（`a < b`，`<` 后空格）、数字比较（`速度<30`）、换行后的 `<`。
+ */
+private val TAG_START_REGEX = Regex("<(?=[a-zA-Z/|｜!?])")
 
 /**
  * UXR7 问题 2（根本性根因，UXR7-R2 增强）：将 markdown 表格块转换为 markdown 列表（纯函数，可测）。

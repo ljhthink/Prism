@@ -19,7 +19,13 @@ mcp = "0.12.0"
 documentfile = "1.0.1"
 onnxruntime = "1.27.0"
 poiOoxml = "5.5.1"
+# R1（UXR10 真机修复）：桌面 PDFBox 3.0.8 依赖 java.awt（Android 无此包）→ 真机解析 PDF 崩溃。
+# 生产切换为 pdfbox-android（com.tom-roush，Apache PDFBox 2.0.27 的 Android 官方移植，Apache 2.0，
+# Maven Central，替换 java.awt 为 android.graphics）；桌面 pdfbox 仅 testImplementation 供测试夹具生成。
 pdfbox = "3.0.8"
+pdfboxAndroid = "2.0.27.0"
+# R1：Robolectric 用于 JVM 单测加载 pdfbox-android（其依赖 android.graphics，纯 JVM 无法运行）
+robolectric = "4.14.1"
 # M4 Skills 系统（ADR-013 5.2）：SKILL.md frontmatter 解析
 # 选型依据：charleskorn/kaml 已归档（2025-11-30），改用底层引擎 snakeyaml-engine-kmp
 # 活跃维护（最后提交 2026-08-08），KMP 原生，Apache 2.0
@@ -68,6 +74,8 @@ onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime
 onnxruntime = { group = "com.microsoft.onnxruntime", name = "onnxruntime", version.ref = "onnxruntime" }
 poi-ooxml = { group = "org.apache.poi", name = "poi-ooxml", version.ref = "poiOoxml" }
 pdfbox = { group = "org.apache.pdfbox", name = "pdfbox", version.ref = "pdfbox" }
+pdfbox-android = { group = "com.tom-roush", name = "pdfbox-android", version.ref = "pdfboxAndroid" }
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
 snakeyaml-engine-kmp = { group = "it.krzeminski", name = "snakeyaml-engine-kmp", version.ref = "snakeyamlEngineKmp" }
 markdown-renderer-m3 = { group = "com.mikepenz", name = "multiplatform-markdown-renderer-m3", version.ref = "markdownRenderer" }
 

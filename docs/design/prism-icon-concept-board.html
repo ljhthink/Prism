@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Prism · 品牌图标概念提案</title>
+<style>
+  :root{
+    --bg:#0c0c11; --surface:#14141a; --surface2:#1a1a22; --surface3:#20202a;
+    --primary:#6e62ff; --primary-strong:#5a4eff; --cyan:#22c7e0; --mint:#2fbf8f;
+    --warning:#d99a2b; --danger:#e5484d;
+    --text:#eaeaf0; --text-dim:#a0a0ac; --text-faint:#6e6e7a;
+    --line:rgba(255,255,255,.07); --line-strong:rgba(255,255,255,.12);
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:"Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;
+    padding:40px 48px 56px; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1180px;margin:0 auto}
+  .masthead{display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:36px;border-bottom:1px solid var(--line);padding-bottom:22px}
+  .brand{display:flex;align-items:center;gap:18px}
+  .mark{width:56px;height:56px;border-radius:14px;background:var(--surface);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;box-shadow:0 1px 0 rgba(255,255,255,.04) inset,0 10px 28px -18px rgba(0,0,0,.9)}
+  .mark svg{width:34px;height:34px}
+  h1{font-size:26px;font-weight:700;letter-spacing:-.4px}
+  .sub{font-size:12px;color:var(--text-dim);margin-top:6px;letter-spacing:.3px}
+  .tag{font-size:10px;font-weight:600;letter-spacing:1.2px;color:var(--primary);text-transform:uppercase}
+  .label{font-size:10px;font-weight:600;letter-spacing:1px;color:var(--text-faint);text-transform:uppercase;margin-bottom:14px}
+  .grid{display:grid;gap:20px}
+  .grid3{grid-template-columns:repeat(3,1fr)}
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;overflow:hidden;box-shadow:0 1px 0 rgba(255,255,255,.03) inset,0 8px 24px -16px rgba(0,0,0,.9)}
+  .panel .pad{padding:18px}
+  .panel img{width:100%;display:block}
+  .panel h3{font-size:13.5px;font-weight:600;letter-spacing:-.2px}
+  .panel .desc{font-size:11px;color:var(--text-dim);line-height:1.65;margin-top:8px}
+  .chip{display:inline-block;font-size:10px;font-weight:600;letter-spacing:.6px;padding:3px 9px;border-radius:999px;margin-bottom:10px}
+  .chip.rec{background:rgba(110,98,255,.14);color:#9c92ff;border:1px solid rgba(110,98,255,.3)}
+  .chip.alt{background:var(--surface2);color:var(--text-dim);border:1px solid var(--line)}
+  .strategy{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:28px}
+  .kv{display:flex;gap:14px;padding:14px 0;border-bottom:1px solid var(--line)}
+  .kv:last-child{border-bottom:none}
+  .kv b{font-size:11px;color:var(--text-faint);width:120px;flex-shrink:0;font-weight:600;letter-spacing:.4px;padding-top:1px}
+  .kv span{font-size:12px;color:var(--text);line-height:1.6}
+  .swatches{display:flex;gap:10px;flex-wrap:wrap}
+  .sw{display:flex;flex-direction:column;gap:6px;align-items:center}
+  .sw .dot{width:44px;height:44px;border-radius:10px;border:1px solid var(--line)}
+  .sw span{font-size:9.5px;color:var(--text-dim);letter-spacing:.2px}
+  .section{margin-bottom:30px}
+  footer{margin-top:44px;padding-top:18px;border-top:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+  footer span{font-size:10px;color:var(--text-faint);letter-spacing:.6px}
+  .numb{font-size:10px;color:var(--text-faint);letter-spacing:1px}
+  .rev{color:var(--primary);font-weight:600}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="masthead">
+    <div class="brand">
+      <div class="mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#6e62ff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 3 21 19H3L12 3Z"/>
+          <path d="M12 9v3l3 3" stroke="#2fbf8f"/>
+          <circle cx="12" cy="8" r="1" fill="#2fbf8f" stroke="none"/>
+        </svg>
+      </div>
+      <div>
+        <div class="tag">Brand Identity · Concept Proposal</div>
+        <h1>Prism · 品牌图标概念提案</h1>
+        <div class="sub">手机端个人 AI Agent 平台 · 光穿过三棱镜折射出知识</div>
+      </div>
+    </div>
+    <div class="numb">v0.1 · 2026-08-18</div>
+  </div>
+
+  <!-- 品牌策略 -->
+  <div class="section">
+    <div class="label">01 · Brand Strategy</div>
+    <div class="strategy">
+      <div class="panel"><div class="pad">
+        <div class="kv"><b>品类</b><span>手机端个人 AI Agent 平台（BYOK + MCP + Skills + 端侧 RAG + 三层记忆 + 跨 App）</span></div>
+        <div class="kv"><b>核心母题</b><span>「光穿过三棱镜折射出知识」—— 单一输入，经棱镜分光为多元能力</span></div>
+        <div class="kv"><b>符号逻辑</b><span>三棱镜剖面 + 折射光束 = 一个 Agent 平台把多种能力（六位一体）汇聚、聚焦、分发</span></div>
+        <div class="kv"><b>情绪承诺</b><span>克制、精准、工具感；深空 + 精准的光 + 真实的材质纵深</span></div>
+      </div></div>
+      <div class="panel"><div class="pad">
+        <div class="label" style="margin-bottom:12px">Color System · 深空玻璃 v0.4</div>
+        <div class="swatches">
+          <div class="sw"><div class="dot" style="background:#0c0c11"></div><span>#0c0c11 bg</span></div>
+          <div class="sw"><div class="dot" style="background:#6e62ff"></div><span>#6e62ff 主色</span></div>
+          <div class="sw"><div class="dot" style="background:#5a4eff"></div><span>#5a4eff 强</span></div>
+          <div class="sw"><div class="dot" style="background:#22c7e0"></div><span>#22c7e0 青</span></div>
+          <div class="sw"><div class="dot" style="background:#2fbf8f"></div><span>#2fbf8f 薄荷</span></div>
+        </div>
+        <div class="desc" style="margin-top:16px">单强调色原则：靛蓝紫主导 AI 身份，青/薄荷仅作折射光谱点缀，暗合 v0.4「克制降噪」规范。</div>
+      </div></div>
+    </div>
+  </div>
+
+  <!-- 概念 -->
+  <div class="section">
+    <div class="label">02 · Icon Concepts · 三方向</div>
+    <div class="grid grid3">
+      <div class="panel">
+        <img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Premium%20minimal%20Android%20app%20icon%2C%20centered%20on%20a%20deep-space%20near-black%20charcoal%20background%20with%20subtle%20material%20depth%2C%20a%20crisp%20triangular%20prism%20rendered%20as%20glowing%20indigo-violet%20line%20art%20with%20translucent%20glass%20fill%2C%20a%20single%20white%20light%20beam%20entering%20the%20top-left%20vertex%2C%20refracting%20through%20the%20interior%20and%20splitting%20into%20a%20soft%20refined%20spectrum%20band%20of%20indigo-violet%2C%20cyan%20and%20mint%20exiting%20the%20right%20edge%2C%20restrained%20premium%20aesthetic%2C%20precise%20geometry%2C%20soft%20inner%20glow%2C%20subtle%20shadow%2C%20flat%20vector%20style%2C%20no%20text%2C%20centered%20composition%2C%20square%20app%20icon&image_size=square_hd" alt="Concept 1">
+        <div class="pad">
+          <span class="chip rec">主推 · 三棱镜折射</span>
+          <h3>Concept A · Refraction</h3>
+          <div class="desc">光从左上顶点射入，经棱镜内折射后分光为靛蓝紫/青/薄荷光谱带射出 —— 一个平台，多元能力。</div>
+        </div>
+      </div>
+      <div class="panel">
+        <img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Ultra-minimal%20premium%20Android%20app%20icon%2C%20dark%20charcoal%20deep-space%20background%2C%20a%20single%20geometric%20triangle%20prism%20outline%20in%20indigo-violet%20thin%20line%20art%2C%20one%20small%20white%20light%20dot%20entering%20the%20top%20vertex%20and%20a%20subtle%20mint%20refracted%20ray%20exiting%20the%20lower%20right%20edge%2C%20huge%20negative%20space%2C%20restrained%2C%20precise%2C%20flat%20vector%2C%20no%20text%2C%20centered%2C%20square%20app%20icon&image_size=square_hd" alt="Concept 2">
+        <div class="pad">
+          <span class="chip alt">备选 · 极简线框</span>
+          <h3>Concept B · Minimal</h3>
+          <div class="desc">仅一条极简棱镜线框 + 一点入射光与一束薄荷折射光，最大留白，工具感与克制感最强。</div>
+        </div>
+      </div>
+      <div class="panel">
+        <img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Premium%20Android%20app%20icon%2C%20dark%20deep-space%20background%2C%20triangular%20prism%20filled%20with%20translucent%20indigo-violet%20glass%20gradient%2C%20a%20white%20light%20beam%20entering%20the%20top%20vertex%20and%20refracting%20into%20six%20thin%20spectrum%20rays%20fanning%20out%20the%20bottom%20in%20indigo-violet%2C%20cyan%2C%20mint%2C%20amber%20and%20soft%20white%2C%20symbolizing%20six%20integrated%20AI%20capabilities%2C%20minimalist%2C%20precise%20geometry%2C%20subtle%20glow%2C%20premium%20tech%20aesthetic%2C%20flat%20vector%2C%20no%20text%2C%20centered%2C%20square%20app%20icon&image_size=square_hd" alt="Concept 3">
+        <div class="pad">
+          <span class="chip alt">备选 · 六束能力之光</span>
+          <h3>Concept C · Six Beams</h3>
+          <div class="desc">棱镜将一束光分光为六道光谱 —— 对应六位一体能力：BYOK / RAG / MCP / Skills / 记忆 / 跨 App。</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 应用场景 -->
+  <div class="section">
+    <div class="label">03 · Application Mockup</div>
+    <div class="grid grid3">
+      <div class="panel" style="grid-column:span 2">
+        <img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Premium%20dark%20smartphone%20home%20screen%20mockup%20on%20deep%20charcoal%20background%2C%20a%20standout%20app%20icon%20showing%20a%20triangular%20prism%20with%20indigo-violet%20refracted%20light%20spectrum%20prominent%20in%20the%20center%2C%20surrounded%20by%20a%20minimal%20grid%20of%20dark%20abstract%20app%20icons%2C%20cinematic%20soft%20lighting%2C%20shallow%20depth%20of%20field%2C%20high-end%20tech%20product%20render&image_size=landscape_4_3" alt="Home screen mockup">
+      </div>
+      <div class="panel"><div class="pad">
+        <div class="label" style="margin-bottom:10px">Design Rules</div>
+        <div class="kv"><b>造型</b><span>正三棱锥剖面，几何精准，圆头线帽</span></div>
+        <div class="kv"><b>光</b><span>白光入射 → 棱镜内偏折 → 光谱出射</span></div>
+        <div class="kv"><b>表面</b><span>实心深空底 + 内顶高光 + 微投影，去玻璃感</span></div>
+        <div class="kv"><b>兼容</b><span>生成版用于概念预览；落地采用矢量 XML 自适应图标</span></div>
+      </div></div>
+    </div>
+  </div>
+
+  <!-- 矢量落地预览 -->
+  <div class="section">
+    <div class="label">04 · Vector Implementation · 选定方向落地</div>
+    <div class="grid grid3">
+      <div class="panel">
+        <div style="background:radial-gradient(circle at 50% 46%, #17171e 0%, #101015 50%, #0a0a0f 100%);display:flex;align-items:center;justify-content:center;padding:34px">
+          <svg viewBox="0 0 108 108" width="168" height="168" xmlns="http://www.w3.org/2000/svg">
+            <defs>
+              <radialGradient id="bgd" cx="50%" cy="46%" r="74%">
+                <stop offset="0%" stop-color="#17171e"/><stop offset="50%" stop-color="#101015"/><stop offset="100%" stop-color="#0a0a0f"/>
+              </radialGradient>
+            </defs>
+            <rect x="0" y="0" width="108" height="108" rx="22" fill="url(#bgd)"/>
+            <path d="M54,32 L74,76 L34,76 Z" fill="#1F6E62FF" stroke="#6E62FF" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+            <path d="M34,22 L54,32" stroke="#EAEAF0" stroke-width="5.5" stroke-linecap="round" fill="none"/>
+            <path d="M54,32 L66,50" stroke="#EAEAF0" stroke-width="4" stroke-linecap="round" fill="none"/>
+            <path d="M66,50 L80,62" stroke="#6E62FF" stroke-width="4" stroke-linecap="round" fill="none"/>
+            <path d="M66,50 L76,72" stroke="#22C7E0" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+            <path d="M66,50 L68,78" stroke="#2FBF8F" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+            <circle cx="66" cy="50" r="2.6" fill="#FFFFFF"/>
+          </svg>
+        </div>
+        <div class="pad">
+          <span class="chip rec">Concept A · Final</span>
+          <h3>三棱镜折射 · 自适应图标</h3>
+          <div class="desc">108dp 矢量前景 + 深空径向渐变背景，内容落在 66dp 安全区。文件：ic_launcher_foreground / ic_launcher_background。</div>
+        </div>
+      </div>
+      <div class="panel" style="grid-column:span 2">
+        <div style="background:radial-gradient(circle at 50% 40%, #101015 0%, #0a0a0f 70%);display:flex;align-items:center;justify-content:center;gap:44px;padding:30px">
+          <div style="width:210px;height:430px;border-radius:26px;background:#0f0f15;border:1px solid rgba(255,255,255,.08);box-shadow:0 30px 60px -30px rgba(0,0,0,.9);padding:12px;display:flex;flex-direction:column;gap:14px">
+            <div style="font-size:10px;color:#a0a0ac;letter-spacing:.5px;padding:2px 4px">PRISM · 深空玻璃 v0.4</div>
+            <div style="flex:1;border-radius:18px;background:radial-gradient(circle at 50% 30%, #14141a 0%, #0c0c11 75%);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px">
+              <svg viewBox="0 0 108 108" width="92" height="92" xmlns="http://www.w3.org/2000/svg">
+                <rect x="0" y="0" width="108" height="108" rx="22" fill="url(#bgd)"/>
+                <path d="M54,32 L74,76 L34,76 Z" fill="#1F6E62FF" stroke="#6E62FF" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/>
+                <path d="M34,22 L54,32" stroke="#EAEAF0" stroke-width="5.5" stroke-linecap="round" fill="none"/>
+                <path d="M54,32 L66,50" stroke="#EAEAF0" stroke-width="4" stroke-linecap="round" fill="none"/>
+                <path d="M66,50 L80,62" stroke="#6E62FF" stroke-width="4" stroke-linecap="round" fill="none"/>
+                <path d="M66,50 L76,72" stroke="#22C7E0" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+                <path d="M66,50 L68,78" stroke="#2FBF8F" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+                <circle cx="66" cy="50" r="2.6" fill="#FFFFFF"/>
+              </svg>
+              <div style="font-size:11px;color:#eaeaf0;letter-spacing:.5px">Prism</div>
+            </div>
+            <div style="display:flex;justify-content:center;gap:12px;padding:6px 0 4px">
+              <span style="width:6px;height:6px;border-radius:50%;background:#6e62ff"></span>
+              <span style="width:6px;height:6px;border-radius:50%;background:#20202a"></span>
+              <span style="width:6px;height:6px;border-radius:50%;background:#20202a"></span>
+            </div>
+          </div>
+          <div style="max-width:320px">
+            <div class="label" style="margin-bottom:10px">规格对齐</div>
+            <div class="kv"><b>造型</b><span>正三棱锥剖面 · 主色实线描边 · 极淡玻璃填充</span></div>
+            <div class="kv"><b>光路</b><span>白光左上入射 → 顶点内折射 → 三色光谱右下射出</span></div>
+            <div class="kv"><b>色板</b><span>主 #6E62FF / 青 #22C7E0 / 薄荷 #2FBF8F / 光 #EAEAF0</span></div>
+            <div class="kv"><b>表面</b><span>深空径向渐变 · 实体化 · 无玻璃无霓虹 · 单强调色</span></div>
+            <div class="kv"><b>兼容</b><span>adaptive-icon 108dp · 安全区 66dp · API 26+ 矢量直出</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <span>PRISM · 深空玻璃肌理 v0.4 规范对齐 · 克制 · 降噪 · 单强调色</span>
+    <span class="rev">Concepts by BrandKit Skill</span>
+  </footer>
+</div>
+</body>
+</html>

@@ -81,6 +81,74 @@ class ConversationSummarizer(
      */
     internal fun buildSummarizationPrompt(): String = SUMMARY_PROMPT_TEMPLATE
 
+    /**
+     * UXR11 U5（ADR-033）：从对话中抽取**可跨会话复用的原子记忆**（L2 跨会话记忆）。
+     *
+     * 参考 TencentDB-Agent-Memory 的 Chat Memory 理念（"记忆资产，而非聊天日志仓库"）：
+     * L2 只应保留**关于用户**的可复用信息（偏好/事实/决策），而**非**对话过程或一次性
+     * 信息查询。此前用 [summarize]（对话摘要）作为 L2 内容，把"用户问过 X、我回答了 Y"
+     * 这类一次性查询也摘要入库（真机实测：L2 基本全是无效信息）。
+     *
+     * **与 [summarize] 的区别**：
+     * - [summarize]：压缩**对话过程**（L1 滑动窗口用，会话内上下文）
+     * - [extractMemories]：抽取**关于用户的原子记忆**（L2 跨会话用，可复用资产）
+     *
+     * **返回值语义**：
+     * - `null`：LLM 调用失败（调用方降级为规则抽取，不丢数据）
+     * - `emptyList()`：LLM 成功但判定**无值得跨会话记住的记忆**（调用方应跳过，不落库）
+     * - 非空：原子记忆列表（每条一行，独立完整）
+     *
+     * @param messages 本会话重要轮次消息（已过滤寒暄/确认）
+     * @param config 目标 Provider 配置
+     * @return 原子记忆列表；失败返回 null
+     * @throws kotlinx.coroutines.CancellationException 协程取消必须重抛
+     */
+    suspend fun extractMemories(messages: List<ChatMessage>, config: ProviderConfig): List<String>? {
+        if (messages.isEmpty()) return emptyList()
+        return try {
+            val raw = completionProvider.chatCompletion(
+                config = config,
+                messages = messages,
+                systemPrompt = buildMemoryExtractionPrompt()
+            )
+            if (raw.isNullOrBlank()) return emptyList()
+            // 解析：每行一条记忆，剥离序号/列表符号，去空，截断上限
+            // guardrail F6：仅剥离完整序号格式（`1.` / `1、` / `1）` 等），不裸剥数字——
+            // 否则以数字开头的真实记忆（如 "用户有 2 个孩子"）会被破坏；LLM 未按
+            // "每行一条"约定输出时整段视为一条（不强制结构化）。
+            raw.lineSequence()
+                .map { line ->
+                    line.trim()
+                        .replaceFirst(NUMBERED_LIST_PREFIX_REGEX, "")
+                        .trim()
+                        .removePrefix("-").removePrefix("•").removePrefix("·").removePrefix("*")
+                        .trim()
+                        // guardrail M-1（第二轮复审）：单条原子记忆截断上限，防病态/幻觉超长行
+                        // 无界写入 L2 库并在后续会话注入 systemPrompt 时膨胀上下文。
+                        .take(MAX_MEMORY_ITEM_CHARS)
+                }
+                .filter { it.isNotBlank() && it != "无" && it.length > 1 }
+                .take(MEMORY_EXTRACT_MAX)
+                .toList()
+        } catch (e: CancellationException) {
+            throw e // BR-error-handling-007：协程取消必须重抛
+        } catch (e: Exception) {
+            // 防御性兜底：ChatCompletionProvider 内部已捕获异常返回 null
+            null
+        }
+    }
+
+    /**
+     * 构建记忆抽取 prompt（纯函数，可测）。
+     *
+     * **prompt 设计**（参考 TencentDB-Agent-Memory Chat Memory：preferences/facts/decisions）：
+     * - 明确"原子记忆"定义：关于用户的偏好、个人信息事实、长期决策/立场
+     * - **显式排除一次性信息查询**（"搜索X""查Y背景"）——这是用户反馈"L2 什么都记"的根因：
+     *   单次查询只在当次会话有用，不构成跨会话记忆
+     * - 输出：每条一行、第三人称"用户…"、最多 5 条、无值得记录输出"无"
+     */
+    internal fun buildMemoryExtractionPrompt(): String = MEMORY_EXTRACTION_PROMPT_TEMPLATE
+
     companion object {
         /**
          * 摘要 prompt 模板（参考 mem0/CALMem 对话压缩最佳实践）。
@@ -103,5 +171,42 @@ class ConversationSummarizer(
 - 只总结已有内容，不生成新内容、不评价、不与用户对话
 - 输出纯文本摘要，不要 JSON、Markdown 标题或列表符号
         """.trimIndent()
+
+        /**
+         * UXR11 U5（ADR-033）：L2 跨会话记忆抽取 prompt 模板。
+         *
+         * 参考 TencentDB-Agent-Memory Chat Memory 核心（L0→L1→L2→L3 分层蒸馏，
+         * Chat Memory = preferences + facts + decisions，**不是聊天日志仓库**）。
+         * 与 [SUMMARY_PROMPT_TEMPLATE]（L1 对话摘要）语义区分：本 prompt 抽"关于用户
+         * 的可复用记忆"，显式排除一次性信息查询与对话过程。
+         */
+        internal val MEMORY_EXTRACTION_PROMPT_TEMPLATE = """
+你是记忆抽取助手。从以下对话中，抽取**值得跨会话长期记住的原子记忆**。
+
+原子记忆 = 关于用户的偏好、个人信息事实、长期决策/立场，且对未来对话有帮助的信息。例如：
+- 用户偏好使用简体中文交流
+- 用户是 Android 开发者，使用 Kotlin 和 Jetpack Compose
+- 用户决定项目采用方案 A（不采用方案 B）
+
+**不要记录**（这些不是长期记忆）：
+- 一次性信息查询（如"搜索某角色的背景""查一下最新价格"）——只在当次会话有用，不应跨会话记住
+- 对话过程、寒暄、确认、闲聊
+- 临时性任务内容
+
+约束：
+- 每条记忆一行，独立完整，第三人称叙述（以"用户"开头）
+- 只抽取对话中明确表达的信息，不臆测、不脑补
+- 没有值得跨会话记住的记忆时，只输出"无"
+- 最多 5 条
+        """.trimIndent()
+
+        /** UXR11 U5：单次抽取记忆条数上限（防 token 溢出 + 控制记忆库膨胀）。 */
+        internal const val MEMORY_EXTRACT_MAX = 5
+
+        /** guardrail M-1（第二轮复审）：单条原子记忆字符上限（防病态/幻觉超长行无界入库）。 */
+        internal const val MAX_MEMORY_ITEM_CHARS = 200
+
+        /** guardrail F6：完整序号前缀（`1.` / `1、` / `1）` / `1:` 等），仅剥此类格式不剥裸数字。 */
+        internal val NUMBERED_LIST_PREFIX_REGEX = Regex("""^\d+[.、:：)）]\s*""")
     }
 }

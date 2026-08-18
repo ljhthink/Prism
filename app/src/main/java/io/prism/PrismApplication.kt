@@ -371,7 +371,10 @@ class PrismApplication : Application() {
             skillExecutionRepository = skillExecutionRepository,
             localToolExecutor = compositeLocalToolExecutor,
             // UXR3 问题 10（ADR-023）：工具审批模式 —— 从配置仓库实时读取（运行时切换即时生效）
-            approvalModeProvider = { toolApprovalConfigRepository.getMode() }
+            approvalModeProvider = { toolApprovalConfigRepository.getMode() },
+            // UXR11 U2（ADR-033）：工具回路轮间退避 —— 生产显式注入 2s，摊开多轮 LLM
+            // 请求、降低瞬时 RPM 峰值触发 429 概率（构造器默认 0 供单测不等待）。
+            interRoundDelayMs = io.prism.skill.SkillExecutor.TOOL_LOOP_INTER_ROUND_DELAY_MS
         )
     }
 
@@ -477,13 +480,17 @@ class PrismApplication : Application() {
     val fetchHttpClient: HttpClient by lazy {
         HttpClient(OkHttp) {
             expectSuccess = false
+            // UXR11 U3（ADR-033）修复：Ktor 3.x **HttpRedirect 默认安装且默认跟随重定向**
+            //（maxJumps=20，网络调研实证：Ktor 文档 "By default, Ktor HTTP client does follow
+            // redirections"）。此前 Q-LOW-3 注释假设「OkHttp engine 默认不跟随 3xx」在 Ktor 3.3.3
+            // 下**不成立** → client.get 会在内部跟随重定向（绕过 LocalMcpToolProvider.fetchWithRedirects
+            // 的逐跳 SSRF 复检与 3 跳上限，且重定向到内网地址可被跟随 = SSRF 纵深防御被突破；
+            // 超过 20 跳抛 SendCountExceedException → "抓取失败：网络错误"）。**显式禁用**，
+            // 使 3xx 原样返回给 fetchWithRedirects 做 SSRF 校验后手动跟随（唯一重定向路径）。
+            followRedirects = false
             install(HttpTimeout) {
                 requestTimeoutMillis = FETCH_REQUEST_TIMEOUT_MS
             }
-            // Q-LOW-3（guardrail TKN-UXR9-GUARDRAIL-002）：**不安装 HttpRedirect 插件**——
-            // Ktor OkHttp engine 默认不跟随 3xx 重定向，这是 Fetch 工具 SSRF 纵深防御的
-            // 关键不变量（重定向到内网地址的绕过不可达）。如未来需要重定向支持，必须先在
-            // LocalMcpToolProvider 侧校验重定向目标仍为公网，禁止在此静默开启。
         }
     }
 
@@ -766,6 +773,13 @@ class PrismApplication : Application() {
         // M7 嵌入闲置卸载调度（ADR-017 4.5）：FULL 档 5min / STANDARD 档 2min 闲置后 session.close()
         // MINIMAL/CHAT_ONLY 档不加载 embedder（NullEmbedder），checkIntervalMs=0 跳过调度
         startEmbedderUnloadScheduler()
+        // R1（UXR10 真机修复，ADR-032）：pdfbox-android 需初始化资源加载器（字体等）。
+        // 若 PDFBoxResourceLoader 未初始化，pdfbox 在访问字体资源时报错；初始化失败不阻断启动。
+        runCatching {
+            com.tom_roush.pdfbox.android.PDFBoxResourceLoader.init(this)
+        }.onFailure { e ->
+            android.util.Log.w("PrismApplication", "PDFBoxResourceLoader init failed", e)
+        }
         // UXR9 US-901（guardrail Q-HIGH-2 修复）：embedder 是重资源 lazy（113MB ONNX 读取 +
         // 9MB tokenizer.json 解析 + 250k 词条 HashMap 构建）。若由 ConversationViewModel.Factory
         // （主线程）首次触发会同步阻塞导致首开聊天页卡顿/ANR。此处用 appScope(IO) 预预热，

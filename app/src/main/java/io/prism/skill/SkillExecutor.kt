@@ -21,6 +21,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.withContext
@@ -83,7 +84,15 @@ open class SkillExecutor(
     private val skillExecutionRepository: SkillExecutionRepository? = null,
     private val localToolExecutor: LocalToolExecutor? = null,
     /** UXR3 问题 10（ADR-023）：工具审批模式提供者（null 时降级为 [ToolApprovalMode.MANUAL]，向后兼容既有测试）。 */
-    private val approvalModeProvider: (suspend () -> ToolApprovalMode)? = null
+    private val approvalModeProvider: (suspend () -> ToolApprovalMode)? = null,
+    /**
+     * UXR11 U2（ADR-033）：工具回路轮间最小间隔（毫秒，默认 0 = 不等待）。
+     *
+     * **生产默认由 [io.prism.PrismApplication] 显式注入 [TOOL_LOOP_INTER_ROUND_DELAY_MS]（2s）**：
+     * 把工具回路的多轮 LLM 请求摊开，降低瞬时 RPM 峰值触发 429 概率。构造器默认 0 是为
+     * 了既有单测（58 处直接构造）不因真实延时拖慢；生产路径唯一构造点已注入 2s。
+     */
+    private val interRoundDelayMs: Long = 0L
 ) {
 
     /**
@@ -260,8 +269,17 @@ open class SkillExecutor(
             var effectiveSystemPrompt = systemPrompt
             val consecutiveToolFailures = mutableMapOf<String, Int>()
 
+            // UXR11 U2（ADR-033）：429 限流自动重试剩余次数（RPM 限流在重试耗尽前不中断工具回路）。
+            var rateLimitRetriesLeft = MAX_RATE_LIMIT_RETRIES
             while (rounds < maxRounds) {
                 rounds++
+                // UXR11 U2（ADR-033）：工具回路轮间退避 —— LLM 端点（如 Moonshot Kimi 组织级
+                // RPM=3）对连续请求限流严格，而工具回路每轮工具执行后都要重新调 LLM
+                //（ADR-014 协议要求），一次深度调研（2-4 轮）会在数秒内打满 RPM 触发 429。
+                // 轮间加最小间隔，把请求摊开、显著降低瞬时 RPM 峰值（真机实测第二次对话即 429）。
+                // 首轮立即发（rounds==1 不等待，保首 token 延迟），后续轮次在工具结果回灌后等待。
+                // CancellationException 由 delay 自动传播（BR-error-handling-007）。
+                if (rounds > 1) delay(interRoundDelayMs)
                 lastRoundHadToolCall = false
                 val completedToolCalls = mutableListOf<StreamEvent.ToolCallComplete>()
                 // Q-LOW-2（guardrail TKN-UXR8-B3-GUARDRAIL-001）：本轮已实际执行的 tool_call id。
@@ -272,6 +290,8 @@ open class SkillExecutor(
                 // 否则工具回路第 2 轮请求返回 400。此处收集后传给
                 // [buildAssistantToolCallMessage] 构造占位消息时回传。
                 val roundReasoning = StringBuilder()
+                // UXR11 U2（ADR-033）：本轮是否触发 429 限流（重试耗尽前不转发给用户）。
+                var roundRateLimited = false
                 // 1. 流式请求 + 收集 ToolCallComplete
                 val flow: Flow<StreamEvent> = try {
                     provider.streamChat(
@@ -301,6 +321,12 @@ open class SkillExecutor(
 
                 try {
                     flow.collect { event ->
+                        // UXR11 U2（ADR-033）：429 限流错误不转发给用户（避免每次对话都弹限流提示），
+                        // 交由下方自动退避重试；重试耗尽后才原样转发给用户提示稍等。
+                        if (event is StreamEvent.Error && isRateLimitError(event.message)) {
+                            roundRateLimited = true
+                            return@collect
+                        }
                         onEvent(event)
                         if (event is StreamEvent.ReasoningDelta) {
                             // UXR4 问题 1/4/6（ADR-024）：累积 reasoning 供 assistant 占位消息回传
@@ -322,6 +348,28 @@ open class SkillExecutor(
                     errorMessage = safeMsg
                     onEvent(StreamEvent.Error("流式请求失败: $safeMsg"))
                     break
+                }
+
+                // UXR11 U2（ADR-033）：429 限流自动退避重试 —— 服务端"retry after"通常仅 1s，
+                // 等待 [RATE_LIMIT_BACKOFF_MS] 后重发同一轮请求。guardrail F1 幂等守卫：
+                // 仅当本轮**未执行任何工具**（completedToolCalls 为空）才重试——限流错误通常在
+                // 响应头即判定（首个事件即 Error），此条件恒真；若极端场景下已收集到工具调用
+                // （限流错误在中流到达），不清空、不回退轮号，直接按正常流程回灌结果后结束回路，
+                // 避免丢弃已执行结果或重复执行非幂等工具。
+                // 重试耗尽仍限流 → 落回正常逻辑（completedToolCalls 为空 → 回路自然结束），
+                // 由既有 429 专属文案（R2/ADR-032）提示用户稍等，不无限重试放大请求频率。
+                if (roundRateLimited && completedToolCalls.isEmpty() && rateLimitRetriesLeft > 0) {
+                    rateLimitRetriesLeft--
+                    val backoffMs = RATE_LIMIT_BACKOFF_MS * (MAX_RATE_LIMIT_RETRIES - rateLimitRetriesLeft)
+                    Log.w(TAG, "round $rounds 429 rate limit, retry in ${backoffMs}ms (left=$rateLimitRetriesLeft)")
+                    roundReasoning.clear()
+                    delay(backoffMs)
+                    rounds-- // 重试同一轮（rounds 自增前 --，保持轮号不变）
+                    continue
+                }
+                if (roundRateLimited) {
+                    // 重试耗尽：补发限流错误事件给用户（说明稍等重试）
+                    onEvent(StreamEvent.Error("请求过于频繁，触发服务端限流（429）。请稍等几秒后重试"))
                 }
 
                 // 2. 无工具调用 → 回路自然结束（纯文本响应）
@@ -526,6 +574,41 @@ open class SkillExecutor(
          */
         internal const val MAX_CONSECUTIVE_TOOL_FAILURES = 2
 
+        /**
+         * UXR11 U2（ADR-033）：工具回路轮间最小间隔（毫秒）。
+         *
+         * 背景：LLM 端点（如 Moonshot Kimi 组织级 RPM=3）对连续请求限流严格，工具回路
+         * 每轮工具执行后都要重新调 LLM。真机实测一次深度调研数秒内多次 LLM 调用即触发
+         * 429（"request reached organization max RPM"）。轮间加 2s 间隔把请求摊开。
+         *
+         * 说明：RPM=3 是**账号级配额**，客户端无法提升；轮间退避只降低瞬时峰值、减少触发
+         * 概率。若账号配额极低（RPM<2），一次多轮调研仍可能触发 429——此时由既有
+         * 429 专属文案（R2/ADR-032）提示用户稍等，且工具回路自然停止不重试。
+         */
+        internal const val TOOL_LOOP_INTER_ROUND_DELAY_MS = 2_000L
+
+        /**
+         * UXR11 U2（ADR-033）：429 限流自动重试次数上限。
+         *
+         * 限流（RPM 配额）时按 [RATE_LIMIT_BACKOFF_MS] 退避重发同一轮请求（本轮未执行工具，
+         * 幂等安全）。上限 2 次 + 递增退避（3s/6s），避免无限重试放大请求频率叠加限流。
+         */
+        internal const val MAX_RATE_LIMIT_RETRIES = 2
+
+        /**
+         * UXR11 U2（ADR-033）：429 限流重试基础退避时长（毫秒）。
+         *
+         * 服务端 "retry after" 通常仅 1s；取 3s 保证越过限流窗口。退避随尝试次数递增
+         * （第 1 次 3s、第 2 次 6s）。
+         */
+        internal const val RATE_LIMIT_BACKOFF_MS = 3_000L
+
+        /** guardrail F2：`429` 词边界匹配（避免 "错误码 4299" 等误判）。 */
+        private val RATE_LIMIT_429_REGEX = Regex("""\b429\b""")
+
+        /** guardrail F2：`rpm` 词边界匹配（Kimi "max RPM: 3" 类文案）。 */
+        private val RATE_LIMIT_RPM_REGEX = Regex("""\brpm\b""")
+
         /** 命名空间分隔符（`skillName__toolName`）。 */
         internal const val NAMESPACE_SEPARATOR = "__"
 
@@ -721,6 +804,30 @@ open class SkillExecutor(
                 // UXR8 N2 Phase 2（ADR-030）：ask_user 反问结果不在失败识别之列
                 //（其为"等待用户输入"语义，非失败；由 executeLoop 检测标记前缀单独处理）。
                 false
+
+        /**
+         * UXR11 U2（ADR-033）：判断流式错误事件是否为服务端限流（429，纯函数可测）。
+         *
+         * 覆盖 [io.prism.network.OpenAICompatibleProvider.mapHttpError] 的 429 专属文案
+         * （"请求过于频繁，触发服务端限流（429）"）及其它 Provider 的 rate_limit 变体
+         * （OpenAI "rate_limit_exceeded" / Kimi "reached organization max RPM" / 状态码 429）。
+         *
+         * @param message [StreamEvent.Error] 的 message（可能为 null）
+         * @return true 表示限流（应退避重试），false 表示其它错误
+         */
+        internal fun isRateLimitError(message: String?): Boolean {
+            if (message.isNullOrBlank()) return false
+            val lower = message.lowercase()
+            // guardrail F2：`\b429\b` 词边界匹配避免把 "错误码 4299" 误判为 429 限流
+            return RATE_LIMIT_429_REGEX.containsMatchIn(lower) ||
+                lower.contains("rate_limit") ||
+                lower.contains("rate limit") ||
+                lower.contains("限流") ||
+                lower.contains("请求过于频繁") ||
+                // Kimi/Moonshot： "reached organization max RPM: 3"（账号级 RPM 配额）
+                lower.contains("max rpm") ||
+                RATE_LIMIT_RPM_REGEX.containsMatchIn(lower)
+        }
 
         /**
          * 解析 ask_user 工具结果载荷（UXR8 N2 Phase 2，ADR-030，纯函数可测）。

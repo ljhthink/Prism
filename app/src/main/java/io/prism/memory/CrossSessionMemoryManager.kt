@@ -123,42 +123,48 @@ class CrossSessionMemoryManager(
                     if (msg.content.length <= MAX_SUMMARY_MSG_CHARS) msg
                     else msg.copy(content = msg.content.takeLast(MAX_SUMMARY_MSG_CHARS))
                 }
-            val summary = try {
-                summarizer.summarize(importantMessages, providerConfig)
+            val memories = try {
+                summarizer.extractMemories(importantMessages, providerConfig)
             } catch (e: CancellationException) {
                 throw e // BR-error-handling-007：协程取消必须重抛
             } catch (e: Exception) {
-                // 摘要 LLM 调用失败 → 记录并降级为规则抽取（逐对存储）
-                Log.w(TAG, "saveSessionMemories: LLM 摘要失败（${e::class.simpleName}），降级为规则抽取")
+                // 记忆抽取 LLM 调用失败 → 记录并降级为规则抽取（逐对存储）
+                Log.w(TAG, "saveSessionMemories: LLM 记忆抽取失败（${e::class.simpleName}），降级为规则抽取")
                 null
-            }?.takeIf { it.isNotBlank() }
-            if (summary != null) {
-                val summarySaved = try {
-                    val content = "$MEMORY_SUMMARY_PREFIX$summary"
-                    val embedding = embedder.embed(content)
-                    memoryRepository.save(
-                        MemoryRecord(
-                            sessionId = sessionId,
-                            content = content,
-                            embedding = embedding,
-                            timestamp = turnPairs.first().first.timestamp,
-                            turnCount = 1
-                        )
-                    )
-                    true
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    // M-2（guardrail TKN-UXR9-GUARDRAIL-001，CWE-754）：摘要记录 embed/save 失败
-                    // **不得 return 0 丢弃全部记忆**——须落入下方逐对存储（规则抽取降级），
-                    // 保证有价值内容不因摘要入库失败而整体丢失。
-                    Log.w(TAG, "saveSessionMemories: 摘要入库失败（${e::class.simpleName}），降级为逐对存储")
-                    false
-                }
-                if (summarySaved) return 1
-                // 摘要入库失败 → 落入下方逐对存储（规则抽取降级）
             }
-            // summary == null → 落入下方逐对存储（规则抽取降级）
+            when {
+                // LLM 成功但判定无值得记住的记忆 → 不落库（根治"什么都记"）
+                memories != null && memories.isEmpty() -> return 0
+                // LLM 成功且有原子记忆 → 逐条入库（每条独立记忆向量）
+                memories != null -> {
+                    var saved = 0
+                    for ((index, memory) in memories.withIndex()) {
+                        try {
+                            val content = "$MEMORY_SUMMARY_PREFIX$memory"
+                            val embedding = embedder.embed(content)
+                            memoryRepository.save(
+                                MemoryRecord(
+                                    sessionId = sessionId,
+                                    content = content,
+                                    embedding = embedding,
+                                    timestamp = turnPairs.first().first.timestamp,
+                                    turnCount = index + 1
+                                )
+                            )
+                            saved++
+                        } catch (e: CancellationException) {
+                            throw e // BR-error-handling-007
+                        } catch (e: Exception) {
+                            // M-2（guardrail TKN-UXR9-GUARDRAIL-001，CWE-754）：单条记忆
+                            // embed/save 失败跳过该条，其余继续；全部失败才落入逐对存储兜底。
+                            Log.w(TAG, "saveSessionMemories: 记忆第 ${index + 1} 条入库失败（${e::class.simpleName}），跳过")
+                        }
+                    }
+                    if (saved > 0) return saved
+                    // 全部入库失败 → 落入下方逐对存储（规则抽取降级，不丢数据）
+                }
+                // memories == null（LLM 调用失败）→ 落入下方逐对存储（规则抽取降级）
+            }
         }
 
         val limitedPairs = turnPairs.take(maxMemories.coerceIn(1, DEFAULT_MAX_MEMORIES_PER_SESSION))
@@ -382,7 +388,7 @@ class CrossSessionMemoryManager(
          * 标识该记忆来自会话结束时的 LLM 摘要压缩（区别于逐对存储的原文记录），
          * 检索注入时仍走 [MEMORY_CONTEXT_PREFIX] 统一格式。
          */
-        internal const val MEMORY_SUMMARY_PREFIX = "[摘要] "
+        internal const val MEMORY_SUMMARY_PREFIX = "[记忆] "
 
         /**
          * L2 检索相似度阈值（UXR9 US-904 AC-3）。
@@ -447,3 +453,5 @@ class CrossSessionMemoryManager(
         private const val MIN_IMPORTANT_LEN = 8
     }
 }
+
+

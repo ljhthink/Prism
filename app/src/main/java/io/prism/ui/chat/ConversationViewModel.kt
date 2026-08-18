@@ -1858,6 +1858,22 @@ class ConversationViewModel(
          *
          * 不替代 [buildRagPlan] 的相似度防线，两者叠加（先按需、再按相关度）。
          */
+
+        /**
+         * UXR11 U1（ADR-033）：文档内容直发消息前缀（与 ConversationScreen.extractDocumentText
+         * 的 `【文档：$displayName】` 包装一致）。以此前缀开头的用户消息 = R5「＋→文件」上传的
+         * 文档内容（+ 用户需求合并），跳过 RAG 自动注入（见 [needsRagRetrieval]）。
+         */
+        internal const val DOCUMENT_MESSAGE_PREFIX = "【文档："
+
+        /**
+         * RAG 需求预判跳过短语集（UXR8-R3，ADR-028；UXR11 U1 扩展）。
+         *
+         * 以下消息**整句**（归一化后）命中 → [needsRagRetrieval] 返回 false，跳过 embed+search：
+         * - 寒暄/问候、确认/回应、礼貌回应、结束/离开
+         *
+         * 不替代 [buildRagPlan] 的相似度防线，两者叠加（先按需、再按相关度）。
+         */
         private val RAG_SKIP_PHRASES = setOf(
             // 寒暄/问候
             "你好", "您好", "hi", "hello", "嗨", "哈喽", "在吗", "早上好", "下午好", "晚上好",
@@ -1890,6 +1906,11 @@ class ConversationViewModel(
          * 用户消息无条件执行 embed+search，导致问候/闲聊/确认类消息也触发知识库片段注入，
          * 污染 LLM 上下文。本函数做轻量级需求预判：
          * - 消息归一化后**整句**命中 [RAG_SKIP_PHRASES] → 跳过（纯确认/寒暄，无检索意图）
+         * - UXR11 U1（ADR-033）：**文件内容直发消息**（R5「＋→文件」上传，文本以
+         *   [DOCUMENT_MESSAGE_PREFIX]「【文档：」包裹）→ 跳过 RAG 自动注入 —— 文档本身
+         *   就是本轮上下文，无需知识库检索；且长文档作为 query 会让多语言嵌入模型检索出
+         *   无关片段注入 LLM 上下文（真机实测：上传文件后即使无检索需求，知识库资料仍被注入）。
+         *   用户如需知识库关联，可显式用 knowledge_base__search 工具（RAG 开启时已注入）。
          * - 其余消息（包括短查询如"查询"，以及含查询内容的长句）照常走相似度阈值过滤
          *
          * 启发式是**保守过滤器**：仅拦截明显无需求的消息，其余照常走相似度阈值过滤。
@@ -1901,6 +1922,8 @@ class ConversationViewModel(
         internal fun needsRagRetrieval(queryText: String): Boolean {
             // 空白消息无检索需求
             if (queryText.isBlank()) return false
+            // UXR11 U1（ADR-033）：文档内容直发消息跳过 RAG 自动注入
+            if (queryText.startsWith(DOCUMENT_MESSAGE_PREFIX)) return false
             return normalizeRagText(queryText) !in RAG_SKIP_PHRASES
         }
 

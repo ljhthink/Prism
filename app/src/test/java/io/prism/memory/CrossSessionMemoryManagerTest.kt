@@ -3,7 +3,9 @@ package io.prism.memory
 import io.prism.data.MemoryRepository
 import io.prism.data.MemorySearchResult
 import io.prism.data.MyObjectBox
+import io.prism.data.ProviderConfig
 import io.prism.embedding.FakeEmbedder
+import io.prism.network.ChatCompletionProvider
 import io.prism.ui.model.ChatMessage
 import io.prism.ui.model.Role
 import io.objectbox.BoxStore
@@ -499,5 +501,113 @@ class CrossSessionMemoryManagerTest {
         assertEquals("应形成 1 个轮次对（前导 ASSISTANT 被跳过）", 1, pairs.size)
         assertEquals("user 应是'你好，我想了解 Prism 功能'", "你好，我想了解 Prism 功能", pairs[0].first.content)
         assertEquals("assistant 应是欢迎回复", "你好！有什么可以帮您？", pairs[0].second.content)
+    }
+
+    // ==================== UXR11 U5：saveSessionMemories 原子记忆抽取三态（ADR-033） ====================
+
+    /** 测试用 ProviderConfig（供 LLM 原子记忆抽取路径）。 */
+    private val testConfig = ProviderConfig(
+        name = "test-provider",
+        baseUrl = "https://api.test.com/v1",
+        apiKeyRef = "test-key-ref"
+    )
+
+    /** 构造 3 个重要轮次的消息列表（≥ MIN_SUMMARY_TURNS=3，触发 LLM 抽取）。 */
+    private fun importantMessages(count: Int): List<ChatMessage> =
+        (1..count).flatMap { i ->
+            listOf(
+                ChatMessage(i * 10L, Role.USER, "我是用户第 $i 次提问，请记住我的偏好", 1000L * i),
+                ChatMessage(i * 10L + 1, Role.ASSISTANT, "好的，第 $i 次回答", 1000L * i + 1)
+            )
+        }
+
+    @Test
+    fun saveSessionMemories_extracts_atomic_memories_when_llm_succeeds() = runBlocking {
+        val fake = Uxr11FakeCompletionProvider(
+            returnValue = "1. 用户偏好使用简体中文交流\n2. 用户是 Android 开发者，使用 Kotlin"
+        )
+        val summarizer = ConversationSummarizer(fake)
+        val manager = CrossSessionMemoryManager(embedder, memoryRepository, summarizer, retrievalThreshold = 0.0)
+
+        val count = manager.saveSessionMemories("session-llm", importantMessages(3), providerConfig = testConfig)
+
+        assertEquals("LLM 成功应逐条保存 2 条原子记忆", 2, count)
+        assertEquals("应调用 LLM 1 次", 1, fake.callCount)
+        val records = memoryRepository.getBySession("session-llm")
+        assertEquals(2, records.size)
+        assertTrue("原子记忆应含[记忆]前缀", records.any { it.content.startsWith("[记忆]") })
+        assertTrue("原子记忆应含用户偏好", records.any { it.content.contains("用户偏好使用简体中文") })
+        assertTrue("原子记忆应含用户事实", records.any { it.content.contains("用户是 Android 开发者") })
+    }
+
+    @Test
+    fun saveSessionMemories_returns_zero_when_llm_finds_no_valuable_memory() = runBlocking {
+        // LLM 成功但判定无值得跨会话记住的记忆（输出"无"）→ 不落库（根治"什么都记"）
+        val fake = Uxr11FakeCompletionProvider(returnValue = "无")
+        val summarizer = ConversationSummarizer(fake)
+        val manager = CrossSessionMemoryManager(embedder, memoryRepository, summarizer, retrievalThreshold = 0.0)
+
+        val count = manager.saveSessionMemories("session-empty", importantMessages(3), providerConfig = testConfig)
+
+        assertEquals("LLM 判定无价值应 return 0", 0, count)
+        assertEquals("应调用 LLM 1 次", 1, fake.callCount)
+        assertTrue("不应降级为逐对存储", memoryRepository.getBySession("session-empty").isEmpty())
+    }
+
+    @Test
+    fun saveSessionMemories_falls_back_to_rule_extraction_when_llm_fails() = runBlocking {
+        // LLM 调用抛异常 → 降级为规则抽取（逐对存储兜底，不丢数据）
+        val fake = Uxr11FakeCompletionProvider(throwOnCall = true)
+        val summarizer = ConversationSummarizer(fake)
+        val manager = CrossSessionMemoryManager(embedder, memoryRepository, summarizer, retrievalThreshold = 0.0)
+
+        val count = manager.saveSessionMemories("session-fallback", importantMessages(3), providerConfig = testConfig)
+
+        assertEquals("LLM 失败应降级为逐对存储 3 条", 3, count)
+        assertEquals("应尝试 LLM 1 次", 1, fake.callCount)
+        val records = memoryRepository.getBySession("session-fallback")
+        assertEquals(3, records.size)
+        assertTrue("降级记录应为轮次对格式", records.any { it.content.startsWith("[用户]") })
+    }
+
+    @Test
+    fun saveSessionMemories_below_MIN_SUMMARY_TURNS_skips_llm_uses_rule_extraction() = runBlocking {
+        // 重要轮次 < MIN_SUMMARY_TURNS=3 → 不触发 LLM 调用（BYOK 成本门槛），直接逐对存储
+        val fake = Uxr11FakeCompletionProvider(returnValue = "1. 用户偏好 X")
+        val summarizer = ConversationSummarizer(fake)
+        val manager = CrossSessionMemoryManager(embedder, memoryRepository, summarizer, retrievalThreshold = 0.0)
+
+        val count = manager.saveSessionMemories("session-below-threshold", importantMessages(2), providerConfig = testConfig)
+
+        assertEquals("低于门槛应直接逐对存储 2 条", 2, count)
+        assertEquals("不应调用 LLM", 0, fake.callCount)
+        assertTrue(memoryRepository.getBySession("session-below-threshold").isNotEmpty())
+    }
+
+    /**
+     * UXR11 U5：可控返回值的 ChatCompletionProvider fake（供 ConversationSummarizer 注入）。
+     *
+     * @param returnValue chatCompletion 返回的固定值（"无"模拟 LLM 判定无价值）
+     * @param throwOnCall true 时抛普通异常模拟 LLM 调用失败
+     */
+    private class Uxr11FakeCompletionProvider(
+        private val returnValue: String? = null,
+        private val throwOnCall: Boolean = false
+    ) : ChatCompletionProvider {
+        var callCount: Int = 0
+            private set
+
+        override suspend fun chatCompletion(
+            config: ProviderConfig,
+            messages: List<ChatMessage>,
+            systemPrompt: String?,
+            ragContext: String?,
+            thinkingEnabled: Boolean?,
+            reasoningEffort: String?
+        ): String? {
+            callCount++
+            if (throwOnCall) throw RuntimeException("LLM 记忆抽取失败")
+            return returnValue
+        }
     }
 }

@@ -235,6 +235,202 @@ class SkillExecutorTest {
         assertFalse(SkillExecutor.shouldEmitMaxRoundsError(false, 3, 10))
     }
 
+    // ==================== UXR11 U2：429 限流识别（ADR-033） ====================
+
+    @Test
+    fun `isRateLimitError detects 429 status and variants`() {
+        assertTrue(
+            "429 状态码应识别为限流",
+            SkillExecutor.isRateLimitError("请求失败：HTTP 429")
+        )
+        assertTrue(
+            "OpenAI rate_limit_exceeded 应识别",
+            SkillExecutor.isRateLimitError("rate_limit_exceeded: 429")
+        )
+        assertTrue(
+            "Kimi organization max RPM 应识别",
+            SkillExecutor.isRateLimitError("Your account request reached organization max RPM: 3, please try again")
+        )
+        assertTrue(
+            "中文限流文案应识别",
+            SkillExecutor.isRateLimitError("请求过于频繁，触发服务端限流（429）。请稍等几秒后重试")
+        )
+        assertTrue(
+            "rate limit 空格变体应识别",
+            SkillExecutor.isRateLimitError("rate limit exceeded")
+        )
+    }
+
+    @Test
+    fun `isRateLimitError returns false for non-rate-limit errors`() {
+        assertFalse("空消息不识别", SkillExecutor.isRateLimitError(null))
+        assertFalse("空串不识别", SkillExecutor.isRateLimitError(""))
+        assertFalse("普通错误不识别", SkillExecutor.isRateLimitError("网络请求失败，请检查网络连接"))
+        assertFalse("鉴权错误不识别", SkillExecutor.isRateLimitError("鉴权失败，请检查 API Key"))
+        assertFalse("400 错误不识别", SkillExecutor.isRateLimitError("请求被拒绝（400），请检查 Provider 配置"))
+        assertFalse("工具失败不识别", SkillExecutor.isRateLimitError("工具执行失败：读取文件失败"))
+    }
+
+    // ==================== UXR11 U2：executeLoop 429 自动退避重试回路（ADR-033） ====================
+
+    @Test
+    fun `executeLoop retries rate limit error and continues to success`() = runBlocking {
+        // 第 1 轮触发 429 → 不转发给用户，退避 RATE_LIMIT_BACKOFF_MS 后重发同一轮 →
+        // 拿到 tool_call → 执行工具 → 第 3 轮纯文本结束
+        val provider = FakeChatStreamProvider(
+            rounds = listOf(
+                listOf(StreamEvent.Error("请求过于频繁，触发服务端限流（429）")),
+                listOf(StreamEvent.ToolCallComplete("c1", "skill__t", emptyMap())),
+                listOf(StreamEvent.Delta("done"), StreamEvent.Done)
+            )
+        )
+        val mcpProvider = FakeMcpToolProvider(returnResult = "result")
+        val gate = FakeConfirmationGate(approve = true)
+        val executor = SkillExecutor(mcpProvider, gate, Dispatchers.Unconfined)
+
+        val events = mutableListOf<StreamEvent>()
+        var idCounter = 1L
+        val result = executor.executeLoop(
+            provider, makeProviderConfig(), listOf(makeUserMessage("hi")),
+            systemPrompt = null, ragContext = null,
+            tools = listOf(makeToolDefinition("skill__t")),
+            mcpServers = listOf(makeServer("fs", true)),
+            maxRounds = 10, idGenerator = { idCounter++ }
+        ) { events.add(it) }
+
+        assertFalse("429 在重试耗尽前不应转发给用户", events.any { it is StreamEvent.Error })
+        assertEquals("应经历 429 重试 + 工具轮 + 文本轮共 3 次 LLM 请求", 3, provider.roundsConsumed)
+        assertTrue("重试后工具应正常执行", mcpProvider.callToolCalled)
+        assertEquals("user + assistant 占位 + tool result", 3, result.size)
+    }
+
+    @Test
+    fun `executeLoop rate limit retries exhausted notifies user and terminates`() = runBlocking {
+        // 连续 3 次 429（首次 + MAX_RATE_LIMIT_RETRIES=2 次重试，退避 3s/6s）→
+        // 重试耗尽后补发"请稍等几秒后重试"提示给用户，回路自然结束，不无限重试
+        val provider = FakeChatStreamProvider(
+            rounds = listOf(listOf(StreamEvent.Error("请求失败：HTTP 429"))),
+            repeatLastRound = true
+        )
+        val mcpProvider = FakeMcpToolProvider(returnResult = "should not be called")
+        val gate = FakeConfirmationGate(approve = true)
+        val executor = SkillExecutor(mcpProvider, gate, Dispatchers.Unconfined)
+
+        val events = mutableListOf<StreamEvent>()
+        val result = executor.executeLoop(
+            provider, makeProviderConfig(), listOf(makeUserMessage("hi")),
+            systemPrompt = null, ragContext = null,
+            tools = listOf(makeToolDefinition("skill__t")),
+            mcpServers = listOf(makeServer("fs", true)),
+            maxRounds = 10, idGenerator = { 1L }
+        ) { events.add(it) }
+
+        val errors = events.filterIsInstance<StreamEvent.Error>()
+        assertEquals("重试耗尽后应补发 1 条限流提示", 1, errors.size)
+        assertTrue("提示应说明稍等重试", errors[0].message.contains("请稍等几秒后重试"))
+        assertFalse("不应转发原始 429 文案", errors[0].message.contains("HTTP 429"))
+        // 原始 429 Error 事件在 collect 中被截留（retry 分支 return@collect），未转发给 UI
+        assertFalse(
+            "原始 429 事件不应到达 UI",
+            events.any { (it as? StreamEvent.Error)?.message?.contains("HTTP 429") == true }
+        )
+        // 1 次原始 + 2 次重试 = 3 次 LLM 请求后停止，不无限重试放大请求频率
+        assertEquals("共 3 次 LLM 请求后停止", 3, provider.roundsConsumed)
+        assertFalse("限流时不应执行工具", mcpProvider.callToolCalled)
+        assertEquals("回路自然结束，消息列表不变", 1, result.size)
+    }
+
+    @Test
+    fun `executeLoop forwards non-rate-limit error immediately without retry`() = runBlocking {
+        val provider = FakeChatStreamProvider(
+            rounds = listOf(listOf(StreamEvent.Error("网络请求失败，请检查网络连接")))
+        )
+        val mcpProvider = FakeMcpToolProvider(returnResult = "should not be called")
+        val executor = SkillExecutor(mcpProvider, FakeConfirmationGate(true), Dispatchers.Unconfined)
+
+        val events = mutableListOf<StreamEvent>()
+        executor.executeLoop(
+            provider, makeProviderConfig(), listOf(makeUserMessage("hi")),
+            systemPrompt = null, ragContext = null,
+            tools = listOf(makeToolDefinition("skill__t")),
+            mcpServers = listOf(makeServer("fs", true)),
+            maxRounds = 10, idGenerator = { 1L }
+        ) { events.add(it) }
+
+        val errors = events.filterIsInstance<StreamEvent.Error>()
+        assertEquals("非限流错误应立即转发", 1, errors.size)
+        assertEquals("原始错误消息应保留", "网络请求失败，请检查网络连接", errors[0].message)
+        assertEquals("非限流错误不应触发重试", 1, provider.roundsConsumed)
+        assertFalse(mcpProvider.callToolCalled)
+    }
+
+    @Test
+    fun `executeLoop rate limit with completed tool calls does not retry and keeps result`() = runBlocking {
+        // guardrail F1 幂等守卫：限流错误到达时本轮已收集到 tool_call（completedToolCalls 非空）
+        // → 不清空、不回退轮号重试（避免重复执行非幂等工具），按正常流程回灌结果后结束回路
+        val provider = FakeChatStreamProvider(
+            rounds = listOf(
+                listOf(
+                    StreamEvent.ToolCallComplete("c1", "skill__t", emptyMap()),
+                    StreamEvent.Error("请求失败：HTTP 429")
+                ),
+                listOf(StreamEvent.Delta("done"), StreamEvent.Done)
+            )
+        )
+        val mcpProvider = FakeMcpToolProvider(returnResult = "result")
+        val executor = SkillExecutor(mcpProvider, FakeConfirmationGate(true), Dispatchers.Unconfined)
+
+        val events = mutableListOf<StreamEvent>()
+        var idCounter = 1L
+        val result = executor.executeLoop(
+            provider, makeProviderConfig(), listOf(makeUserMessage("hi")),
+            systemPrompt = null, ragContext = null,
+            tools = listOf(makeToolDefinition("skill__t")),
+            mcpServers = listOf(makeServer("fs", true)),
+            maxRounds = 10, idGenerator = { idCounter++ }
+        ) { events.add(it) }
+
+        assertEquals("不应回退轮号重试（工具轮 + 文本轮 = 2 次）", 2, provider.roundsConsumed)
+        assertTrue("已收集的 tool_call 仍应执行", mcpProvider.callToolCalled)
+        assertEquals("user + assistant 占位 + tool result", 3, result.size)
+        val errors = events.filterIsInstance<StreamEvent.Error>()
+        assertEquals("本轮限流信号仍应补发提示（roundRateLimited=true）", 1, errors.size)
+        assertTrue(errors[0].message.contains("请稍等几秒后重试"))
+    }
+
+    @Test
+    fun `executeLoop waits interRoundDelayMs between rounds after first`() = runBlocking {
+        // UXR11 U2 轮间退避：生产由 PrismApplication 注入 TOOL_LOOP_INTER_ROUND_DELAY_MS（2s），
+        // 测试用小值验证"第 2 轮起等待"语义（构造器默认 0 供既有单测不等待）
+        val interRoundDelay = 60L
+        val provider = FakeChatStreamProvider(
+            rounds = listOf(
+                listOf(StreamEvent.ToolCallComplete("c1", "skill__t", emptyMap())),
+                listOf(StreamEvent.Delta("done"), StreamEvent.Done)
+            )
+        )
+        val executor = SkillExecutor(
+            FakeMcpToolProvider("result"), FakeConfirmationGate(true),
+            Dispatchers.Unconfined, interRoundDelayMs = interRoundDelay
+        )
+
+        val start = System.currentTimeMillis()
+        executor.executeLoop(
+            provider, makeProviderConfig(), listOf(makeUserMessage("hi")),
+            systemPrompt = null, ragContext = null,
+            tools = listOf(makeToolDefinition("skill__t")),
+            mcpServers = listOf(makeServer("fs", true)),
+            maxRounds = 10, idGenerator = { 1L }
+        ) { /* ignore */ }
+        val elapsed = System.currentTimeMillis() - start
+
+        assertEquals("两轮消费", 2, provider.roundsConsumed)
+        assertTrue(
+            "第 2 轮请求前应等待 interRoundDelayMs（实际 ${elapsed}ms >= $interRoundDelay）",
+            elapsed >= interRoundDelay
+        )
+    }
+
     @Test
     fun `buildAssistantToolCallMessage creates message with toolCalls refs`() {
         val toolCalls = listOf(

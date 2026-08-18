@@ -14,6 +14,7 @@ import io.ktor.http.headersOf
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -102,7 +103,7 @@ class LocalMcpToolProviderFetchTest {
                 headers = headersOf(HttpHeaders.ContentType, "text/html")
             )
         }
-        val client = HttpClient(engine)
+        val client = HttpClient(engine) { followRedirects = false }
         val provider = providerWith(client)
 
         val result = provider.callTool(
@@ -123,7 +124,7 @@ class LocalMcpToolProviderFetchTest {
             requestCount++
             respond("unexpected", HttpStatusCode.OK)
         }
-        val client = HttpClient(engine)
+        val client = HttpClient(engine) { followRedirects = false }
         val provider = providerWith(client)
 
         val result = provider.callTool(
@@ -154,7 +155,7 @@ class LocalMcpToolProviderFetchTest {
         val engine = MockEngine {
             respond("Not Found", HttpStatusCode.NotFound)
         }
-        val client = HttpClient(engine)
+        val client = HttpClient(engine) { followRedirects = false }
         val provider = providerWith(client)
 
         val result = provider.callTool(
@@ -164,6 +165,43 @@ class LocalMcpToolProviderFetchTest {
 
         assertTrue("应返回失败文案", result.contains("抓取失败"))
         assertFalse("不应泄露内部细节", result.contains("Exception"))
+    }
+
+    @Test
+    fun `fetch tool 403 returns anti-crawler diagnostic without retry prompt`() = runBlocking {
+        // R3（UXR10，ADR-032）：403 是反爬/需登录常态，应给出可诊断文案并显式标注勿重试，
+        // 避免 LLM 误以为 URL 写错而反复重试（放大请求频率 → 叠加 LLM 端点限流）。
+        val engine = MockEngine {
+            respond("Forbidden", HttpStatusCode.Forbidden)
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "https://example.com/blocked")
+        )
+
+        assertTrue("403 应提示反爬/需登录", result.contains("403"))
+        assertTrue("403 应提示勿反复重试", result.contains("勿反复重试") || result.contains("勿连续抓取"))
+    }
+
+    @Test
+    fun `fetch tool 429 returns rate-limit diagnostic without retry prompt`() = runBlocking {
+        // R3（UXR10，ADR-032）：目标站限流 429 文案，引导稍后再试或换来源，勿连续抓取
+        val engine = MockEngine {
+            respond("Too Many Requests", HttpStatusCode.TooManyRequests)
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "https://example.com/limited")
+        )
+
+        assertTrue("429 应提示目标站限流", result.contains("429"))
+        assertTrue("429 应提示勿连续抓取", result.contains("勿连续抓取") || result.contains("勿反复重试"))
     }
 
     @Test
@@ -180,7 +218,7 @@ class LocalMcpToolProviderFetchTest {
         val engine = MockEngine {
             respond("x".repeat(1000), HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/plain"))
         }
-        val client = HttpClient(engine)
+        val client = HttpClient(engine) { followRedirects = false }
         val provider = providerWith(client)
 
         val result = provider.callTool(
@@ -190,5 +228,170 @@ class LocalMcpToolProviderFetchTest {
 
         // 截断到上限（Content-Length 预检可能先拦截，或 bodyAsText 后 take 上限）
         assertTrue("不应崩溃", result.isNotBlank())
+    }
+
+    // ==================== UXR11 U3：fetchWithRedirects 手动跟随 3xx（ADR-033） ====================
+
+    @Test
+    fun `fetch follows 3xx redirect to public location`() = runBlocking {
+        val requests = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            requests.add(request.url.toString())
+            if (request.url.toString().endsWith("/start")) {
+                respond(
+                    content = "",
+                    status = HttpStatusCode.Found, // 302
+                    headers = headersOf(HttpHeaders.Location, "https://example.com/target")
+                )
+            } else {
+                respond(
+                    content = "<html><body>目标内容</body></html>",
+                    status = HttpStatusCode.OK,
+                    headers = headersOf(HttpHeaders.ContentType, "text/html")
+                )
+            }
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "https://example.com/start")
+        )
+
+        assertEquals("应跟随 1 次重定向共 2 次请求", 2, requests.size)
+        assertEquals("目标 URL 应为重定向后地址", "https://example.com/target", requests[1])
+        assertTrue("应返回目标页内容", result.contains("目标内容"))
+    }
+
+    @Test
+    fun `fetch does not follow redirect to internal address (SSRF fail-closed)`() = runBlocking {
+        // 重定向目标指向云元数据内网地址 → isPublicHttpUrl 拒绝跟随，返回原始 3xx 可诊断文案
+        val requests = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            requests.add(request.url.toString())
+            respond(
+                content = "",
+                status = HttpStatusCode.Found,
+                headers = headersOf(HttpHeaders.Location, "http://169.254.169.254/latest/meta-data")
+            )
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "https://example.com/redirect")
+        )
+
+        assertEquals("不应跟随到内网地址，仅 1 次请求", 1, requests.size)
+        assertFalse("不应出现内网地址请求", requests.any { it.contains("169.254") })
+        assertTrue("应返回原始 3xx 的可诊断文案", result.contains("抓取失败：HTTP 302"))
+    }
+
+    @Test
+    fun `fetch follows at most FETCH_REDIRECT_MAX hops`() = runBlocking {
+        // 每跳都返回 302 指向下一跳 → 上限 3 跳后不再跟随，返回第 4 个 3xx 可诊断文案
+        val requests = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            requests.add(request.url.toString())
+            respond(
+                content = "",
+                status = HttpStatusCode.Found,
+                headers = headersOf(HttpHeaders.Location, "https://example.com/step-${requests.size}")
+            )
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "https://example.com/0")
+        )
+
+        // UXR11 U3（ADR-033）：客户端 followRedirects=false（Ktor 3.x 默认跟随重定向），
+        // 3xx 由 fetchWithRedirects 手动跟随并逐跳 SSRF 校验。每跳返回 302 指向下一跳 →
+        // 上限 3 跳后不再跟随，返回第 4 个 3xx 可诊断文案。
+        assertEquals("最多跟随 3 跳（共 4 次请求）", 4, requests.size)
+        assertTrue("超出上限的 3xx 返回可诊断文案", result.contains("抓取失败：HTTP 302"))
+    }
+
+    @Test
+    fun `fetch resolves relative redirect location with URI resolve`() = runBlocking {
+        val requests = mutableListOf<String>()
+        val engine = MockEngine { request ->
+            requests.add(request.url.toString())
+            if (requests.size == 1) {
+                respond(
+                    content = "",
+                    status = HttpStatusCode.Found,
+                    headers = headersOf(HttpHeaders.Location, "/docs/page")
+                )
+            } else {
+                respond(
+                    content = "<html><body>相对路径目标</body></html>",
+                    status = HttpStatusCode.OK,
+                    headers = headersOf(HttpHeaders.ContentType, "text/html")
+                )
+            }
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "https://example.com/base/start")
+        )
+
+        assertEquals(2, requests.size)
+        assertEquals("相对 Location 应解析为绝对 URL", "https://example.com/docs/page", requests[1])
+        assertTrue("应返回重定向后内容", result.contains("相对路径目标"))
+    }
+
+    @Test
+    fun `fetch sends browser typical headers`() = runBlocking {
+        var captured: io.ktor.client.request.HttpRequestData? = null
+        val engine = MockEngine { request ->
+            captured = request
+            respond(
+                "<html><body>ok</body></html>",
+                HttpStatusCode.OK,
+                headersOf(HttpHeaders.ContentType, "text/html")
+            )
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        provider.callTool(fetchConfig, "fetch", mapOf("url" to "https://example.com/"))
+
+        val headers = captured!!.headers
+        assertTrue("应带浏览器 UA", headers[HttpHeaders.UserAgent]?.contains("Chrome") == true)
+        assertTrue("应带 Accept", headers[HttpHeaders.Accept]?.contains("text/html") == true)
+        assertTrue("应带 Accept-Language", headers[HttpHeaders.AcceptLanguage]?.isNotBlank() == true)
+        assertTrue("应带 Cache-Control", headers[HttpHeaders.CacheControl] == "no-cache")
+        assertEquals("应带 Sec-Fetch-Dest", "document", headers["Sec-Fetch-Dest"])
+        assertEquals("应带 Sec-Fetch-Mode", "navigate", headers["Sec-Fetch-Mode"])
+        assertEquals("应带 Sec-Fetch-Site", "none", headers["Sec-Fetch-Site"])
+        assertEquals("应带 Sec-Fetch-User", "?1", headers["Sec-Fetch-User"])
+        assertEquals("应带 Upgrade-Insecure-Requests", "1", headers["Upgrade-Insecure-Requests"])
+        // 刻意不设 Accept-Encoding：交由 OkHttp 透明 gzip 解压避免响应乱码
+        assertNull("不应显式设置 Accept-Encoding", headers[HttpHeaders.AcceptEncoding])
+    }
+
+    @Test
+    fun `fetch 404 returns diagnostic without retry prompt`() = runBlocking {
+        val engine = MockEngine {
+            respond("Not Found", HttpStatusCode.NotFound)
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "https://example.com/missing")
+        )
+
+        assertTrue("404 应提示目标页面不存在", result.contains("404"))
+        assertTrue("404 应提示勿反复重试/改用其他来源", result.contains("勿反复重试") || result.contains("改用其他来源"))
     }
 }

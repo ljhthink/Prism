@@ -7,6 +7,7 @@ import io.prism.ui.model.Role
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -145,6 +146,138 @@ class ConversationSummarizerTest {
         )
         summarizer.summarize(messages, testConfig)
         assertNull("ragContext 应为 null（摘要任务不需要 RAG 上下文）", provider.lastRagContext)
+    }
+
+    // ==================== UXR11 U5：原子记忆抽取 extractMemories（ADR-033） ====================
+
+    @Test
+    fun extractMemories_returns_empty_for_empty_messages() = runBlocking {
+        val provider = FakeCompletionProvider("无")
+        val summarizer = ConversationSummarizer(provider)
+        val result = summarizer.extractMemories(emptyList(), testConfig)
+        assertEquals("空消息列表应返回空列表（不触发 LLM）", emptyList<String>(), result)
+        assertEquals("空消息不应触发 LLM 调用", 0, provider.callCount)
+    }
+
+    @Test
+    fun extractMemories_parses_list_lines_and_strips_numbering() = runBlocking {
+        // LLM 返回带序号/列表符号的多行记忆
+        val raw = """1. 用户偏好使用简体中文交流
+- 用户是 Android 开发者，使用 Kotlin 和 Jetpack Compose
+• 用户决定项目采用方案 A
+2. 用户每周日健身"""
+        val provider = FakeCompletionProvider(raw)
+        val summarizer = ConversationSummarizer(provider)
+        val messages = listOf(
+            ChatMessage(1, Role.USER, "我是 Android 开发者", 1000L),
+            ChatMessage(2, Role.ASSISTANT, "了解了。", 2000L)
+        )
+        val result = summarizer.extractMemories(messages, testConfig)
+        assertEquals(4, result?.size)
+        assertEquals("用户偏好使用简体中文交流", result?.get(0))
+        assertEquals("用户是 Android 开发者，使用 Kotlin 和 Jetpack Compose", result?.get(1))
+        assertEquals("用户决定项目采用方案 A", result?.get(2))
+        assertEquals("用户每周日健身", result?.get(3))
+        // 抽取任务应使用记忆抽取 prompt 作为 systemPrompt
+        assertTrue(
+            "应使用记忆抽取 prompt",
+            provider.lastSystemPrompt?.contains("原子记忆") == true
+        )
+    }
+
+    @Test
+    fun extractMemories_filters_empty_and_无_lines() = runBlocking {
+        val raw = """无
+
+1. 用户喜欢喝美式咖啡
+   
+2. 用户计划下周去成都出差"""
+        val provider = FakeCompletionProvider(raw)
+        val summarizer = ConversationSummarizer(provider)
+        val messages = listOf(
+            ChatMessage(1, Role.USER, "我平时喜欢喝美式咖啡", 1000L)
+        )
+        val result = summarizer.extractMemories(messages, testConfig)
+        assertEquals("应过滤'无'与空行", 2, result?.size)
+        assertFalse("不应包含'无'", result?.any { it == "无" } == true)
+    }
+
+    @Test
+    fun extractMemories_caps_at_MEMORY_EXTRACT_MAX() = runBlocking {
+        val raw = (1..10).joinToString("\n") { "$it. 用户第 $it 条记忆" }
+        val provider = FakeCompletionProvider(raw)
+        val summarizer = ConversationSummarizer(provider)
+        val messages = listOf(ChatMessage(1, Role.USER, "test", 1000L))
+        val result = summarizer.extractMemories(messages, testConfig)
+        assertEquals("应截断到上限", ConversationSummarizer.MEMORY_EXTRACT_MAX, result?.size)
+    }
+
+    @Test
+    fun extractMemories_preserves_digit_leading_memory_without_list_marker() = runBlocking {
+        // guardrail F6：仅剥完整序号格式（1. 等），不裸剥数字开头的真实记忆
+        val raw = """1. 用户喜欢养宠物
+- 用户有 2 个孩子
+3）用户计划 2026 年买车"""
+        val provider = FakeCompletionProvider(raw)
+        val summarizer = ConversationSummarizer(provider)
+        val messages = listOf(ChatMessage(1, Role.USER, "test", 1000L))
+        val result = summarizer.extractMemories(messages, testConfig)
+        assertEquals(3, result?.size)
+        assertEquals("用户喜欢养宠物", result?.get(0))
+        assertEquals("用户有 2 个孩子", result?.get(1))
+        assertEquals("用户计划 2026 年买车", result?.get(2))
+    }
+
+    @Test
+    fun extractMemories_truncates_single_memory_to_MAX_MEMORY_ITEM_CHARS() = runBlocking {
+        // guardrail M-1（第二轮复审）：病态/幻觉超长单行记忆截断到单条上限，防无界入库
+        val longLine = "用户特别喜欢".repeat(100)
+        val raw = "1. $longLine"
+        val provider = FakeCompletionProvider(raw)
+        val summarizer = ConversationSummarizer(provider)
+        val messages = listOf(ChatMessage(1, Role.USER, "test", 1000L))
+        val result = summarizer.extractMemories(messages, testConfig)
+        assertEquals(1, result?.size)
+        assertTrue("单条记忆应截断到上限", result!![0].length <= ConversationSummarizer.MAX_MEMORY_ITEM_CHARS)
+        assertEquals("截断长度应为上限", ConversationSummarizer.MAX_MEMORY_ITEM_CHARS, result[0].length)
+    }
+
+    @Test
+    fun extractMemories_returns_empty_when_provider_returns_null() = runBlocking {
+        val provider = FakeCompletionProvider(null)
+        val summarizer = ConversationSummarizer(provider)
+        val messages = listOf(ChatMessage(1, Role.USER, "test", 1000L))
+        val result = summarizer.extractMemories(messages, testConfig)
+        assertEquals("Provider 返回 null 应视为无记忆（空列表）", emptyList<String>(), result)
+    }
+
+    @Test
+    fun extractMemories_returns_null_when_provider_throws_exception() = runBlocking {
+        val provider = FakeCompletionProvider(throwOnCall = true)
+        val summarizer = ConversationSummarizer(provider)
+        val messages = listOf(ChatMessage(1, Role.USER, "test", 1000L))
+        val result = summarizer.extractMemories(messages, testConfig)
+        assertNull("Provider 抛异常应返回 null（调用方降级规则抽取）", result)
+    }
+
+    @Test(expected = CancellationException::class)
+    fun extractMemories_rethrows_cancellation_exception(): Unit = runBlocking {
+        val provider = FakeCompletionProvider(throwCancellation = true)
+        val summarizer = ConversationSummarizer(provider)
+        val messages = listOf(ChatMessage(1, Role.USER, "test", 1000L))
+        summarizer.extractMemories(messages, testConfig)
+    }
+
+    @Test
+    fun buildMemoryExtractionPrompt_returns_non_empty_prompt() {
+        val provider = FakeCompletionProvider("无")
+        val summarizer = ConversationSummarizer(provider)
+        val prompt = summarizer.buildMemoryExtractionPrompt()
+        assertTrue("Prompt 不应为空", prompt.isNotBlank())
+        assertTrue("Prompt 应包含 '原子记忆' 定义", prompt.contains("原子记忆"))
+        assertTrue("Prompt 应显式排除一次性信息查询", prompt.contains("一次性信息查询"))
+        assertTrue("Prompt 应含第三人称约束", prompt.contains("第三人称"))
+        assertTrue("Prompt 应含输出上限约束", prompt.contains("最多 5 条"))
     }
 
     /**

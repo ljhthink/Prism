@@ -29,7 +29,7 @@ import java.io.File
  * | dedupByPriority | 空 / 无冲突 / 三源冲突 / 两源冲突 | 单一来源 |
  * | parseToEntry | 合法 / 缺失 frontmatter / 非法 YAML / REMOTE sourceUri | — |
  * | scanDirectory | 不存在目录 / 空目录 / 合法子目录 / 缺 SKILL.md / 非法 SKILL.md / REMOTE sourceUri | — |
- * | computeSyncDiff | 全新增 / 全更新 / 标记缺失 / 已卸载跳过 / 混合 / toInsert isEnabled=false | — |
+ * | computeSyncDiff | 全新增 / 全更新 / 标记缺失 / 已卸载跳过 / 混合 / toInsert（内置默认启用，用户/远程默认禁用） | — |
  * | mergeWithPersistedState | 继承 isEnabled / 未持久化 / 空 / 部分重叠 | — |
  * | filterEnabledSkills | 空 / 全启用 / 全禁用 / 混合（isEnabled × isInstalled 四象限） | — |
  */
@@ -420,6 +420,20 @@ class SkillRegistryTest {
         assertEquals(2, diff.toInsert.size)
         assertEquals(0, diff.toUpdate.size)
         assertEquals(0, diff.toMarkUninstalled.size)
+        // R4（ADR-032）：内置 Skill 首次安装默认启用（开箱即用，LLM 首次即感知 Skills）
+        assertTrue("内置 Skill 首次安装应默认启用", diff.toInsert.all { it.isEnabled })
+    }
+
+    @Test
+    fun `computeSyncDiff keeps user and remote skills disabled by default on insert`() {
+        // R4（ADR-032）：仅内置 Skill 默认启用；用户自建 / 远程下载 Skill 仍需用户主动启用
+        val discovered = listOf(
+            makeEntry("user-skill", SkillSource.LOCAL_USER),
+            makeEntry("remote-skill", SkillSource.REMOTE)
+        )
+        val diff = SkillRegistry.computeSyncDiff(discovered, emptyMap())
+        assertEquals(2, diff.toInsert.size)
+        assertTrue("用户自建 Skill 不应默认启用", diff.toInsert.none { it.isEnabled })
     }
 
     @Test
@@ -489,11 +503,12 @@ class SkillRegistryTest {
     }
 
     @Test
-    fun `computeSyncDiff toInsert has isEnabled=false`() {
+    fun `computeSyncDiff toInsert builtin has isEnabled=true by default`() {
+        // R4（ADR-032）：内置 Skill 首次安装默认启用（LLM 开箱即感知 Skills）
         val discovered = listOf(makeEntry("new", SkillSource.LOCAL_BUILTIN))
         val diff = SkillRegistry.computeSyncDiff(discovered, emptyMap())
         assertEquals(1, diff.toInsert.size)
-        assertTrue("New skill should default to isEnabled=false", !diff.toInsert[0].isEnabled)
+        assertTrue("Builtin skill should default to isEnabled=true (R4)", diff.toInsert[0].isEnabled)
         assertEquals("New skill should have id=0 (unassigned)", 0L, diff.toInsert[0].id)
     }
 

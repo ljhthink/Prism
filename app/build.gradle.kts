@@ -95,6 +95,8 @@ android {
     testOptions {
         unitTests {
             isReturnDefaultValues = true
+            // R1（ADR-032）：Robolectric 需要加载 Android resources（pdfbox-android 测试）
+            isIncludeAndroidResources = true
             all { test ->
                 val ignorePerf = project.findProperty("ignorePerformanceTests")?.toString()
                 if (ignorePerf == "false") {
@@ -155,7 +157,9 @@ dependencies {
     // M3 RAG（ADR-007）：端侧嵌入运行时（onnxruntime-android，MIT）+ 文档解析（Apach POI，Apache 2.0）
     implementation(libs.onnxruntime.android)
     implementation(libs.poi.ooxml)
-    implementation(libs.pdfbox)
+    // R1（UXR10 真机修复）：桌面 PDFBox 3.0.8 依赖 java.awt（Android 无此包）→ 真机解析 PDF 崩溃。
+    // 生产切换 pdfbox-android（Apache PDFBox 2.0.27 的 Android 移植，ADR-032）；桌面 pdfbox 仅 test 供夹具。
+    implementation(libs.pdfbox.android)
     // M4 Skills（ADR-013 5.2）：SKILL.md frontmatter YAML 解析（snakeyaml-engine-kmp，Apache 2.0）
     implementation(libs.snakeyaml.engine.kmp)
     implementation(libs.markdown.renderer.m3)
@@ -169,4 +173,8 @@ dependencies {
     testImplementation(libs.ktor.server.sse)
     // US-014：JVM 单测用 onnxruntime（纯 JVM 版，含桌面原生库）替代 onnxruntime-android AAR
     testImplementation(libs.onnxruntime)
+    // R1（ADR-032）：桌面 pdfbox 仅供测试夹具生成 PDF（TestDocumentFactory/DocumentParserEdgeCaseTest）
+    testImplementation(libs.pdfbox)
+    // R1（ADR-032）：Robolectric 在 JVM 单测中提供 android.graphics，使 pdfbox-android 可测
+    testImplementation(libs.robolectric)
 }

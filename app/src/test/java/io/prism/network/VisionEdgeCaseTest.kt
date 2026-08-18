@@ -8,6 +8,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import io.ktor.server.response.respond
+import io.ktor.server.response.respondText
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import io.prism.data.ProviderConfig
@@ -67,9 +68,23 @@ class VisionEdgeCaseTest {
     fun `tool loop round keeps image signal from original user message on 400`() = runBlocking {
         // 模拟工具回路第 2 轮请求：原始用户含图消息（仍是最后一条 USER）+ assistant(tool_calls)
         // + TOOL 结果追加在其后。lastOrNull { role == USER } 必须仍指向含图消息 →
-        // requestHasImage=true → 含图 400 仍应映射视觉降级文案。
-        val port = startServer(HttpStatusCode.BadRequest)
+        // requestHasImage=true。R2（ADR-032）：仅当服务端错误详情含「不支持图片」信号时才
+        // 映射视觉降级文案——此处返回含图片不支持信号的 body，验证召回率 + 新逻辑双成立。
+        val server = embeddedServer(Netty, port = 0) {
+            routing {
+                route("/chat/completions", HttpMethod.Post) {
+                    handle {
+                        call.respondText(
+                            """{"error":{"message":"This model does not support images"}}""",
+                            io.ktor.http.ContentType.Application.Json, HttpStatusCode.BadRequest
+                        )
+                    }
+                }
+            }
+        }
+        server.start(wait = false)
         try {
+            val port = server.engine.resolvedConnectors().first().port
             val config = ProviderConfig(
                 name = "DeepSeek", baseUrl = "http://127.0.0.1:$port",
                 apiKeyRef = "deepseek", models = listOf("deepseek-chat")
@@ -94,7 +109,7 @@ class VisionEdgeCaseTest {
                 e.message.contains("不支持图片")
             )
         } finally {
-            // 测试用临时嵌入式服务器随进程回收
+            server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
         }
     }
 
