@@ -2197,11 +2197,14 @@ private fun flushPending(pending: List<String>, out: MutableList<String>) {
 }
 
 /**
- * 工具调用块开标签（`<tool_calls>` / `<invoke…>` 及其 `|`/`｜`（U+FF5C）分隔变体）。
- * `(?!/)` 负向前瞻排除闭合标签；`[^\w>]{0,4}?` 容忍 `<` 与关键词间的 0~4 个非单词字符。
+ * 工具调用块开标签（`<tool_calls>` / `<invoke…>` 及其 `|`/`｜`（U+FF5C）/混合分隔变体）。
+ * `(?!/)` 负向前瞻排除闭合标签；`[^>\n]{0,8}?` 容忍 `<` 与关键词间的**任意** 0~8 个非 `>` 字符。
+ * 用 `[^>\n]`（而非早先的 `[^\w>]`）是因为部分 LLM 会输出 `<｜tool_calls｜>` 等分隔符中夹带
+ * 字母数字（如 `<｜tool_calls｜>` 被某些渲染写成 `<｜invoke name｜>`），`\w` 词字符会被
+ * `[^\w>]` 拒绝导致开标签漏配而残留乱码。关键词 `tool_calls|invoke` 足够特异，放宽前缀不误伤正文。
  */
 private val TOOL_BLOCK_OPEN_REGEX = Regex(
-    """<(?!/)[^\w>]{0,4}?(?:tool_calls|invoke)[^>\n]*>""",
+    """<(?!/)[^>\n]{0,8}?(?:tool_calls|invoke)[^>\n]*>""",
     RegexOption.IGNORE_CASE
 )
 
@@ -2209,7 +2212,7 @@ private val TOOL_BLOCK_OPEN_REGEX = Regex(
  * 工具调用块闭标签（`</tool_calls>` / `</invoke>` 及其分隔变体）。
  */
 private val TOOL_BLOCK_CLOSE_REGEX = Regex(
-    """</[^\w>]{0,4}?(?:tool_calls|invoke)\s*[^\w>]{0,2}?>""",
+    """</[^>\n]{0,8}?(?:tool_calls|invoke)[^>\n]{0,6}?>""",
     RegexOption.IGNORE_CASE
 )
 

@@ -27,13 +27,14 @@ import org.junit.Test
 class WebSearchLocalToolExecutorUxr7SupplementTest {
 
     private fun rssBody(vararg items: Triple<String, String, String>): String {
-        val sb = StringBuilder("""<?xml version="1.0" encoding="UTF-8"?><rss><channel>""")
+        // v1 批次6（RSS→HTML）：本文件所有 execute 测试的 MockEngine 响应体改为 Bing HTML `li.b_algo`。
+        val sb = StringBuilder("""<html><ol id="b_results">""")
         items.forEach { (title, link, desc) ->
-            sb.append("<item><title>").append(title).append("</title><link>")
-                .append(link).append("</link><description>").append(desc)
-                .append("</description></item>")
+            sb.append("<li class=\"b_algo\"><h2><a href=\"").append(link).append("\">")
+                .append(title).append("</a></h2><div class=\"b_caption\"><p>").append(desc)
+                .append("</p></div></li>")
         }
-        sb.append("</channel></rss>")
+        sb.append("</ol></html>")
         return sb.toString()
     }
 
@@ -64,7 +65,8 @@ class WebSearchLocalToolExecutorUxr7SupplementTest {
             mapOf("query" to "昔涟 星穹铁道 崩坏 三月七 角色")
         )
         // 主查询 + 最多 3 个候选 = 4 次请求
-        assertEquals("候选应截断为 3 个，总请求 4 次（主 + 3）", 4, callCount)
+        // 候选截断为 3 个：Bing 主+3 重试 = 4 次；随后百度兜底再查 1 次完整 query + 3 核心词 = 4 次，共 8 次
+        assertEquals("候选应截断为 3 个，总请求 8 次（Bing 主+3 + 百度兜底 query+3）", 8, callCount)
         assertTrue("截断后应返回搜索失败（第 4 候选未被重试）", result.startsWith("搜索失败"))
         // 搜索失败文案会回显完整 query（含"三月七"），此处断言"三月七"重试命中的结果特征不存在
         assertFalse("第 4 个候选'三月七'不应被重试命中", result.contains("三月七-百度百科"))
@@ -102,7 +104,8 @@ class WebSearchLocalToolExecutorUxr7SupplementTest {
             WebSearchLocalToolExecutor.TOOL_SEARCH,
             mapOf("query" to "昔涟")
         )
-        assertEquals("query==term 时不应重复请求，仅 1 次", 1, callCount)
+        // query==term 时不应重复请求：仅 1 次 Bing；随后百度兜底查 1 次完整 query（核心词==query 跳过），共 2 次
+        assertEquals("query==term 时 Bing 仅 1 次 + 百度兜底 1 次 = 2 次", 2, callCount)
         assertTrue("应返回搜索失败", result.startsWith("搜索失败"))
     }
 

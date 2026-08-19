@@ -24,7 +24,6 @@ import kotlinx.coroutines.CancellationException
  * 2. **新会话开始时**（[retrieveRelevantMemories]）：将用户首条消息向量化，
  *    [MemoryRepository.searchByVector] top-k 检索相关历史。
  * 3. **防污染**（ADR-015 决策 2）：仅注入 top-k 检索结果作为 context，不加载旧会话全文。
- *    新会话上下文只包含语义相关的历史片段，保持干净。
  * 4. **格式化注入**（[formatMemoriesAsContext]）：将检索结果格式化为 systemPrompt section，
  *    与 RAG 上下文合并注入新会话。
  *
@@ -35,9 +34,16 @@ import kotlinx.coroutines.CancellationException
  *   (b) 检索后注入时直接可用（含问题和回答），无需二次拼接；
  *   (c) 记录数减半，HNSW 检索效率更高。
  * - **复用 M3 Embedder**：[embedder.embed] 生成 384 维向量，与 MemoryRecord.embedding 索引对齐。
- * - **无相似度阈值过滤**：数据层 [MemoryRepository.searchByVector] 保留数学语义，
- *   本管理器也不做阈值过滤（与 KnowledgeBaseRepository.search 一致），
- *   让 LLM 自行判断检索结果的相关性。若未来需要阈值，可在调用方添加。
+ *
+ * **v1 记忆深度优化**（US-101~104，参照 TencentDB-Agent-Memory）：
+ * - 原子记忆抽取升级：LLM 抽取结构化原子记忆（content/type/priority/sourceMessageIds）
+ * - 混合检索（US-102）：FTS5 BM25 + 向量 → RRF(k=60) 融合（[keywordIndex]）
+ * - 批量去重（US-103）：[dedupeSessionMemories] 单次 LLM 批量判定 store/update/merge/skip
+ * - 软衰减（US-103）：[computeRecallScore] 按「priority × exp(-λ·age) × (1+α·accessCount)」
+ *   过滤低分记忆，移出注入集但保留在库
+ * - 容量回收（US-103）：超限按「低 priority + 最旧」优先回收
+ * - 注入预算（US-104）：条数上限 + 单条字符截断
+ * - 命中自增 accessCount（软衰减使用频率信号）
  *
  * **线程安全**：[MemoryRepository] 内部 ObjectBox 保证原子读写；
  * [Embedder] 实现需保证并发安全（BR-concurrency-002）。
@@ -47,26 +53,24 @@ import kotlinx.coroutines.CancellationException
  * - [retrieveRelevantMemories] 中 embed 失败时返回空列表（降级为无跨会话记忆）。
  * - CancellationException 正确重抛。
  *
- * US-033 验收标准：
- * - AC-1：会话结束时向量化存储
- * - AC-2：新会话 top-k 检索
- * - AC-3：防污染（仅注入检索结果）
- * - AC-4：检索结果注入 systemPrompt
- * - AC-5：单元测试通过
- *
  * @param embedder 嵌入引擎（复用 M3 OnnxEmbedder，384 维向量）
  * @param memoryRepository L2 记忆仓库（Phase A 已实现）
  * @param summarizer 对话摘要生成器（UXR9 US-904 AC-2，可空：null 时保存路径不做 LLM 摘要，
  *   仅做重要性过滤 + 逐对存储；非空且 [saveSessionMemories] 传入 providerConfig 时先尝试
- *   LLM 摘要入库，失败降级为逐对存储）
+ *   LLM 摘要入库，失败降级为逐对存储；亦承担去重 LLM 调用）
  * @param retrievalThreshold 检索相似度阈值（UXR9 US-904 AC-3，默认 0.4）。测试注入
  *   [io.prism.embedding.FakeEmbedder]（非语义向量，相似度不可控）时传 0.0 禁用过滤
+ * @param keywordIndex v1 US-102 关键词索引（混合检索用）。null 时降级为纯向量检索（向后兼容）；
+ *   非空时 [retrieveRelevantMemories] 走「FTS5 BM25 + 向量 → RRF(k=60) 融合」。
+ * @param memoryConfig v1 US-103/104 记忆配置仓库（可空：null 时使用默认常量）
  */
 class CrossSessionMemoryManager(
     private val embedder: Embedder,
     private val memoryRepository: MemoryRepository,
     private val summarizer: ConversationSummarizer? = null,
-    private val retrievalThreshold: Double = MEMORY_RETRIEVAL_THRESHOLD
+    private val retrievalThreshold: Double = MEMORY_RETRIEVAL_THRESHOLD,
+    private val keywordIndex: MemoryKeywordIndex? = null,
+    private val memoryConfig: MemoryConfigRepository? = null
 ) {
 
     /**
@@ -84,8 +88,10 @@ class CrossSessionMemoryManager(
      * **限流**：单会话最多保存 [DEFAULT_MAX_MEMORIES_PER_SESSION] 条记忆（默认 20），
      * 防止超长会话产生过多记录拖慢检索。超过限制时仅保存前 N 个轮次对。
      *
+     * **容量回收**（v1 US-103）：入口先执行 [evictIfOverCapacity]，超限按
+     * 「低 priority + 最久未访问」优先回收。
+     *
      * **容错**：单个轮次对 embed 失败时跳过（不中断整体保存），返回实际保存数。
-     * 这保证即使部分消息嵌入失败，其余记忆仍能保存。
      *
      * @param sessionId 当前会话标识（运行时生成的 UUID）
      * @param messages 本会话完整消息列表（按时间顺序）
@@ -102,6 +108,9 @@ class CrossSessionMemoryManager(
         providerConfig: ProviderConfig? = null
     ): Int {
         if (messages.isEmpty()) return 0
+
+        // v1 US-103：容量上限回收（在新增前执行，保持库不超上限）
+        evictIfOverCapacity()
 
         // UXR9 Bug4 修复：按重要性过滤轮次对（跳过寒暄/确认/一次性闲聊），
         // 避免无价值内容全量堆积进 L2 跨会话记忆污染后续会话。
@@ -123,6 +132,8 @@ class CrossSessionMemoryManager(
                     if (msg.content.length <= MAX_SUMMARY_MSG_CHARS) msg
                     else msg.copy(content = msg.content.takeLast(MAX_SUMMARY_MSG_CHARS))
                 }
+            // v1 US-101：记忆溯源——LLM 抽取的每条记忆引用其来源消息 id（逗号分隔）。
+            val sourceMessageIds = importantMessages.map { it.id }.joinToString(",")
             val memories = try {
                 summarizer.extractMemories(importantMessages, providerConfig)
             } catch (e: CancellationException) {
@@ -135,20 +146,25 @@ class CrossSessionMemoryManager(
             when {
                 // LLM 成功但判定无值得记住的记忆 → 不落库（根治"什么都记"）
                 memories != null && memories.isEmpty() -> return 0
-                // LLM 成功且有原子记忆 → 逐条入库（每条独立记忆向量）
+                // LLM 成功且有原子记忆 → 逐条入库（每条独立向量 + 结构化元数据）
                 memories != null -> {
                     var saved = 0
                     for ((index, memory) in memories.withIndex()) {
                         try {
-                            val content = "$MEMORY_SUMMARY_PREFIX$memory"
+                            val content = "$MEMORY_SUMMARY_PREFIX${memory.content}"
                             val embedding = embedder.embed(content)
                             memoryRepository.save(
                                 MemoryRecord(
                                     sessionId = sessionId,
                                     content = content,
                                     embedding = embedding,
-                                    timestamp = turnPairs.first().first.timestamp,
-                                    turnCount = index + 1
+                                    timestamp = System.currentTimeMillis(),
+                                    turnCount = index + 1,
+                                    // v1 US-101：LLM 抽取的重要性评分（0-100）与类型经
+                                    // ExtractedMemory 规范化；版本号随新增为 1
+                                    priority = memory.priority,
+                                    version = 1,
+                                    sourceMessageIds = sourceMessageIds
                                 )
                             )
                             saved++
@@ -178,7 +194,7 @@ class CrossSessionMemoryManager(
                     sessionId = sessionId,
                     content = content,
                     embedding = embedding,
-                    timestamp = pair.first.timestamp,
+                    timestamp = System.currentTimeMillis(),
                     turnCount = index + 1
                 )
                 memoryRepository.save(record)
@@ -194,24 +210,125 @@ class CrossSessionMemoryManager(
     }
 
     /**
-     * 新会话开始时检索相关历史记忆（US-033 AC-2 + AC-3）。
+     * v1 US-103：本会话记忆批量去重（会话结束异步，参照 TencentDB-Agent-Memory l1-dedup 两阶段）。
+     *
+     * **流程**：
+     * 1. 取本会话 LLM 抽取路径保存的记忆（带 [MEMORY_SUMMARY_PREFIX] 前缀）
+     * 2. **候选召回**：对每条新记忆向量 top-k 检索（[DEDUP_CANDIDATE_TOP_K]，排除自身）
+     * 3. **单次 LLM 批量判定**：[ConversationSummarizer.dedupeMemories] 输出 store/update/merge/skip
+     * 4. **应用**：skip → 删除新记录；update/merge → 合并入目标候选（版本号 +1）并删除新记录；
+     *    store → 保留原记录
+     *
+     * **降级**：LLM 失败（返回 null）/ 去重关闭 / 无 summarizer / 无 providerConfig → 返回 0 不处理。
+     *
+     * @param sessionId 会话标识（本会话记忆的 sessionId）
+     * @param providerConfig 激活的 Provider 配置（可为 null：null 时不执行去重）
+     * @return 变更条数（skip 删除 + update/merge 合并的数量）；未执行返回 0
+     * @throws kotlinx.coroutines.CancellationException 协程取消必须重抛
+     */
+    suspend fun dedupeSessionMemories(sessionId: String, providerConfig: ProviderConfig?): Int {
+        if (providerConfig == null || summarizer == null) return 0
+        val dedupEnabled = memoryConfig?.isDedupEnabled() ?: MemoryConfigRepository.DEFAULT_DEDUP_ENABLED
+        if (!dedupEnabled) return 0
+
+        // 取本会话 LLM 抽取路径的记忆（带 [记忆] 前缀）
+        val newMemories = memoryRepository.getBySession(sessionId)
+            .filter { it.content.startsWith(MEMORY_SUMMARY_PREFIX) }
+        if (newMemories.isEmpty()) return 0
+
+        // 候选召回：每条新记忆向量 top5（排除自身；embed 失败降级为空池）
+        val candidatePools = newMemories.map { rec ->
+            try {
+                val emb = rec.embedding ?: embedder.embed(rec.content)
+                memoryRepository.searchByVector(emb, DEDUP_CANDIDATE_TOP_K)
+                    .mapNotNull { hit ->
+                        memoryRepository.all().firstOrNull { it.id == hit.recordId && it.id != rec.id }
+                    }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                emptyList()
+            }
+        }
+
+        val memories = newMemories.map {
+            ExtractedMemory(content = it.content.removePrefix(MEMORY_SUMMARY_PREFIX), priority = it.priority)
+        }
+        val decisions = try {
+            summarizer.dedupeMemories(memories, candidatePools, providerConfig)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        }
+        // LLM 失败 → 降级：不处理（保留原记录，不丢数据）
+        if (decisions == null) return 0
+
+        var changed = 0
+        for (decision in decisions) {
+            val rec = newMemories.getOrNull(decision.memoryIndex) ?: continue
+            try {
+                when (decision.action) {
+                    "skip" -> {
+                        memoryRepository.deleteById(rec.id)
+                        changed++
+                    }
+                    "update", "merge" -> {
+                        val target = decision.targetId?.let { id ->
+                            candidatePools.getOrNull(decision.memoryIndex)?.firstOrNull { it.id == id && it.id != rec.id }
+                        }
+                        if (target != null) {
+                            val mergedContent = if (decision.action == "merge") {
+                                "$MEMORY_SUMMARY_PREFIX${target.content.removePrefix(MEMORY_SUMMARY_PREFIX)}；" +
+                                    rec.content.removePrefix(MEMORY_SUMMARY_PREFIX)
+                            } else {
+                                rec.content
+                            }
+                            memoryRepository.save(
+                                target.copy(
+                                    content = mergedContent.take(MAX_MERGED_CHARS),
+                                    embedding = mergedEmbeddingOf(mergedContent, rec.embedding ?: target.embedding),
+                                    priority = maxOf(target.priority, rec.priority),
+                                    version = target.version + 1
+                                )
+                            )
+                            memoryRepository.deleteById(rec.id)
+                            changed++
+                        }
+                    }
+                    // store：保留原记录（无需处理）
+                    else -> Unit
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "dedupeSessionMemories: 决策应用失败（${e::class.simpleName}）")
+            }
+        }
+        return changed
+    }
+
+    /**
+     * 新会话开始时检索相关历史记忆（US-033 AC-2 + AC-3，v1 US-102 混合检索 + US-103 软衰减 + US-104 预算）。
      *
      * **流程**：
      * 1. 将用户首条消息 [Embedder.embed] 生成查询向量
-     * 2. [MemoryRepository.searchByVector] top-k 检索（默认 k=3）
-     * 3. 返回检索结果（按相似度降序）
+     * 2. [MemoryRepository.searchByVector] top-k 检索（默认 k=3）+ 相似度阈值过滤
+     * 3. **v1 US-102**：若注入 [keywordIndex]，再走关键词 BM25 召回（FTS5/内存倒排），
+     *    两路经 [RrfFusion.rrfMerge]（k=60）融合后取 top-k——解决中文精确词句
+     *    （如"上次说的 Kotlin 协程"）向量相似度不足但关键词命中的短板
+     * 4. **v1 US-103**：软衰减过滤——[computeRecallScore] < 注入阈值的记忆移出注入集（保留在库）
+     * 5. **v1 US-104**：注入预算——条数上限（默认 5）+ 单条字符截断
+     * 6. 命中记忆 [MemoryRepository.incrementAccessCount]（软衰减使用频率信号）
      *
      * **防污染**（AC-3）：仅返回 top-k 检索结果，不加载旧会话全文。
-     * 调用方通过 [formatMemoriesAsContext] 将结果注入新会话 systemPrompt。
      *
-     * **空消息处理**：用户消息为空白时返回空列表（不执行检索）。
-     *
-     * **容错**：embed 失败时返回空列表（降级为无跨会话记忆），不崩溃。
-     * CancellationException 正确重抛。
+     * **降级**：无 keywordIndex → 纯向量路径（向后兼容）；embed/keyword 索引不可用 → 返回
+     * 向量结果或空列表，不崩溃。
      *
      * @param userMessage 用户首条消息文本
      * @param topK 返回结果数上限（默认 3，与 [MemoryRepository.DEFAULT_SEARCH_TOP_K] 对齐）
-     * @return top-k 检索结果列表（按相似度降序）；空库/embed 失败/空消息返回空 list
+     * @return top-k 检索结果列表；空库/embed 失败/空消息返回空 list
      * @throws kotlinx.coroutines.CancellationException 协程取消必须重抛
      */
     suspend fun retrieveRelevantMemories(
@@ -220,19 +337,163 @@ class CrossSessionMemoryManager(
     ): List<MemorySearchResult> {
         if (userMessage.isBlank()) return emptyList()
 
+        // v1 US-103/104：读取软衰减与注入预算配置（未注入配置时用默认常量）
+        val decayLambda = memoryConfig?.getDecayLambda() ?: MemoryConfigRepository.DEFAULT_DECAY_LAMBDA
+        val decayAlpha = memoryConfig?.getDecayAlpha() ?: MemoryConfigRepository.DEFAULT_DECAY_ALPHA
+        val decayThreshold = memoryConfig?.getDecayThreshold() ?: MemoryConfigRepository.DEFAULT_DECAY_THRESHOLD
+        val injectionMaxResults = memoryConfig?.getInjectionMaxResults()
+            ?: MemoryConfigRepository.DEFAULT_INJECTION_MAX_RESULTS
+        val injectionMaxChars = memoryConfig?.getInjectionMaxChars()
+            ?: MemoryConfigRepository.DEFAULT_INJECTION_MAX_CHARS
+
         return try {
             val queryEmbedding = embedder.embed(userMessage)
             // UXR9 US-904 AC-3：检索侧相似度阈值过滤（此前不过滤，低相关记忆也注入）。
             // 会话隔离：记忆按 sessionId 持久化；新会话启动时 sessionId 为全新 UUID，
             // 天然只命中旧会话记录（本会话记录尚未落库），再叠加阈值收窄语义噪声。
-            memoryRepository.searchByVector(queryEmbedding, topK)
+            val vectorResults = memoryRepository.searchByVector(queryEmbedding, topK)
                 .filter { it.similarity >= retrievalThreshold }
+
+            val keyword = keywordIndex
+            val merged: List<MemorySearchResult> = if (keyword == null) {
+                // 纯向量路径（未启用混合检索）
+                vectorResults
+            } else {
+                // v1 US-102：关键词路径（版本化增量重建 + BM25 召回）
+                val allRecords = memoryRepository.all()
+                keyword.reconcile(allRecords, memoryRepository.mutationVersion)
+                val keywordHits = keyword.search(userMessage, topK)
+                if (keywordHits.isEmpty()) {
+                    vectorResults
+                } else {
+                    // RRF 融合两路排名（纯排名融合，不依赖两路分数可比较）
+                    val mergedIds = RrfFusion.rrfMergeTop(
+                        lists = listOf(
+                            vectorResults.map { it.recordId },
+                            keywordHits.map { it.recordId }
+                        ),
+                        topK = topK
+                    )
+                    if (mergedIds.isEmpty()) {
+                        vectorResults
+                    } else {
+                        // 回查记录构造 MemorySearchResult（携带元数据供软衰减/溯源）
+                        val recordById = allRecords.associateBy { it.id }
+                        val vectorById = vectorResults.associateBy { it.recordId }
+                        mergedIds.mapNotNull { id ->
+                            val record = recordById[id] ?: return@mapNotNull null
+                            MemorySearchResult(
+                                recordId = record.id,
+                                sessionId = record.sessionId,
+                                content = record.content,
+                                similarity = vectorById[id]?.similarity ?: 0.0,
+                                timestamp = record.timestamp,
+                                turnCount = record.turnCount,
+                                priority = record.priority,
+                                accessCount = record.accessCount,
+                                version = record.version,
+                                sourceMessageIds = record.sourceMessageIds.orEmpty()
+                            )
+                        }
+                    }
+                }
+            }
+
+            // v1 US-103：软衰减过滤（低于注入阈值的移出注入集但保留在库）
+            val now = System.currentTimeMillis()
+            val decayed = merged.filter {
+                computeRecallScore(
+                    priority = it.priority,
+                    accessCount = it.accessCount,
+                    timestamp = it.timestamp,
+                    now = now,
+                    lambda = decayLambda,
+                    alpha = decayAlpha
+                ) >= decayThreshold
+            }
+
+            // v1 US-104：注入预算（条数上限 + 单条字符截断；截断为纯展示层，不影响库内容）
+            val budgeted = decayed.take(injectionMaxResults.coerceAtLeast(1))
+                .map { truncateContent(it, injectionMaxChars) }
+
+            markAccessHits(budgeted)
+            budgeted
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             // BR-error-handling-004：embed 或检索失败时记录日志（不含敏感信息），降级为空结果
             Log.w(TAG, "retrieveRelevantMemories: 检索失败（${e::class.simpleName}）")
             emptyList()
+        }
+    }
+
+    /**
+     * 软衰减评分（v1 US-103，纯函数可测，参照 Mem0 Ebbinghaus / Bjork 检索强度模型）。
+     *
+     * `recallScore = priority × exp(-λ·age_days) × (1 + α·accessCount)`
+     * - priority：记忆重要性（0-100，LLM 抽取时赋值，越大越难遗忘）
+     * - exp(-λ·age)：时间衰减（旧记忆降权）
+     * - (1 + α·accessCount)：使用频率增强（越常命中越难遗忘）
+     *
+     * @param priority 记忆重要性
+     * @param accessCount 命中次数
+     * @param timestamp 记忆创建时间戳（毫秒）
+     * @param now 当前时间戳（毫秒）
+     * @param lambda 时间衰减系数 λ/天（默认 [MemoryConfigRepository.DEFAULT_DECAY_LAMBDA]）
+     * @param alpha 频率增强系数 α（默认 [MemoryConfigRepository.DEFAULT_DECAY_ALPHA]）
+     * @return 0~∞ 的召回评分（< 注入阈值时移出注入集）
+     */
+    internal fun computeRecallScore(
+        priority: Int,
+        accessCount: Long,
+        timestamp: Long,
+        now: Long = System.currentTimeMillis(),
+        lambda: Double = MemoryConfigRepository.DEFAULT_DECAY_LAMBDA,
+        alpha: Double = MemoryConfigRepository.DEFAULT_DECAY_ALPHA
+    ): Double {
+        val ageDays = (now - timestamp).coerceAtLeast(0L).toDouble() / MILLIS_PER_DAY
+        val timeDecay = Math.exp(-lambda * ageDays)
+        val usageBoost = 1.0 + alpha * accessCount
+        return priority * timeDecay * usageBoost
+    }
+
+    /**
+     * 注入单条字符截断（v1 US-104，纯函数可测）——截断为展示层，不影响库内容。
+     */
+    internal fun truncateContent(result: MemorySearchResult, maxChars: Int): MemorySearchResult {
+        if (maxChars <= 0 || result.content.length <= maxChars) return result
+        return result.copy(content = result.content.take(maxChars) + "…")
+    }
+
+    /**
+     * 为检索命中的记忆自增 accessCount（v1 US-101/103：软衰减使用频率信号）。
+     *
+     * **设计**：命中即 +1（fire-and-forget，不阻塞检索返回；incrementAccessCount 不递增
+     * mutationVersion，不会触发 FTS 全量重建）。
+     *
+     * @param results 检索命中的结果列表
+     */
+    private fun markAccessHits(results: List<MemorySearchResult>) {
+        for (result in results) {
+            try {
+                memoryRepository.incrementAccessCount(result.recordId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 命中计数失败不影响检索结果（仅丢失一次频率信号）
+                Log.w(TAG, "markAccessHits: 命中计数失败（${e::class.simpleName}）")
+            }
+        }
+    }
+
+    /**
+     * v1 US-103：容量上限回收（超限按「低 priority + 最久未访问」优先回收）。
+     */
+    private suspend fun evictIfOverCapacity() {
+        val capacity = memoryConfig?.getMemoryCapacity() ?: MemoryConfigRepository.DEFAULT_MEMORY_CAPACITY
+        val evicted = memoryRepository.evictIfOverLimit(capacity)
+        if (evicted > 0) {
+            Log.i(TAG, "saveSessionMemories: 容量回收 $evicted 条（上限 $capacity）")
         }
     }
 
@@ -359,12 +620,38 @@ class CrossSessionMemoryManager(
         val normalized = text.lowercase().filter { it.isLetterOrDigit() }
         // 1. 寒暄/确认/继续 → 不重要
         if (normalized in SKIP_PHRASES) return false
-        // 2. 偏好/身份/任务信号词 → 重要
-        if (IMPORTANCE_KEYWORDS.any { text.contains(it) }) return true
-        // 3. 实质问题（疑问词或足够长）→ 重要
-        if (text.length >= MIN_IMPORTANT_LEN) return true
-        if (QUESTION_WORDS.any { text.contains(it) }) return true
+        // 2. 自我指涉偏好/身份/记忆诉求（持久用户属性）→ 重要
+        if (ATOM_KEYWORDS.any { text.contains(it) }) {
+            if (isPureQuery(text)) return false
+            return true
+        }
+        // 3. 其余（普通问题/一次性任务/超短回应）→ 不重要
         return false
+    }
+
+    /**
+     * 判断用户消息是否为"一次性对外查询请求"（非持久记忆）。
+     */
+    private fun isPureQuery(text: String): Boolean {
+        val t = text.trim()
+        if (t.endsWith("？") || t.endsWith("?") || t.endsWith("吗") ||
+            t.endsWith("呢") || t.endsWith("呀") || t.endsWith("啊") ||
+            t.endsWith("何") || t.endsWith("怎样") || t.endsWith("哪些")
+        ) return true
+        if (QUERY_VERBS.any { it in t }) return true
+        return false
+    }
+
+    /**
+     * v1 US-103 merge re-embed (guardrail FIX-3): merged text changed,
+     * re-embed keeps vector consistent with content (fallback on failure).
+     */
+    private fun mergedEmbeddingOf(mergedContent: String, fallback: FloatArray?): FloatArray? = try {
+        embedder.embed(mergedContent)
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        fallback
     }
 
     companion object {
@@ -400,6 +687,15 @@ class CrossSessionMemoryManager(
          */
         internal const val MEMORY_RETRIEVAL_THRESHOLD = 0.4
 
+        /** v1 US-103：去重候选召回 top-k（参照 TencentDB-Agent-Memory l1-dedup top5）。 */
+        internal const val DEDUP_CANDIDATE_TOP_K = 5
+
+        /** v1 US-103：update/merge 后合并记忆的字符上限（防无限膨胀）。 */
+        internal const val MAX_MERGED_CHARS = 400
+
+        /** 毫秒/天（软衰减年龄计算）。 */
+        internal const val MILLIS_PER_DAY = 86_400_000L
+
         /**
          * 寒暄/确认/继续类短语（归一化后整句命中即跳过 L2 记忆）。
          * 与 RAG 需求预判（BR-interface-017）同源：整句精确匹配，禁止前缀匹配误伤。
@@ -429,29 +725,30 @@ class CrossSessionMemoryManager(
         internal const val MAX_SUMMARY_MSG_CHARS = 2000
 
         /**
-         * 偏好/身份/习惯/任务信号词（含任一带长期记忆价值 → 保存到 L2）。
-         * 覆盖：偏好、身份、习惯、计划、目标、重要事实。
+         * 可沉淀为 L2 跨会话记忆的用户消息信号词（v1 深度优化，对齐 TencentDB-Agent-Memory L1 Atom）。
+         *
+         * 仅收录**自我指涉的持久属性**（偏好 / 身份 / 习惯 / 计划决定 / 明确记忆诉求），
+         * 因为这些才是未来会话可复用的用户画像；**不收录**在一次性问答中也会出现的
+         * 泛化名词（如"项目/任务/计划/公司/团队/工作"）与请求动词（"分析/总结/推荐"）——
+         * 它们会被一次性问题触发，造成"什么都记"的污染。
          */
-        private val IMPORTANCE_KEYWORDS = listOf(
+        private val ATOM_KEYWORDS = listOf(
             "我喜欢", "我不喜欢", "我讨厌", "我爱", "我恨",
-            "我是", "我叫", "我住在", "我在", "我工作", "我学", "我的", "我今年",
-            "我希望", "我想", "我要", "我打算", "我计划", "我决定",
+            "我是", "我叫", "我住在", "我今年", "我工作", "我学", "我的",
             "我习惯", "我经常", "我每天", "我周末",
-            "请记住", "记住", "记得", "以后", "下次", "别忘了", "重要", "关键",
-            "偏好", "喜欢", "讨厌", "最爱",
-            "不要", "最好", "务必", "一定",
-            "目标", "计划", "任务", "项目", "工作", "公司", "团队"
+            "我打算", "我计划", "我决定",
+            // 仅显式记忆诉求命令（淡化的"记住/以后/重要/务必"等会被一次性陈述触发，造成 L2 噪声）
+            "请记住", "别忘了", "最爱", "偏好"
         )
 
-        /** 疑问词（含任一即视为实质问题，保存到 L2）。 */
-        private val QUESTION_WORDS = listOf(
-            "什么", "为什么", "怎么", "如何", "多少", "哪些", "是否", "吗", "呢", "谁", "哪里",
-            "请问", "介绍", "分析", "总结", "比较", "解释", "说明", "推荐", "建议"
+        /**
+         * 一次性对外查询/任务请求的意图动词（进入该句式 → 判定为一次性信息需求，不沉淀记忆）。
+         * 用于 [isPureQuery] 识别"帮我查一下 X""介绍一下 X"等请求，与用户自身画像无关。
+         */
+        private val QUERY_VERBS = listOf(
+            "帮我", "帮我查", "帮我搜", "介绍一下", "简单介绍", "查一下", "搜一下",
+            "分析一下", "总结一下", "推荐一下", "介绍", "查询", "搜索", "解释一下",
+            "比较一下", "讲讲", "说说", "写一个", "写一份", "翻译"
         )
-
-        /** 用户消息达到该长度即视为实质内容（重要，保存到 L2）。 */
-        private const val MIN_IMPORTANT_LEN = 8
     }
 }
-
-

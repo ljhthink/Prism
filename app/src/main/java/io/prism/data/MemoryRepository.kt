@@ -52,7 +52,87 @@ class MemoryRepository(private val boxStore: BoxStore) {
     /** 全部记忆记录列表（按 timestamp 升序），供 UI 订阅。 */
     val memoryRecords: StateFlow<List<MemoryRecord>> = _memoryRecords.asStateFlow()
 
+    /**
+     * 数据变更版本号（v1 记忆深度优化 US-102）。
+     *
+     * 每次写操作（save / deleteById / deleteBySession / deleteAll）自增。
+     * 供 [io.prism.memory.MemoryKeywordIndex] 做增量同步：索引记录上次同步的版本号，
+     * 搜索前若版本号变化则重建，避免每次检索都全量重建索引（O(N) 分词成本）。
+     */
+    @Volatile
+    var mutationVersion: Long = 0
+        private set
+
     init {
+        refreshFlows()
+    }
+
+    /**
+     * 记忆容量上限回收（v1 US-103，参照 TencentDB-Agent-Memory quota/容量上限）。
+     *
+     * 当记录数超过 [capacity] 时，按「低 priority + 最久未访问」优先删除超出的部分
+     * （保留高重要性、常命中的记忆）。软衰减的核心是「旧且低分记忆降权/回收」。
+     *
+     * **HNSW 删除策略**（ADR-015 风险表 H-4，规避 objectbox-java#1209）：
+     * 使用 `findIds()` + `Box.remove(ids)` 模式（单个事务内），不可用 `Query.remove()`。
+     *
+     * @param capacity 容量上限（>0）
+     * @return 本次回收删除的记录数
+     */
+    fun evictIfOverLimit(capacity: Int): Long {
+        if (capacity <= 0) return 0L
+        var evicted = 0L
+        boxStore.runInTx {
+            val all = box.all
+            if (all.size > capacity) {
+                // 淘汰候选：优先低 priority，其次最旧（timestamp 升序 → 最先淘汰），
+                // 再其次低访问（accessCount 升序）
+                val sorted = all.sortedWith(
+                    compareBy<MemoryRecord> { it.priority }
+                        .thenBy { it.timestamp }
+                        .thenBy { it.accessCount }
+                )
+                val toRemove = sorted.take(all.size - capacity).map { it.id }.toLongArray()
+                if (toRemove.isNotEmpty()) {
+                    box.remove(*toRemove)
+                    evicted = toRemove.size.toLong()
+                }
+            }
+        }
+        if (evicted > 0) mutationVersion++
+        refreshFlows()
+        return evicted
+    }
+
+    /**
+     * 获取全部记忆记录（按 timestamp 升序）。
+     *
+     * 供 [io.prism.memory.MemoryKeywordIndex] 的 [io.prism.memory.MemoryKeywordIndex.reconcile]
+     * 全量对齐数据（版本化增量重建，避免每次检索全量重建）。
+     *
+     * @return 全部记忆记录列表（timestamp 升序）
+     */
+    fun all(): List<MemoryRecord> = box.all.sortedBy { it.timestamp }
+
+    /**
+     * 记忆被检索命中时自增 accessCount（v1 US-101/103 软衰减使用）。
+     *
+     * **设计**：**不递增 [mutationVersion]**——accessCount 仅用于软衰减评分，不影响
+     * FTS 内容索引（关键词索引只依赖 content）。若递增 mutationVersion，每次检索命中
+     * 都会触发 FTS 全量重建（O(N) 分词），破坏版本化增量同步的优化。
+     *
+     * **HNSW 安全**：走 `box.get + box.put`（更新既有记录）而非 Query.remove，规避
+     * objectbox-java#1209（BR-concurrency-001 事务原子性）。
+     *
+     * @param id 被命中的记忆记录 id
+     */
+    fun incrementAccessCount(id: Long) {
+        boxStore.runInTx {
+            box.get(id)?.let { record ->
+                record.accessCount++
+                box.put(record)
+            }
+        }
         refreshFlows()
     }
 
@@ -64,6 +144,7 @@ class MemoryRepository(private val boxStore: BoxStore) {
      */
     fun save(record: MemoryRecord): Long {
         val id = box.put(record)
+        mutationVersion++
         refreshFlows()
         return id
     }
@@ -132,7 +213,12 @@ class MemoryRepository(private val boxStore: BoxStore) {
                     content = record.content,
                     similarity = 1.0 - result.getScore(),
                     timestamp = record.timestamp,
-                    turnCount = record.turnCount
+                    turnCount = record.turnCount,
+                    // v1 US-101：检索结果携带记忆元数据（供软衰减/去重/溯源）
+                    priority = record.priority,
+                    accessCount = record.accessCount,
+                    version = record.version,
+                    sourceMessageIds = record.sourceMessageIds ?: ""
                 )
             }
         }
@@ -157,6 +243,7 @@ class MemoryRepository(private val boxStore: BoxStore) {
                 deleted = true
             }
         }
+        if (deleted) mutationVersion++
         refreshFlows()
         return deleted
     }
@@ -185,6 +272,7 @@ class MemoryRepository(private val boxStore: BoxStore) {
                 deletedCount = ids.size.toLong()
             }
         }
+        if (deletedCount > 0) mutationVersion++
         refreshFlows()
         return deletedCount
     }
@@ -200,6 +288,7 @@ class MemoryRepository(private val boxStore: BoxStore) {
     fun deleteAll(): Long {
         val deletedCount = box.count()
         box.removeAll()
+        if (deletedCount > 0) mutationVersion++
         refreshFlows()
         return deletedCount
     }
@@ -253,6 +342,10 @@ class MemoryRepository(private val boxStore: BoxStore) {
  * @property similarity 相似度分数 ∈ [-1, 1]（1 - COSINE 距离）
  * @property timestamp 记录创建时间戳（毫秒）
  * @property turnCount 对话轮次
+ * @property priority 记忆重要性（0-100，v1 US-101）
+ * @property accessCount 记忆被检索命中次数（v1 US-101）
+ * @property version 记忆版本号（v1 US-101）
+ * @property sourceMessageIds 记忆来源消息引用（v1 US-101）
  */
 data class MemorySearchResult(
     val recordId: Long,
@@ -260,5 +353,9 @@ data class MemorySearchResult(
     val content: String,
     val similarity: Double,
     val timestamp: Long,
-    val turnCount: Int
+    val turnCount: Int,
+    val priority: Int = MemoryRecord.DEFAULT_PRIORITY,
+    val accessCount: Long = 0,
+    val version: Int = 1,
+    val sourceMessageIds: String = ""
 )

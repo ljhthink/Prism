@@ -219,7 +219,8 @@ class ConversationViewModelMemoryIntegrationTest {
             sessionId = "old-session",
             content = "[用户] Kotlin 协程怎么用 [助手] 用 launch 启动",
             embedding = embedder.embed("Kotlin 协程"),
-            timestamp = 1000L,
+            // v1 US-103 软衰减：需用近期时间戳，否则被时间衰减移出注入集
+            timestamp = System.currentTimeMillis(),
             turnCount = 1
         )
         memoryRepository.save(existingMemory)

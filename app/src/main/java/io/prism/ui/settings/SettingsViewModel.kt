@@ -48,7 +48,13 @@ class SettingsViewModel(
     /** UXR3 问题 10（ADR-023）：工具审批模式配置仓库；null 时审批模式状态降级为默认值（向后兼容） */
     private val toolApprovalConfigRepository: ToolApprovalConfigRepository? = null,
     /** UXR8 N1（ADR-030）：用户规则配置仓库（「关于我」+「如何回答」双字段）；null 时降级为默认空（向后兼容） */
-    private val userRulesRepository: io.prism.config.UserRulesRepository? = null
+    private val userRulesRepository: io.prism.config.UserRulesRepository? = null,
+    /** v1 US-301（方案 B 识图）：视觉旁路配置仓库（授权 + 自动开关 + 熔断）；null 时降级默认（向后兼容） */
+    private val visionBypassConfigRepository: io.prism.config.VisionBypassConfigRepository? = null,
+    /** v1 US-201（LLM 操控手机）：无障碍服务连接状态提供者；null 时降级为恒 false（向后兼容，保持 JVM 可测） */
+    private val phoneControlStatusProvider: (() -> Boolean)? = null,
+    /** v1 真机二次修复（Issue 4b）：手机操控高危动作（发送/删除/拨号）确认策略仓库 */
+    private val highRiskApprovalRepository: io.prism.config.HighRiskApprovalRepository? = null
 ) : ViewModel() {
 
     /** Provider 已配置列表。 */
@@ -85,6 +91,89 @@ class SettingsViewModel(
     val reasoningEffort: StateFlow<String> =
         (thinkingConfigRepository?.reasoningEffort() ?: flowOf(ThinkingConfigRepository.DEFAULT_EFFORT))
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ThinkingConfigRepository.DEFAULT_EFFORT)
+
+    /**
+     * v1 US-301：视觉旁路授权（用户明示：图片可外发到视觉 Provider）。默认 false。
+     * 隐私刚性要求（D-6）：未授权不触发云端旁路（仅 OCR 兜底可用）。
+     */
+    val visionConsent: StateFlow<Boolean> =
+        (visionBypassConfigRepository?.consent() ?: flowOf(false))
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /** v1 US-301：视觉旁路自动开关（默认开启，需授权后生效）。 */
+    val visionAutoBypass: StateFlow<Boolean> =
+        (visionBypassConfigRepository?.autoBypass()
+            ?: flowOf(io.prism.config.VisionBypassConfigRepository.DEFAULT_AUTO_BYPASS))
+            .stateIn(
+                viewModelScope,
+                SharingStarted.WhileSubscribed(5_000),
+                io.prism.config.VisionBypassConfigRepository.DEFAULT_AUTO_BYPASS
+            )
+
+    /** 设置视觉旁路授权（用户明示同意图片外发到视觉 Provider）。 */
+    fun setVisionConsent(given: Boolean) {
+        viewModelScope.launch {
+            try {
+                visionBypassConfigRepository?.setConsent(given)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("SettingsViewModel", "设置视觉旁路授权失败: $given", e)
+            }
+        }
+    }
+
+    /** 设置视觉旁路自动开关。 */
+    fun setVisionAutoBypass(enabled: Boolean) {
+        viewModelScope.launch {
+            try {
+                visionBypassConfigRepository?.setAutoBypassEnabled(enabled)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("SettingsViewModel", "设置视觉旁路开关失败: $enabled", e)
+            }
+        }
+    }
+
+    // ==================== v1 US-201：手机操控（无障碍服务） ====================
+
+    private val _phoneControlConnected = MutableStateFlow(phoneControlStatusProvider?.invoke() == true)
+
+    /** 手机操控无障碍服务是否已连接（设置页引导状态；由 [refreshPhoneControlStatus] 刷新）。 */
+    val phoneControlConnected: StateFlow<Boolean> = _phoneControlConnected.asStateFlow()
+
+    /**
+     * 刷新无障碍服务连接状态。
+     *
+     * **设计**：不内置无限轮询循环（避免 runTest/StandardTestDispatcher 下调度器永不空闲导致
+     * 单元测试挂起）。由设置页 Composable 用 LaunchedEffect 定时调用（UI 侧轮询，VM 侧无循环）。
+     * 状态变化时打日志（v1 US-201 可观测性）。
+     */
+    fun refreshPhoneControlStatus() {
+        val connected = phoneControlStatusProvider?.invoke() == true
+        if (_phoneControlConnected.value != connected) {
+            Log.i("SettingsViewModel", "手机操控无障碍服务连接状态变更: $connected")
+            _phoneControlConnected.value = connected
+        }
+    }
+
+    /** 手机操控高危动作（发送/删除/拨号）确认策略（v1 真机二次修复 Issue 4b）。 */
+    val highRiskApprovalMode: StateFlow<io.prism.config.HighRiskApprovalMode> =
+        (highRiskApprovalRepository?.mode()
+            ?: flowOf(io.prism.config.HighRiskApprovalMode.ASK))
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), io.prism.config.HighRiskApprovalMode.ASK)
+
+    /** 设置手机操控高危动作确认策略（v1 真机二次修复 Issue 4b）。 */
+    fun setHighRiskApprovalMode(mode: io.prism.config.HighRiskApprovalMode) {
+        viewModelScope.launch {
+            try {
+                highRiskApprovalRepository?.setMode(mode)
+            } catch (e: Exception) {
+                Log.w("SettingsViewModel", "设置高危动作策略失败：${e::class.simpleName}")
+            }
+        }
+    }
 
     /** 设置深度思考开关（持久化到 DataStore，运行时即时生效）。 */
     fun setThinkingEnabled(enabled: Boolean) {
@@ -178,6 +267,19 @@ class SettingsViewModel(
     /** 保存 Provider 配置（id=0 新建，id>0 更新）。@return 保存后的 id（新建时用于后续激活） */
     fun saveProvider(config: ProviderConfig): Long {
         val id = providerRepository.save(config)
+        // v1 真机二次修复（Issue 3）：把某 Provider 标记为「视觉旁路 Provider」本身即用户"把图片
+        // 外发到该端点"的明确意图 → 同步写入云端旁路授权 consent，避免用户"激活了视觉模型却
+        // 仍只见 OCR"（原误解：isBypassAvailable 因 consent 默认 false 恒不过，Cloud 从不执行）。
+        if (config.isVisionFallback) {
+            viewModelScope.launch {
+                visionBypassConfigRepository?.setConsent(true)
+                visionBypassConfigRepository?.setAutoBypassEnabled(true)
+                // v1 真机二次修复（Issue 3b）：重新激活视觉 Provider 即清零云端旁路熔断计数。
+                // 旁路经「连续失败 [MAX_FAILURES] 次自动停用」熔断后，配置修好前 cloud 永不触发、
+                // 只剩 OCR。激活/保存动作代表用户"期望云端旁路可用"的信号，应重置熔断让 cloud 重试。
+                visionBypassConfigRepository?.resetFailures()
+            }
+        }
         _selectedProvider.value = null
         return id
     }
@@ -255,7 +357,16 @@ class SettingsViewModel(
                     // UXR3 问题 10（ADR-023）：工具审批模式配置仓库
                     toolApprovalConfigRepository = app.toolApprovalConfigRepository,
                     // UXR8 N1（ADR-030）：用户规则配置仓库（「关于我」+「如何回答」）
-                    userRulesRepository = app.userRulesRepository
+                    userRulesRepository = app.userRulesRepository,
+                    // v1 US-301（方案 B 识图）：视觉旁路配置仓库（授权 + 自动开关 + 熔断）
+                    visionBypassConfigRepository = app.visionBypassConfigRepository,
+                    // v1 US-201（LLM 操控手机）：无障碍服务连接状态提供者（v1 真机二次修复 Issue 4：
+                    // 用系统真实启用状态判定，避免微信等重内存 App 打开时进程实例空窗误报"未启用"）
+                    phoneControlStatusProvider = {
+                        io.prism.phonecontrol.PhoneControlAccessibilityService.isEnabledInSystem(app)
+                    },
+                    // v1 真机二次修复（Issue 4b）：高危动作确认策略仓库
+                    highRiskApprovalRepository = app.highRiskApprovalRepository
                 )
             }
         }

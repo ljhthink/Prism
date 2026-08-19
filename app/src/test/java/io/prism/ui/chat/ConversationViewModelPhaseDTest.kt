@@ -215,6 +215,31 @@ class ConversationViewModelPhaseDTest {
         assertTrue(names.contains("document__create_xlsx"))
     }
 
+    @Test
+    fun `buildTools default excludes phone control tools for backward compat`() {
+        // v1 US-204：默认 phoneControlEnabled=false（向后兼容）→ 不注入 phone_control__* 工具
+        val tools = ConversationViewModel.buildTools(emptyList(), webSearchEnabled = true)
+        assertTrue(
+            "默认不应包含手机操控工具",
+            tools.none { it.function.name.startsWith("phone_control__") }
+        )
+    }
+
+    @Test
+    fun `buildTools includes phone control tools when phoneControlEnabled true`() {
+        // v1 US-201/204：FULL/STANDARD 档启用 → 注入 12 个 phone_control__* 工具
+        val tools = ConversationViewModel.buildTools(
+            emptyList(), webSearchEnabled = true, phoneControlEnabled = true
+        )
+        val names = tools.map { it.function.name }
+        val phoneTools = names.filter { it.startsWith("phone_control__") }
+        assertEquals("应注入 12 个手机操控工具", 12, phoneTools.size)
+        assertTrue(phoneTools.contains("phone_control__get_ui_state"))
+        assertTrue(phoneTools.contains("phone_control__double_tap"))
+        assertTrue(phoneTools.contains("phone_control__take_over"))
+        assertTrue(phoneTools.contains("phone_control__screenshot"))
+    }
+
     // ==================== 纯函数测试：mergeSystemPrompt ====================
 
     @Test

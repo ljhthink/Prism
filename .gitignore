@@ -70,3 +70,11 @@ perf/baselines/*.bin
 # 注：docs/reports/perf/ 子目录不受影响（*.md 不递归匹配子目录）
 docs/reports/*.md
 !docs/reports/README.md
+
+# 真机/模拟器采集运行时产物（CLAUDE.md 20.1，禁止入库；guardrail TKN-PREPUSH-V1-B1B7-001 4.1）
+# 包括 logcat 捕获（*.log / *.err / PID 状态文件）、uiautomator UI dump（*.xml）、
+# logcat 转储（*.txt）、截图（*.png）。
+docs/reports/logcat/
+docs/reports/*.xml
+docs/reports/*.txt
+docs/reports/*.png

@@ -82,6 +82,28 @@ class PerformanceTierTest {
         assertFalse("CHAT_ONLY 档不应加载 embedder", PerformanceTier.CHAT_ONLY.isEmbedderEnabled)
     }
 
+    // ============ isPhoneControlEnabled（v1 US-204，LLM 操控手机档位门控） ============
+
+    @Test
+    fun isPhoneControlEnabled_full_returns_true() {
+        assertTrue("FULL 档应启用手机操控", PerformanceTier.FULL.isPhoneControlEnabled)
+    }
+
+    @Test
+    fun isPhoneControlEnabled_standard_returns_true() {
+        assertTrue("STANDARD 档应启用手机操控", PerformanceTier.STANDARD.isPhoneControlEnabled)
+    }
+
+    @Test
+    fun isPhoneControlEnabled_minimal_returns_false() {
+        assertFalse("MINIMAL 档应禁用手机操控（低端优先稳定）", PerformanceTier.MINIMAL.isPhoneControlEnabled)
+    }
+
+    @Test
+    fun isPhoneControlEnabled_chatOnly_returns_false() {
+        assertFalse("CHAT_ONLY 档应禁用手机操控（低端优先稳定）", PerformanceTier.CHAT_ONLY.isPhoneControlEnabled)
+    }
+
     // ============ ragTopK ============
 
     @Test

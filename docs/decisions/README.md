@@ -39,6 +39,13 @@
 | ADR-031 | UXR9 多语言嵌入模型 + L2 记忆选择性增强 | Proposed | 2026-08-18 | [ADR-031-uxr9-multilingual-embedding-and-l2-memory.md](ADR-031-uxr9-multilingual-embedding-and-l2-memory.md) |
 | ADR-032 | UXR10 真机问题修复（上传崩溃 + 多模态误判 + Fetch 限流 + Skills 感知 + 上传交互） | Proposed | 2026-08-18 | [ADR-032-uxr10-real-device-fixes.md](ADR-032-uxr10-real-device-fixes.md) |
 | ADR-033 | UXR11 真机问题修复（RAG 误注入 + 搜索限流 + Fetch 反爬 + 乱码 + L2 记忆 + Skills 反馈 + 思考动画） | Proposed | 2026-08-18 | [ADR-033-uxr11-real-device-fixes.md](ADR-033-uxr11-real-device-fixes.md) |
+| ADR-034 | v1 记忆系统深度优化（原子抽取 / 混合检索 / 去重 / 软衰减 / 预算） | Accepted | 2026-08-19 | [ADR-034-v1-memory-deep-optimization.md](ADR-034-v1-memory-deep-optimization.md) |
+| ADR-035 | v1 纯文本模型识图（方案 B：云端视觉旁路 + OCR 兜底） | Accepted | 2026-08-19 | [ADR-035-v1-vision-plan-b.md](ADR-035-v1-vision-plan-b.md) |
+| ADR-036 | v1 LLM 操控手机（无障碍服务 + 工具集 + 敏感拦截 + 截图增强 + 档位适配） | Accepted | 2026-08-19 | [ADR-036-v1-phone-control.md](ADR-036-v1-phone-control.md) |
+| ADR-037 | v1 真机二次修复（搜索乱码+质量 / Fetch 反爬 / L2 记忆原子化 / 视觉旁路 / 手机操控 UI 与上限） | Accepted | 2026-08-19 | [ADR-037-v1-real-device-round2.md](ADR-037-v1-real-device-round2.md) |
+| ADR-038 | v1 真机三次修复（Fetch 反爬 Referer / 搜索实体提取 / 视觉旁路熔断恢复 / 无障碍系统判定+高危三态 / 后台确认通知） | Accepted | 2026-08-19 | [ADR-038-v1-real-device-round3.md](ADR-038-v1-real-device-round3.md) |
+| ADR-039 | v1 真机四次修复（Fetch 明文被拦 http→https / 搜索 RSS→HTML SERP + 后缀误剥 / 视觉旁路 Provider 回退 + 可观测日志） | Accepted | 2026-08-19 | [ADR-039-v1-real-device-round4.md](ADR-039-v1-real-device-round4.md) |
+| ADR-040 | v1 真机五次修复（搜索 Bing→Baidu 多引擎回退 / 视觉专用 Provider 跳过熔断但守 consent 隐私铁门） | Accepted | 2026-08-19 | [ADR-040-v1-real-device-round5.md](ADR-040-v1-real-device-round5.md) |
 
 ## ADR 生命周期
 

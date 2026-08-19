@@ -69,7 +69,7 @@ class CrossSessionMemoryManagerSupplementaryTest {
     fun saveSessionMemories_maxMemories_zero_coerces_to_1() = runBlocking {
         val messages = (1..3).flatMap { i ->
             listOf(
-                ChatMessage(i.toLong() * 2 - 1, Role.USER, "问题$i 的详细分析", i.toLong() * 1000),
+                ChatMessage(i.toLong() * 2 - 1, Role.USER, "请记住我重视的问题$i", i.toLong() * 1000),
                 ChatMessage(i.toLong() * 2, Role.ASSISTANT, "回答$i 的关键结论", i.toLong() * 1000 + 500)
             )
         }
@@ -84,7 +84,7 @@ class CrossSessionMemoryManagerSupplementaryTest {
     @Test
     fun saveSessionMemories_maxMemories_negative_coerces_to_1() = runBlocking {
         val messages = listOf(
-            ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L),
             ChatMessage(2, Role.ASSISTANT, "回答：协程是轻量级线程", 2000L)
         )
         val count = manager.saveSessionMemories("session-1", messages, maxMemories = -1)
@@ -98,7 +98,7 @@ class CrossSessionMemoryManagerSupplementaryTest {
     fun saveSessionMemories_maxMemories_exceeds_upper_bound_coerces_to_20() = runBlocking {
         val messages = (1..25).flatMap { i ->
             listOf(
-                ChatMessage(i.toLong() * 2 - 1, Role.USER, "问题$i 的详细分析", i.toLong() * 1000),
+                ChatMessage(i.toLong() * 2 - 1, Role.USER, "请记住我重视的问题$i", i.toLong() * 1000),
                 ChatMessage(i.toLong() * 2, Role.ASSISTANT, "回答$i 的关键结论", i.toLong() * 1000 + 500)
             )
         }
@@ -114,14 +114,14 @@ class CrossSessionMemoryManagerSupplementaryTest {
     fun saveSessionMemories_maxMemories_1_saves_only_first_pair() = runBlocking {
         val messages = (1..3).flatMap { i ->
             listOf(
-                ChatMessage(i.toLong() * 2 - 1, Role.USER, "问题$i 的详细分析", i.toLong() * 1000),
+                ChatMessage(i.toLong() * 2 - 1, Role.USER, "请记住我重视的问题$i", i.toLong() * 1000),
                 ChatMessage(i.toLong() * 2, Role.ASSISTANT, "回答$i 的关键结论", i.toLong() * 1000 + 500)
             )
         }
         val count = manager.saveSessionMemories("session-1", messages, maxMemories = 1)
         assertEquals("maxMemories=1 应保存 1 条", 1, count)
         val records = memoryRepository.getBySession("session-1")
-        assertTrue("应保存第一个轮次对", records[0].content.contains("问题1 的详细分析"))
+        assertTrue("应保存第一个轮次对", records[0].content.contains("请记住我重视的问题1"))
     }
 
     // ==================== 部分失败场景 ====================
@@ -137,7 +137,7 @@ class CrossSessionMemoryManagerSupplementaryTest {
         manager = CrossSessionMemoryManager(embedder, memoryRepository, retrievalThreshold = 0.0)
         val messages = (1..3).flatMap { i ->
             listOf(
-                ChatMessage(i.toLong() * 2 - 1, Role.USER, "问题$i 的详细分析", i.toLong() * 1000),
+                ChatMessage(i.toLong() * 2 - 1, Role.USER, "请记住我重视的问题$i", i.toLong() * 1000),
                 ChatMessage(i.toLong() * 2, Role.ASSISTANT, "回答$i 的关键结论", i.toLong() * 1000 + 500)
             )
         }
@@ -155,7 +155,7 @@ class CrossSessionMemoryManagerSupplementaryTest {
     fun retrieveRelevantMemories_topK_1_returns_single_result() = runBlocking {
         val messages = (1..5).flatMap { i ->
             listOf(
-                ChatMessage(i.toLong() * 2 - 1, Role.USER, "话题$i 的深入探讨", i.toLong() * 1000),
+                ChatMessage(i.toLong() * 2 - 1, Role.USER, "请记住我深入研究过的话题$i", i.toLong() * 1000),
                 ChatMessage(i.toLong() * 2, Role.ASSISTANT, "话题$i 的核心结论", i.toLong() * 1000 + 500)
             )
         }
@@ -170,7 +170,7 @@ class CrossSessionMemoryManagerSupplementaryTest {
     @Test
     fun retrieveRelevantMemories_topK_exceeds_record_count() = runBlocking {
         val messages = listOf(
-            ChatMessage(1, Role.USER, "这是唯一待解决的问题", 1000L),
+            ChatMessage(1, Role.USER, "请记住这是我唯一待解决的问题", 1000L),
             ChatMessage(2, Role.ASSISTANT, "回答：这是唯一的关键答案", 2000L)
         )
         manager.saveSessionMemories("session-1", messages)
@@ -258,10 +258,10 @@ class CrossSessionMemoryManagerSupplementaryTest {
     @Test
     fun saveSessionMemories_tool_messages_interleaved_filtered() = runBlocking {
         val messages = listOf(
-            ChatMessage(1, Role.USER, "如何配置 MCP 服务器？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我常配置 MCP 服务器", 1000L),
             ChatMessage(2, Role.TOOL, "工具结果", 1500L),
             ChatMessage(3, Role.ASSISTANT, "MCP 配置在设置页面完成", 2000L),
-            ChatMessage(4, Role.USER, "Prism 支持哪些功能？", 3000L),
+            ChatMessage(4, Role.USER, "请记住我关心 Prism 的功能", 3000L),
             ChatMessage(5, Role.ASSISTANT, "Prism 支持多种模型和工具", 4000L)
         )
         val count = manager.saveSessionMemories("session-1", messages)
@@ -275,7 +275,7 @@ class CrossSessionMemoryManagerSupplementaryTest {
      */
     @Test
     fun saveSessionMemories_very_long_content() = runBlocking {
-        val longContent = "A".repeat(10000)
+        val longContent = "请记住" + "A".repeat(10000)
         val messages = listOf(
             ChatMessage(1, Role.USER, longContent, 1000L),
             ChatMessage(2, Role.ASSISTANT, "回答：这是超长内容的回复", 2000L)
@@ -292,7 +292,7 @@ class CrossSessionMemoryManagerSupplementaryTest {
     @Test
     fun retrieveRelevantMemories_very_long_query() = runBlocking {
         val messages = listOf(
-            ChatMessage(1, Role.USER, "Kotlin 协程", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注的 Kotlin 协程", 1000L),
             ChatMessage(2, Role.ASSISTANT, "回答：协程的基本介绍", 2000L)
         )
         manager.saveSessionMemories("session-1", messages)
@@ -323,7 +323,7 @@ class CrossSessionMemoryManagerSupplementaryTest {
     @Test
     fun filterKeyMessages_mixed_tool_and_empty() {
         val messages = listOf(
-            ChatMessage(1, Role.USER, "这是一个有效的测试问题", 1000L),
+            ChatMessage(1, Role.USER, "请记住这是一个测试问题", 1000L),
             ChatMessage(2, Role.TOOL, "工具结果", 2000L),
             ChatMessage(3, Role.ASSISTANT, "", 3000L),
             ChatMessage(4, Role.ASSISTANT, "回答：这是一个有效的回复", 4000L)
@@ -343,13 +343,13 @@ class CrossSessionMemoryManagerSupplementaryTest {
         // 注意：此测试直接调用 internal 函数，模拟 filterKeyMessages 未过滤的情况
         // TOOL 角色不在 USER/ASSISTANT 中，while 循环 j++ 跳过
         val messages = listOf(
-            ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L),
             ChatMessage(2, Role.TOOL, "工具结果", 2000L),
             ChatMessage(3, Role.ASSISTANT, "回答：协程是轻量级线程", 3000L)
         )
         val pairs = manager.groupIntoTurnPairs(messages)
         assertEquals("TOOL 穿插时应配对 USER-ASSISTANT", 1, pairs.size)
-        assertEquals("什么是 Kotlin 协程？", pairs[0].first.content)
+        assertEquals("请记住我关注 Kotlin 协程", pairs[0].first.content)
         assertEquals("回答：协程是轻量级线程", pairs[0].second.content)
     }
 
@@ -392,12 +392,12 @@ class CrossSessionMemoryManagerSupplementaryTest {
     fun multiple_sessions_save_then_retrieve() = runBlocking {
         // 会话 1：Kotlin 话题
         manager.saveSessionMemories("s1", listOf(
-            ChatMessage(1, Role.USER, "Kotlin 协程怎么用", 1000L),
+            ChatMessage(1, Role.USER, "请记住我研究过 Kotlin 协程", 1000L),
             ChatMessage(2, Role.ASSISTANT, "使用 launch", 2000L)
         ))
         // 会话 2：Python 话题
         manager.saveSessionMemories("s2", listOf(
-            ChatMessage(3, Role.USER, "Python 异步编程", 3000L),
+            ChatMessage(3, Role.USER, "请记住我关注 Python 异步编程", 3000L),
             ChatMessage(4, Role.ASSISTANT, "使用 asyncio", 4000L)
         ))
         // 检索：FakeEmbedder 不保证语义排序，仅验证检索机制可用
@@ -418,7 +418,7 @@ class CrossSessionMemoryManagerSupplementaryTest {
     fun save_retrieve_format_full_chain() = runBlocking {
         val messages = (1..3).flatMap { i ->
             listOf(
-                ChatMessage(i.toLong() * 2 - 1, Role.USER, "话题$i 讨论内容", i.toLong() * 1000),
+                ChatMessage(i.toLong() * 2 - 1, Role.USER, "请记住我关注的话题$i", i.toLong() * 1000),
                 ChatMessage(i.toLong() * 2, Role.ASSISTANT, "话题$i 回答内容", i.toLong() * 1000 + 500)
             )
         }
@@ -453,7 +453,7 @@ class CrossSessionMemoryManagerSupplementaryTest {
     fun anti_pollution_topK_1_returns_only_one_fragment() = runBlocking {
         val messages = (1..10).flatMap { i ->
             listOf(
-                ChatMessage(i.toLong() * 2 - 1, Role.USER, "话题$i 的极限测试", i.toLong() * 1000),
+                ChatMessage(i.toLong() * 2 - 1, Role.USER, "请记住我测试过的话题$i", i.toLong() * 1000),
                 ChatMessage(i.toLong() * 2, Role.ASSISTANT, "回答$i 的极限测试", i.toLong() * 1000 + 500)
             )
         }
@@ -484,11 +484,11 @@ class CrossSessionMemoryManagerSupplementaryTest {
         val summaryManager = CrossSessionMemoryManager(embedder, memoryRepository, summarizer)
         // Q-MED-3 门槛：重要轮次 ≥ MIN_SUMMARY_TURNS(3) 才触发 LLM 摘要
         val messages = listOf(
-            ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L),
             ChatMessage(2, Role.ASSISTANT, "协程是轻量级线程，支持挂起", 2000L),
-            ChatMessage(3, Role.USER, "Kotlin 的挂起函数如何工作？", 3000L),
+            ChatMessage(3, Role.USER, "请记住我关注 Kotlin 挂起函数", 3000L),
             ChatMessage(4, Role.ASSISTANT, "挂起函数可在不阻塞线程的情况下暂停", 4000L),
-            ChatMessage(5, Role.USER, "Flow 和协程的区别是什么？", 5000L),
+            ChatMessage(5, Role.USER, "请记住我对 Flow 和协程区别的关注", 5000L),
             ChatMessage(6, Role.ASSISTANT, "Flow 是冷数据流，协程是并发原语", 6000L)
         )
         val saved = summaryManager.saveSessionMemories("s1", messages, providerConfig = TEST_CONFIG)
@@ -508,7 +508,7 @@ class CrossSessionMemoryManagerSupplementaryTest {
         val summarizer = ConversationSummarizer(completionProvider)
         val summaryManager = CrossSessionMemoryManager(embedder, memoryRepository, summarizer)
         val messages = listOf(
-            ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L),
             ChatMessage(2, Role.ASSISTANT, "协程是轻量级线程", 2000L),
             ChatMessage(3, Role.USER, "好的，谢谢", 3000L),
             ChatMessage(4, Role.ASSISTANT, "不客气", 4000L)
@@ -531,11 +531,11 @@ class CrossSessionMemoryManagerSupplementaryTest {
         val summaryManager = CrossSessionMemoryManager(embedder, memoryRepository, summarizer)
         // Q-MED-3 门槛：≥3 重要轮次才触发抽取 → 抽取失败后逐对存储 3 条
         val messages = listOf(
-            ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L),
             ChatMessage(2, Role.ASSISTANT, "协程是轻量级线程", 2000L),
-            ChatMessage(3, Role.USER, "挂起函数怎么理解？", 3000L),
+            ChatMessage(3, Role.USER, "请记住我对挂起函数的理解", 3000L),
             ChatMessage(4, Role.ASSISTANT, "挂起函数不阻塞线程", 4000L),
-            ChatMessage(5, Role.USER, "Flow 与协程区别？", 5000L),
+            ChatMessage(5, Role.USER, "请记住我对 Flow 与协程区别的关注", 5000L),
             ChatMessage(6, Role.ASSISTANT, "Flow 是冷数据流", 6000L)
         )
         val saved = summaryManager.saveSessionMemories("s1", messages, providerConfig = TEST_CONFIG)
@@ -551,7 +551,7 @@ class CrossSessionMemoryManagerSupplementaryTest {
         val summarizer = ConversationSummarizer(completionProvider)
         val summaryManager = CrossSessionMemoryManager(embedder, memoryRepository, summarizer)
         val messages = listOf(
-            ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L),
             ChatMessage(2, Role.ASSISTANT, "协程是轻量级线程", 2000L)
         )
         summaryManager.saveSessionMemories("s1", messages) // 不传 providerConfig
@@ -567,15 +567,19 @@ class CrossSessionMemoryManagerSupplementaryTest {
         val query = "话题相关"
         val queryVector = qEmbedder.embed(query)
         // 相关记忆：与查询向量完全一致 → 相似度 1.0 → 通过 0.4 阈值
+        // 注意 timestamp 用当前时间（软衰减 US-103：1970 纪元时间戳会被时间衰减过滤）
         memoryRepository.save(
-            MemoryRecord(sessionId = "s1", content = "相关记忆A", embedding = queryVector, timestamp = 1000L, turnCount = 1)
+            MemoryRecord(
+                sessionId = "s1", content = "相关记忆A", embedding = queryVector,
+                timestamp = System.currentTimeMillis() - 1000L, turnCount = 1
+            )
         )
         // 无关记忆：查询向量取反 → 相似度 -1.0 → 被 0.4 阈值过滤
         memoryRepository.save(
             MemoryRecord(
                 sessionId = "s1", content = "无关记忆B",
                 embedding = FloatArray(384) { -queryVector[it] },
-                timestamp = 2000L, turnCount = 2
+                timestamp = System.currentTimeMillis(), turnCount = 2
             )
         )
         val thresholdManager = CrossSessionMemoryManager(qEmbedder, memoryRepository) // 默认阈值 0.4
@@ -597,11 +601,11 @@ class CrossSessionMemoryManagerSupplementaryTest {
         val summaryManager = CrossSessionMemoryManager(failingEmbedder, memoryRepository, summarizer)
         // Q-MED-3 门槛：≥3 重要轮次才触发摘要 → 摘要 embed（第 1 次）失败 → 降级逐对存储 3 条
         val messages = listOf(
-            ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L),
             ChatMessage(2, Role.ASSISTANT, "协程是轻量级线程", 2000L),
-            ChatMessage(3, Role.USER, "挂起函数怎么理解？", 3000L),
+            ChatMessage(3, Role.USER, "请记住我对挂起函数的理解", 3000L),
             ChatMessage(4, Role.ASSISTANT, "挂起函数不阻塞线程", 4000L),
-            ChatMessage(5, Role.USER, "Flow 与协程区别？", 5000L),
+            ChatMessage(5, Role.USER, "请记住我对 Flow 与协程区别的关注", 5000L),
             ChatMessage(6, Role.ASSISTANT, "Flow 是冷数据流", 6000L)
         )
         val saved = summaryManager.saveSessionMemories("s1", messages, providerConfig = TEST_CONFIG)
@@ -617,7 +621,7 @@ class CrossSessionMemoryManagerSupplementaryTest {
         // M-3（CWE-20）：系统提示消息（isSystemNotice=true）不得进入 L2 记忆链路
         val messages = listOf(
             ChatMessage(1, Role.USER, "⚠️ 图片编码失败，请重试", 1000L).copy(isSystemNotice = true),
-            ChatMessage(2, Role.USER, "什么是 Kotlin 协程？", 2000L),
+            ChatMessage(2, Role.USER, "请记住我关注 Kotlin 协程", 2000L),
             ChatMessage(3, Role.ASSISTANT, "协程是轻量级线程", 3000L),
             ChatMessage(4, Role.TOOL, "tool", 4000L)
         )

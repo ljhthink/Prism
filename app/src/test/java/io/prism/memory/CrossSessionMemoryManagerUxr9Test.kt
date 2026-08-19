@@ -67,25 +67,28 @@ class CrossSessionMemoryManagerUxr9Test {
         assertTrue("我喜欢 应重要", manager.isImportantTurnPair("我喜欢用简洁的语言回答"))
         assertTrue("我叫 应重要", manager.isImportantTurnPair("我叫张三，是一名软件工程师"))
         assertTrue("请记住 应重要", manager.isImportantTurnPair("请记住我最常用的编程语言是 Kotlin"))
-        assertTrue("下次 应重要", manager.isImportantTurnPair("下次请用中文回答"))
+        assertTrue("请记住 应重要", manager.isImportantTurnPair("请记住下次请用中文回答"))
         assertTrue("我计划 应重要", manager.isImportantTurnPair("我计划学习机器学习的知识"))
     }
 
     @Test
-    fun `isImportantTurnPair returns true for substantive questions`() {
-        // 实质问题（疑问词或足够长）→ 重要
-        assertTrue("疑问词 应重要", manager.isImportantTurnPair("什么是 Kotlin 协程？"))
-        assertTrue("如何 应重要", manager.isImportantTurnPair("如何配置 MCP 服务器？"))
-        assertTrue("长问题 应重要", manager.isImportantTurnPair("帮我分析一下这个项目的架构设计思路"))
+    fun `isImportantTurnPair returns false for one-time queries even if long`() {
+        // v1 深度优化(TencentDB-Agent-Memory L1 Atom)：一次性对外查询(问题/任务请求)不沉淀为记忆，
+        // 无论多长、含多少疑问词。此前"疑问词/长度≥8 即重要"会把一次性问答全量入库。
+        assertFalse("纯疑问 应不重要", manager.isImportantTurnPair("什么是区块链技术？"))
+        assertFalse("如何 应不重要", manager.isImportantTurnPair("如何导入这个项目的源码？"))
+        assertFalse("长任务请求 应不重要", manager.isImportantTurnPair("帮我总结一下今天的调研要点"))
     }
 
     @Test
-    fun `isImportantTurnPair boundary at MIN_IMPORTANT_LEN 8`() {
-        // 边界值：无信号词/疑问词时，长度 ≥8 重要；<8 不重要
+    fun `isImportantTurnPair ignores content length without self-referential atom keyword`() {
+        // 长度本身不再判定重要：无自我指涉偏好/身份/记忆诉求时，无论多长都非持久记忆
         val seven = "一二三四五六七"   // 7 字
         val eight = "一二三四五六七八" // 8 字
+        val long = "一二三四五六七八九十十一十二十三十四十五十六"
         assertFalse("7 字纯内容应不重要", manager.isImportantTurnPair(seven))
-        assertTrue("8 字纯内容应重要", manager.isImportantTurnPair(eight))
+        assertFalse("8 字纯内容应不重要", manager.isImportantTurnPair(eight))
+        assertFalse("超长纯陈述但无自我指涉 应不重要", manager.isImportantTurnPair(long))
     }
 
     @Test
@@ -124,7 +127,7 @@ class CrossSessionMemoryManagerUxr9Test {
         val messages = listOf(
             ChatMessage(1, Role.USER, "你好", 1000L),
             ChatMessage(2, Role.ASSISTANT, "你好！", 2000L),
-            ChatMessage(3, Role.USER, "什么是 Kotlin 协程？", 3000L),
+            ChatMessage(3, Role.USER, "请记住我关注 Kotlin 协程", 3000L),
             ChatMessage(4, Role.ASSISTANT, "协程是轻量级线程", 4000L),
             ChatMessage(5, Role.USER, "好的谢谢", 5000L),
             ChatMessage(6, Role.ASSISTANT, "不客气", 6000L)

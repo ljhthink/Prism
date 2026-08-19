@@ -44,6 +44,10 @@ enum class PerformanceTier {
     val isEmbedderEnabled: Boolean
         get() = this == FULL || this == STANDARD
 
+    /** 手机操控（LLM 操控手机，v1 US-204）是否启用（FULL / STANDARD 启用，低端档禁用）。 */
+    val isPhoneControlEnabled: Boolean
+        get() = this == FULL || this == STANDARD
+
     /** RAG 检索 top-k（FULL=5, STANDARD=3，禁用时返回 0 表示不使用）。 */
     val ragTopK: Int
         get() = when (this) {

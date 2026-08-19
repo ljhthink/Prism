@@ -4,6 +4,9 @@
     <!-- US-006：SSE 流式请求 OpenAI 兼容端点需要网络权限 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- v1 真机二次修复（Issue 5）：Prism 后台时手机操控高危确认（发送/删除/拨号）需发系统通知，
+         Android 13+（targetSdk 34）为运行时权限，需在运行时申请（Settings 无障碍页/首次操控时提示）。 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:name=".PrismApplication"
@@ -26,6 +29,28 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+            v1 US-201（LLM 操控手机）：无障碍服务。
+            读取 UI 树 + 注入手势/全局动作/无障碍截图（API30+），供 phone_control__* 工具使用。
+            需用户在系统「设置 → 无障碍」中手动开启（Android 12+ 无法代码拉起授权页）。
+        -->
+        <service
+            android:name=".phonecontrol.PhoneControlAccessibilityService"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/phone_control_accessibility" />
+        </service>
+        <!-- v1 真机二次修复（Issue 5）：手机操控高危确认通知操作接收器（后台也能作答） -->
+        <receiver
+            android:name=".phonecontrol.PhoneControlAskUserNotifier$ConfirmActionReceiver"
+            android:exported="false" />
     </application>
 
     <!--
@@ -100,6 +125,12 @@
         <intent>
             <action android:name="android.intent.action.SEND" />
             <data android:mimeType="image/*" />
+        </intent>
+
+        <!-- v1 US-201（LLM 操控手机）：launcher intent 包可见性（启动任意已装 App） -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
         </intent>
 
     </queries>

@@ -60,7 +60,41 @@ data class MemoryRecord(
     @HnswIndex(dimensions = 384, distanceType = VectorDistanceType.COSINE)
     var embedding: FloatArray? = null,
     var timestamp: Long = System.currentTimeMillis(),
-    var turnCount: Int = 0
+    var turnCount: Int = 0,
+    /**
+     * 记忆重要性评分（v1 记忆深度优化 US-101，参照 TencentDB-Agent-Memory priority）。
+     *
+     * 0-100，由 LLM 原子记忆抽取时赋值（未走 LLM 抽取的规则存储默认 [DEFAULT_PRIORITY]）。
+     * 用于 [io.prism.memory.CrossSessionMemoryManager] 的软衰减评分
+     * `recallScore = priority × exp(-λ·age) × (1+α·accessCount)` 与容量回收排序。
+     */
+    var priority: Int = DEFAULT_PRIORITY,
+    /**
+     * 记忆被检索命中的次数（v1 记忆深度优化 US-101）。
+     *
+     * 每次 [MemoryRepository.searchByVector] / 混合检索命中该记录时 +1（软衰减的
+     * 使用频率信号，对应 Bjork「检索强度」模型：越常命中越难遗忘）。
+     */
+    var accessCount: Long = 0,
+    /**
+     * 记忆版本号（v1 记忆深度优化 US-101，参照 TencentDB-Agent-Memory version）。
+     *
+     * 新增=1，批量去重 update/merge 时单调递增（US-103），供溯源与去重审计。
+     */
+    var version: Int = 1,
+    /**
+     * 记忆来源消息引用（v1 记忆深度优化 US-101）。
+     *
+     * 记录该条记忆源自哪些 [io.prism.ui.model.ChatMessage] id（逗号分隔），
+     * 实现记忆溯源（来源消息可追溯）。LLM 抽取路径由管理端按输入消息 id 赋值；
+     * 规则存储路径为空串。
+     *
+     * **可空原因（v1 真机修复）**：US-101 新增该字段时 ObjectBox 自动迁移仅对新增列
+     * 写入 SQL NULL（不反填非空默认值），旧版本遗留的记忆行该字段为 null。若声明为非空，
+     * 读库时 ObjectBox 将 null 传给 Kotlin 非空构造参数触发 Intrinsics NPE 崩溃。
+     * 改为可空后读取 null 安全；调用方在结果对象处 `?: ""` 归一化。
+     */
+    var sourceMessageIds: String? = null
 ) {
     /**
      * FloatArray 字段的 equals/hashCode 覆盖（H-3，BR-security-001 + L-01 修复）。
@@ -84,7 +118,11 @@ data class MemoryRecord(
             content == other.content &&
             embedding.contentEquals(other.embedding) &&
             timestamp == other.timestamp &&
-            turnCount == other.turnCount
+            turnCount == other.turnCount &&
+            priority == other.priority &&
+            accessCount == other.accessCount &&
+            version == other.version &&
+            sourceMessageIds == other.sourceMessageIds
     }
 
     override fun hashCode(): Int {
@@ -94,6 +132,25 @@ data class MemoryRecord(
         result = 31 * result + (embedding?.contentHashCode() ?: 0)
         result = 31 * result + timestamp.hashCode()
         result = 31 * result + turnCount.hashCode()
+        result = 31 * result + priority.hashCode()
+        result = 31 * result + accessCount.hashCode()
+        result = 31 * result + version.hashCode()
+        result = 31 * result + (sourceMessageIds?.hashCode() ?: 0)
         return result
+    }
+
+    companion object {
+        /**
+         * 记忆重要性评分默认值（v1 记忆深度优化 US-101）。
+         *
+         * LLM 抽取失败/未走抽取路径时使用；范围 0-100（[MIN_PRIORITY]..[MAX_PRIORITY]）。
+         */
+        const val DEFAULT_PRIORITY = 50
+
+        /** 记忆重要性评分下界。 */
+        const val MIN_PRIORITY = 0
+
+        /** 记忆重要性评分上界。 */
+        const val MAX_PRIORITY = 100
     }
 }

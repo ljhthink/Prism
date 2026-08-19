@@ -205,6 +205,46 @@ class LocalMcpToolProviderFetchTest {
     }
 
     @Test
+    fun `fetch tool 200 challenge shell returns no-content diagnostic`() = runBlocking {
+        // v1 Issue 2：反爬系统常返回 200 但内容是 JS 挑战/验证壳，直接回灌 LLM 会得到无意义脚本。
+        // 内容纯度判定应拦截并给出明确降级文案，而非把挑战页原文返回给 LLM。
+        val engine = MockEngine {
+            respond(
+                "<html><head><title>Just a moment...</title></head><body>Checking your browser before accessing. Please enable cookies.</body></html>",
+                HttpStatusCode.OK
+            )
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "https://example.com/challenged")
+        )
+
+        assertTrue("200 挑战壳应提示无有效正文", result.contains("无有效正文"))
+        assertFalse("不应把挑战页脚本原文回灌 LLM", result.contains("Checking your browser"))
+    }
+
+    @Test
+    fun `fetch tool 503 returns challenge diagnostic`() = runBlocking {
+        // v1 Issue 2：503 挑战页（Cloudflare「Just a moment」）给出可诊断文案，避免误判为 URL 错误
+        val engine = MockEngine {
+            respond("Service Unavailable", HttpStatusCode.ServiceUnavailable)
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "https://example.com/challenge")
+        )
+
+        assertTrue("503 应提示人机验证/挑战页", result.contains("503") && result.contains("人机验证"))
+        assertTrue("503 应提示改用其他来源", result.contains("改用其他来源"))
+    }
+
+    @Test
     fun `fetch tool null client degrades gracefully`() = runBlocking {
         // fetchHttpClient=null 时返回降级文案（不抛异常）
         val provider = LocalMcpToolProvider(server, null)
@@ -393,5 +433,47 @@ class LocalMcpToolProviderFetchTest {
 
         assertTrue("404 应提示目标页面不存在", result.contains("404"))
         assertTrue("404 应提示勿反复重试/改用其他来源", result.contains("勿反复重试") || result.contains("改用其他来源"))
+    }
+
+    @Test
+    fun `fetch upgrades public http url to https before request`() = runBlocking {
+        // v1 批次6（Issue 1）：Android 明文 http 被网络安全策略拦截（UnknownServiceException），
+        // 公网 http 应在发起请求前升级为 https（SSRF 复检后）——MockEngine 捕获到的 URL 必须为 https。
+        var capturedUrl: String? = null
+        val engine = MockEngine { request ->
+            capturedUrl = request.url.toString()
+            respond("<html><body>ok</body></html>", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/html"))
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "http://example.com/index")
+        )
+
+        assertTrue("http 应被升级为 https 再请求", capturedUrl.orEmpty().startsWith("https://example.com/"))
+        assertTrue("应返回抓取内容", result.contains("ok"))
+    }
+
+    @Test
+    fun `sanitizeUrlForLog strips query and fragment keeping host path`() {
+        // v1 批次6（Issue 1，CWE-532）：Fetch 失败日志须脱敏——丢弃 query（易含 PII），保留 host+path
+        val provider = LocalMcpToolProvider(server, null)
+        assertEquals(
+            "https://example.com/a/b",
+            provider.sanitizeUrlForLog("https://example.com/a/b?token=secret&x=1#frag")
+        )
+        assertEquals(
+            "https://example.com/",
+            provider.sanitizeUrlForLog("https://example.com/?q=私密查询词")
+        )
+        // LOW-1（CWE-532）：userinfo 凭证必须剥离，不入日志
+        assertEquals(
+            "https://example.com/priv",
+            provider.sanitizeUrlForLog("https://user:secret123@example.com/priv?token=abc")
+        )
+        // 非标准输入兜底（截断）
+        assertTrue(provider.sanitizeUrlForLog("not a url").length <= 120)
     }
 }

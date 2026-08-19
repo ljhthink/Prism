@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    v1 US-201（LLM 操控手机）：无障碍服务配置。
+
+    - canRetrieveWindowContent：读取 UI 树（节点文本/位置/可点击性）→ 喂给通用 LLM 感知屏幕
+    - canPerformGestures（API24+）：注入点击/滑动/长按等手势
+    - flagIncludeNotImportantViews / flagReportViewIds：获取完整节点树与 view id
+    - canTakeScreenshot（API30+）：无障碍截图（避开 MediaProjection Android14+ 每次授权限制）
+    - notificationTimeout：事件节流
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeWindowsChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews|flagReportViewIds"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:canTakeScreenshot="true"
+    android:description="@string/phone_control_accessibility_description"
+    android:notificationTimeout="100" />

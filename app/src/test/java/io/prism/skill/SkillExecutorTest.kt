@@ -1669,6 +1669,24 @@ class SkillExecutorTest {
     }
 
     @Test
+    fun `isFailureResult true for phone control error and blocked prefixes`() {
+        // v1 US-202（LLM 操控手机）：phone_control__* 执行失败"错误："与敏感硬拦截"⚠️"前缀
+        // 纳入失败识别 → 重复工具熔断可识别手机控制失败，防 LLM 同参数反复重试。
+        assertTrue(SkillExecutor.isFailureResult("错误：手机操控无障碍服务未开启"))
+        assertTrue(SkillExecutor.isFailureResult("错误：节点 [3] 不存在（页面可能已变化）"))
+        assertTrue(SkillExecutor.isFailureResult("错误：缺少 package 参数"))
+        assertTrue(SkillExecutor.isFailureResult("⚠️ 目标含敏感内容（转账），已硬拦截"))
+        assertTrue(SkillExecutor.isFailureResult("⚠️ 禁止启动金融专用应用 com.eg.android.AlipayGphone"))
+    }
+
+    @Test
+    fun `isFailureResult false for ask_user takeover marker`() {
+        // v1 US-202：take_over/高危动作强制 MANUAL 返回【需要用户回答】+ 载荷 —— 属"等待用户输入"
+        // 语义，由 executeLoop 单独处理（发 AskUser + StopAtTools），不纳入失败识别（否则误熔断）。
+        assertFalse(SkillExecutor.isFailureResult("【需要用户回答】{\"questions\":[]}"))
+    }
+
+    @Test
     fun `isFailureResult false for success result`() {
         assertFalse(SkillExecutor.isFailureResult("文件内容：hello world"))
     }

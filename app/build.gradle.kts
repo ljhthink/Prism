@@ -27,8 +27,8 @@ android {
         applicationId = "io.prism"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "1.0.0"
         // M3 引入 Apache POI（poi-ooxml）后方法数/引用数可能超限，启用 Multidex（ADR-007 5.3）
         multiDexEnabled = true
         // M7 设备适配（ADR-017 4.8）：仅打包 arm64-v8a + armeabi-v7a 两个 ABI，
@@ -160,6 +160,9 @@ dependencies {
     // R1（UXR10 真机修复）：桌面 PDFBox 3.0.8 依赖 java.awt（Android 无此包）→ 真机解析 PDF 崩溃。
     // 生产切换 pdfbox-android（Apache PDFBox 2.0.27 的 Android 移植，ADR-032）；桌面 pdfbox 仅 test 供夹具。
     implementation(libs.pdfbox.android)
+    // v1 US-302（方案 B OCR 兜底）：ML Kit 文字识别（bundled 中文，离线，不依赖 GMS/Firebase，
+    // F-Droid 友好）。minSdk 23 满足（项目 26）。体积 +~8MB（2 ABI）。
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     // M4 Skills（ADR-013 5.2）：SKILL.md frontmatter YAML 解析（snakeyaml-engine-kmp，Apache 2.0）
     implementation(libs.snakeyaml.engine.kmp)
     implementation(libs.markdown.renderer.m3)

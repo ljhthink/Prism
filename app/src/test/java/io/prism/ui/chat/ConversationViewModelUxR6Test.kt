@@ -403,6 +403,29 @@ class ConversationViewModelUxR6Test {
         }
 
     @Test
+    fun `resolveToolLoopMaxRounds opens phone control cap and raises default to 50`() = runTest(mainDispatcher) {
+        fun tool(name: String) = ToolDefinition(
+            function = ToolDefinition.FunctionDef(
+                name = name, description = name, parameters = buildJsonObject { }
+            )
+        )
+        val searchTool = tool("web_search__search")
+        val phoneTool = tool("phone_control__001_tap")
+        assertEquals(
+            "普通工具应走默认上限（提升至 50）",
+            50,
+            ConversationViewModel.resolveToolLoopMaxRounds(listOf(searchTool))
+        )
+        assertEquals(
+            "含手机操控工具应放宽上限（解除限制）",
+            200,
+            ConversationViewModel.resolveToolLoopMaxRounds(listOf(searchTool, phoneTool))
+        )
+        assertEquals("DEFAULT_MAX_ROUNDS 应与 SkillExecutor 对齐为 50", 50, ConversationViewModel.DEFAULT_MAX_ROUNDS)
+        assertEquals("isPhoneControlTool 应识别前缀", true, ConversationViewModel.isPhoneControlTool("phone_control__001_tap"))
+    }
+
+    @Test
     fun `streamingIds stays during tool loop and clears in finally`() = runTest(mainDispatcher) {
         saveActiveProvider()
         // 工具回路：注入带工具的 Skill → tools 非空 → executeWithToolLoop 分支。

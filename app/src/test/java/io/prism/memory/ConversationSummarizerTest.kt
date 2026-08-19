@@ -155,13 +155,13 @@ class ConversationSummarizerTest {
         val provider = FakeCompletionProvider("无")
         val summarizer = ConversationSummarizer(provider)
         val result = summarizer.extractMemories(emptyList(), testConfig)
-        assertEquals("空消息列表应返回空列表（不触发 LLM）", emptyList<String>(), result)
+        assertEquals("空消息列表应返回空列表（不触发 LLM）", emptyList<ExtractedMemory>(), result)
         assertEquals("空消息不应触发 LLM 调用", 0, provider.callCount)
     }
 
     @Test
     fun extractMemories_parses_list_lines_and_strips_numbering() = runBlocking {
-        // LLM 返回带序号/列表符号的多行记忆
+        // LLM 返回带序号/列表符号的多行记忆（行式降级：type=general / priority=50）
         val raw = """1. 用户偏好使用简体中文交流
 - 用户是 Android 开发者，使用 Kotlin 和 Jetpack Compose
 • 用户决定项目采用方案 A
@@ -174,15 +174,96 @@ class ConversationSummarizerTest {
         )
         val result = summarizer.extractMemories(messages, testConfig)
         assertEquals(4, result?.size)
-        assertEquals("用户偏好使用简体中文交流", result?.get(0))
-        assertEquals("用户是 Android 开发者，使用 Kotlin 和 Jetpack Compose", result?.get(1))
-        assertEquals("用户决定项目采用方案 A", result?.get(2))
-        assertEquals("用户每周日健身", result?.get(3))
+        assertEquals("用户偏好使用简体中文交流", result?.get(0)?.content)
+        assertEquals("用户是 Android 开发者，使用 Kotlin 和 Jetpack Compose", result?.get(1)?.content)
+        assertEquals("用户决定项目采用方案 A", result?.get(2)?.content)
+        assertEquals("用户每周日健身", result?.get(3)?.content)
+        // 行式降级：type 兜底 general、priority 兜底 50
+        assertEquals(ExtractedMemory.TYPE_GENERAL, result?.get(0)?.type)
+        assertEquals(ExtractedMemory.DEFAULT_PRIORITY, result?.get(0)?.priority)
         // 抽取任务应使用记忆抽取 prompt 作为 systemPrompt
         assertTrue(
             "应使用记忆抽取 prompt",
             provider.lastSystemPrompt?.contains("原子记忆") == true
         )
+    }
+
+    // ==================== v1 US-101：JSON 结构化解析 + 类型/优先级规范化 ====================
+
+    @Test
+    fun extractMemories_parses_json_structured_output() = runBlocking {
+        // LLM 按新 prompt 输出 JSON 数组（content/type/priority）
+        val raw = """
+            [{"content": "用户偏好使用简体中文交流", "type": "persona", "priority": 90},
+             {"content": "用户最近在学习 Kotlin", "type": "fact", "priority": 70},
+             {"content": "用户决定项目采用方案 A", "type": "decision", "priority": 80}]
+        """.trimIndent()
+        val provider = FakeCompletionProvider(raw)
+        val summarizer = ConversationSummarizer(provider)
+        val messages = listOf(
+            ChatMessage(1, Role.USER, "我是 Android 开发者", 1000L),
+            ChatMessage(2, Role.ASSISTANT, "了解了。", 2000L)
+        )
+        val result = summarizer.extractMemories(messages, testConfig)
+        assertEquals(3, result?.size)
+        assertEquals("用户偏好使用简体中文交流", result?.get(0)?.content)
+        // 同义词规范化：preference/fact/decision → persona/episodic/instruction
+        assertEquals(ExtractedMemory.TYPE_PERSONA, result?.get(0)?.type)
+        assertEquals(ExtractedMemory.TYPE_EPISODIC, result?.get(1)?.type)
+        assertEquals(ExtractedMemory.TYPE_INSTRUCTION, result?.get(2)?.type)
+        assertEquals(90, result?.get(0)?.priority)
+        assertEquals(70, result?.get(1)?.priority)
+        assertEquals(80, result?.get(2)?.priority)
+    }
+
+    @Test
+    fun extractMemories_strips_json_markdown_fence() = runBlocking {
+        val raw = """
+            ```json
+            [{"content": "用户喜欢简洁回答", "type": "preference", "priority": 85}]
+            ```
+        """.trimIndent()
+        val provider = FakeCompletionProvider(raw)
+        val summarizer = ConversationSummarizer(provider)
+        val messages = listOf(ChatMessage(1, Role.USER, "test", 1000L))
+        val result = summarizer.extractMemories(messages, testConfig)
+        assertEquals(1, result?.size)
+        assertEquals("用户喜欢简洁回答", result?.get(0)?.content)
+        assertEquals(ExtractedMemory.TYPE_PERSONA, result?.get(0)?.type)
+    }
+
+    @Test
+    fun extractMemories_normalizes_type_and_priority_fallbacks() = runBlocking {
+        // type 无法识别 → general；priority 非数字/超界 → 兜底/clamp
+        val raw = """
+            [{"content": "用户喜欢喝美式咖啡", "type": "未知类型", "priority": "abc"},
+             {"content": "用户每周健身三次", "type": "episodes", "priority": 999},
+             {"content": "用户使用 Kotlin", "type": "preferences", "priority": -5}]
+        """.trimIndent()
+        val provider = FakeCompletionProvider(raw)
+        val summarizer = ConversationSummarizer(provider)
+        val messages = listOf(ChatMessage(1, Role.USER, "test", 1000L))
+        val result = summarizer.extractMemories(messages, testConfig)
+        assertEquals(3, result?.size)
+        // 未知类型 → general；非数字优先级 → 50
+        assertEquals(ExtractedMemory.TYPE_GENERAL, result?.get(0)?.type)
+        assertEquals(ExtractedMemory.DEFAULT_PRIORITY, result?.get(0)?.priority)
+        // episodes → episodic；999 → clamp 100
+        assertEquals(ExtractedMemory.TYPE_EPISODIC, result?.get(1)?.type)
+        assertEquals(100, result?.get(1)?.priority)
+        // preferences → persona；-5 → clamp 0
+        assertEquals(ExtractedMemory.TYPE_PERSONA, result?.get(2)?.type)
+        assertEquals(0, result?.get(2)?.priority)
+    }
+
+    @Test
+    fun extractMemories_returns_empty_for_empty_json_array() = runBlocking {
+        // LLM 成功但判定无值得记录 → 空数组 → 空列表（调用方据此不落库）
+        val provider = FakeCompletionProvider("[]")
+        val summarizer = ConversationSummarizer(provider)
+        val messages = listOf(ChatMessage(1, Role.USER, "test", 1000L))
+        val result = summarizer.extractMemories(messages, testConfig)
+        assertEquals("空数组应返回空列表", emptyList<ExtractedMemory>(), result)
     }
 
     @Test
@@ -199,7 +280,7 @@ class ConversationSummarizerTest {
         )
         val result = summarizer.extractMemories(messages, testConfig)
         assertEquals("应过滤'无'与空行", 2, result?.size)
-        assertFalse("不应包含'无'", result?.any { it == "无" } == true)
+        assertFalse("不应包含'无'", result?.any { it.content == "无" } == true)
     }
 
     @Test
@@ -223,9 +304,9 @@ class ConversationSummarizerTest {
         val messages = listOf(ChatMessage(1, Role.USER, "test", 1000L))
         val result = summarizer.extractMemories(messages, testConfig)
         assertEquals(3, result?.size)
-        assertEquals("用户喜欢养宠物", result?.get(0))
-        assertEquals("用户有 2 个孩子", result?.get(1))
-        assertEquals("用户计划 2026 年买车", result?.get(2))
+        assertEquals("用户喜欢养宠物", result?.get(0)?.content)
+        assertEquals("用户有 2 个孩子", result?.get(1)?.content)
+        assertEquals("用户计划 2026 年买车", result?.get(2)?.content)
     }
 
     @Test
@@ -238,8 +319,11 @@ class ConversationSummarizerTest {
         val messages = listOf(ChatMessage(1, Role.USER, "test", 1000L))
         val result = summarizer.extractMemories(messages, testConfig)
         assertEquals(1, result?.size)
-        assertTrue("单条记忆应截断到上限", result!![0].length <= ConversationSummarizer.MAX_MEMORY_ITEM_CHARS)
-        assertEquals("截断长度应为上限", ConversationSummarizer.MAX_MEMORY_ITEM_CHARS, result[0].length)
+        assertTrue(
+            "单条记忆应截断到上限",
+            result!![0].content.length <= ConversationSummarizer.MAX_MEMORY_ITEM_CHARS
+        )
+        assertEquals("截断长度应为上限", ConversationSummarizer.MAX_MEMORY_ITEM_CHARS, result[0].content.length)
     }
 
     @Test
@@ -248,7 +332,7 @@ class ConversationSummarizerTest {
         val summarizer = ConversationSummarizer(provider)
         val messages = listOf(ChatMessage(1, Role.USER, "test", 1000L))
         val result = summarizer.extractMemories(messages, testConfig)
-        assertEquals("Provider 返回 null 应视为无记忆（空列表）", emptyList<String>(), result)
+        assertEquals("Provider 返回 null 应视为无记忆（空列表）", emptyList<ExtractedMemory>(), result)
     }
 
     @Test
@@ -278,6 +362,68 @@ class ConversationSummarizerTest {
         assertTrue("Prompt 应显式排除一次性信息查询", prompt.contains("一次性信息查询"))
         assertTrue("Prompt 应含第三人称约束", prompt.contains("第三人称"))
         assertTrue("Prompt 应含输出上限约束", prompt.contains("最多 5 条"))
+    }
+
+    // ==================== v1 US-103：parseDedupDecisions 对抗测试（guardrail FIX-2） ====================
+
+    @Test
+    fun parseDedupDecisions_drops_out_of_range_memoryIndex() {
+        val summarizer = ConversationSummarizer(FakeCompletionProvider("[]"))
+        val decisions = summarizer.parseDedupDecisions(
+            """[{"memoryIndex": 99, "action": "skip", "targetId": 1}, {"memoryIndex": 0, "action": "store"}]""",
+            batchSize = 1
+        )
+        assertEquals("越界 memoryIndex 应被丢弃，仅保留合法决策", 1, decisions?.size)
+        assertEquals(0, decisions?.get(0)?.memoryIndex)
+    }
+
+    @Test
+    fun parseDedupDecisions_drops_invalid_action() {
+        val summarizer = ConversationSummarizer(FakeCompletionProvider("[]"))
+        val decisions = summarizer.parseDedupDecisions(
+            """[{"memoryIndex": 0, "action": "drop_all", "targetId": 1}, {"memoryIndex": 1, "action": "skip"}]""",
+            batchSize = 2
+        )
+        assertEquals("非法 action 应被丢弃", 1, decisions?.size)
+        assertEquals("skip", decisions?.get(0)?.action)
+    }
+
+    @Test
+    fun parseDedupDecisions_strips_markdown_fence() {
+        val summarizer = ConversationSummarizer(FakeCompletionProvider("[]"))
+        val decisions = summarizer.parseDedupDecisions(
+            "```json\n[{\"memoryIndex\": 0, \"action\": \"skip\", \"targetId\": 5}]\n```",
+            batchSize = 1
+        )
+        assertEquals(1, decisions?.size)
+        assertEquals("skip", decisions?.get(0)?.action)
+        assertEquals(5L, decisions?.get(0)?.targetId)
+    }
+
+    @Test
+    fun parseDedupDecisions_empty_array_returns_empty_list() {
+        val summarizer = ConversationSummarizer(FakeCompletionProvider("[]"))
+        val decisions = summarizer.parseDedupDecisions("[]", batchSize = 1)
+        assertEquals("空数组应返回空列表", emptyList<DedupDecision>(), decisions)
+    }
+
+    @Test
+    fun parseDedupDecisions_non_json_returns_null() {
+        val summarizer = ConversationSummarizer(FakeCompletionProvider("[]"))
+        val decisions = summarizer.parseDedupDecisions("这不是 JSON", batchSize = 1)
+        assertNull("非 JSON 应返回 null（调用方降级 store）", decisions)
+    }
+
+    @Test
+    fun parseDedupDecisions_targetId_optional_for_store() {
+        val summarizer = ConversationSummarizer(FakeCompletionProvider("[]"))
+        val decisions = summarizer.parseDedupDecisions(
+            """[{"memoryIndex": 0, "action": "store", "targetId": null}]""",
+            batchSize = 1
+        )
+        assertEquals(1, decisions?.size)
+        assertEquals("store", decisions?.get(0)?.action)
+        assertNull(decisions?.get(0)?.targetId)
     }
 
     /**

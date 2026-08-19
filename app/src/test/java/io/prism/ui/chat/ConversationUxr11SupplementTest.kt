@@ -142,6 +142,21 @@ class ConversationUxr11SupplementTest {
     }
 
     @Test
+    fun `sanitizeToolCallSyntax strips garbled open tag with alnum separators`() {
+        // v1 Issue 1 回归用例：LLM 输出 `<与关键词间夹带字母数字分隔`（如 `｜tool_calls｜` 被写成
+        // 带编号/字符分隔的变形 `<1tool_calls>`）。旧正则 `[^\w>]` 会拒绝 `\w` 词字符导致开标签
+        // 漏配而残留乱码；改为 `[^>\n]` 后应正确剥离整块，仅保留正文。
+        val input = "我先查一下。\n<1tool_calls>\n<2invoke name=\"web_search__search\">\n" +
+            "<3parameter name=\"query\">梧州市第一中学</3parameter>\n</2invoke>\n</1tool_calls>\n" +
+            "以上是查询过程。"
+        val out = sanitizeToolCallSyntax(input)
+        assertFalse("夹数字分隔的 tool_calls 块应被剥离", out.contains("tool_calls"))
+        assertFalse("夹数字分隔的 invoke 块应被剥离", out.contains("invoke"))
+        assertTrue("正文前段应保留", out.contains("我先查一下"))
+        assertTrue("正文后段应保留", out.contains("以上是查询过程"))
+    }
+
+    @Test
     fun `sanitizeToolCallSyntax keeps code fence containing tool_calls token`() {
         // guardrail F5：代码示例中出现 </tool_calls> 闭合标签时，围栏内不应被误删
         val fenced = "```xml\n" +

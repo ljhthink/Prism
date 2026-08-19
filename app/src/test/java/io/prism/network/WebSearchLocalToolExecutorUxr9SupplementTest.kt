@@ -27,13 +27,14 @@ import org.junit.Test
 class WebSearchLocalToolExecutorUxr9SupplementTest {
 
     private fun rssBody(vararg items: Triple<String, String, String>): String {
-        val sb = StringBuilder("""<?xml version="1.0" encoding="UTF-8"?><rss><channel>""")
+        // v1 批次6（RSS→HTML）：本文件 execute 测试的 MockEngine 响应体改为 Bing HTML `li.b_algo`。
+        val sb = StringBuilder("""<html><ol id="b_results">""")
         items.forEach { (title, link, desc) ->
-            sb.append("<item><title>").append(title).append("</title><link>")
-                .append(link).append("</link><description>").append(desc)
-                .append("</description></item>")
+            sb.append("<li class=\"b_algo\"><h2><a href=\"").append(link).append("\">")
+                .append(title).append("</a></h2><div class=\"b_caption\"><p>").append(desc)
+                .append("</p></div></li>")
         }
-        sb.append("</channel></rss>")
+        sb.append("</ol></html>")
         return sb.toString()
     }
 
@@ -184,6 +185,44 @@ class WebSearchLocalToolExecutorUxr9SupplementTest {
         assertEquals("应触发 2 次搜索（主查询 + 核心词重试）", 2, callCount)
         assertTrue("重试结果应含完整命中条目", result.contains("昔涟（崩坏"))
         assertFalse("重试结果的单字噪声条目应被剔除", result.contains("昔 xī"))
+    }
+
+    // ==================== v1 批次5 无空格中文整句实体提取（ac-verifier P2，ADR-038） ====================
+
+    @Test
+    fun `extractCoreTerms strips interrogative suffix to derive entity from unsegmented sentence`() {
+        // "梧州一中是什么学校" 无空格/标点，整体是一个连续 CJK run。核心词必须能剥出前置实体
+        // "梧州一中"（而非保留整句），否则条目过滤/相关性都要求字面整句命中 → 检索只"大概相关"。
+        val executor = WebSearchLocalToolExecutor(noopClient())
+        val terms = executor.extractCoreTerms("梧州一中是什么学校")
+        assertTrue(
+            "应剥出实体'梧州一中'，实际: $terms",
+            terms.contains("梧州一中")
+        )
+        // 降级重试用候选应排除与原始 query 相同的整句（execute 内 `term==query` 跳过），
+        // 因此过滤去重后用于实际重试的核心候选应包含实体词
+        val retryCandidates = terms.filterNot { it == "梧州一中是什么学校" }
+        assertTrue(
+            "重试候选应含实体'梧州一中'，实际: $retryCandidates",
+            retryCandidates.contains("梧州一中")
+        )
+    }
+
+    @Test
+    fun `filterRelevantItems keeps only items containing stripped entity not whole sentence`() {
+        // 相关性过滤应基于剥出的实体（梧州一中），Bing 返回的条目标题/摘要含"梧州一中"即直接命中；
+        // 若退化用整句过滤则会把"梧州一中简介"这类正常条目误删，导致"参考来源间接不达"。
+        val executor = WebSearchLocalToolExecutor(noopClient())
+        val items = listOf(
+            item("梧州一中官网", "https://wz.hrg980.com", "梧州一中的学校介绍"),
+            item("梧州市 教育新闻", "https://www.example.com/wz", "梧州市教育局发布"),
+            item("梧州一中怎么样", "https://baike.example.com/1", "梧州一中基本信息")
+        )
+        val filtered = executor.filterRelevantItems(items, listOf("梧州一中"))
+        assertEquals("只应保留包含完整实体'梧州一中'的条目", 2, filtered.size)
+        assertTrue(filtered.any { it.title == "梧州一中官网" })
+        assertTrue(filtered.any { it.title == "梧州一中怎么样" })
+        assertFalse("仅含'梧州'但不含'一中'的条目应被剔除", filtered.any { it.title.contains("教育新闻") })
     }
 
     private fun noopClient(): HttpClient =

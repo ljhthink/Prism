@@ -47,8 +47,10 @@ import io.prism.data.UserProfileRepository
 import io.prism.memory.ConversationSummarizer
 import io.prism.memory.CrossSessionMemoryManager
 import io.prism.memory.MemoryConfigRepository
+import io.prism.memory.SqliteFtsMemoryIndex
 import io.prism.memory.SlidingWindowMemoryManager
 import io.prism.memory.UserProfileManager
+import io.prism.vision.MlKitOcrTextExtractor
 import io.prism.skill.SkillRegistry
 import io.prism.tier.PerformanceTier
 import io.prism.tier.TierConfigRepository
@@ -557,9 +559,57 @@ class PrismApplication : Application() {
                 webSearchLocalToolExecutor,
                 knowledgeBaseLocalToolExecutor,
                 documentLocalToolExecutor,
-                askUserLocalToolExecutor
+                askUserLocalToolExecutor,
+                // v1 US-201（LLM 操控手机）：phone_control__* 工具
+                phoneControlLocalToolExecutor
             )
         )
+    }
+
+    /**
+     * v1 US-201（LLM 操控手机）：手机操控本地工具执行器。
+     *
+     * 通过 [PhoneControlAccessibilityService]（需用户在系统设置开启无障碍）读取 UI 树、
+     * 执行点击/滑动/输入/返回/启动应用等。敏感操作（支付/密码/高危动作）在
+     * [io.prism.phonecontrol.PhoneControlSecurity] 层硬拦截（代码层，不依赖模型自觉）。
+     */
+    val phoneControlLocalToolExecutor: io.prism.phonecontrol.PhoneControlLocalToolExecutor by lazy {
+        // v1 真机二次修复（Issue 4）：注入系统级无障碍启用检测，区分"已启用但实例未连"与"未启用"
+        io.prism.phonecontrol.PhoneControlLocalToolExecutor(
+            accessibilityEnabledProvider = {
+                io.prism.phonecontrol.PhoneControlAccessibilityService.isEnabledInSystem(this)
+            },
+            // v1 真机二次修复（Issue 4b）：高危动作（发送/删除/拨号）按用户三态策略（秒读；失败回退 ASK 安全优先）
+            highRiskApprovalProvider = {
+                try {
+                    highRiskApprovalRepository.getMode()
+                } catch (e: Exception) {
+                    io.prism.config.HighRiskApprovalMode.ASK
+                }
+            },
+            // v1 真机二次修复（Issue 5）：后台执行高危动作时发系统通知让用户在其它 App 也能作答
+            askUserNotifier = phoneControlAskUserNotifier
+        )
+    }
+
+    /**
+     * 手机操控高危动作（发送/删除/拨号）确认策略仓库（v1 真机二次修复 Issue 4b）。
+     */
+    val highRiskApprovalRepository: io.prism.config.HighRiskApprovalRepository by lazy {
+        io.prism.config.HighRiskApprovalRepository(highRiskApprovalDataStore)
+    }
+
+    /**
+     * 手机操控确认通知桥（v1 真机二次修复 Issue 5）：Prism 后台时高危确认以高优先级通知+允许/拒绝
+     * 操作弹出，用户即便在其它 App 也能看见并作答。
+     */
+    val phoneControlAskUserNotifier: io.prism.phonecontrol.PhoneControlAskUserNotifier by lazy {
+        io.prism.phonecontrol.PhoneControlAskUserNotifier(this).also { notifier ->
+            io.prism.phonecontrol.PhoneControlAskUserNotifier.ConfirmActionReceiver.holder = notifier
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                io.prism.phonecontrol.PhoneControlAskUserNotifier.ensureChannel(this)
+            }
+        }
     }
 
     /**
@@ -637,6 +687,71 @@ class PrismApplication : Application() {
      * 由 [slidingWindowMemoryManager] 读取 N 值，由记忆管理 UI（US-036）写入 N 值。
      */
     val memoryConfigRepository: MemoryConfigRepository by lazy { MemoryConfigRepository(memoryConfigDataStore) }
+
+    /**
+     * v1 US-301（方案 B 云端视觉旁路）配置仓库 —— 持久化旁路授权 + 自动开关 + 熔断计数。
+     *
+     * 使用独立 DataStore（`prism_vision_bypass_config`）。授权（隐私刚性要求：图片外发视觉
+     * Provider 需用户明示）+ 自动开关 + 连续失败熔断（默认 3 次）。
+     */
+    val visionBypassConfigRepository: io.prism.config.VisionBypassConfigRepository by lazy {
+        io.prism.config.VisionBypassConfigRepository(visionBypassConfigDataStore)
+    }
+
+    /**
+     * v1 US-302：ML Kit OCR 提取器（单例，guardrail M-3：TextRecognizer「创建一次复用」，
+     * 避免每次 OCR 新建导致资源泄漏）。
+     */
+    private val mlKitOcrTextExtractor: MlKitOcrTextExtractor by lazy { MlKitOcrTextExtractor(this) }
+
+    /**
+     * v1 US-301/302：视觉旁路编排器（纯文本模型识图方案 B）。
+     *
+     * 主 Provider 为纯文本模型（图片直传 400 + 视觉不支持信号）时：
+     * 1. 云端旁路：调用视觉旁路 Provider（[OpenAICompatibleProvider.chatCompletion] 复用
+     *    image_url 多模态协议）生成图片描述；
+     * 2. OCR 兜底：[MlKitOcrTextExtractor] 本地提取文字（离线，不依赖 GMS）。
+     * 由 [ConversationViewModel] 在收到 visionUnsupported 错误时调用。
+     */
+    val visionBypassOrchestrator: io.prism.vision.VisionBypassOrchestrator by lazy {
+        io.prism.vision.VisionBypassOrchestrator(
+            config = visionBypassConfigRepository,
+            cloudDescriber = { imageDataUrl, userText, visionConfig ->
+                // 视觉模型：图片（image_url）+ 用户提问 → 文字描述
+                val messages = listOf(
+                    io.prism.ui.model.ChatMessage(
+                        id = 0L,
+                        role = io.prism.ui.model.Role.USER,
+                        content = io.prism.vision.VisionBypassOrchestrator.buildVisionUserPrompt(userText),
+                        timestamp = 0L,
+                        imageUrl = imageDataUrl
+                    )
+                )
+                // v1 批次6（Issue 3）：云端旁路此前失败被 orchestrator 静默吞掉（try/catch 返回 null
+                // → 默默落到 OCR），真机无法判断是"没走到 Cloud"还是"Cloud 调用了但失败"。这里显式
+                // 记录调用结果/异常类型，供真机日志 RCA。
+                val visionProviderName = visionConfig.name
+                try {
+                    val desc = openAICompatibleProvider.chatCompletion(
+                        config = visionConfig,
+                        messages = messages,
+                        systemPrompt = io.prism.vision.VisionBypassOrchestrator.buildVisionSystemPrompt()
+                    )
+                    android.util.Log.i("PrismVision", "cloud bypass ok provider=$visionProviderName descLen=${desc?.length ?: -1}")
+                    desc
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    android.util.Log.w(
+                        "PrismVision",
+                        "cloud bypass failed provider=$visionProviderName err=${e::class.simpleName}: ${e.message?.take(160)}"
+                    )
+                    null
+                }
+            },
+            ocrExtractor = { dataUrl -> mlKitOcrTextExtractor.extractText(dataUrl) }
+        )
+    }
 
     /**
      * 深度思考配置仓库（问题 8a，ADR-020）—— 持久化深度思考开关与思考强度。
@@ -732,7 +847,15 @@ class PrismApplication : Application() {
     val crossSessionMemoryManager: CrossSessionMemoryManager by lazy {
         // UXR9 US-904 AC-2：注入 conversationSummarizer，会话结束时对有价值内容做 LLM 摘要入库
         //（失败由 CrossSessionMemoryManager 内部降级为规则抽取逐对存储）。
-        CrossSessionMemoryManager(embedder, memoryRepository, conversationSummarizer)
+        // v1 US-102：注入 SQLite FTS5 关键词索引（零 APK 体积），检索走「BM25 + 向量 → RRF」混合路径。
+        // v1 US-103/104：注入记忆配置仓库（去重开关/容量/软衰减/注入预算）。
+        CrossSessionMemoryManager(
+            embedder = embedder,
+            memoryRepository = memoryRepository,
+            summarizer = conversationSummarizer,
+            keywordIndex = SqliteFtsMemoryIndex(this),
+            memoryConfig = memoryConfigRepository
+        )
     }
 
     /**
@@ -884,6 +1007,12 @@ class PrismApplication : Application() {
 
     /** 设备档位配置 DataStore 进程级单例（ADR-017 4.4，US-040 用户手动覆盖持久化）。 */
     private val Context.tierConfigDataStore by preferencesDataStore(name = "prism_tier_config")
+
+    /** 视觉旁路配置 DataStore 进程级单例（v1 US-301：授权 + 自动开关 + 熔断计数持久化）。 */
+    private val Context.visionBypassConfigDataStore by preferencesDataStore(name = "prism_vision_bypass_config")
+
+    /** 手机操控高危动作确认策略 DataStore 进程级单例（v1 真机二次修复 Issue 4b）。 */
+    private val Context.highRiskApprovalDataStore by preferencesDataStore(name = "prism_high_risk_approval")
 
     companion object {
         /**

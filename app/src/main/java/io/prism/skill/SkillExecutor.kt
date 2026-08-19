@@ -565,8 +565,32 @@ open class SkillExecutor(
         /** 单次工具调用默认超时（30s，对齐 UiConfirmationGate 确认超时）。 */
         internal const val DEFAULT_TOOL_TIMEOUT_MS = 30_000L
 
-        /** 工具执行回路默认最大轮数（防止无限循环，ADR-014 5.5）。 */
-        internal const val DEFAULT_MAX_ROUNDS = 10
+        /**
+         * 工具执行回路默认最大轮数（防止无限循环，ADR-014 5.5）。
+         *
+         * v1 真机反馈（2026-08-19）：普通工具在复杂深度调研时 10 轮常被截断、手机操控
+         * （每步 UI 操作消耗 1 轮）更是几乎无法完成长链路。故全局上限由 10 提升至 50，
+         * 手机操控场景由 [PHONE_CONTROL_MAX_ROUNDS]=200 另行放开（见 [isPhoneControlTool]）。
+         */
+        internal const val DEFAULT_MAX_ROUNDS = 50
+
+        /**
+         * 手机操控（`phone_control__*`）工具回路的轮数上限。
+         *
+         * 用户要求对该功能「解除工具循环调用上限」。一次手机操控 = LLM 逐轮
+         * `get_ui_state → click → get_ui_state…`，每步消耗 1 个 round，复杂长链路远超
+         * 普通上限。但完全无限循环有失控风险（轮间退避 + 每轮 LLM 调用延迟累积），
+         * 故取一个对"完成一次任务"而言实际上限极高的值（200 轮 ≈ 数分钟任务），
+         * 同时保留 [MAX_CONSECUTIVE_TOOL_FAILURES]=2 重复失败熔断兜底。
+         */
+        internal const val PHONE_CONTROL_MAX_ROUNDS = 200
+
+        /** 手机操控工具名前缀（与 [io.prism.phonecontrol.PhoneControlLocalToolExecutor.NAMESPACE] 对齐）。 */
+        internal const val PHONE_CONTROL_TOOL_PREFIX = "phone_control__"
+
+        /** 判断工具名是否为手机操控工具（用于分层轮数上限）。 */
+        internal fun isPhoneControlTool(name: String): Boolean =
+            name.startsWith(PHONE_CONTROL_TOOL_PREFIX)
 
         /**
          * 重复工具熔断阈值（UXR6 问题 1）：同一工具连续失败达到该次数即熔断，
@@ -801,6 +825,13 @@ open class SkillExecutor(
                 result.startsWith("仅支持抓取") ||
                 result.startsWith("仅支持抓取公网地址") ||
                 result.startsWith("工具调用失败") ||
+                // v1 US-201/202（LLM 操控手机）：phone_control__* 工具失败/硬拦截文案统一
+                // 以"错误："（执行失败）或"⚠️"（敏感硬拦截）前缀标注。此前不在前缀列表 →
+                // 熔断计数无法识别手机控制失败，LLM 会用同参数反复重试直至 maxRounds。
+                // 注意：AskUser 接管结果以【需要用户回答】开头（已在 executeLoop 单独处理，
+                // 不进失败识别）；⚠️ 前缀用于手机控制硬拦截结果。
+                result.startsWith("错误：") ||
+                result.startsWith("⚠️ ") ||
                 // UXR8 N2 Phase 2（ADR-030）：ask_user 反问结果不在失败识别之列
                 //（其为"等待用户输入"语义，非失败；由 executeLoop 检测标记前缀单独处理）。
                 false

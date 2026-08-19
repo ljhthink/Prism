@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">Prism</string>
+    <!-- v1 US-201：无障碍服务用途声明（系统设置/无障碍中的展示文案） -->
+    <string name="phone_control_accessibility_description">用于「手机操控」功能：读取屏幕界面元素，供 AI 助手理解并执行点击、滑动、输入等操作。仅在你授权使用该功能时生效。</string>
 </resources>

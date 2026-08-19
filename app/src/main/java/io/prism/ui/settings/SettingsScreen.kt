@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -29,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -57,6 +59,9 @@ import io.prism.ui.theme.PrismTextDim
 import io.prism.ui.theme.PrismTextFaint
 import io.prism.ui.theme.PrismWarning
 import java.util.Locale
+
+/** v1 US-201：手机操控无障碍服务状态轮询间隔（毫秒）。 */
+private const val PHONE_CONTROL_POLL_MS = 1_000L
 
 /**
  * 设置屏幕 —— 深空玻璃肌理（设计规范 v0.4 第 8.4 节）。
@@ -93,10 +98,38 @@ fun SettingsScreen(
     // UXR8 N1（ADR-030）：用户规则（「关于我」+「如何回答」双字段，DataStore 持久化）
     val userRulesAboutMe by viewModel.userRulesAboutMe.collectAsState()
     val userRulesHowToRespond by viewModel.userRulesHowToRespond.collectAsState()
+    // v1 US-301（方案 B 识图）：视觉旁路授权 + 自动开关
+    val visionConsent by viewModel.visionConsent.collectAsState()
+    val visionAutoBypass by viewModel.visionAutoBypass.collectAsState()
+    // v1 真机反馈（Issue 4）：云端视觉旁路需一个被标记为视觉回退的 Provider；
+    // 未配置时向用户明示（用户此前误以为"在设置里没有显示"、功能不可用）。
+    val visionFallbackName = providers.firstOrNull { it.isVisionFallback }?.name
+    // v1 US-201（LLM 操控手机）：无障碍服务连接状态（设置页引导）
+    val phoneControlConnected by viewModel.phoneControlConnected.collectAsState()
+    // v1 真机二次修复（Issue 4b）：手机操控高危动作（发送/删除/拨号）确认策略
+    val highRiskApprovalMode by viewModel.highRiskApprovalMode.collectAsState()
 
     // M7 Phase C（US-042）：档位 UI 由 TierViewModel 驱动（替代原 PerfTier 本地 mock state）
     val tierViewModel: TierViewModel = viewModel(factory = TierViewModel.Factory)
     val tierOverride by tierViewModel.override.collectAsState()
+
+    // v1 US-201（LLM 操控手机）：打开系统无障碍设置（用途声明见下方 SetRow 文案）
+    val context = LocalContext.current
+    val openAccessibilitySettings = {
+        context.startActivity(
+            android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
+
+    // v1 US-201：UI 侧轮询无障碍服务连接状态（用户在系统设置开关后返回本页自动刷新引导）。
+    // VM 侧无循环（避免 JVM 单测 runTest 调度器挂起），轮询放 Composable LaunchedEffect。
+    LaunchedEffect(Unit) {
+        while (true) {
+            viewModel.refreshPhoneControlStatus()
+            kotlinx.coroutines.delay(PHONE_CONTROL_POLL_MS)
+        }
+    }
 
     Box {
         LazyColumn(
@@ -161,6 +194,74 @@ fun SettingsScreen(
                     title = "生物识别解锁",
                     subtitle = "即将支持 · 可选二次解锁",
                     trailing = { PrismSwitch(checked = biometric, onCheckedChange = { biometric = it }) }
+                )
+            }
+            // v1 US-301（方案 B 识图）：纯文本模型识图 —— 视觉旁路授权 + 自动开关
+            item { SetSection("识图（纯文本模型）") }
+            item {
+                SetRow(
+                    icon = "👁",
+                    iconColor = Color(0xFFFFB84D),
+                    title = "云端视觉旁路",
+                    subtitle = buildString {
+                        if (visionConsent) append("已授权") else append("未授权")
+                        val vp = visionFallbackName
+                        append(if (vp != null) " · 视觉模型：$vp" else " · 需配置并标记一个视觉 Provider")
+                    },
+                    trailing = {
+                        PrismSwitch(checked = visionConsent, onCheckedChange = { viewModel.setVisionConsent(it) })
+                    },
+                    onClick = { viewModel.setVisionConsent(!visionConsent) }
+                )
+            }
+            item {
+                SetRow(
+                    icon = "◎",
+                    iconColor = PrismIndigo,
+                    title = "自动旁路",
+                    subtitle = if (visionAutoBypass) "开启 · 图片自动转为描述/文字后回答" else "关闭",
+                    trailing = {
+                        PrismSwitch(checked = visionAutoBypass, onCheckedChange = { viewModel.setVisionAutoBypass(it) })
+                    }
+                )
+            }
+            // v1 US-201（LLM 操控手机）：无障碍服务引导 + 用途声明（prominent disclosure）
+            item { SetSection("手机操控（LLM 操控手机）") }
+            item {
+                SetRow(
+                    icon = "🖐",
+                    iconColor = PrismMint,
+                    title = "无障碍服务",
+                    subtitle = if (phoneControlConnected) {
+                        "已开启 · AI 可读取屏幕并执行点击/滑动/输入"
+                    } else {
+                        "未开启 · 在系统「设置 → 无障碍」中开启"
+                    },
+                    trailing = {
+                        PrismButton(
+                            text = if (phoneControlConnected) "已开启" else "去开启",
+                            variant = if (phoneControlConnected) PrismButtonVariant.Ghost else PrismButtonVariant.Primary,
+                            onClick = openAccessibilitySettings
+                        )
+                    }
+                )
+            }
+            item {
+                SetRow(
+                    icon = "⛔",
+                    iconColor = Color(0xFFFF7A6B),
+                    title = "安全拦截",
+                    subtitle = "支付/密码/验证码硬拦截；发送/删除/拨号需你确认"
+                )
+            }
+            // v1 真机二次修复（Issue 4b）：高危动作（发送/删除/拨号/短信）确认策略三态选择
+            item {
+                SetRow(
+                    icon = "🖊",
+                    iconColor = Color(0xFFFFB84D),
+                    title = "高危操作",
+                    subtitle = highRiskApprovalSubtitle(highRiskApprovalMode),
+                    onClick = { viewModel.setHighRiskApprovalMode(nextHighRiskApprovalMode(highRiskApprovalMode)) }
                 )
             }
             // UXR3 问题 10（ADR-023）：工具审批模式（手动审批 / 自动审批 / 禁用）
@@ -355,6 +456,21 @@ private fun toolApprovalSubtitle(mode: ToolApprovalMode): String = when (mode) {
     ToolApprovalMode.AUTO -> "所有工具直接放行"
     ToolApprovalMode.DISABLED -> "不向 AI 提供任何工具"
 }
+
+/** 手机操控高危动作（发送/删除/拨号）策略副标题（v1 真机二次修复 Issue 4b）。 */
+private fun highRiskApprovalSubtitle(mode: io.prism.config.HighRiskApprovalMode): String = when (mode) {
+    io.prism.config.HighRiskApprovalMode.BLOCK -> "全部拦截 · 发送/删除/拨号一律不执行（最安全）"
+    io.prism.config.HighRiskApprovalMode.ALLOW -> "全部放行 · 发送/删除/拨号直接执行（最便捷）"
+    io.prism.config.HighRiskApprovalMode.ASK -> "逐次询问 · 每次发送/删除/拨号前向你确认（默认）"
+}
+
+/** 高危操作策略循环顺序：BLOCK → ALLOW → ASK → BLOCK…（点击切换）。 */
+private fun nextHighRiskApprovalMode(mode: io.prism.config.HighRiskApprovalMode): io.prism.config.HighRiskApprovalMode =
+    when (mode) {
+        io.prism.config.HighRiskApprovalMode.BLOCK -> io.prism.config.HighRiskApprovalMode.ALLOW
+        io.prism.config.HighRiskApprovalMode.ALLOW -> io.prism.config.HighRiskApprovalMode.ASK
+        io.prism.config.HighRiskApprovalMode.ASK -> io.prism.config.HighRiskApprovalMode.BLOCK
+    }
 
 /**
  * 工具审批模式弹层（UXR3 问题 10，ADR-023）—— 三选一。
@@ -747,6 +863,9 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
     // BR-naming-002：原变量名 `enabled` 与 PrismButton.enabled 参数同名导致语义混淆（DEF-001 考古报告 §3）。
     // 重命名为 `activateAfterSave` 明确表达「保存后是否激活此 Provider」的意图。
     var activateAfterSave by remember(config.id) { mutableStateOf(config.isActive) }
+    // v1 US-301（方案 B 识图）：是否设为「视觉旁路 Provider」——主模型不支持图片时，
+    // 图片会发往该 Provider 生成描述（隐私：设置开启前需在「识图」设置中授权）。
+    var visionFallback by remember(config.id) { mutableStateOf(config.isVisionFallback) }
     // 自定义请求头用 SnapshotStateList：原地改值（headers[index]=…）会触发重组，
     // 与删除/新增重建列表行为一致，避免丢输入（guardrail Q2）。
     val headers = remember(config.id) {
@@ -794,7 +913,8 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
                             baseUrl = baseUrl.trim(),
                             models = models.split(",").map { it.trim() }.filter { it.isNotEmpty() },
                             headers = validHeaders.toMap(),
-                            isActive = false
+                            isActive = false,
+                            isVisionFallback = visionFallback
                         )
                     )
                     if (activateAfterSave) {
@@ -885,6 +1005,19 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(text = "设为激活 Provider", color = PrismText, fontSize = 14.sp, modifier = Modifier.weight(1f))
             PrismSwitch(checked = activateAfterSave, onCheckedChange = { activateAfterSave = it })
+        }
+        Spacer(Modifier.height(12.dp))
+        // v1 US-301（方案 B 识图）：视觉旁路 Provider 开关（主模型不支持图片时，图片发往该
+        // Provider 生成描述。需在「识图」设置中授权后方可自动触发，隐私提示见下）。
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(text = "设为视觉旁路 Provider", color = PrismText, fontSize = 14.sp)
+                Text(
+                    text = "主模型不支持图片时，图片将发送到此视觉模型生成描述（需在「识图」设置授权）",
+                    color = PrismTextFaint, fontSize = 10.sp
+                )
+            }
+            PrismSwitch(checked = visionFallback, onCheckedChange = { visionFallback = it })
         }
         Spacer(Modifier.height(12.dp))
         PrismButton(

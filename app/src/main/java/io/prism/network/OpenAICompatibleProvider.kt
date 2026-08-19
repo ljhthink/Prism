@@ -437,7 +437,11 @@ class OpenAICompatibleProvider(
             status == HttpStatusCode.TooManyRequests.value ->
                 StreamEvent.Error("请求过于频繁，触发服务端限流（429）。请稍等几秒后重试$detail")
             status == 400 && requestHasImage && isVisionUnsupportedError(detail) ->
-                StreamEvent.Error("当前模型端点不支持图片（多模态）。请在 Provider 配置中切换到支持视觉的模型，或移除图片后重发")
+                // v1 US-301：携带 visionUnsupported=true 信号，供上层触发云端视觉旁路/OCR 兜底
+                StreamEvent.Error(
+                    "当前模型端点不支持图片（多模态）。请在 Provider 配置中切换到支持视觉的模型，或移除图片后重发",
+                    visionUnsupported = true
+                )
             status == 400 && requestHasImage ->
                 StreamEvent.Error("图片请求被拒绝（400）$detail。若该模型支持视觉，请确认图片格式/大小后重试")
             status in 400..499 -> StreamEvent.Error("请求被拒绝（$status）$detail，请检查 Provider 配置")

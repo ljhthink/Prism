@@ -26,14 +26,28 @@ import org.junit.Test
  */
 class WebSearchLocalToolExecutorTest {
 
+    /** v1 批次6（RSS→HTML）：本文件 execute 测试的 MockEngine 响应体均输出 Bing HTML `li.b_algo`。
+     *  注意：`parseRssItems` 纯函数单测若需 RSS 原文，请用内联字面量而非本 helper。 */
     private fun rssBody(vararg items: Triple<String, String, String>): String {
-        val sb = StringBuilder("""<?xml version="1.0" encoding="UTF-8"?><rss><channel>""")
+        val sb = StringBuilder("""<html><ol id="b_results">""")
         items.forEach { (title, link, desc) ->
-            sb.append("<item><title>").append(title).append("</title><link>")
-                .append(link).append("</link><description>").append(desc)
-                .append("</description></item>")
+            sb.append("<li class=\"b_algo\"><h2><a href=\"").append(link).append("\">")
+                .append(title).append("</a></h2><div class=\"b_caption\"><p>").append(desc)
+                .append("</p></div></li>")
         }
-        sb.append("</channel></rss>")
+        sb.append("</ol></html>")
+        return sb.toString()
+    }
+
+    /** v1 批次6（RSS→HTML）：构造 Bing HTML SERP 的 `li.b_algo` 响应体（parseBingHtml 主路径 fixture）。 */
+    private fun bingHtml(vararg items: Triple<String, String, String>): String {
+        val sb = StringBuilder("""<html><ol id="b_results">""")
+        items.forEach { (title, link, desc) ->
+            sb.append("<li class=\"b_algo\"><h2><a href=\"").append(link).append("\">")
+                .append(title).append("</a></h2><div class=\"b_caption\"><p>").append(desc)
+                .append("</p></div></li>")
+        }
+        sb.append("</ol></html>")
         return sb.toString()
     }
 
@@ -54,7 +68,7 @@ class WebSearchLocalToolExecutorTest {
     fun `execute formats search results from Bing RSS`() = runBlocking {
         val engine = MockEngine { _ ->
             respond(
-                content = rssBody(
+                content = bingHtml(
                     Triple("Prism 官网", "https://prism.example.com", "Prism 是一个 AI 助手"),
                     Triple("Prism 文档", "https://docs.example.com/prism", "使用指南")
                 ),
@@ -88,7 +102,7 @@ class WebSearchLocalToolExecutorTest {
     fun `execute returns not found when no search results`() = runBlocking {
         val engine = MockEngine { _ ->
             respond(
-                content = rssBody(),
+                content = bingHtml(),
                 status = HttpStatusCode.OK,
                 headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
             )
@@ -120,7 +134,7 @@ class WebSearchLocalToolExecutorTest {
     fun `execute respects maxResults limit`() = runBlocking {
         val engine = MockEngine { _ ->
             respond(
-                content = rssBody(
+                content = bingHtml(
                     Triple("A", "https://a.example.com", "desc A"),
                     Triple("B", "https://b.example.com", "desc B"),
                     Triple("C", "https://c.example.com", "desc C")
@@ -144,12 +158,14 @@ class WebSearchLocalToolExecutorTest {
     @Test
     fun `parseRssItems extracts title link snippet from RSS body`() {
         val executor = WebSearchLocalToolExecutor(noopClient())
-        val items = executor.parseRssItems(
-            rssBody(
-                Triple("标题一", "https://one.example.com", "摘要一"),
-                Triple("标题二", "https://two.example.com", "摘要二")
-            )
-        )
+        // v1 批次6：本文件 rssBody 已改为输出 Bing HTML；parseRssItems 纯函数单测须用 RSS 原文。
+        val rss = """
+            <rss><channel>
+            <item><title>标题一</title><link>https://one.example.com</link><description>摘要一</description></item>
+            <item><title>标题二</title><link>https://two.example.com</link><description>摘要二</description></item>
+            </channel></rss>
+        """.trimIndent()
+        val items = executor.parseRssItems(rss)
         assertEquals(2, items.size)
         assertEquals("标题一", items[0].title)
         assertEquals("https://one.example.com", items[0].link)
@@ -231,7 +247,7 @@ class WebSearchLocalToolExecutorTest {
         val engine = MockEngine { request ->
             capturedUrl = request.url.toString()
             respond(
-                content = rssBody(Triple("R", "https://r.example.com", "d")),
+                content = bingHtml(Triple("R", "https://r.example.com", "d")),
                 status = HttpStatusCode.OK,
                 headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
             )
@@ -242,7 +258,8 @@ class WebSearchLocalToolExecutorTest {
             mapOf("query" to "prism ai agent", "maxResults" to 1)
         )
         assertTrue("URL 应包含编码后的 q 参数", capturedUrl.orEmpty().contains("q=prism+ai+agent"))
-        assertTrue("URL 应包含 format=rss", capturedUrl.orEmpty().contains("format=rss"))
+        assertTrue("URL 应包含 HTML SERP 市场参数 mkt=zh-CN", capturedUrl.orEmpty().contains("mkt=zh-CN"))
+        assertTrue("URL 不应再带 format=rss（v1 批次6 已改 HTML）", !capturedUrl.orEmpty().contains("format=rss"))
     }
 
     @Test
@@ -254,7 +271,7 @@ class WebSearchLocalToolExecutorTest {
         val engine = MockEngine { request ->
             capturedUrl = request.url.toString()
             respond(
-                content = rssBody(Triple("昔涟", "https://r.example.com", "描述")),
+                content = bingHtml(Triple("昔涟", "https://r.example.com", "描述")),
                 status = HttpStatusCode.OK,
                 headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
             )
@@ -270,8 +287,8 @@ class WebSearchLocalToolExecutorTest {
         val url = capturedUrl
         assertFalse("中文 query 不应含原始中文字符于 URL（已被编码）", url!!.contains("昔涟"))
         assertTrue("应含 mkt=zh-CN（Bing 官方市场参数）", url.contains("mkt=zh-CN"))
-        assertTrue("应含 cc=cn", url.contains("cc=cn"))
         assertTrue("应含 setlang=zh-hans", url.contains("setlang=zh-hans"))
+        assertTrue("应含 count=10（HTML SERP 请求）", url.contains("count=10"))
         assertTrue("结果应包含完整中文标题（昔涟）", result.contains("昔涟"))
     }
 
@@ -317,7 +334,7 @@ class WebSearchLocalToolExecutorTest {
         // S-5（S-2 修复验证）：第三方网页内容回灌 LLM 前有「不可信内容」边界标记
         val engine = MockEngine { _ ->
             respond(
-                content = rssBody(Triple("标题", "https://x.example.com", "摘要")),
+                content = bingHtml(Triple("标题", "https://x.example.com", "摘要")),
                 status = HttpStatusCode.OK,
                 headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
             )
@@ -486,7 +503,7 @@ class WebSearchLocalToolExecutorTest {
         // UXR7 问题 1：主查询 + 全部核心词重试都不相关 → 返回"搜索失败"触发熔断（防循环达上限）
         val engine = MockEngine { _ ->
             respond(
-                content = rssBody(Triple("昔_百度百科", "https://baike.baidu.com/昔", "昔 xī - 汉典")),
+                content = bingHtml(Triple("昔_百度百科", "https://baike.baidu.com/昔", "昔 xī - 汉典")),
                 status = HttpStatusCode.OK,
                 headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
             )
@@ -505,7 +522,7 @@ class WebSearchLocalToolExecutorTest {
         // 第 11 条不返回。query 为纯英文（无核心词变体）→ 不触发多查询合并路径。
         val engine = MockEngine { _ ->
             respond(
-                content = rssBody(
+                content = bingHtml(
                     Triple("r1", "https://1.example.com", "s1"),
                     Triple("r2", "https://2.example.com", "s2"),
                     Triple("r3", "https://3.example.com", "s3"),
@@ -536,7 +553,7 @@ class WebSearchLocalToolExecutorTest {
         // AC-B1 边界：LLM 传 maxResults=0（低于下限）→ coerceIn 到 1，仅返回第 1 条
         val engine = MockEngine { _ ->
             respond(
-                content = rssBody(
+                content = bingHtml(
                     Triple("result-a", "https://a.example.com", "snip-a"),
                     Triple("result-b", "https://b.example.com", "snip-b")
                 ),
@@ -558,7 +575,7 @@ class WebSearchLocalToolExecutorTest {
         // AC-B1 边界：maxResults 非数字 → 默认 5
         val engine = MockEngine { _ ->
             respond(
-                content = rssBody(
+                content = bingHtml(
                     Triple("r1", "https://1.example.com", "s1"),
                     Triple("r2", "https://2.example.com", "s2"),
                     Triple("r3", "https://3.example.com", "s3"),
@@ -682,7 +699,7 @@ class WebSearchLocalToolExecutorTest {
         val engine = MockEngine { _ ->
             callCount++
             respond(
-                content = rssBody(
+                content = bingHtml(
                     Triple("昔涟_百度百科", "https://baike.baidu.com/昔涟", "昔涟是游戏角色"),
                     Triple("昔涟 - BWIKI", "https://wiki.biligame.com/昔涟", "昔涟资料")
                 ),
@@ -707,13 +724,13 @@ class WebSearchLocalToolExecutorTest {
             val q = request.url.parameters["q"].orEmpty()
             when {
                 q.contains("昔涟 星穹铁道") -> respond(
-                    content = rssBody(Triple("昔涟_百度百科", "https://baike.baidu.com/昔涟", "昔涟是游戏角色")),
+                    content = bingHtml(Triple("昔涟_百度百科", "https://baike.baidu.com/昔涟", "昔涟是游戏角色")),
                     status = HttpStatusCode.OK,
                     headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
                 )
                 q == "昔涟" -> throw RuntimeException("variant connection refused")
                 else -> respond(
-                    content = rssBody(Triple("星穹铁道官网", "https://sr.example.com/星穹铁道", "星穹铁道是游戏")),
+                    content = bingHtml(Triple("星穹铁道官网", "https://sr.example.com/星穹铁道", "星穹铁道是游戏")),
                     status = HttpStatusCode.OK,
                     headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
                 )
@@ -802,7 +819,7 @@ class WebSearchLocalToolExecutorTest {
         // O5 引用策略：结果头部追加内联 [N] 引用要求（驱动 LLM 覆盖全部相关来源）
         val engine = MockEngine { _ ->
             respond(
-                content = rssBody(Triple("标题", "https://x.example.com", "摘要")),
+                content = bingHtml(Triple("标题", "https://x.example.com", "摘要")),
                 status = HttpStatusCode.OK,
                 headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
             )

@@ -62,7 +62,7 @@ class CrossSessionMemoryManagerPerfBaselineTest {
     private fun makeTurnPairs(count: Int): List<ChatMessage> {
         return (1..count).flatMap { i ->
             listOf(
-                ChatMessage(i.toLong() * 2 - 1, Role.USER, "性能测试问题$i Kotlin协程", i.toLong() * 1000),
+                ChatMessage(i.toLong() * 2 - 1, Role.USER, "请记住性能测试问题$i Kotlin协程", i.toLong() * 1000),
                 ChatMessage(i.toLong() * 2, Role.ASSISTANT, "性能测试回答$i 使用launch启动", i.toLong() * 1000 + 500)
             )
         }
@@ -93,7 +93,7 @@ class CrossSessionMemoryManagerPerfBaselineTest {
         var failures = 0
         repeat(iters) { i ->
             val messages = listOf(
-                ChatMessage(1, Role.USER, "问题$i Kotlin", 1000L),
+                ChatMessage(1, Role.USER, "请记住问题$i Kotlin", 1000L),
                 ChatMessage(2, Role.ASSISTANT, "回答$i 协程", 2000L)
             )
             val start = System.nanoTime()

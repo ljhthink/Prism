@@ -91,6 +91,14 @@ class ProviderConfigRepository(private val boxStore: BoxStore) {
         box.all.find { it.name == name }
 
     /**
+     * v1 US-301：查找视觉旁路 Provider（[ProviderConfig.isVisionFallback] == true）。
+     *
+     * @return 第一个视觉旁路配置；未配置返回 null
+     */
+    fun findVisionFallback(): ProviderConfig? =
+        box.all.firstOrNull { it.isVisionFallback }
+
+    /**
      * 删除指定 id 的 Provider 配置。
      *
      * @param id ProviderConfig id

@@ -110,16 +110,18 @@ class WebSearchLocalToolExecutor(
                             return@withContext formatSearchResult(filterRelevantItems(retryItems, listOf(term)), maxResults)
                         }
                     }
-                    // 所有核心词重试仍不相关 → 判定为"搜索失败"（触发 SkillExecutor 重复工具熔断，
-                    // 避免 LLM 反复换 query 直至 maxRounds=10 硬终止）。
-                    Log.w(LOG_TAG, "all core term retries irrelevant for query=${query.take(LOG_QUERY_MAX_LEN)}, mark search failed")
+                    // 所有核心词重试仍不相关 → 兜底切百度（专救中文实体：Bing 对"梧州一中"消歧为城市）。
+                    // 百度仍不相关才判定"搜索失败"（触发 SkillExecutor 重复工具熔断）。
+                    Log.w(LOG_TAG, "all core term retries irrelevant for query=${query.take(LOG_QUERY_MAX_LEN)}, try baidu")
+                    tryBaiduFallback(query, coreTerms, maxResults, { (System.nanoTime() - startNanos) / 1_000_000L })
+                        ?.let { return@withContext it }
                     return@withContext "搜索失败：未找到与「$query」相关的网页结果"
                 }
                 if (primaryItems.isEmpty()) {
-                    // 空结果：中性文案（不诱导 LLM 以同义 query 反复重试，UXR6 问题 1）。
-                    // 前置 `[搜索失败]` 标记，供 SkillExecutor.isFailureResult 识别为失败，
-                    // 从而触发重复工具熔断（见 SkillExecutor.executeLoop）。
-                    Log.w(LOG_TAG, "web search empty result for query=${query.take(LOG_QUERY_MAX_LEN)}")
+                    // 空结果：百度兜底后再判中性文案（不诱导 LLM 以同义 query 反复重试）。
+                    Log.w(LOG_TAG, "web search empty result for query=${query.take(LOG_QUERY_MAX_LEN)}, try baidu")
+                    tryBaiduFallback(query, coreTerms, maxResults, { (System.nanoTime() - startNanos) / 1_000_000L })
+                        ?.let { return@withContext it }
                     return@withContext "搜索失败：未找到与「$query」相关的网页结果"
                 }
 
@@ -185,38 +187,36 @@ class WebSearchLocalToolExecutor(
         }
 
     /**
-     * 执行一次 Bing RSS 搜索请求并解析结果（UXR7 抽取，供原查询 + 核心词降级重试复用）。
+     * 执行一次 Bing 搜索请求并解析结果（UXR7 抽取，供原查询 + 核心词降级重试复用）。
+     *
+     * **v1 批次6（Issue 2，真机证据）由 RSS 改 HTML SERP**：Bing `format=rss` 对中文实体
+     * （如"梧州市第一中学"）排名明显坍缩——实证连**精确校名**都只返回市级百科，造成
+     * "参考来源大概相关、与内容无直接联系"。改用 Bing **HTML 搜索结果页**（`li.b_algo`
+     * 结构化块），实测同查询能直接命中学校官网/词条。HTML 端点 Bing 反爬中等（较 Google
+     * 宽松），配合浏览器 UA / Accept-Language 即可稳定解析（tech-selection-researcher，
+     * 2026-08-19）。
      *
      * @param query 搜索关键词（Bing 自动 URL 编码）
-     * @return 解析后的搜索结果列表（可能为空）
+     * @return 解析后的搜索结果列表（可能为空；返回空壳/被拦页时也返回空）
      */
     private suspend fun fetchSearch(query: String): List<SearchItem> {
-        val response: HttpResponse = httpClient.get(BING_RSS_ENDPOINT) {
-            // 查询词经 Ktor 参数编码（自动 URL 编码，SSRF/注入防御，不拼接裸用户输入）
+        val response: HttpResponse = httpClient.get(BING_HTML_ENDPOINT) {
             url {
                 parameters.append("q", query)
-                parameters.append("format", "rss")
-                // UXR5 问题 3 / UXR6 问题 1（中文搜索质量）：显式限定中文市场。
-                // 实测确认 `language=zh-cn` 并非 Bing 认可的参数（Bing 本地化参数为
-                // `mkt`（市场，如 zh-CN）与 `setlang`（界面语言）），仅 `cc=cn`（国家码）
-                // 有效。UXR5 基于未抓包假设添加的 `language` 参数无效，此处改用
-                // 官方市场参数 `mkt=zh-CN` 限定中文搜索结果。
+                // UXR5 问题 3 / UXR6 问题 1（中文搜索质量）：限定中文市场。
+                // `mkt=zh-CN`（市场）+ `setlang=zh-hans`（界面语言）是 Bing 认可的本地化参数。
                 parameters.append("mkt", "zh-CN")
-                parameters.append("cc", "cn")
-                // 对齐 Bing 对中文搜索的界面语言偏好，进一步稳定中文结果
                 parameters.append("setlang", "zh-hans")
+                parameters.append("count", MAX_RESULTS.toString())
             }
             header(HttpHeaders.UserAgent, USER_AGENT)
+            header(HttpHeaders.AcceptLanguage, "zh-CN,zh;q=0.9,en;q=0.8")
+            header("Referer", BING_HTML_REFERER)
         }
-        // UXR5 问题 3（编码防御）：响应体按 Content-Type 声明的 charset 解码，
-        // 缺省时按 UTF-8（Ktor bodyAsText 默认）。cn.bing.com 历史可能返回
-        // GBK 编码 RSS，显式按声明 charset 解码避免中文乱码/截断。
         val body = response.bodyAsText(decodeCharset(response))
-        val items = parseRssItems(body)
-        // UXR6 问题 6 / UXR7（日志 RCA）：记录实际 query 与结果摘要，
-        // 真机 logcat 可见 Bing 到底返回了什么（搜索质量 RCA 的唯一证据）。
-        // LOW-03（guardrail TKN-UXR7R2-GUARDRAIL-001，CWE-532）：query 可能含用户 PII，
-        // 日志仅记录截断后的 query（前 LOG_QUERY_MAX_LEN 字符）。
+        val items = parseBingHtml(body)
+        // UXR6 问题 6 / UXR7（日志 RCA）：记录实际 query 与结果摘要，真机 logcat 可见
+        // Bing 到底返回了什么。LOW-03（CWE-532）：query 可能含用户 PII，仅记录截断后 query。
         Log.i(
             LOG_TAG,
             "search query=${query.take(LOG_QUERY_MAX_LEN)} items=${items.size} first=${items.firstOrNull()?.title}"
@@ -293,13 +293,48 @@ class WebSearchLocalToolExecutor(
      */
     internal fun extractCoreTerms(query: String): List<String> {
         if (query.isBlank()) return emptyList()
-        return Regex("""[\u4e00-\u9fff]{2,}""")
-            .findAll(query)
-            .map { it.value }
-            .filter { it !in CHINESE_STOP_WORDS }
-            .distinct()
-            .toList()
+        // v1 真机二次修复（ADR-038）：对无空格/标点的中文句（如"梧州一中是什么学校"），正则
+        // `[\u4e00-\u9fff]{2,}` 会把整句当成**一个**连续 CJK run，导致核心词=整句、条目过滤
+        // 与相关性判定都要求字面整句命中，检索只返回"大概相关"而非直接命中；且降级重试用
+        // `term == query` 跳过了唯一候选（整句）→ 无真实降级。修复：对每个 run 再**剥尾部
+        // 疑问/泛化后缀**衍生一个前置实体候选（"是什么学校/怎么/如何/…"剥掉 → "梧州一中"）。
+        val terms = LinkedHashSet<String>()
+        for (run in Regex("""[\u4e00-\u9fff]{2,}""").findAll(query).map { it.value }) {
+            if (run.isBlank()) continue
+            if (run !in CHINESE_STOP_WORDS) terms.add(run)
+            val entity = stripTrailingQuerySuffix(run)
+            if (entity.length >= 2 && entity != run && entity !in CHINESE_STOP_WORDS) {
+                terms.add(entity)
+            }
+        }
+        return terms.take(MAX_CORE_TERM_RETRIES.coerceAtLeast(4)).toList()
     }
+
+    /**
+     * 剥除连续中文 run 尾部的疑问/泛化后缀，返回前置实体候选。
+     *
+     * "梧州一中是什么学校" → "梧州一中"；"如何配置MCP服务器"的 CJK 片段"如何配置"→ 空。
+     * 最长后缀优先（按长度降序），逐一剥除直到无匹配或过短。纯函数可测。
+     */
+    private fun stripTrailingQuerySuffix(run: String): String {
+        var s = run
+        while (s.length >= 3) {
+            // 取所有命中的后缀中最长者（不依赖列表顺序），确保最长匹配优先剥除
+            val suffixed = QUERY_SUFFIXES.filter { s.endsWith(it) }.maxByOrNull { it.length }
+            if (suffixed == null || suffixed.length >= s.length) break
+            s = s.dropLast(suffixed.length)
+        }
+        return s
+    }
+
+    /** 中文 query 尾部疑问/泛化后缀（按长度降序，保证最长匹配优先剥除）。 */
+    private val QUERY_SUFFIXES = listOf(
+        "是什么学校", "是什么东西", "是什么样的", "是怎么回事",
+        "是什么情况", "到底是什么", "是什么时候", "为什么要", "怎么做",
+        "是什么", "是不是", "是怎么", "怎么弄", "怎么样", "怎么办",
+        "如何", "怎么", "哪种", "哪种的", "哪个", "哪些", "什么样",
+        "多少", "呢", "吗", "呀", "啊", "的了", "的"
+    )
 
     /**
      * 常见中文搜索停用词（guardrail M-1，TKN-UXR7-GUARDRAIL-001，UXR7-R2 扩充）。
@@ -425,6 +460,160 @@ class WebSearchLocalToolExecutor(
         return items
     }
 
+    /**
+     * 从 Bing **HTML 搜索结果页**解析 `li.b_algo` 结构化块（v1 批次6 Issue 2 主路径）。
+     *
+     * **为什么不用 RSS**：真机证据显示 Bing `format=rss` 对中文实体排名坍缩（精确校名返回市级
+     * 百科）；HTML SERP 的 `li.b_algo` 块带真实标题/链接/摘要，实测能命中学校官网。本函数基于
+     * Bing SERP 稳定结构（`li.b_algo` + `h2 a` + `cite`/`b_caption`，详见 tech-selection-researcher
+     * 调研）以正则提取，**不引入 HTML 解析依赖**（Karpathy 简洁 + 避免 R8 风险）。
+     *
+     * **链接处理**：Bing 结果 `href` 有直接地址（多数）与 `//cn.bing.com/ck/a?...u=a1<base64>`
+     * 跳转两种；后者经 [decodeBingUrl] 解码出真实 URL。
+     *
+     * @param body Bing HTML 响应体原文
+     * @return 搜索结果列表（按出现顺序；无 `b_algo` 块即视为空壳/被拦页 → 空）
+     */
+    internal fun parseBingHtml(body: String): List<SearchItem> {
+        val items = mutableListOf<SearchItem>()
+        val algoRegex = Regex("""<li class="b_algo"[\s\S]*?</li>""", RegexOption.IGNORE_CASE)
+        for (match in algoRegex.findAll(body)) {
+            val block = match.value
+            // 真实链接：取 h2 内首个 a 的 href；Bing 跳转链接再解码
+            val href = Regex("""<a[^>]+href="([^"]+)""")
+                .find(block)?.groupValues?.get(1) ?: continue
+            val link = decodeBingUrl(href.trim())
+                .takeIf { it.startsWith("http") } ?: continue
+            // 标题：`<h2>...<a>标题</a>...</h2>`（去标签 + 解码）
+            val title = Regex("""<h2[^>]*>([\s\S]*?)</h2>""", RegexOption.IGNORE_CASE)
+                .find(block)?.groupValues?.get(1)?.let { clean(it) } ?: continue
+            // 摘要：`b_lineclamp` 的 `<p>`；缺省回退 `b_caption` 块
+            val snippet = Regex(
+                """<p[^>]*class="[^"]*b_lineclamp[^"]*"[^>]*>([\s\S]*?)</p>""",
+                RegexOption.IGNORE_CASE
+            ).find(block)?.groupValues?.get(1)
+                ?: Regex("""<div class="b_caption"[^>]*>([\s\S]*?)</div>""", RegexOption.IGNORE_CASE)
+                    .find(block)?.groupValues?.get(1).orEmpty()
+            items.add(SearchItem(title = title, link = link, snippet = clean(snippet)))
+        }
+        return items
+    }
+
+    /**
+     * 解码 Bing 结果链接（纯函数可测）：直链直接采用；`//cn.bing.com/ck/a?...` 跳转链接从
+     * `u=a1<base64url>` 解出真实 URL（`a1aHR0c` = base64("https")，`aHR0c` = base64("http")）。
+     *
+     * @param href 原始 href 属性值（可能以 `//` 开头）
+     * @return 真实绝对 URL；无法解析返回空串
+     */
+    internal fun decodeBingUrl(href: String): String {
+        val h = href.trim().let { if (it.startsWith("//")) it.removePrefix("//") else it }
+        val isCkLink = h.startsWith("cn.bing.com/ck/") || h.startsWith("bing.com/ck/")
+        if (!isCkLink) {
+            // 直链：补全 scheme
+            return if (h.startsWith("http")) h else "https://$h"
+        }
+        // Bing 跳转：`u=a1<base64url>`——`a1` 是版本标记符，其后才是 base64("http(s)://...")，
+        // 直接解码 `u=` 之后的部分（不得把 `a1` 拼回 base64，否则解码出乱码）。
+        // base64url 不含 &/%，正则在完整 href 上取 u 参数并断言 a1 前缀（& 终止捕获）。
+        val b64 = Regex("""[?&]u=a1([A-Za-z0-9+/=_-]+)""").find(href)?.groupValues?.get(1) ?: return ""
+        return try {
+            java.util.Base64.getUrlDecoder().decode(b64).toString(Charsets.UTF_8)
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+    // ==================== 百度兜底（v1 批次7 Issue 2，中文实体救援） ====================
+
+    /**
+     * 百度搜索请求（v1 批次7）：仅作为「百度是中文专名实体的兜底来源」调用，非主路径。
+     * 百度对"梧州一中"等能直接命中学校（AI 摘要/学校百科/政府/地图），弥补 Bing 的消歧缺陷。
+     */
+    private suspend fun fetchBaiduSearch(query: String): List<SearchItem> {
+        val response: HttpResponse = httpClient.get(BAIDU_ENDPOINT) {
+            url { parameters.append("wd", query) }
+            header(HttpHeaders.UserAgent, USER_AGENT)
+            header(HttpHeaders.AcceptLanguage, "zh-CN,zh;q=0.9,en;q=0.8")
+            header("Referer", BAIDU_REFERER)
+            header(HttpHeaders.Accept, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        }
+        val body = response.bodyAsText(decodeCharset(response))
+        val items = parseBaiduHtml(body)
+        Log.i(
+            LOG_TAG,
+            "baidu query=${query.take(LOG_QUERY_MAX_LEN)} items=${items.size} first=${items.firstOrNull()?.title}"
+        )
+        return items
+    }
+
+    /**
+     * 解析百度 HTML 有机结果（纯函数可测）。百度结果标题在 `<h3><a href="...">标题</a></h3>`，
+     * href 多为 `http://www.baidu.com/link?url=<token>` 跳转（可被点击/抓取跟随定位真实页面）。
+     * 摘要尽力提取 `c-abstract` 块，缺失时留空（标题已足以判相关）。
+     *
+     * @param body 百度 HTML 响应体
+     * @return 标题/链接/摘要列表
+     */
+    internal fun parseBaiduHtml(body: String): List<SearchItem> {
+        val items = mutableListOf<SearchItem>()
+        val h3Regex = Regex("""<h3[^>]*>([\s\S]*?)</h3>""", RegexOption.IGNORE_CASE)
+        for (m in h3Regex.findAll(body)) {
+            val block = m.groupValues[1]
+            val a = Regex("""<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)</a>""", RegexOption.IGNORE_CASE)
+                .find(block)
+            val href = a?.groupValues?.get(1) ?: continue
+            val title = a?.groupValues?.get(2)?.let { clean(it) } ?: continue
+            if (title.isEmpty()) continue
+            // 摘要：取本 h3 之后固定窗口内的 c-abstract 块（Baidu 布局；尽力而为，缺失留空）
+            val winStart = m.range.last
+            val winEnd = (winStart + SNIPPET_SEARCH_WINDOW).coerceAtMost(body.length)
+            val after = body.substring(winStart, winEnd)
+            val snippet = Regex("""<div[^>]*class="[^"]*c-abstract[^"]*"[^>]*>([\s\S]*?)</div>""", RegexOption.IGNORE_CASE)
+                .find(after)?.groupValues?.get(1)?.let { clean(it) }.orEmpty()
+            items.add(SearchItem(title = title, link = href, snippet = snippet))
+        }
+        return items
+    }
+
+    /**
+     * 百度兜底入口：用 query 及其核心词依次查百度，取**首个相关**结果返回格式化文本；全不相关返回 null。
+     * 受 [hasRequestBudget] 预算约束（只读路径已在 execute 中检查过，此处每请求前再自查）。
+     */
+    private suspend fun tryBaiduFallback(
+        query: String,
+        coreTerms: List<String>,
+        maxResults: Int,
+        elapsedMs: () -> Long
+    ): String? {
+        fun budget(): Boolean = Companion.hasRequestBudget(elapsedMs())
+        suspend fun safeFetch(q: String): List<SearchItem> = try {
+            fetchBaiduSearch(q)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(LOG_TAG, "baidu search failed (${e::class.simpleName}), skip q=${q.take(LOG_QUERY_MAX_LEN)}")
+            emptyList()
+        }
+        if (!budget()) return null
+        val baiduPrimary = filterRelevantItems(safeFetch(query), coreTerms)
+        if (baiduPrimary.isNotEmpty() && (coreTerms.isEmpty() || isRelevant(baiduPrimary, coreTerms))) {
+            Log.i(LOG_TAG, "baidu fallback hit for query=${query.take(LOG_QUERY_MAX_LEN)} items=${baiduPrimary.size}")
+            return formatSearchResult(baiduPrimary, maxResults)
+        }
+        for (term in coreTerms) {
+            if (term == query) continue
+            if (!budget()) break
+            val items = filterRelevantItems(safeFetch(term), listOf(term))
+            if (items.isNotEmpty() && isRelevant(items, listOf(term))) {
+                Log.i(LOG_TAG, "baidu fallback hit for core=${term.take(LOG_QUERY_MAX_LEN)}")
+                return formatSearchResult(items, maxResults)
+            }
+        }
+        Log.w(LOG_TAG, "baidu fallback no hit for query=${query.take(LOG_QUERY_MAX_LEN)}")
+        return null
+    }
+
     /** 提取单个 XML 标签内容（忽略大小写，支持 CDATA）。 */
     private fun extractTag(block: String, tag: String): String? {
         val regex = Regex("<$tag[^>]*>([\\s\\S]*?)</$tag>", RegexOption.IGNORE_CASE)
@@ -491,8 +680,23 @@ class WebSearchLocalToolExecutor(
         /** 搜索工具名（`web_search__search`）。 */
         const val TOOL_SEARCH = "${NAMESPACE_PREFIX}search"
 
-        /** Bing RSS 端点（国内可访问、无需 Key，ADR-020 选型）。 */
-        private const val BING_RSS_ENDPOINT = "https://cn.bing.com/search"
+        /** Bing HTML 搜索端点（国内可访问、无需 Key，ADR-020 选型；v1 批次6 由 RSS 改 HTML 提升中文实体命中）。 */
+        private const val BING_HTML_ENDPOINT = "https://cn.bing.com/search"
+
+        /** HTML 请求 Referer（模拟搜索引擎→点进结果上下文，ADR-038 同思路）。 */
+        private const val BING_HTML_REFERER = "https://cn.bing.com/"
+
+        /**
+         * v1 批次7（Issue 2，真机/浏览器实证）：Bing 中国对中文专名实体（如"梧州一中"/"梧州市第一中学"）
+         * **查询消歧为城市**——连精确校名顶级返回的都是"梧州市(城市)百科/政府/旅游"，长期无法命中。
+         * 百度对同类查询能直接命中学校（AI 摘要 + 学校百科/政府/地图/贴吧）。引入百度 HTML 作为
+         * **兜底来源**：仅在 Bing 主查询+核心词重试全部不相关时触发，专门救援中文实体类查询。
+         */
+        private const val BAIDU_ENDPOINT = "https://www.baidu.com/s"
+        private const val BAIDU_REFERER = "https://www.baidu.com/"
+
+        /** 百度解析：抓取本 h3 之后窗口长度内的 c-abstract 作为摘要（防跨结果串味）。 */
+        private const val SNIPPET_SEARCH_WINDOW = 1500
 
         /** 默认返回结果数。 */
         private const val DEFAULT_MAX_RESULTS = 5

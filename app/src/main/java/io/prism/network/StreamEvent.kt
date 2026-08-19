@@ -38,7 +38,19 @@ sealed class StreamEvent {
     data object Done : StreamEvent()
 
     /** 错误（端点不可达 / 超时 / 401 / 流中断 / 解析失败）。 */
-    data class Error(val message: String) : StreamEvent()
+    data class Error(
+        val message: String,
+        /**
+         * v1 US-301（方案 B 云端视觉旁路）：是否为「模型不支持图片（视觉）」信号。
+         *
+         * 由 [OpenAICompatibleProvider.mapHttpError] 在「含图 + 400 + 错误详情含视觉不支持
+         * 关键词」时置 true。调用方（ConversationViewModel）据此触发云端视觉旁路（视觉
+         * Provider 生成描述 → 注入文本模型）或 OCR 兜底，而非仅展示错误提示。
+         *
+         * **向后兼容**：默认 false，现有 `when` 穷尽匹配与既有测试不受影响。
+         */
+        val visionUnsupported: Boolean = false
+    ) : StreamEvent()
 
     /**
      * 检测到新 tool_call 开始（M4，ADR-014 5.1）。

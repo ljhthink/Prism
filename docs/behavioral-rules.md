@@ -532,6 +532,17 @@
 - 适用场景：dev
 - 状态：active
 
+#### BR-ops-004: 用 PowerShell 修改源码文件前必须统一 CRLF→LF 或按行数组拼接，且多行替换后按字节级校验
+
+- 类别：ops
+- 规则：在 Windows PowerShell 中用 `ReadAllText`/`String.Replace` 对源码做**多行字符串替换**时，目标文件可能是 CRLF（git autocrlf）而脚本构造的块为 LF，`Replace` 静默不命中（返回 0 替换却"看似成功"），导致改了却未落盘直到编译失败。可靠做法：(1) 替换前 `.Replace("`r`n","`n")` 归一化再写回（整文件转 LF，Kotlin/git 可接受）；(2) 或按 `ReadAllLines` 行数组 + `List.RemoveRange`/`Insert` 拼接后 `WriteAllLines`（绕过 here-string 的引号/行尾坑），但对大文件需确认 `ReadAllLines` 长度与 `Get-Content` 一致（不一致说明编码/行尾异常，禁止直接覆盖）；(3) 写回后必须**字节级**用 `Get-Content -Encoding UTF8` 复验目标内容已变化（BR-ops-003）。禁止用 `@'...'@` here-string 构造含 `>`/`（`/中文/`$i` 的多行块传给 `Replace`——终端会分页展开引号导致内容与文件不符。
+- 反例：`$content.Replace($oldBlock, $newBlock)`（$oldBlock 为 LF here-string，文件为 CRLF）→ 0 次替换，文件未变，编译报 Unresolved reference；或 `ReadAllLines`（738 行）与 `Get-Content`（597 行）长度不一致仍直接覆盖 → 丢行/错乱
+- 正例：`$content=$content.Replace("`r`n","`n"); $content=$content.Replace($old,$new)`（先归一化行尾再替换再写回）+ WriteAllLines 前校验行数 / 写回后 UTF8 复验关键词存在
+- 来源：v1 真机二次修复（2026-08-19）CrossSessionMemoryManager.kt 多行函数替换多次不命中（CRLF vs LF）+ ReadAllLines/Get-Content 行数不一致；ConversationScreen.kt/sanitize 正则多行替换（BR-ops-003 会话）
+- 添加日期：2026-08-19
+- 适用场景：dev
+- 状态：active
+
 #### BR-error-handling-019: RAG 嵌入模型必须匹配检索语种，英文模型对中文语义区分度差
 
 - 类别：error-handling
@@ -917,6 +928,106 @@
 - 适用场景：dev / bugfix
 - 状态：active
 
+#### BR-search-001: 无空格中文整句搜索须先剥疑问/泛化后缀提取实体前缀再检索
+
+- 类别：interface / search
+- 规则：Bing 等服务端对无空格/标点的连续中文句（如"梧州一中是什么学校"）按`[\u4e00-\u9fff]{2,}`正则会被视为**一个** CJK run，关键词解析退化；若把整句当核心词，条目过滤/相关性判定都要求字面整句命中 → 只返回"大概相关"。须先 `stripTrailingQuerySuffix`（最长后缀优先，覆盖 是什么学校/怎么/如何/… ）剥成前置实体候选（"梧州一中"），实体候选进入核心词列表参与主查询命中与短整词降级重试。
+- 反例：整句"梧州一中是什么学校"作为唯一核心词 → 检索命中率低、参考来源间接
+- 正例：核心词含实体"梧州一中" → 直接命中学校官方/介绍页
+- 来源：v1 批次5 Issue 2（ADR-038 子决策 B）
+- 添加日期：2026-08-19
+- 适用场景：bugfix
+- 状态：active
+
+#### BR-vision-001: 视觉旁路 Provider 激活须同步授权并清熔断；重激活视为"期望启用"信号
+
+- 类别：security / vision
+- 规则：把 Provider 标记为「视觉旁路」（`isVisionFallback`）本身即用户"图片外发到该端点"的明确意图 → 保存时必须同步 `setConsent(true)` + `setAutoBypassEnabled(true)`。云端旁路经"连续失败 N 次自动熔断"停用后，若不在用户修复/重激活时 `resetFailures()`，Cloud 会永久不触发只剩 OCR；因此重激活保存时**额外清熔断计数**，让修复后的 Cloud 可重试。授权仍由用户 UI 显式动作为前提，非代码静默外发。
+- 反例：用户激活视觉模型后仍只见 OCR（熔断卡死未清 / consent 默认 false 恒不过）
+- 正例：标记 isVisionFallback 保存 → consent+auto+resetFailures 俱到，Cloud 可重试
+- 来源：v1 批次5 Issue 3（ADR-038 子决策 C；旧 Issue 3 已授 consent，本次补熔断恢复）
+- 添加日期：2026-08-19
+- 适用场景：bugfix / security
+- 状态：active
+
+#### BR-security-008: 后台高危确认用仅宿主可见广播 + 单槽通知，PendingIntent 须组件显式 + FLAG_IMMUTABLE
+
+- 类别：security
+- 规则：后台用户确认（如手机操控发送/删除/拨号）不得用系统级悬浮窗权限（SYSTEM_ALERT_WINDOW 高风险），改用高优先级通知 + 操作按钮，Receiver 必须 `android:exported=false`、`PendingIntent` 必须**显式组件** + `FLAG_IMMUTABLE`（防外部篡改 extra/越权触发）。确认语义单槽时，发新通知前 `cancel` 旧通知（`activeAskId` 维护），杜绝"残留旧按钮误批新高危确认"。锁屏 `VISIBILITY_PRIVATE` 不泄详情；点通知本体默认拒绝（fail-closed）。answers 消费须白名单映射（固定 允许/取消 → 固定中文），未知动作忽略，禁止任意字符串注入。
+- 反例：exported=true 广播 / 隐式 PendingIntent / 不撤旧通知 / 通知正文透传任意 LLM 输入给 sendMessage
+- 正例：`ConfirmActionReceiver` exported=false + 显式 component PendingIntent + 发新先撤旧 + 白名单映射
+- 来源：v1 批次5 Issue 5（ADR-038 子决策 E；guardrail TKN-V1B5-GUARDRAIL-001）
+- 添加日期：2026-08-19
+- 适用场景：security / bugfix
+- 状态：active
+
+#### BR-interface-019: Android 13+ 需要通知权限的功能须在入口生命周期请求，拒绝不阻塞主流程
+
+- 类别：interface
+- 规则：targetSdk ≥ 33 且功能依赖系统通知（后台确认、下载完成提示等）时，必须在入口 Activity `onCreate` 对 API33+ 做 `POST_NOTIFICATIONS` 运行时请求（`SDK>=TIRAMISU && !granted` 才请求），并同时在 `AndroidManifest` 声明该权限。请求失败/拒绝不得阻塞主流程（相关功能降级：提问卡片仍可用）。不要在每个功能点重复请求。
+- 反例：只声明权限不运行时请求 → Android 13+ 通知静默不显示、后台确认不可见
+- 正例：MainActivity.onCreate 一次性运行时请求 + Manifest 声明；拒绝可重进设置授予
+- 来源：v1 批次5 Issue 5（ADR-038 子决策 E）
+- 添加日期：2026-08-19
+- 适用场景：bugfix
+- 状态：active
+
+#### BR-network-001: Android targetSdk>28 Fetch 任意公网 http 前必须升级 https（明文拦截非反爬）
+
+- 类别：network / security
+- 规则：Android 9+（targetSdk≥28）依赖 `network_security_config`，默认拦截公网**明文 http**（仅放行声明的 localhost）。任何抓取/检索类工具对公网 `http://` URL 直接请求会抛 `UnknownServiceException: CLEARTEXT communication ... not permitted`——这**不是反爬失败**。修复不得依赖"加请求头/指纹"（对明文拦截无效），应在应用层把公网 http **升级为 https** 再请求（同 host，过自身 SSRF 校验），且**不**全局放宽 `usesCleartextTraffic`（安全边界）。失败日志须经脱敏（剥 query/fragment/**userinfo** 凭证，CWE-532）以便区分明文/DNS/握手各层。
+- 反例：对 `http://` 请求只加 UA/Sec-CH-UA/Referer → 仍 `UnknownServiceException`，LLM 误判反爬反复重试
+- 正例：`fetchUrl` 先 `http://`→`https://` 再 `isPublicHttpUrl` 复检；`sanitizeUrlForLog` 剥 userinfo 再落日志
+- 来源：v1 批次6 Issue 1（ADR-039 子决策 A；真机日志 `fetch failed: UnknownServiceException`）
+- 添加日期：2026-08-19
+- 适用场景：bugfix / dev
+- 状态：active
+
+#### BR-search-002: 中文实体的"中学/大学/学校/公司"等是实义词，禁止当查询后缀剥除；中文实体搜索用 HTML SERP 优于 RSS
+
+- 类别：interface / search
+- 规则1（后缀）：`stripTrailingQuerySuffix` 的后缀表只能放**疑问/泛化**后缀（是什么/怎么/如何/呢/吗…），**不得**放实体词（中学/大学/学校/公司/医院/功能/详情…）——否则"梧州市第一中学"被误剥成"梧州市第一"，毁了整词匹配。校名/机构名必须保留完整实体。
+- 规则2（源）：Bing `format=rss` 对中文实体（尤其长校名）排名坍缩（连精确校名也返回市级百科、参考来源"大概相关"）；**优先解析 Bing HTML SERP**（`li.b_algo` 提取 title/真实 href/snippet，`u=a1<base64url>` 解码 ck 跳转直链），命中率显著更高。HTML 解析结果属不可信外部内容，仅回灌 LLM 文本，禁止进入抓取/Intent/WebView sink。
+- 反例：RSS 返回市级、参考来源与内容无直接联系；后缀误剥出半截实体
+- 正例：HTML SERP + 完整实体，校名 query 直接命中学校官网
+- 来源：v1 批次6 Issue 2（ADR-039 子决策 B；真机日志 `search query=… first=梧州市…百科`）
+- 添加日期：2026-08-19
+- 适用场景：bugfix / dev
+- 状态：active
+
+#### BR-search-003: 单引擎命中不佳时须多引擎回退（Bing→Baidu），回退仍须经过相关性过滤 + 请求预算/电源感知
+
+- 类别：interface / search / observability
+- 规则：中文专有名词/长实体在单一搜索源（如 Bing）排名坍缩时，主查询+核心词重试（多候选）全不相关或空结果后，**必须触发兜底引擎（如 Baidu HTML SERP）再试一次**（query 主查询 → 首次不中再逐核心词短整词），避免"参考来源只有大概相关 / 剩下的全无关"。兜底引擎同样复用条目级相关性过滤（`parseBaiduHtml` → `filterRelevantItems`）与请求预算检查（`hasRequestBudget`，任一条 hit 即停），满足"预算感知 + 幂等 + 智能停止"。Baidu `link?url=` 跳转/`c-abstract` 摘要布局与 Bing 结构不同，解析必须独立实现并配 golden 测试，不得复用 Bing 的 `li.b_algo` 正则。
+- 反例：Bing 对"梧州一中"只返回市级百科，直接返回"大概相关+无关混合集"
+- 正例：Bing 不相关 → Baidu 兜底命中"梧州市第一中学_百度百科"等权威条目，参考来源直接相关
+- 来源：v1 批次7 Issue 1（ADR-040 子决策 A；真机多次修复后 Bing 仍无法命中中文实体）
+- 添加日期：2026-08-19
+- 适用场景：bugfix / dev
+- 状态：active
+
+#### BR-vision-002: 云端视觉/外部降级链路失败不得静默吞，须留可观测日志；无专用视觉 Provider 时回退主 Provider 作描述端点
+
+- 类别：interface / vision / observability
+- 规则：任何"外部能力→本地兜底"降级链（如视觉旁路 Cloud→OCR），Cloud 侧**不得用 try/catch 吞失败**——必须记录 `provider + 异常`（不落 key/完整用户文本）和入参归属（`dedicated=`/`cloudConfig=`），否则真机永远无法判断是"没进 Cloud"还是"Cloud 失败"，问题无法闭环。Provider 解析应 `findVisionFallback() ?: activeProvider`——未配置专用视觉 Provider 时以主 Provider 尝试；外发仍受 consent 闸门（未授权不进云），不构成新增隐私面。
+- 反例：cloudDescriber 失败返回 null → 默默落 OCR，无任何日志，多轮无法定位
+- 正例：`cloud bypass ok/failed provider=… err=…` + `vision bypass: dedicated=… cloudConfig=…` 两条日志可现场 RCA
+- 来源：v1 批次6 Issue 3（ADR-039 子决策 C；真机日志只有 `OCR process succeeded`）
+- 添加日期：2026-08-19
+- 适用场景：bugfix
+- 状态：active
+
+#### BR-vision-003: 视觉旁路专用 Provider 可跳过熔断，但**不得**因"已激活/专用"绕过用户显式撤销的图片外发授权（consent 隐私铁门）
+
+- 类别：security / vision / privacy
+- 规则：让"激活视觉模型即可用 Cloud"而做的专用 Provider 例外（`resolve(isDedicated=true)`）只能**跳过熔断**（连续失败不再锁死 Cloud，避免"激活了却永远只 OCR"），**必须仍尊重两项硬信号——`autoBypass` 开关 + 用户显式撤销授权（`isConsentGiven()`）**。consent 授予链路已由 `SettingsViewModel.saveProvider` 在把 Provider 标记为 `isVisionFallback` 时自动 `setConsent(true)`，因此正常激活路径 consent 恒为 true；校验 consent 正是为了拦截"用户到设置页关闭图片外发授权后，专用 Provider 仍把图片外发"的隐私回归（ADR-035 隐私铁门）。任何想绕开 consent 的"配置即授权/激活即授权"推理都是隐私红线违规。
+- 反例：`cloudAllowed = if (isDedicated) auto else (visionConfig!=null && auto && consent && failures<MAX)`——专用分支漏掉 `consent`，用户设置页关闭授权后图片仍外发（guardrail TKN-SEARCH-VISION-ROUND5-001 B-1 阻断项）
+- 正例：`cloudAllowed = if (isDedicated) auto && config.isConsentGiven() else visionConfig!=null && auto && consent && failures<MAX`，并配单测"专用 Provider + 授权撤销 → 落到 OCR，不得调云端"
+- 来源：guardrail-accepted review（TKN-SEARCH-VISION-ROUND5-001 B-1/A-No.1，v1 批次7 ADR-040）
+- 添加日期：2026-08-19
+- 适用场景：dev / bugfix
+- 状态：active
+
 ## 审计记录
 
 | 日期 | 审计人 | 结果 | 备注 |
@@ -973,3 +1084,7 @@
 | 2026-08-16 | guardrail-enforcer + ac-verifier | 新增 BR-interface-015 + BR-performance-002 | UXR8 批次2 优化闭环（TKN-UXR8-B2-GUARDRAIL-001/002 + ACCEPTANCE-001，ADR-029）。O1-O5 五项优化 + 6 项 guardrail 修复（G-01 画像静默覆盖 / G-03 搜索预算 / G-04 sheet 上限 / G-05 skill 工具名 / G-07 测试缺口 / G-09 公式注入）+ G2-01~04 即时闭环。guardrail 复审 PASS-with-notes（6 项全 FIXED）+ ac-verifier 17/17 AC PASS + 全量 1873 用例 0 失败 + 模拟器验证 O1/O2/O3/O4 UI 全部通过。2 条新规则：BR-interface-015（派生 key 冲突须生成唯一 key 防静默覆盖）、BR-performance-002（串行子请求须预算感知防总超时丢结果） |
 | 2026-08-17 | guardrail-enforcer + ac-verifier | 新增 BR-ops-002 | UXR8 批次3 新功能闭环（TKN-UXR8-B3-GUARDRAIL-001/002 + ACCEPTANCE-001，ADR-030）。N1 用户规则文件 / N2 LLM 反问（Phase1+2）/ N3 文本模型视觉（方案 A）。guardrail 首轮有条件通过（4 MEDIUM + 2 可修 LOW 全修复：Q-MED-1 userRules runCatching 违规 / Q-MED-2 末轮 ask_user 误报循环上限 / Q-MED-3 历史图片污染 400 归因 / Q-MED-4 大图 OOM，Q-LOW-1 解析失败静默 / Q-LOW-2 占位孤儿）→ 复审通过。ac-verifier 3/3 AC PASS + 全量 1942 用例 0 失败 + lintDebug 0 errors。1 条新规则：BR-ops-002（同一文件多处修改必须串行单条 Edit，禁止同批并行 Edit 同文件——开发期实际踩坑：并行 Edit 写竞争导致改动丢失编译失败） |
 | 2026-08-17 | 主 Agent | 新增 BR-interface-016 + BR-testing-008 | 真机测试 Bug 修复闭环（TKN-UXR8-FIX-GUARDRAIL-001/002 + ACCEPTANCE-001）。根因 1：document__create_xlsx 工具 `sheets` 参数 schema 为裸 JsonArray 字面量（非法 JSON Schema）→ DeepSeek 对**全部请求**（含图片请求、新/老会话）返回 400 Invalid schema，视觉功能完全不可用。修复为合法 `type:array + items:object` 结构。根因 2：Skill displayName 取 description 首行导致显示长句而非原名 → 改为优先取 SKILL.md body 首个 `# 一级标题`。根因 3：Skill 详情 body/systemPrompt 硬截断 500/200 字符 → 改为 ExpandableText 预览+展开全文。根因 4：Skills 缺失删除功能 → 新增 deleteSkill（isHidden 标记持久化 + 执行记录级联清理 + 非内置删磁盘目录），同时移除 5 个废弃内置 Skill（code-reviewer/meeting-notes/rewriter/summarizer/translator），scanAndSync 对 assets 已消失的内置 Skill 删除 DB 行（PURGE_BUILTIN）、对 isHidden 条目保留行（KEEP_HIDDEN）、对用户/远程文件缺失标记未安装（MARK_UNINSTALLED）。guardrail 两轮通过 + ac-verifier 6/6 AC PASS + 全量 1967 用例 0 失败 + 模拟器验证（5 内置 Skill 正确 purge、无崩溃）。2 条新规则：BR-interface-016（OpenAI 工具 schema 的 array 属性必须为 type:array + items 对象结构，禁止裸 JsonArray 字面量）、BR-testing-008（工具 schema 合法性须有结构断言测试防 400 复发） |
+
+| 2026-08-19 | 主 Agent | 新增 BR-ops-004 | v1 真机二次修复（ADR-037）开发期踩坑：CrossSessionMemoryManager.kt 多行函数替换多次不命中（CRLF vs LF，PowerShell String.Replace 静默 0 替换）+ ReadAllLines/Get-Content 行数不一致。新增 BR-ops-004（改源码前统一 CRLF→LF 或按行数组拼接 + 字节级复验，禁止 here-string 多行块直传 Replace） |
+| 2026-08-19 | guardrail-enforcer | 通过，A/C 建议采纳 | v1 真机修复审查（TKN-V1FIX-GUARDRAIL-001）：0 阻断，无注入/硬编码密钥/SSRF 回归/CWE-209，隐私授权边界完好（视觉旁路 OCR 本地兜底 + 云端仍受授权闸门）。采纳质量建议：ATOM_KEYWORDS 剔除淡化的非自我指涉词（防 L2 噪声）、CHALLENGE_MARKERS 分级（弱特征需正文极短才判定避免误伤正常长文）。全量回归通过 |
+| 2026-08-19 | guardrail-enforcer | 有条件通过，B-1 阻断项已修复；新增 BR-search-003 + BR-vision-003 | v1 批次7（ADR-040）审查（TKN-SEARCH-VISION-ROUND5-001）：搜索 Bing→Baidu 多引擎回退 + 视觉专用 Provider 跳过熔断。**B-1 阻断项**（MEDIUM 隐私回归）：专用 Provider 分支漏 `isConsentGiven()`，用户设置页撤销授权后图片仍外发。修复为专用分支 `auto && config.isConsentGiven()`（只跳过熔断、仍守 consent 铁门）+ 补单测"专用 Provider + 授权撤销→OCR"。A-No.2/3/4/5（专用限流退避 / Baidu 跳转解码 / 简称↔全称放宽 / 主模型=视觉未打标授权引导）列为后续迭代已知限制。新增规则：BR-search-003（多引擎回退须复核相关性+预算）、BR-vision-003（专用 Provider 可跳过熔断但不得绕过 consent 铁门）。全量回归 2270 用例 0 失败 |

@@ -41,7 +41,7 @@
     },
     {
       "id": "2:2044962236284629724",
-      "lastPropertyId": "8:9035974663408664555",
+      "lastPropertyId": "9:4990081859461232027",
       "name": "ProviderConfig",
       "properties": [
         {
@@ -84,6 +84,11 @@
           "id": "8:9035974663408664555",
           "name": "createdAt",
           "type": 6
+        },
+        {
+          "id": "9:4990081859461232027",
+          "name": "isVisionFallback",
+          "type": 1
         }
       ],
       "relations": []
@@ -301,7 +306,7 @@
     },
     {
       "id": "7:2775429706893952970",
-      "lastPropertyId": "6:2437181171657738910",
+      "lastPropertyId": "10:5133816819915043930",
       "name": "MemoryRecord",
       "properties": [
         {
@@ -336,6 +341,26 @@
           "id": "6:2437181171657738910",
           "name": "turnCount",
           "type": 5
+        },
+        {
+          "id": "7:4576225924183789896",
+          "name": "priority",
+          "type": 5
+        },
+        {
+          "id": "8:8996878637871185998",
+          "name": "accessCount",
+          "type": 6
+        },
+        {
+          "id": "9:1197687467621071690",
+          "name": "version",
+          "type": 5
+        },
+        {
+          "id": "10:5133816819915043930",
+          "name": "sourceMessageIds",
+          "type": 9
         }
       ],
       "relations": []

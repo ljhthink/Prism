@@ -183,7 +183,17 @@ class LocalMcpToolProvider(
             return "仅支持抓取 http:// 或 https:// 地址"
         }
         // SSRF 防护：解析 URL 并拒绝内网/回环/链路本地地址（guardrail M-1）
-        if (!isPublicHttpUrl(rawUrl)) {
+        // v1 批次5/6 修复（Issue 1，真机证据 UnknownServiceException）：Android 9+（targetSdk>28）
+        // 默认拦截公网**明文 http**（`network_security_config` 仅放行 localhost/127.0.0.1），
+        // 此前公网 http 请求一步步走到 OkHttp 即抛 `UnknownServiceException: CLEARTEXT...`，
+        // 被当成"反爬失败"，LLM 反复重试。公网站点绝大多数支持 https，先把 http 升级为 https
+        // 尝试（同主机、SSRF 复检），绕开明文拦截而不放宽全局明文（ADR-004 安全边界不变）。
+        val upgraded = if (rawUrl.startsWith("http://")) {
+            "https://" + rawUrl.removePrefix("http://")
+        } else {
+            rawUrl
+        }
+        if (!isPublicHttpUrl(upgraded)) {
             return "仅支持抓取公网地址（已拒绝内网/本机地址）"
         }
         val maxLength = (arguments["maxLength"] as? Number)
@@ -194,7 +204,7 @@ class LocalMcpToolProvider(
             // UXR11 U3（ADR-033）：fetchWithRedirects 手动跟随 3xx 重定向（每次重定向目标
             // 重新过 isPublicHttpUrl SSRF 校验），并携带完整浏览器请求头降低反爬拦截率。
             val response: io.ktor.client.statement.HttpResponse =
-                fetchWithRedirects(client, rawUrl, FETCH_HTTP_HEADERS, 0)
+                fetchWithRedirects(client, upgraded, FETCH_HTTP_HEADERS, 0)
             // Content-Length 预检（防超大响应全量读入，guardrail L-3/M-1）
             val contentLength = response.contentLength()
             if (contentLength != null && contentLength > MAX_FETCH_LEN) {
@@ -211,6 +221,7 @@ class LocalMcpToolProvider(
                     403 -> "抓取失败：目标站点拒绝访问（403，可能反爬或需登录）。请勿反复重试同一 URL，改用其他来源或基于已有信息回答"
                     404 -> "抓取失败：目标页面不存在（404）。请勿反复重试，改用其他来源"
                     429 -> "抓取失败：目标站点限流（429）。请稍后再试或改用其他来源，勿连续抓取"
+                    503 -> "抓取失败：目标站点返回人机验证/挑战页（503，如 Cloudflare「Just a moment」）。该页为验证或动态渲染页，当前抓取方式不可达，请改用其他来源"
                     else -> "抓取失败：HTTP ${response.status.value}。请勿反复重试同一 URL，可改用其他来源"
                 }
             }
@@ -234,11 +245,19 @@ class LocalMcpToolProvider(
                 return "抓取失败：网络错误或目标不可访问"
             }
             val text = if (raw) body else stripHtmlTags(body)
+            // v1 真机反馈（Issue 2）：反爬系统有时返回 200 但内容为挑战页/动态渲染空壳/登录墙，
+            // 直接回灌 LLM 会得到无意义脚本或误导性"页面为空"。做内容纯度判定，命中即降级提示。
+            if (!raw && isAntiBotOrEmpty(text)) {
+                return "抓取失败：页面无有效正文（可能是 JS 动态渲染、登录墙或人机验证页）。请改用其他来源或基于已有信息回答"
+            }
             text.trim().take(maxLength)
         } catch (e: CancellationException) {
             throw e // BR-error-handling-007
         } catch (e: Exception) {
-            Log.w(LOG_TAG, "fetch failed: ${e::class.simpleName}")
+            // ALM-001（v1 批次6 Issue 1）：记录**脱敏 URL**（host+path 即可定位）与异常类型，
+            // 便于区分"明文拦截/超时/DNS/握手/解析"各层失败；此前只记 simpleName，
+            // 真机无法判断到底是反爬还是明文拦截。
+            Log.w(LOG_TAG, "fetch failed url=${sanitizeUrlForLog(upgraded)} err=${e::class.simpleName}: ${e.message?.take(160)}")
             "抓取失败：网络错误或目标不可访问"
         }
     }
@@ -357,6 +376,20 @@ class LocalMcpToolProvider(
             addr.isSiteLocalAddress ||
             addr.isLinkLocalAddress ||
             addr.isAnyLocalAddress
+
+    /**
+     * 脱敏 URL 供日志（BR-error-handling-016 / LOW-03，CWE-532）：丢弃 query/fragment
+     * （最易携带用户 PII），仅保留 scheme://host + 截断 path，供真机 RCA 定位是哪一层失败。
+     */
+    internal fun sanitizeUrlForLog(url: String): String {
+        val authority = Regex("""^https?://([^/?#]+)""").find(url)?.groupValues?.get(1) ?: return url.take(120)
+        // LOW-1（guardrail TKN-V1FIX5-GUARDRAIL-001，CWE-532）：userinfo（user:pass@）是凭证，
+        // 必须剥离后再记录；与 isPublicHttpUrl 的处理保持一致。host 可能含 :port，单取 host。
+        val host = authority.substringAfterLast('@').substringBefore(':')
+        if (host.isEmpty()) return url.take(120)
+        val path = Regex("""^https?://[^/?#]+(/[^?#]*)""").find(url)?.groupValues?.get(1).orEmpty()
+        return "https://$host${path.take(120)}"
+    }
 
     /** 去除 HTML 标签（`<[^>]+>` → 空），保留文本内容。 */
     private fun stripHtmlTags(raw: String): String = raw.replace(Regex("<[^>]+>"), " ")
@@ -481,22 +514,61 @@ class LocalMcpToolProvider(
          */
         const val MAX_FETCH_READ_CAP = 1_000_000
 
-        /** Fetch 请求 User-Agent（部分站点对无 UA 请求降级/拒绝）。 */
+        /**
+         * 判定抓取到的正文是否为「无有效内容」：空白，或命中人机验证/登录墙/动态渲染壳特征。
+         * 供 200 响应的内容纯度判定（v1 Issue 2），避免把无意义挑战页/空壳回灌 LLM。
+         *
+         * 分级判定（guardrail TKN-V1FIX-GUARDRAIL-001 发现 A 收敛）：
+         * - 强特征（Cloudflare 等典型验证门户标记）独立命中即判空壳；
+         * - 弱特征（中文泛词如"人机验证/异常流量"）需配合「正文极短」（近似纯挑战壳）才判定，
+         *   避免把含"验证码/安全验证"等词的**正常长文**（登录教程/安全科普）误伤。
+         */
+        private fun isAntiBotOrEmpty(text: String): Boolean {
+            val t = text.trim()
+            if (t.isEmpty()) return true
+            val lower = t.lowercase()
+            if (STRONG_CHALLENGE_MARKERS.any { it in lower }) return true
+            if (t.length <= MAX_CHALLENGE_TEXT_LEN && WEAK_CHALLENGE_MARKERS.any { it in lower }) return true
+            return false
+        }
+
+        /** 强特征：验证门户（Cloudflare 等）典型标记（小写匹配），独立命中即判定空壳。 */
+        private val STRONG_CHALLENGE_MARKERS = listOf(
+            "just a moment", "cf-browser-verification", "checking your browser",
+            "verify you are human", "attention required", "cf-challenge",
+            "access denied by security policy", "unusual traffic from your network"
+        )
+
+        /** 弱特征：需配合正文极短才判定的中文验证外壳标记。 */
+        private val WEAK_CHALLENGE_MARKERS = listOf("人机验证", "滑动验证", "异常流量")
+
+        /** 判定弱特征时允许的最大正文长度（字符）：超过即视为正常长文，不误判。 */
+        private const val MAX_CHALLENGE_TEXT_LEN = 80
+
+        /** Fetch 请求 User-Agent（部分站点对无 UA 请求降级/拒绝）。v1 升级至 2026 主流移动 Chrome/126。 */
         private const val FETCH_USER_AGENT =
-            "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36"
+            "Mozilla/5.0 (Linux; Android 13; SM-A536B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
 
         /**
-         * UXR11 U3（ADR-033）：Fetch 请求浏览器典型请求头集合（降低反爬拦截率）。
+         * Fetch 请求浏览器典型请求头集合（降低反爬拦截率）。
          *
          * 反爬系统（Cloudflare/Paywall）常按请求头指纹识别自动化请求（缺 Accept /
-         * Accept-Language / Sec-Fetch-* 等即判 bot）。网络调研（webfetch-mcp / readerfi
-         * 60-line MCP）：补全浏览器头是把 403 变 200 的最廉价手段。
+         * Accept-Language / Sec-Fetch-* 等即判 bot）。网络调研（tech-selection-researcher，
+         * 2026-08-19）：请求头层是与目标 SSR 站点反爬交战最廉价的入口。
          *
-         * **刻意不设 Accept-Encoding**：Ktor OkHttp 在未手动设置该头时透明 gzip 解压，
-         * 手动声明 `gzip, br` 会关掉 OkHttp 自动解压 → 响应乱码（与 UXR11 U4 的乱码同族风险）。
+         * v1 真机反馈（Issue 2）优化：
+         * 1. 补 `Sec-CH-UA` 系列（Client Hints）—— Cloudflare L3 层的核心判定依据；
+         *    版本号与 [FETCH_USER_AGENT] 的 Chrome/126 **必须一致**，否则反而实锤 bot。
+         * 2. 保持**刻意不设 Accept-Encoding**：Ktor OkHttp 在未手动设置该头时透明 gzip 解压，
+         *    手动声明 `gzip, br` 会关掉 OkHttp 自动解压 → 响应乱码（与 UXR11 U4 同族风险）。
          */
         private val FETCH_HTTP_HEADERS: Map<String, String> = mapOf(
             "User-Agent" to FETCH_USER_AGENT,
+            "sec-ch-ua" to "\"Chromium\";v=\"126\", \"Not/A)Brand\";v=\"8\", \"Google Chrome\";v=\"126\"",
+            "sec-ch-ua-mobile" to "?1",
+            "sec-ch-ua-platform" to "\"Android\"",
+            "sec-ch-ua-full-version-list" to "\"Chromium\";v=\"126.0.6478.122\", \"Not/A)Brand\";v=\"8\", \"Google Chrome\";v=\"126.0.6478.122\"",
+            "sec-ch-ua-platform-version" to "\"13.0.0\"",
             "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language" to "zh-CN,zh;q=0.9,en;q=0.8",
             "Cache-Control" to "no-cache",
@@ -506,7 +578,11 @@ class LocalMcpToolProvider(
             "Sec-Fetch-Dest" to "document",
             "Sec-Fetch-Mode" to "navigate",
             "Sec-Fetch-Site" to "none",
-            "Sec-Fetch-User" to "?1"
+            "Sec-Fetch-User" to "?1",
+            // v1 真机二次修复（Issue 1）：部分站点做 Referer 校验，无 Referer 视为外链/机器人。
+            // 用户流程通常是"搜索 → 点进结果页"，用 Bing 作 Referer 最贴近正常点击来源，
+            // 可降低 403 概率。刻意不伪造为文本类 URL（站源 Referer 逻辑复杂易反噬）。
+            "Referer" to "https://cn.bing.com/"
         )
 
         /**

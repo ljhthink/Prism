@@ -40,5 +40,17 @@ data class ProviderConfig(
     @Convert(converter = StringMapConverter::class, dbType = String::class)
     var headers: Map<String, String> = emptyMap(),
     var isActive: Boolean = false,
-    var createdAt: Long = System.currentTimeMillis()
+    var createdAt: Long = System.currentTimeMillis(),
+    /**
+     * v1 US-301（方案 B 云端视觉旁路）：是否为「视觉旁路 Provider」。
+     *
+     * 当主聊天 Provider 为纯文本模型（图片直传 400 + 视觉不支持信号）时，若用户已配置
+     * 视觉旁路 Provider（支持 OpenAI 兼容 image_url 输入 → text 输出的视觉模型，如
+     * GLM-4V-Plus / Qwen-VL / GPT-4o），则把图片发往该 Provider 生成文字描述，注入文本
+     * 模型上下文回答。
+     *
+     * **语义**：辅助视觉角色，**不抢占 [isActive]**（聊天主 Provider 仍唯一激活，
+     * 规避 ProviderConfigRepository.save 的单激活不变式冲突）。默认 false。
+     */
+    var isVisionFallback: Boolean = false
 )

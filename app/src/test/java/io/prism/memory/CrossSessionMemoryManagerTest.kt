@@ -76,7 +76,7 @@ class CrossSessionMemoryManagerTest {
     @Test
     fun saveSessionMemories_stores_turn_pairs_with_embedding() = runBlocking {
         val messages = listOf(
-            ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L),
             ChatMessage(2, Role.ASSISTANT, "协程是轻量级线程...", 2000L)
         )
         val count = manager.saveSessionMemories("session-1", messages)
@@ -88,11 +88,11 @@ class CrossSessionMemoryManagerTest {
     @Test
     fun saveSessionMemories_stores_multiple_turn_pairs() = runBlocking {
         val messages = listOf(
-            ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L),
             ChatMessage(2, Role.ASSISTANT, "回答：协程是轻量级线程", 2000L),
-            ChatMessage(3, Role.USER, "Prism 支持哪些功能？", 3000L),
+            ChatMessage(3, Role.USER, "请记住我关心 Prism 的功能", 3000L),
             ChatMessage(4, Role.ASSISTANT, "回答：Prism 支持多种模型", 4000L),
-            ChatMessage(5, Role.USER, "如何配置 MCP 服务器？", 5000L),
+            ChatMessage(5, Role.USER, "请记住我常配置 MCP 服务器", 5000L),
             ChatMessage(6, Role.ASSISTANT, "回答：在设置页配置 MCP", 6000L)
         )
         val count = manager.saveSessionMemories("session-1", messages)
@@ -104,9 +104,9 @@ class CrossSessionMemoryManagerTest {
     fun saveSessionMemories_skips_unpaired_user_message() = runBlocking {
         // 最后一条 user 无配对 assistant，应被跳过
         val messages = listOf(
-            ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L),
             ChatMessage(2, Role.ASSISTANT, "回答：协程是轻量级线程", 2000L),
-            ChatMessage(3, Role.USER, "还有一个问题没有收到回复", 3000L)
+            ChatMessage(3, Role.USER, "请记住我还有一个问题", 3000L)
         )
         val count = manager.saveSessionMemories("session-1", messages)
         assertEquals("应保存 1 个完整轮次对，跳过未配对 user", 1, count)
@@ -116,7 +116,7 @@ class CrossSessionMemoryManagerTest {
     fun saveSessionMemories_respects_max_memories_limit() = runBlocking {
         val messages = (1..10).flatMap { i ->
             listOf(
-                ChatMessage(i.toLong() * 2 - 1, Role.USER, "问题$i 的详细分析", i.toLong() * 1000),
+                ChatMessage(i.toLong() * 2 - 1, Role.USER, "请记住我重视的问题$i", i.toLong() * 1000),
                 ChatMessage(i.toLong() * 2, Role.ASSISTANT, "回答$i 的关键结论", i.toLong() * 1000 + 500)
             )
         }
@@ -130,7 +130,7 @@ class CrossSessionMemoryManagerTest {
         embedder = FakeEmbedder(throwOnCall = true)
         manager = CrossSessionMemoryManager(embedder, memoryRepository, retrievalThreshold = 0.0)
         val messages = listOf(
-            ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L),
             ChatMessage(2, Role.ASSISTANT, "回答：协程是轻量级线程", 2000L)
         )
         val count = manager.saveSessionMemories("session-1", messages)
@@ -141,7 +141,7 @@ class CrossSessionMemoryManagerTest {
     @Test
     fun saveSessionMemories_associates_records_with_session_id() = runBlocking {
         val messages = listOf(
-            ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L),
             ChatMessage(2, Role.ASSISTANT, "回答：协程是轻量级线程", 2000L)
         )
         manager.saveSessionMemories("my-session", messages)
@@ -154,7 +154,7 @@ class CrossSessionMemoryManagerTest {
     fun saveSessionMemories_sets_turn_count_incrementally() = runBlocking {
         val messages = (1..3).flatMap { i ->
             listOf(
-                ChatMessage(i.toLong() * 2 - 1, Role.USER, "问题$i 的详细分析", i.toLong() * 1000),
+                ChatMessage(i.toLong() * 2 - 1, Role.USER, "请记住我重视的问题$i", i.toLong() * 1000),
                 ChatMessage(i.toLong() * 2, Role.ASSISTANT, "回答$i 的关键结论", i.toLong() * 1000 + 500)
             )
         }
@@ -188,7 +188,7 @@ class CrossSessionMemoryManagerTest {
         // 存入 5 条记忆
         val messages = (1..5).flatMap { i ->
             listOf(
-                ChatMessage(i.toLong() * 2 - 1, Role.USER, "话题$i 相关问题", i.toLong() * 1000),
+                ChatMessage(i.toLong() * 2 - 1, Role.USER, "请记住我关注的话题$i", i.toLong() * 1000),
                 ChatMessage(i.toLong() * 2, Role.ASSISTANT, "话题$i 的回答", i.toLong() * 1000 + 500)
             )
         }
@@ -203,7 +203,7 @@ class CrossSessionMemoryManagerTest {
     fun retrieveRelevantMemories_returns_results_sorted_by_similarity_desc() = runBlocking {
         val messages = (1..5).flatMap { i ->
             listOf(
-                ChatMessage(i.toLong() * 2 - 1, Role.USER, "话题$i 的深入探讨", i.toLong() * 1000),
+                ChatMessage(i.toLong() * 2 - 1, Role.USER, "请记住我深入研究过的话题$i", i.toLong() * 1000),
                 ChatMessage(i.toLong() * 2, Role.ASSISTANT, "话题$i 的核心结论", i.toLong() * 1000 + 500)
             )
         }
@@ -231,7 +231,7 @@ class CrossSessionMemoryManagerTest {
     fun retrieveRelevantMemories_uses_default_topk_3() = runBlocking {
         val messages = (1..5).flatMap { i ->
             listOf(
-                ChatMessage(i.toLong() * 2 - 1, Role.USER, "话题$i 的深入探讨", i.toLong() * 1000),
+                ChatMessage(i.toLong() * 2 - 1, Role.USER, "请记住我深入研究过的话题$i", i.toLong() * 1000),
                 ChatMessage(i.toLong() * 2, Role.ASSISTANT, "话题$i 的核心结论", i.toLong() * 1000 + 500)
             )
         }
@@ -248,7 +248,7 @@ class CrossSessionMemoryManagerTest {
         // 存入一个会话的 10 条记忆（5 个轮次对）
         val messages = (1..5).flatMap { i ->
             listOf(
-                ChatMessage(i.toLong() * 2 - 1, Role.USER, "话题$i 的深入探讨", i.toLong() * 1000),
+                ChatMessage(i.toLong() * 2 - 1, Role.USER, "请记住我深入研究过的话题$i", i.toLong() * 1000),
                 ChatMessage(i.toLong() * 2, Role.ASSISTANT, "话题$i 的核心结论", i.toLong() * 1000 + 500)
             )
         }
@@ -264,13 +264,13 @@ class CrossSessionMemoryManagerTest {
         // 两个会话各存 3 条
         val session1Messages = (1..3).flatMap { i ->
             listOf(
-                ChatMessage(i.toLong() * 2 - 1, Role.USER, "会话1话题$i 的详细讨论", i.toLong() * 1000),
+                ChatMessage(i.toLong() * 2 - 1, Role.USER, "请记住会话1话题$i 的详细讨论", i.toLong() * 1000),
                 ChatMessage(i.toLong() * 2, Role.ASSISTANT, "会话1话题$i 的核心结论", i.toLong() * 1000 + 500)
             )
         }
         val session2Messages = (1..3).flatMap { i ->
             listOf(
-                ChatMessage(i.toLong() * 2 - 1, Role.USER, "会话2话题$i 的详细讨论", i.toLong() * 1000),
+                ChatMessage(i.toLong() * 2 - 1, Role.USER, "请记住会话2话题$i 的详细讨论", i.toLong() * 1000),
                 ChatMessage(i.toLong() * 2, Role.ASSISTANT, "会话2话题$i 的核心结论", i.toLong() * 1000 + 500)
             )
         }
@@ -335,7 +335,7 @@ class CrossSessionMemoryManagerTest {
     @Test
     fun filterKeyMessages_keeps_user_and_assistant() {
         val messages = listOf(
-            ChatMessage(1, Role.USER, "Prism 支持哪些自定义配置？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Prism 的自定义配置", 1000L),
             ChatMessage(2, Role.ASSISTANT, "Prism 支持模型与工具配置", 2000L),
             ChatMessage(3, Role.TOOL, "工具结果", 3000L)
         )
@@ -366,21 +366,21 @@ class CrossSessionMemoryManagerTest {
     @Test
     fun groupIntoTurnPairs_pairs_consecutive_user_assistant() {
         val messages = listOf(
-            ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L),
             ChatMessage(2, Role.ASSISTANT, "回答：协程是轻量级线程", 2000L)
         )
         val pairs = manager.groupIntoTurnPairs(messages)
         assertEquals("应配对 1 组", 1, pairs.size)
-        assertEquals("什么是 Kotlin 协程？", pairs[0].first.content)
+        assertEquals("请记住我关注 Kotlin 协程", pairs[0].first.content)
         assertEquals("回答：协程是轻量级线程", pairs[0].second.content)
     }
 
     @Test
     fun groupIntoTurnPairs_skips_trailing_user_without_assistant() {
         val messages = listOf(
-            ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L),
             ChatMessage(2, Role.ASSISTANT, "回答：协程是轻量级线程", 2000L),
-            ChatMessage(3, Role.USER, "这个问题还没有收到回答", 3000L)
+            ChatMessage(3, Role.USER, "请记住这个问题还没有收到回答", 3000L)
         )
         val pairs = manager.groupIntoTurnPairs(messages)
         assertEquals("应只配对 1 组（跳过未配对 user）", 1, pairs.size)
@@ -389,15 +389,15 @@ class CrossSessionMemoryManagerTest {
     @Test
     fun groupIntoTurnPairs_pairs_multiple_turns() {
         val messages = listOf(
-            ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L),
             ChatMessage(2, Role.ASSISTANT, "回答：协程是轻量级线程", 2000L),
-            ChatMessage(3, Role.USER, "Prism 支持哪些功能？", 3000L),
+            ChatMessage(3, Role.USER, "请记住我关心 Prism 的功能", 3000L),
             ChatMessage(4, Role.ASSISTANT, "回答：Prism 支持多种模型", 4000L)
         )
         val pairs = manager.groupIntoTurnPairs(messages)
         assertEquals("应配对 2 组", 2, pairs.size)
-        assertEquals("什么是 Kotlin 协程？", pairs[0].first.content)
-        assertEquals("Prism 支持哪些功能？", pairs[1].first.content)
+        assertEquals("请记住我关注 Kotlin 协程", pairs[0].first.content)
+        assertEquals("请记住我关心 Prism 的功能", pairs[1].first.content)
     }
 
     @Test
@@ -410,12 +410,12 @@ class CrossSessionMemoryManagerTest {
 
     @Test
     fun formatTurnPair_formats_user_assistant_labels() {
-        val user = ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L)
+        val user = ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L)
         val assistant = ChatMessage(2, Role.ASSISTANT, "协程是轻量级线程...", 2000L)
         val formatted = manager.formatTurnPair(user to assistant)
         assertTrue("应包含 [用户] 标签", formatted.contains("[用户]"))
         assertTrue("应包含 [助手] 标签", formatted.contains("[助手]"))
-        assertTrue("应包含用户内容", formatted.contains("什么是 Kotlin 协程？"))
+        assertTrue("应包含用户内容", formatted.contains("请记住我关注 Kotlin 协程"))
         assertTrue("应包含助手内容", formatted.contains("协程是轻量级线程..."))
     }
 
@@ -425,7 +425,7 @@ class CrossSessionMemoryManagerTest {
     fun save_then_retrieve_round_trip() = runBlocking {
         // 会话 1：存入关于 Kotlin 的对话
         val session1Messages = listOf(
-            ChatMessage(1, Role.USER, "如何在 Kotlin 中使用协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我对 Kotlin 协程的使用", 1000L),
             ChatMessage(2, Role.ASSISTANT, "使用 launch 或 async 启动协程...", 2000L)
         )
         manager.saveSessionMemories("session-1", session1Messages)
@@ -453,10 +453,10 @@ class CrossSessionMemoryManagerTest {
     @Test
     fun groupIntoTurnPairs_consecutive_users_each_paired() {
         val messages = listOf(
-            ChatMessage(1, Role.USER, "什么是 Kotlin 协程？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注 Kotlin 协程", 1000L),
             ChatMessage(2, Role.USER, "补充：协程如何取消？", 2000L),
             ChatMessage(3, Role.ASSISTANT, "回答：协程是轻量级线程", 3000L),
-            ChatMessage(4, Role.USER, "Prism 支持哪些功能？", 4000L),
+            ChatMessage(4, Role.USER, "请记住我关心 Prism 的功能", 4000L),
             ChatMessage(5, Role.ASSISTANT, "回答：Prism 支持多种模型", 5000L)
         )
         val pairs = manager.groupIntoTurnPairs(messages)
@@ -474,7 +474,7 @@ class CrossSessionMemoryManagerTest {
     @Test
     fun groupIntoTurnPairs_consecutive_assistants_takes_first() {
         val messages = listOf(
-            ChatMessage(1, Role.USER, "协程和线程有什么区别？", 1000L),
+            ChatMessage(1, Role.USER, "请记住我关注协程和线程的对比", 1000L),
             ChatMessage(2, Role.ASSISTANT, "协程是轻量级线程", 2000L),
             ChatMessage(3, Role.ASSISTANT, "可挂起也可恢复执行", 3000L),
             ChatMessage(4, Role.ASSISTANT, "适合 IO 密集任务场景", 4000L)
@@ -494,12 +494,12 @@ class CrossSessionMemoryManagerTest {
     fun groupIntoTurnPairs_leading_assistant_skipped() {
         val messages = listOf(
             ChatMessage(1, Role.ASSISTANT, "欢迎使用 Prism！", 1000L),
-            ChatMessage(2, Role.USER, "你好，我想了解 Prism 功能", 2000L),
+            ChatMessage(2, Role.USER, "请记住我想了解 Prism 功能", 2000L),
             ChatMessage(3, Role.ASSISTANT, "你好！有什么可以帮您？", 3000L)
         )
         val pairs = manager.groupIntoTurnPairs(messages)
         assertEquals("应形成 1 个轮次对（前导 ASSISTANT 被跳过）", 1, pairs.size)
-        assertEquals("user 应是'你好，我想了解 Prism 功能'", "你好，我想了解 Prism 功能", pairs[0].first.content)
+        assertEquals("user 应是'你好，我想了解 Prism 功能'", "请记住我想了解 Prism 功能", pairs[0].first.content)
         assertEquals("assistant 应是欢迎回复", "你好！有什么可以帮您？", pairs[0].second.content)
     }
 
