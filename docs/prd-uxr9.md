@@ -8,7 +8,7 @@
 | 版本 | v0.1（待用户确认） |
 | 日期 | 2026-08-17 |
 | 作者 | Prism 主 Agent |
-| 关联文档 | [考古报告 2026-08-17-uxr9-archaeology.md](reports/2026-08-17-uxr9-archaeology.md)、[ADR-012](../decisions/ADR-012-rag-architecture.md)、[ADR-023](../decisions/ADR-023-uxr3-fixes.md)、[ADR-030](../decisions/ADR-030-uxr8-b3.md) |
+| 关联文档 | [考古报告 2026-08-17-uxr9-archaeology.md](reports/2026-08-17-uxr9-archaeology.md)、[ADR-012](decisions/ADR-012-rag-architecture.md)、[ADR-023](decisions/ADR-023-uxr3-fixes.md)、[ADR-030](decisions/ADR-030-uxr8-b3.md) |
 | 风险等级 | P2（跨模块：RAG 检索链路 / 输入区 UI 重构 / 记忆写入链路） |
 
 ## 1. 背景

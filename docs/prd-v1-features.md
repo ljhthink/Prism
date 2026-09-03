@@ -8,7 +8,7 @@
 | 版本 | v1.0（规划；当前 build.gradle.kts versionName=0.1.0，用户口径 1.0） |
 | 日期 | 2026-08-19 |
 | 作者 | 主 Agent + 用户 |
-| 关联文档 | 三份技术选型调研报告（记忆/手机操控/识图）、考古报告 2026-08-19 源码考古（docs/reports/）、[ADR-015](../decisions/ADR-015-m5-memory-system-architecture.md)、[ADR-031](../decisions/ADR-031-uxr9-multilingual-embedding-and-l2-memory.md)、[ADR-033](../decisions/ADR-033-uxr11-real-device-fixes.md) |
+| 关联文档 | 三份技术选型调研报告（记忆/手机操控/识图）、考古报告 2026-08-19 源码考古（docs/reports/）、[ADR-015](decisions/ADR-015-m5-memory-system-architecture.md)、[ADR-031](decisions/ADR-031-uxr9-multilingual-embedding-and-l2-memory.md)、[ADR-033](decisions/ADR-033-uxr11-real-device-fixes.md) |
 | 风险等级 | P3（重大：新增系统权限 + 新依赖 + 跨模块数据模型/接口变更） |
 
 ---
@@ -274,7 +274,7 @@
 
 | 批次 | 内容 | 状态 | 验收证据 |
 |---|---|---|---|
-| 批次1 | T1 记忆深度优化 | ✅ 完成 | guardrail + ac-verifier + 模拟器；全量回归 0 失败；[ADR-034](../decisions/ADR-034-v1-memory-deep-optimization.md)；[验收报告](reports/2026-08-19-v1-b1-memory-acceptance.md) |
-| 批次2 | T3 纯文本识图方案 B | ✅ 完成 | guardrail + ac-verifier + 模拟器；全量回归 0 失败；[ADR-035](../decisions/ADR-035-v1-vision-plan-b.md)；[验收报告](reports/2026-08-19-v1-b2-vision-acceptance.md) |
-| 批次3 | T2 LLM 操控手机 | ✅ 完成 | guardrail + ac-verifier + functional-validation-auditor；全量回归 2268 用例 0 失败；[ADR-036](../decisions/ADR-036-v1-phone-control.md)；[验收报告](reports/2026-08-19-v1-b3-phone-control-acceptance.md)；模拟器验证 |
+| 批次1 | T1 记忆深度优化 | ✅ 完成 | guardrail + ac-verifier + 模拟器；全量回归 0 失败；[ADR-034](decisions/ADR-034-v1-memory-deep-optimization.md)；[验收报告](reports/2026-08-19-v1-b1-memory-acceptance.md) |
+| 批次2 | T3 纯文本识图方案 B | ✅ 完成 | guardrail + ac-verifier + 模拟器；全量回归 0 失败；[ADR-035](decisions/ADR-035-v1-vision-plan-b.md)；[验收报告](reports/2026-08-19-v1-b2-vision-acceptance.md) |
+| 批次3 | T2 LLM 操控手机 | ✅ 完成 | guardrail + ac-verifier + functional-validation-auditor；全量回归 2268 用例 0 失败；[ADR-036](decisions/ADR-036-v1-phone-control.md)；[验收报告](reports/2026-08-19-v1-b3-phone-control-acceptance.md)；模拟器验证 |
 | 收尾 | 版本号 v1.0.0（versionCode 2）+ ADR/文档 + 通知真机测试 | ✅ 版本号已提升；发布待真机验证 | 模拟器验证通过；待用户真机手动测试后 commit + tag v1.0.0 |
