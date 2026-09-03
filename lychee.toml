@@ -31,6 +31,5 @@ accept = [200, 206, 429]
 
 # 用户代理
 user_agent = "Mozilla/5.0 (compatible; lychee/Prism-doc-check)"
-
-# 仅检查 markdown
-include = ["**/*.md"]
+# 注：include/exclude 均按正则解析（非 glob）——文件范围由 workflow 的 args glob '**/*.md' 限定，
+# 此前 include = ["**/*.md"] 被当作正则解析导致 "repetition operator missing expression" 启动失败。
