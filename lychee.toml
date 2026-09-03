@@ -2,6 +2,11 @@
 # 依 CLAUDE.md 第五节 5.5
 
 # 排除目录
+# exclude 按正则解析：
+# - "app/src"：历史 PRD 含大量指向源码行号的锚点链接（目录/行号随重构漂移，不作为门禁）；
+# - "reports/"：一次性报告工件（gitignore 不入库），链接目标在 CI 上必然缺失；
+# 文档索引一致性由 scripts/consistency-check.js 覆盖（offline 模式下检查 README/AGENTS/PRD
+# 之间的内部链接与 ADR 索引完整性）。
 exclude = [
   "node_modules",
   ".git",
@@ -9,6 +14,8 @@ exclude = [
   ".trae",
   "build",
   ".gradle",
+  "app/src",
+  "reports/",
 ]
 
 # 排除路径（文件系统）
