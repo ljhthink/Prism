@@ -20,6 +20,11 @@ class PhoneControlSecurityTest {
         assertTrue(PhoneControlSecurity.isSensitivePackage("com.unionpay"))
         assertTrue(PhoneControlSecurity.isSensitivePackage("com.cmbchina.ccd.pluto.cmbActivity"))
         assertTrue(PhoneControlSecurity.isSensitivePackage("com.paytm.app"))
+        // guardrail P0（TKN-V1B12-GUARDRAIL-001）：包名映射库纠正后仍须拦截（真机实证包名）
+        assertTrue("招商银行 cmb.pb 必须拦截", PhoneControlSecurity.isSensitivePackage("cmb.pb"))
+        assertTrue("中国银行主流包名必须拦截", PhoneControlSecurity.isSensitivePackage("com.chinamworld.bocmbci"))
+        assertTrue("建设银行必须拦截", PhoneControlSecurity.isSensitivePackage("com.chinamworld.main"))
+        assertTrue("工商银行必须拦截", PhoneControlSecurity.isSensitivePackage("com.icbc"))
     }
 
     @Test

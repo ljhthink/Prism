@@ -32,4 +32,10 @@ class CompositeLocalToolExecutor(
             ?: return "未知本地工具: $toolName"
         return delegate.execute(toolName, arguments)
     }
+
+    // v1 批次13（B/D16c）：把「视觉不支持」降级信号转发给全部 delegate，
+    // 使手机操控等有状态执行器（覆写 [LocalToolExecutor.onVisionUnsupported]）能自降级。
+    override fun onVisionUnsupported() {
+        delegates.forEach { it.onVisionUnsupported() }
+    }
 }

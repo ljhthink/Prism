@@ -46,6 +46,7 @@
 | ADR-038 | v1 真机三次修复（Fetch 反爬 Referer / 搜索实体提取 / 视觉旁路熔断恢复 / 无障碍系统判定+高危三态 / 后台确认通知） | Accepted | 2026-08-19 | [ADR-038-v1-real-device-round3.md](ADR-038-v1-real-device-round3.md) |
 | ADR-039 | v1 真机四次修复（Fetch 明文被拦 http→https / 搜索 RSS→HTML SERP + 后缀误剥 / 视觉旁路 Provider 回退 + 可观测日志） | Accepted | 2026-08-19 | [ADR-039-v1-real-device-round4.md](ADR-039-v1-real-device-round4.md) |
 | ADR-040 | v1 真机五次修复（搜索 Bing→Baidu 多引擎回退 / 视觉专用 Provider 跳过熔断但守 consent 隐私铁门） | Accepted | 2026-08-19 | [ADR-040-v1-real-device-round5.md](ADR-040-v1-real-device-round5.md) |
+| ADR-041 | v1 手机操控保活策略修订（「无障碍启用期常驻」→「任务期动态保活」+ 事件订阅瘦身） | Accepted | 2026-08-23 | [ADR-041-v1-phone-control-task-scoped-keepalive.md](ADR-041-v1-phone-control-task-scoped-keepalive.md) |
 
 ## ADR 生命周期
 

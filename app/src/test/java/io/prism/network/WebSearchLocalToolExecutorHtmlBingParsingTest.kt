@@ -192,4 +192,61 @@ class WebSearchLocalToolExecutorHtmlBingParsingTest {
         assertTrue("百度兜底应把学校塞进引用来源", result.contains("梧州市第一中学_百度百科"))
         assertFalse("不应再返回 Bing 的城市百科", result.contains("下辖地级市"))
     }
+
+    @Test
+    fun `execute falls back to baidu when bing city page snippet contains school name`() = runBlocking {
+        // v1 批次9（US-901，B2 根治，真机 H1 分水岭）：Bing 返回的城市页**摘要含校名子串**
+        //（城市页列举市属学校）→ 旧 isRelevant 判相关 → 救援链短路，恒返回城市页。
+        // 修复：主查询/重试判据升级为 title 强相关（城市页 title 不含校名）→ 触发百度兜底。
+        val engine = MockEngine { request ->
+            val host = request.url.host
+            val body = if (host.contains("baidu")) {
+                baiduBody(
+                    Triple("梧州市第一中学_百度百科", "http://www.baidu.com/link?url=school", "梧州市第一中学是广西最早建立的中学"),
+                    Triple("梧州一中（荣列自治区示范性高中）", "http://www.baidu.com/link?url=gov", "梧州一中即梧州市第一中学")
+                )
+            } else {
+                // 城市页 title 不含校名，但 snippet 含"梧州市第一中学"（真机实测场景）
+                htmlBody(Triple("梧州市（中国广西壮族自治区下辖地级市）_百度百科", "https://baike.baidu.com/item/梧州", "梧州市是地级市，梧州市第一中学是当地百年名校"))
+            }
+            respond(content = body, status = HttpStatusCode.OK)
+        }
+        val executor = WebSearchLocalToolExecutor(HttpClient(engine))
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_SEARCH,
+            mapOf("query" to "梧州市第一中学", "maxResults" to 5)
+        )
+        // 城市页 snippet 含校名不再短路救援链 → 百度兜底命中学校
+        assertTrue("百度兜底应把学校塞进引用来源", result.contains("梧州市第一中学_百度百科"))
+        assertFalse("不应再返回 Bing 的城市百科（title 无校名）", result.contains("下辖地级市"))
+    }
+
+    @Test
+    fun `isStrongRelevant requires title match not snippet`() {
+        // v1 批次9（US-901）：title 强相关判据纯函数单测。
+        val executor = WebSearchLocalToolExecutor(noopClient())
+        val cityWithSchoolInSnippet = listOf(
+            WebSearchLocalToolExecutor.SearchItem(
+                title = "梧州市（中国广西壮族自治区下辖地级市）_百度百科",
+                link = "https://baike.baidu.com/item/梧州",
+                snippet = "梧州市是地级市，梧州市第一中学是当地百年名校"
+            )
+        )
+        // 城市页 title 不含校名 → 不强相关（即便 snippet 含）
+        assertFalse(
+            "城市页 title 无校名应判不强相关（触发救援链）",
+            executor.isStrongRelevant(cityWithSchoolInSnippet, listOf("梧州市第一中学"))
+        )
+        val schoolPage = listOf(
+            WebSearchLocalToolExecutor.SearchItem(
+                title = "梧州市第一中学-学校官网",
+                link = "https://www.wzyz.com.cn/",
+                snippet = "梧州市第一中学是一所百年名校"
+            )
+        )
+        // 官网 title 含校名 → 强相关
+        assertTrue("官网 title 含校名应判强相关", executor.isStrongRelevant(schoolPage, listOf("梧州市第一中学")))
+        // 核心词为空 → 无法判断，默认强相关
+        assertTrue("核心词为空应默认强相关", executor.isStrongRelevant(schoolPage, emptyList()))
+    }
 }

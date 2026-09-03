@@ -7,13 +7,20 @@
     - flagIncludeNotImportantViews / flagReportViewIds：获取完整节点树与 view id
     - canTakeScreenshot（API30+）：无障碍截图（避开 MediaProjection Android14+ 每次授权限制）
     - notificationTimeout：事件节流
+
+    v1 批次14（TKN-V1B14-KEEPALIVE-BUG-001，真机卡顿修复）：事件订阅裁剪为
+    typeWindowStateChanged——onAccessibilityEvent 仅消费该类型维护 lastKnownRoot 缓存；
+    此前订阅的 typeWindowContentChanged（全系统最高频事件）与 typeWindowsChanged 均不被
+    处理器消费，属纯 binder IPC 开销（XDA 调研：高频无障碍订阅是整机卡顿经典根因）。
+    节流 100→300ms：缓存维护无需实时性。功能零损失（UI 树读取走 rootInActiveWindow 实时查询，
+    不依赖事件流）。
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeWindowsChanged"
+    android:accessibilityEventTypes="typeWindowStateChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows|flagIncludeNotImportantViews|flagReportViewIds"
     android:canPerformGestures="true"
     android:canRetrieveWindowContent="true"
     android:canTakeScreenshot="true"
     android:description="@string/phone_control_accessibility_description"
-    android:notificationTimeout="100" />
+    android:notificationTimeout="300" />

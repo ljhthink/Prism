@@ -75,6 +75,7 @@ import io.prism.ui.theme.PrismPanel
 import io.prism.ui.theme.PrismText
 import io.prism.ui.theme.PrismTextDim
 import io.prism.ui.theme.PrismTextFaint
+import io.prism.ui.theme.PrismWarning
 
 /** 能力中枢分段。 */
 private enum class CapSegment(val label: String) { MCP("MCP 工具"), SKILLS("Skills"), MEMORY("记忆") }
@@ -474,7 +475,12 @@ private fun PresetRow(preset: McpServerConfig, modifier: Modifier = Modifier, on
                     fontSize = 11.sp
                 )
                 if (meta != null) {
-                    Text(text = tag, color = PrismTextFaint, fontSize = 10.sp)
+                    // US-004：海外远程模板标注网络可用性提示，降低用户试错成本
+                    Text(
+                        text = meta.networkNote.ifEmpty { tag },
+                        color = if (meta.networkNote.isNotEmpty()) PrismWarning else PrismTextFaint,
+                        fontSize = 10.sp
+                    )
                 }
             }
         }
@@ -502,6 +508,15 @@ private fun McpConfigSheet(config: McpServerConfig, viewModel: CapabilitiesViewM
 
     // 本地内建 Server（零配置，ADR-006 5.7）：无需 Base URL，跳过 http(s) 校验
     val isLocal = config.serverType == McpServerType.LOCAL
+
+    // v1 批次15.1（US-1510）：Key 配置状态反馈——打开弹层时异步查询，保存后即时更新。
+    // 背景：Key 输入框回显恒为空（安全口径），用户保存后界面无变化 → 误以为保存失败。
+    var keyConfigured by remember(config.id) { mutableStateOf(false) }
+    LaunchedEffect(config.id, config.apiKeyRef) {
+        if (!isLocal && config.apiKeyRef.isNotBlank()) {
+            viewModel.isApiKeyConfigured(config.apiKeyRef) { keyConfigured = it }
+        }
+    }
 
     // 输入校验：名称非空 + Base URL 为合法 http(s) 地址 + 拒绝 CRLF（纵深防御，guardrail S1）
     val nameValid = name.trim().isNotEmpty()
@@ -572,13 +587,23 @@ private fun McpConfigSheet(config: McpServerConfig, viewModel: CapabilitiesViewM
             label = "Token / API Key",
             value = apiKey,
             onValueChange = { apiKey = it },
-            placeholder = "eyJ…",
+            placeholder = if (keyConfigured) "已配置 · 输入新值将覆盖" else "eyJ…",
             secret = true,
             hint = "Keystore 加密存储 · 明文仅在内存短暂存在",
             trailing = {
                 Icon(Icons.Filled.Lock, contentDescription = null, tint = PrismTextFaint, modifier = Modifier.size(16.dp))
             }
         )
+        // v1 批次15.1（US-1510）：Key 配置状态行——打开时查询、保存后即时刷新
+        if (!isLocal) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = if (keyConfigured) "✓ Key 已配置（留空保存则保留现有 Key）" else "Key 未配置",
+                color = if (keyConfigured) PrismMint else PrismTextFaint,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(horizontal = 2.dp)
+            )
+        }
         // O2（PRD UXR8，D-10）：预设来源的远程 Server 展示 API Key 获取指引
         //（按名称匹配预设元数据；从预设创建的 Server 名称与预设一致即命中）
         val keyHint = McpServerPresets.findMetaByName(config.name)?.keyHint
@@ -679,6 +704,7 @@ private fun McpConfigSheet(config: McpServerConfig, viewModel: CapabilitiesViewM
                 // 若无条件覆盖会清空已存密钥（guardrail M-01）；留空则保留原密钥。
                 if (apiKey.isNotBlank()) {
                     viewModel.saveApiKey(draft.apiKeyRef, apiKey)
+                    keyConfigured = true // US-1510：保存后即时刷新状态行
                 }
                 viewModel.saveServer(draft)
             }

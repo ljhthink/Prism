@@ -122,6 +122,25 @@ class CapabilitiesViewModel(
         }
     }
 
+    /**
+     * 异步查询 API Key 是否已配置（v1 批次15.1 US-1510）。
+     *
+     * MCP 配置弹层的 Key 输入框出于安全考虑**回显恒为空**（guardrail M-01：编辑时留空
+     * 保留原 Key），用户保存后看不到任何已配置痕迹 → 误以为保存失败（真机反馈 2026-09-03）。
+     * 本方法供弹层展示「Key 已配置」状态。
+     */
+    fun isApiKeyConfigured(key: String, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            try {
+                onResult(apiKeyRepository.readApiKeyOnce(key) != null)
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007
+            } catch (e: Exception) {
+                onResult(false)
+            }
+        }
+    }
+
     /** 删除 MCP Server 配置。 */
     fun deleteServer(config: McpServerConfig) {
         serverRepository.remove(config.id)

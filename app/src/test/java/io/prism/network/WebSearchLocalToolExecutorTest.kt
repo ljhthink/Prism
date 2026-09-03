@@ -3,10 +3,12 @@ package io.prism.network
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
+import io.ktor.client.request.HttpRequestData
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.OutgoingContent
 import io.ktor.http.headersOf
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonArray
@@ -15,6 +17,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -500,7 +503,9 @@ class WebSearchLocalToolExecutorTest {
 
     @Test
     fun `execute marks search failed when all retries irrelevant`() = runBlocking {
-        // UXR7 问题 1：主查询 + 全部核心词重试都不相关 → 返回"搜索失败"触发熔断（防循环达上限）
+        // UXR7 问题 1：主查询 + 全部核心词重试都不相关 → 失败文案触发熔断（防循环达上限）。
+        // v1 批次15（US-1504）：无任何结构化引擎配置时，返回「错误：」前缀的引擎配置引导
+        // （isFailureResult 可识别触发熔断；引导文案替代旧「搜索失败」死胡同）。
         val engine = MockEngine { _ ->
             respond(
                 content = bingHtml(Triple("昔_百度百科", "https://baike.baidu.com/昔", "昔 xī - 汉典")),
@@ -513,7 +518,11 @@ class WebSearchLocalToolExecutorTest {
             WebSearchLocalToolExecutor.TOOL_SEARCH,
             mapOf("query" to "昔涟 是谁")
         )
-        assertTrue("全部重试不相关应返回搜索失败（触发熔断）", result.startsWith("搜索失败"))
+        assertTrue("全未配置 + 全不相关应返回「错误：」引导（可诊断）", result.startsWith("错误："))
+        assertTrue("引导应列出可配置引擎（智谱）", result.contains("智谱"))
+        assertTrue("引导应列出可配置引擎（Tavily）", result.contains("Tavily"))
+        assertTrue("引导应指向 SearXNG 自建教程", result.contains("searxng-selfhost"))
+        assertFalse("引导不应是旧「搜索失败」死胡同文案", result.startsWith("搜索失败"))
     }
 
     @Test
@@ -886,5 +895,459 @@ class WebSearchLocalToolExecutorTest {
             10_000L,
             WebSearchLocalToolExecutor.SEARCH_REQUEST_TIMEOUT_MS
         )
+    }
+
+    // ==================== v1 批次15（US-1501/1502/1503/1504/1507）：搜索侧引擎扩展 ====================
+
+    /** 提取 MockEngine 请求的出站 body 文本（TextContent / ByteArrayContent 双形态兜底）。 */
+    private fun outgoingBodyText(request: HttpRequestData): String = when (val body = request.body) {
+        is io.ktor.http.content.TextContent -> body.text
+        is OutgoingContent.ByteArrayContent -> body.bytes().toString(Charsets.UTF_8)
+        else -> ""
+    }
+
+    /** 构造智谱 web_search 响应体（search_result[] 结构）。 */
+    private fun zhipuBody(vararg items: Array<String?>): String {
+        val sb = StringBuilder("""{"search_result":[""")
+        items.forEachIndexed { i, it ->
+            // it = [title, link, content, media_name]，允许为 null（字段缺失）
+            if (i > 0) sb.append(",")
+            val (title, link, content, media) = listOf(it[0], it[1], it[2], it[3])
+            val entry = StringBuilder("{")
+            if (title != null) entry.append("\"title\":\"$title\",")
+            if (link != null) entry.append("\"link\":\"$link\",")
+            if (content != null) entry.append("\"content\":\"$content\",")
+            if (media != null) entry.append("\"media_name\":\"$media\",")
+            var json = entry.toString()
+            if (json.endsWith(",")) json = json.dropLast(1)
+            sb.append(json).append("}")
+        }
+        sb.append("]}")
+        return sb.toString()
+    }
+
+    /** 构造 Tavily / SearXNG 共用响应体（results[] 结构）。 */
+    private fun titleUrlContentBody(vararg items: Triple<String, String, String>): String {
+        val sb = StringBuilder("""{"results":[""")
+        items.forEachIndexed { i, (title, url, content) ->
+            if (i > 0) sb.append(",")
+            sb.append("""{"title":"$title","url":"$url","content":"$content"}""")
+        }
+        sb.append("]}")
+        return sb.toString()
+    }
+
+    // ---------- US-1501：智谱引擎 ----------
+
+    @Test
+    fun `parseZhipuItems extracts title link content and tolerates missing fields`() {
+        val executor = WebSearchLocalToolExecutor(noopClient())
+        val body = zhipuBody(
+            arrayOf("智谱AI官网", "https://bigmodel.cn", "智谱大模型开放平台", "bigmodel.cn"),
+            arrayOf(null, "https://missing-title.example.com", "缺少标题", "x"),
+            arrayOf("缺少链接", null, "内容", "x"),
+            arrayOf("缺少content", "https://no-content.example.com", null, "媒体名")
+        )
+        val items = executor.parseZhipuItems(body)
+        assertEquals("title/link 缺失的条目应被跳过（2 条有效）", 2, items.size)
+        assertEquals("智谱AI官网", items[0].title)
+        assertEquals("https://bigmodel.cn", items[0].link)
+        assertEquals("智谱大模型开放平台", items[0].snippet)
+        assertEquals("缺少content", items[1].title)
+        assertEquals("https://no-content.example.com", items[1].link)
+    }
+
+    @Test
+    fun `parseZhipuItems returns empty for malformed body`() {
+        val executor = WebSearchLocalToolExecutor(noopClient())
+        assertTrue(executor.parseZhipuItems("not json").isEmpty())
+        assertTrue(executor.parseZhipuItems("""{"other":1}""").isEmpty())
+    }
+
+    @Test
+    fun `handles accepts zhipu and tavily tool names`() {
+        val executor = WebSearchLocalToolExecutor(noopClient())
+        assertTrue(executor.handles(WebSearchLocalToolExecutor.TOOL_ZHIPU))
+        assertTrue(executor.handles(WebSearchLocalToolExecutor.TOOL_TAVILY))
+        assertTrue(executor.handles(WebSearchLocalToolExecutor.TOOL_SEARCH))
+        assertFalse(executor.handles("web_search__searxng"))
+    }
+
+    @Test
+    fun `execute explicit zhipu without key returns guidance`() = runBlocking {
+        // US-1501：显式 web_search__zhipu 无 Key → 「错误：」引导（可诊断，不崩溃不阻断）
+        val engine = MockEngine { _ ->
+            throw RuntimeException("不应该发起任何请求")
+        }
+        val executor = WebSearchLocalToolExecutor(HttpClient(engine))
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_ZHIPU,
+            mapOf("query" to "prism")
+        )
+        assertEquals(
+            WebSearchLocalToolExecutor.ZHIPU_MISSING_KEY_GUIDANCE,
+            result
+        )
+        assertTrue("引导应前置「错误：」failure 标记", result.startsWith("错误："))
+    }
+
+    @Test
+    fun `execute routes zhipu engine with bearer key and parses search_result`() = runBlocking {
+        // US-1501：配置 Key 后 web_search__search 引擎链优先命中智谱（Bocha 无 Key 跳过）
+        val requests = mutableListOf<HttpRequestData>()
+        val engine = MockEngine { request ->
+            requests.add(request)
+            if (request.url.host == "open.bigmodel.cn") {
+                respond(
+                    content = zhipuBody(
+                        arrayOf("智谱搜索结果", "https://zhipu.example.com/page", "智谱内容摘要", "zhipu.cn")
+                    ),
+                    status = HttpStatusCode.OK,
+                    headers = headersOf(HttpHeaders.ContentType, "application/json")
+                )
+            } else {
+                respond(content = bingHtml(), status = HttpStatusCode.OK)
+            }
+        }
+        val executor = WebSearchLocalToolExecutor(
+            HttpClient(engine),
+            zhipuApiKeyProvider = { "zhipu-test-key" }
+        )
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_SEARCH,
+            mapOf("query" to "智谱测试", "maxResults" to 5)
+        )
+        assertEquals("智谱命中后不应再请求后续引擎", 1, requests.size)
+        val req = requests[0]
+        assertEquals("智谱端点应为固定常量（无 SSRF）", "open.bigmodel.cn", req.url.host)
+        assertEquals("/api/paas/v4/web_search", req.url.encodedPath)
+        assertEquals("Bearer zhipu-test-key", req.headers[HttpHeaders.Authorization])
+        val bodyText = outgoingBodyText(req)
+        assertTrue("请求体应含 search_query", bodyText.contains("\"search_query\":"))
+        assertTrue("请求体 search_engine 默认 std", bodyText.contains("\"search_engine\":\"std\""))
+        assertTrue("请求体应含 search_result_count", bodyText.contains("\"search_result_count\":5"))
+        assertTrue("结果应含智谱标题", result.contains("智谱搜索结果"))
+        assertTrue("结果应保留外部内容边界标记", result.startsWith("【网络搜索外部内容"))
+        assertFalse("Key 不应落任何回灌文本", result.contains("zhipu-test-key"))
+    }
+
+    @Test
+    fun `execute falls back to bing when zhipu engine fails`() = runBlocking {
+        // US-1501：智谱非 2xx → 降级引擎链（Bing 兜底仍可用，不阻断）
+        val engine = MockEngine { request ->
+            if (request.url.host == "open.bigmodel.cn") {
+                respond(content = """{"error":"rate limited"}""", status = HttpStatusCode.TooManyRequests)
+            } else {
+                respond(
+                    content = bingHtml(Triple("Bing 兜底结果", "https://bing.example.com", "摘要")),
+                    status = HttpStatusCode.OK,
+                    headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
+                )
+            }
+        }
+        val executor = WebSearchLocalToolExecutor(
+            HttpClient(engine),
+            zhipuApiKeyProvider = { "zhipu-test-key" }
+        )
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_SEARCH,
+            mapOf("query" to "fallback", "maxResults" to 5)
+        )
+        assertTrue("智谱 429 失败后应降级 Bing 结果", result.contains("Bing 兜底结果"))
+    }
+
+    // ---------- US-1502：Tavily 引擎 ----------
+
+    @Test
+    fun `parseTitleUrlContentItems extracts tavily results and tolerates missing fields`() {
+        val executor = WebSearchLocalToolExecutor(noopClient())
+        val body = """
+            {"results":[
+                {"title":"Tavily 结果一","url":"https://tavily.example.com/1","content":"内容一"},
+                {"title":"缺url","content":"缺少 url 跳过"},
+                {"title":null,"url":"https://x.example.com","content":"缺标题跳过"},
+                {"title":"Tavily 结果二","url":"https://tavily.example.com/2","content":null}
+            ]}
+        """.trimIndent()
+        val items = executor.parseTitleUrlContentItems(body, "tavily")
+        assertEquals("title/url 缺失的条目应被跳过（2 条有效）", 2, items.size)
+        assertEquals("Tavily 结果一", items[0].title)
+        assertEquals("https://tavily.example.com/1", items[0].link)
+        assertEquals("内容一", items[0].snippet)
+        assertEquals("Tavily 结果二", items[1].title)
+    }
+
+    @Test
+    fun `execute explicit tavily without key returns guidance`() = runBlocking {
+        // US-1502：显式 web_search__tavily 无 Key → 「错误：」引导
+        val engine = MockEngine { _ ->
+            throw RuntimeException("不应该发起任何请求")
+        }
+        val executor = WebSearchLocalToolExecutor(HttpClient(engine))
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_TAVILY,
+            mapOf("query" to "prism")
+        )
+        assertEquals(
+            WebSearchLocalToolExecutor.TAVILY_MISSING_KEY_GUIDANCE,
+            result
+        )
+        assertTrue(result.startsWith("错误："))
+    }
+
+    @Test
+    fun `execute routes tavily engine with bearer key and parses results`() = runBlocking {
+        // US-1502：配置 Key 后 Tavily 作为引擎链成员（Bocha/智谱/SearXNG 均未配置 → 直接命中 Tavily）
+        val requests = mutableListOf<HttpRequestData>()
+        val engine = MockEngine { request ->
+            requests.add(request)
+            if (request.url.host == "api.tavily.com") {
+                respond(
+                    content = titleUrlContentBody(
+                        Triple("Tavily 搜索结果", "https://tavily.example.com/page", "Tavily 内容")
+                    ),
+                    status = HttpStatusCode.OK,
+                    headers = headersOf(HttpHeaders.ContentType, "application/json")
+                )
+            } else {
+                respond(content = bingHtml(), status = HttpStatusCode.OK)
+            }
+        }
+        val executor = WebSearchLocalToolExecutor(
+            HttpClient(engine),
+            tavilyApiKeyProvider = { "tavily-test-key" }
+        )
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_SEARCH,
+            mapOf("query" to "tavily 测试", "maxResults" to 3)
+        )
+        assertEquals("Tavily 命中后不应再请求后续引擎", 1, requests.size)
+        val req = requests[0]
+        assertEquals("Tavily 端点应为固定常量", "api.tavily.com", req.url.host)
+        assertEquals("/search", req.url.encodedPath)
+        assertEquals("Bearer tavily-test-key", req.headers[HttpHeaders.Authorization])
+        val bodyText = outgoingBodyText(req)
+        assertTrue("请求体应含 query", bodyText.contains("\"query\":"))
+        assertTrue("请求体 max_results 应按调用方传值", bodyText.contains("\"max_results\":3"))
+        assertTrue("请求体 search_depth 默认 basic", bodyText.contains("\"search_depth\":\"basic\""))
+        assertTrue("结果应含 Tavily 标题", result.contains("Tavily 搜索结果"))
+    }
+
+    // ---------- US-1507：SearXNG 引擎 ----------
+
+    @Test
+    fun `buildSearxngSearchUrl appends search path and validates scheme`() {
+        val executor = WebSearchLocalToolExecutor(noopClient())
+        assertEquals(
+            "host:port 形式应追加 /search",
+            "http://192.168.1.10:8080/search",
+            executor.buildSearxngSearchUrl("http://192.168.1.10:8080")
+        )
+        assertEquals(
+            "尾斜杠应先剥离再追加 /search",
+            "http://192.168.1.10:8080/search",
+            executor.buildSearxngSearchUrl("http://192.168.1.10:8080/")
+        )
+        assertEquals(
+            "已含 /search 应原样保留",
+            "https://searx.example.com/search",
+            executor.buildSearxngSearchUrl("https://searx.example.com/search")
+        )
+        assertEquals(
+            "/search/ 尾斜杠容忍",
+            "https://searx.example.com/search",
+            executor.buildSearxngSearchUrl("https://searx.example.com/search/")
+        )
+        assertEquals("https scheme 同样支持", "https://searx.example.com/search", executor.buildSearxngSearchUrl("https://searx.example.com"))
+        assertNull("非 http(s) scheme 应判为无效（跳过引擎）", executor.buildSearxngSearchUrl("ftp://searx.example.com"))
+        assertNull("空白端点应判为无效", executor.buildSearxngSearchUrl(""))
+    }
+
+    @Test
+    fun `execute searxng engine sends json format and basic auth`() = runBlocking {
+        // US-1507：Bocha/智谱未配、SearXNG 已配端点 + Basic Auth → 引擎链第 3 位（本测即第 1 位命中）
+        val requests = mutableListOf<HttpRequestData>()
+        val engine = MockEngine { request ->
+            requests.add(request)
+            if (request.url.host == "192.168.1.10") {
+                respond(
+                    content = titleUrlContentBody(
+                        Triple("SearXNG 聚合结果", "https://searxng.example.com/page", "SearXNG 内容")
+                    ),
+                    status = HttpStatusCode.OK,
+                    headers = headersOf(HttpHeaders.ContentType, "application/json")
+                )
+            } else {
+                respond(content = bingHtml(), status = HttpStatusCode.OK)
+            }
+        }
+        val expectedBasic = java.util.Base64.getEncoder().encodeToString("user:pass".toByteArray(Charsets.UTF_8))
+        val executor = WebSearchLocalToolExecutor(
+            HttpClient(engine),
+            searxngConfigProvider = {
+                WebSearchLocalToolExecutor.SearxngConfig(
+                    endpoint = "http://192.168.1.10:8080",
+                    username = "user",
+                    password = "pass"
+                )
+            }
+        )
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_SEARCH,
+            mapOf("query" to "searxng 测试", "maxResults" to 5)
+        )
+        assertEquals("SearXNG 命中后不应再请求后续引擎", 1, requests.size)
+        val req = requests[0]
+        assertEquals("端点应规范化追加 /search", "/search", req.url.encodedPath)
+        assertEquals("q 参数应正确编码", "searxng 测试", req.url.parameters["q"])
+        assertEquals("format 应为 json", "json", req.url.parameters["format"])
+        assertEquals("language 应为 zh-CN", "zh-CN", req.url.parameters["language"])
+        assertEquals("Basic Auth 头应注入", "Basic $expectedBasic", req.headers[HttpHeaders.Authorization])
+        assertTrue("结果应含 SearXNG 标题", result.contains("SearXNG 聚合结果"))
+        assertFalse("凭据不应落回灌文本", result.contains("user:pass"))
+    }
+
+    @Test
+    fun `execute skips searxng engine entirely when not configured`() = runBlocking {
+        // US-1507：未配置端点 → 完全跳过（零行为变化：只发 Bing 请求，无 searxng 请求）
+        val requests = mutableListOf<HttpRequestData>()
+        val engine = MockEngine { request ->
+            requests.add(request)
+            respond(
+                content = bingHtml(Triple("Bing 结果", "https://bing.example.com", "摘要")),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
+            )
+        }
+        val executor = WebSearchLocalToolExecutor(
+            HttpClient(engine),
+            searxngConfigProvider = { null }
+        )
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_SEARCH,
+            mapOf("query" to "prism", "maxResults" to 5)
+        )
+        assertTrue("应只发起 Bing 主查询请求", requests.all { it.url.host == "cn.bing.com" })
+        assertTrue("Bing 结果正常返回", result.contains("Bing 结果"))
+    }
+
+    @Test
+    fun `execute falls back when searxng endpoint is invalid scheme`() = runBlocking {
+        // US-1507：端点 scheme 非 http(s) → 跳过 SearXNG 降级 Bing
+        val requests = mutableListOf<HttpRequestData>()
+        val engine = MockEngine { request ->
+            requests.add(request)
+            respond(
+                content = bingHtml(Triple("Bing 结果", "https://bing.example.com", "摘要")),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
+            )
+        }
+        val executor = WebSearchLocalToolExecutor(
+            HttpClient(engine),
+            searxngConfigProvider = {
+                WebSearchLocalToolExecutor.SearxngConfig(endpoint = "ftp://bad.example.com", username = "", password = "")
+            }
+        )
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_SEARCH,
+            mapOf("query" to "prism", "maxResults" to 5)
+        )
+        assertTrue("无效 scheme 应跳过 SearXNG", requests.all { it.url.host == "cn.bing.com" })
+        assertTrue(result.contains("Bing 结果"))
+    }
+
+    // ---------- US-1503：编号来源格式 / US-1504：失败语义 ----------
+
+    @Test
+    fun `execute output numbering aligns between citation list and entries`() = runBlocking {
+        // US-1503：头部【编号来源】[N] title — url 与下方条目 N. title 一一对应
+        val engine = MockEngine { _ ->
+            respond(
+                content = bingHtml(
+                    Triple("第一条", "https://first.example.com", "摘要一"),
+                    Triple("第二条", "https://second.example.com", "摘要二")
+                ),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
+            )
+        }
+        val executor = WebSearchLocalToolExecutor(HttpClient(engine))
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_SEARCH,
+            mapOf("query" to "prism", "maxResults" to 5)
+        )
+        assertTrue("应含编号来源清单头", result.contains("【编号来源】"))
+        assertTrue("应含 [1] title — url 格式", result.contains("[1] 第一条 — https://first.example.com"))
+        assertTrue("应含 [2] 条目", result.contains("[2] 第二条 — https://second.example.com"))
+        assertTrue("引用要求应含 URL 硬约束", result.contains("禁止拼凑、改写或编造 URL"))
+        assertTrue("引用要求应禁止编造 URL", result.contains("未列出的 URL 不得出现在引用中"))
+        // 编号与条目一一对应：条目块仍保留（UI parseSearchResults 兼容）
+        assertTrue(result.contains("1. 第一条\nhttps://first.example.com"))
+        assertTrue(result.contains("2. 第二条\nhttps://second.example.com"))
+    }
+
+    @Test
+    fun `execute tool description enforces raw url citation constraint`() {
+        // US-1503：工具描述（systemPrompt 联网指引段）应含 URL 引用强约束
+        val def = WebSearchLocalToolExecutor.buildToolDefinition()
+        assertTrue("工具描述应含「禁止拼凑、改写或编造 URL」", def.function.description.contains("禁止拼凑、改写或编造 URL"))
+        assertTrue("工具描述应含「未列出的 URL 不得出现在引用中」", def.function.description.contains("未列出的 URL 不得出现在引用中"))
+    }
+
+    @Test
+    fun `execute keeps plain failure message when engines configured but all fail`() = runBlocking {
+        // US-1504：配置了引擎（bocha）但全失败 + Bing/Baidu 无强相关 → 普通降级文案（不误导配置）
+        val engine = MockEngine { request ->
+            if (request.url.host == "api.bocha.cn") {
+                respond(content = """{"error":"server error"}""", status = HttpStatusCode.InternalServerError)
+            } else {
+                respond(
+                    content = bingHtml(Triple("昔_百度百科", "https://baike.baidu.com/昔", "昔 xī - 汉典")),
+                    status = HttpStatusCode.OK,
+                    headers = headersOf(HttpHeaders.ContentType, "application/rss+xml")
+                )
+            }
+        }
+        val executor = WebSearchLocalToolExecutor(
+            HttpClient(engine),
+            bochaApiKeyProvider = { "bocha-test-key" }
+        )
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_SEARCH,
+            mapOf("query" to "昔涟 是谁")
+        )
+        assertTrue("有引擎配置过应返回普通「搜索失败」文案", result.startsWith("搜索失败"))
+        assertFalse("不应出现配置引导（用户已配置过）", result.contains("可配置以下搜索增强引擎"))
+    }
+
+    @Test
+    fun `execute prefers bocha over zhipu when both keys configured`() = runBlocking {
+        // US-1507 引擎链优先级：Bocha → 智谱 → SearXNG → Tavily → Bing/Baidu（首个成功即返回）
+        val requests = mutableListOf<HttpRequestData>()
+        val engine = MockEngine { request ->
+            requests.add(request)
+            if (request.url.host == "api.bocha.cn") {
+                respond(
+                    content = """{"data":{"webPages":{"value":[{"name":"博查结果","url":"https://bocha.example.com","snippet":"博查摘要"}]}}}""",
+                    status = HttpStatusCode.OK,
+                    headers = headersOf(HttpHeaders.ContentType, "application/json")
+                )
+            } else {
+                respond(content = bingHtml(), status = HttpStatusCode.OK)
+            }
+        }
+        val executor = WebSearchLocalToolExecutor(
+            HttpClient(engine),
+            bochaApiKeyProvider = { "bocha-test-key" },
+            zhipuApiKeyProvider = { "zhipu-test-key" }
+        )
+        val result = executor.execute(
+            WebSearchLocalToolExecutor.TOOL_SEARCH,
+            mapOf("query" to "priority", "maxResults" to 5)
+        )
+        assertEquals("Bocha 命中后不应再请求智谱/Bing", 1, requests.size)
+        assertEquals("首个请求应为 Bocha", "api.bocha.cn", requests[0].url.host)
+        assertTrue(result.contains("博查结果"))
     }
 }

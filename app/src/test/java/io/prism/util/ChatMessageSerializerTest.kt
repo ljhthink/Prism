@@ -3,6 +3,7 @@ package io.prism.util
 import io.prism.ui.model.ChatMessage
 import io.prism.ui.model.Role
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -87,5 +88,39 @@ class ChatMessageSerializerTest {
         val decoded = ChatMessageSerializer.decodeList(json)
         assertEquals(1, decoded.size)
         assertEquals("你好", decoded[0].content)
+    }
+
+    @Test
+    fun `transient image message has imageUrl stripped on encode`() {
+        // v1 批次13（F1，guardrail TKN-V1B13-GUARDRAIL-001）：瞬态截图图片（手机操控截图 base64）
+        // 仅用于当前会话 LLM 请求，持久化时剥离 imageUrl —— 防 400KB+ base64 进会话 JSON 膨胀
+        //（真机 ANR 崩溃根因）+ 切纯文本模型后历史请求每轮 400。
+        val messages = listOf(
+            ChatMessage(
+                id = 10,
+                role = Role.USER,
+                content = "（手机截图，请直接查看屏幕内容）",
+                timestamp = 5000L,
+                imageUrl = "data:image/jpeg;base64,QUJDREVG",
+                transientImage = true
+            ),
+            ChatMessage(
+                id = 11,
+                role = Role.USER,
+                content = "用户主动发的图片",
+                timestamp = 6000L,
+                imageUrl = "data:image/jpeg;base64,VVNFUklNQUdF"
+            )
+        )
+        val json = ChatMessageSerializer.encodeList(messages)
+        // 瞬态截图图片：base64 被剥离
+        assertTrue("瞬态截图图片 base64 不应进入持久化 JSON", !json.contains("QUJDREVG"))
+        // 用户主动发图：正常持久化
+        assertTrue("用户主动发图应保留 imageUrl", json.contains("VVNFUklNQUdF"))
+        // 解码后瞬态消息 imageUrl 为 null（持久化不携带），非瞬态消息保留
+        val decoded = ChatMessageSerializer.decodeList(json)
+        assertEquals(2, decoded.size)
+        assertNull(decoded[0].imageUrl)
+        assertEquals("data:image/jpeg;base64,VVNFUklNQUdF", decoded[1].imageUrl)
     }
 }

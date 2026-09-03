@@ -24,11 +24,14 @@ object PhoneControlSecurity {
     val BLOCKED_LAUNCH_PACKAGES = setOf(
         "com.eg.android.AlipayGphone",      // 支付宝
         "com.unionpay",                     // 云闪付/银联
-        "com.cmbchina.ccd.pluto.cmbActivity", // 招商银行
-        "com.chinamworld.main",             // 中国银行
+        "cmb.pb",                           // 招商银行（掌上生活，真机实证包名）
+        "com.cmbchina.ccd.pluto.cmbActivity", // 招商银行（历史错误值——Activity 名非包名，保留兜底，不匹配也无害）
+        "com.chinamworld.bocmbci",          // 中国银行（主流包名）
+        "com.boc.bocmobi",                  // 中国银行（旧版/海外包名，兜底）
+        "com.chinamworld.main",             // 建设银行（修正注释：此前误标为"中国银行"）
+        "com.ccb.longjiLife",               // 建设银行（备用）
         "com.icbc",                         // 工商银行
         "com.android.bankabc",              // 农业银行
-        "com.ccb.longjiLife",               // 建设银行
         "com.paytm.app",                    // Paytm（海外）
         "com.applepay"                      // Apple Pay（异常值，保留占位）
     )

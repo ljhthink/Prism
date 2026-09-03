@@ -7,6 +7,9 @@
     <!-- v1 真机二次修复（Issue 5）：Prism 后台时手机操控高危确认（发送/删除/拨号）需发系统通知，
          Android 13+（targetSdk 34）为运行时权限，需在运行时申请（Settings 无障碍页/首次操控时提示）。 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- v1 批次11（F2）：手机操控保活前台服务。Android 14+ 需要前台服务权限 + specialUse 声明用途。 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <application
         android:name=".PrismApplication"
@@ -51,6 +54,15 @@
         <receiver
             android:name=".phonecontrol.PhoneControlAskUserNotifier$ConfirmActionReceiver"
             android:exported="false" />
+        <!-- v1 批次11（F2）：手机操控保活前台服务（specialUse，防止 MIUI 回收操控进程） -->
+        <service
+            android:name=".phonecontrol.PhoneControlKeepAliveService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="LLM 手机操控任务期间保活，防止后台进程被系统回收导致任务中断" />
+        </service>
     </application>
 
     <!--

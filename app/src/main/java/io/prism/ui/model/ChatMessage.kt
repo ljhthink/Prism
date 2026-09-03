@@ -106,6 +106,15 @@ data class ChatMessage(
      */
     val imageUrl: String? = null,
     /**
+     * v1 批次13（F1，guardrail TKN-V1B13-GUARDRAIL-001）：瞬态截图图片标记。
+     *
+     * 为 true 时该消息的 [imageUrl]（手机操控截图 base64）**仅用于当前会话的 LLM 请求**
+     * （image_url 注入让视觉模型看真图），**持久化时由 [io.prism.util.ChatMessageSerializer]
+     * 剥离 imageUrl**——防止截图 base64 进会话 JSON 膨胀（真机 ANR 根因）+ 切纯文本模型后
+     * 历史请求每轮 400。默认 false（用户主动发图等需持久化的图片消息不受影响）。
+     */
+    val transientImage: Boolean = false,
+    /**
      * UXR9 Bug3 修复（TKN-UXR9-ARCHAEOLOGY-001）：系统提示标记（如"图片编码失败"）。
      *
      * 为 true 的消息仅供 UI 展示为提示气泡，**不进入 LLM 请求历史**（见

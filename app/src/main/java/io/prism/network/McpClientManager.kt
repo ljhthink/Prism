@@ -1,5 +1,6 @@
 package io.prism.network
 
+import android.util.Log
 import io.ktor.client.HttpClient
 import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.client.request.header
@@ -62,6 +63,10 @@ class McpClientManager(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            // v1 批次15.1（真机诊断 2026-09-03）：连接失败此前完全静默 → 用户无法定位
+            // 「配置保存了但工具不出现」（Scrapling/crawl4ai 真机问题根因之一）。
+            // 补可诊断日志：脱敏 URL + 异常类型 + 消息截断（CWE-209/CWE-532 口径不变）。
+            Log.w(LOG_TAG, "mcp listTools failed url=${sanitizeUrlForLog(config.baseUrl)} err=${e::class.simpleName}: ${e.message?.take(160)}")
             emptyList()
         } finally {
             closeQuietly(client)
@@ -90,6 +95,8 @@ class McpClientManager(
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            // v1 批次15.1：同 listTools——补可诊断日志（此前静默返回空列表）。
+            Log.w(LOG_TAG, "mcp describeTools failed url=${sanitizeUrlForLog(config.baseUrl)} err=${e::class.simpleName}: ${e.message?.take(160)}")
             emptyList()
         } finally {
             closeQuietly(client)
@@ -129,6 +136,8 @@ class McpClientManager(
         } catch (e: Exception) {
             // CR-05（CWE-209）：不向 UI/日志暴露异常内部信息（e.message 可能含 URL/路径/头部）。
             // 诊断信息经结构化日志脱敏记录；UI 仅展示通用错误描述。
+            // v1 批次15.1：脱敏 URL 传入结构化日志（此前无任何日志，真机无法定位调用失败层）。
+            Log.w(LOG_TAG, "mcp callTool failed tool=$name url=${sanitizeUrlForLog(config.baseUrl)} err=${e::class.simpleName}: ${e.message?.take(160)}")
             "工具调用失败，请检查网络连接或 Server 配置"
         } finally {
             closeQuietly(client)
@@ -169,6 +178,17 @@ class McpClientManager(
             throw e
         }
         return client
+    }
+
+    /**
+     * 脱敏 URL 供日志（v1 批次15.1 可诊断性，CWE-532）：剥 query/fragment/userinfo 凭证，
+     * 仅保留 scheme://host[:port] + 截断 path——与 [LocalMcpToolProvider.sanitizeUrlForLog] 同口径。
+     */
+    private fun sanitizeUrlForLog(url: String): String {
+        val authority = Regex("""^https?://([^/?#]+)""").find(url)?.groupValues?.get(1) ?: return url.take(120)
+        val host = authority.substringAfterLast('@')
+        val path = Regex("""^https?://[^/?#]+(/[^?#]*)""").find(url)?.groupValues?.get(1).orEmpty()
+        return "${url.substringBefore("://")}://$host${path.take(120)}"
     }
 
     /**
@@ -250,6 +270,7 @@ class McpClientManager(
     }
 
     private companion object {
+        private const val LOG_TAG = "McpClientManager"
         const val CLIENT_NAME = "Prism"
         const val CLIENT_VERSION = "1.0.0"
     }

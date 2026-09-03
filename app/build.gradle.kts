@@ -166,6 +166,11 @@ dependencies {
     // M4 Skills（ADR-013 5.2）：SKILL.md frontmatter YAML 解析（snakeyaml-engine-kmp，Apache 2.0）
     implementation(libs.snakeyaml.engine.kmp)
     implementation(libs.markdown.renderer.m3)
+    // US-1505（v1 批次15 A4）：Fetch 正文提纯换库——jsoup（MIT，HTML5 解析）+ Readability4J
+    // （net.dankito.readability4j，Apache-2.0，Maven Central）替代手写正则提纯；正则版保留为降级兜底。
+    // 传递依赖 slf4j-api 1.7.25 在 Android 无绑定走 NOP 静默路径（见 proguard-rules.pro dontwarn）。
+    implementation(libs.jsoup)
+    implementation(libs.readability4j)
     debugImplementation(libs.androidx.ui.tooling)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

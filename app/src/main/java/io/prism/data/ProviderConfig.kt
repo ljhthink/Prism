@@ -52,5 +52,46 @@ data class ProviderConfig(
      * **语义**：辅助视觉角色，**不抢占 [isActive]**（聊天主 Provider 仍唯一激活，
      * 规避 ProviderConfigRepository.save 的单激活不变式冲突）。默认 false。
      */
-    var isVisionFallback: Boolean = false
-)
+    var isVisionFallback: Boolean = false,
+    /**
+     * v1 批次13（B/D16b，多模态）：该 Provider 是否支持视觉（多模态图片输入）。
+     *
+     * **作用**：手机操控 `phone_control__screenshot` 截图时，若当前激活 Provider 支持视觉，
+     * 截图**图片**以 image_url 注入会话供模型直接查看（发挥多模态能力，无需 OCR 文本）；
+     * 否则走 OCR 文字+坐标（纯文本模型路径）。也用于截图免 OCR（提速）。
+     *
+     * **判定**：设置页手动开关 + 保存时按模型名自动提示（[detectVisionSupport]）。
+     * 默认 false（向后兼容）。
+     */
+    var supportsVision: Boolean = false,
+    /**
+     * v1 批次13（B/D16b，多模态）：[supportsVision] 是否已被**显式设置**（用户触碰开关）。
+     *
+     * **隐私语义**：截图内容会发送到 LLM 端点，属敏感数据外发。当用户**显式**关闭视觉
+     * 开关时（supportsVision=false + supportsVisionSet=true），运行时与保存逻辑**必须尊重**，
+     * 不得被「按模型名自动检测」覆盖（防隐私静默外发）。旧配置默认 false=未显式设置，
+     * 走模型名自动检测兜底（开箱即用）。ObjectBox 新增布尔列自动迁移，旧数据补 false。
+     */
+    var supportsVisionSet: Boolean = false
+) {
+    companion object {
+        /**
+         * 按模型名启发式判断是否支持视觉（v1 批次13 B）：保存 Provider 时自动提示
+         * [supportsVision]（用户仍可在设置页手动覆盖）。纯启发式，宁缺勿错——
+         * 误判为视觉会把截图图片发给纯文本模型（400 走视觉旁路/OCR 兜底，可降级）。
+         */
+        fun detectVisionSupport(modelName: String?): Boolean {
+            val m = modelName?.trim()?.lowercase() ?: return false
+            return VISION_MODEL_PATTERNS.any { m.contains(it) }
+        }
+
+        /** 常见视觉模型名模式（小写包含匹配）。 */
+        private val VISION_MODEL_PATTERNS = listOf(
+            "glm-4v", "glm-4.5v", "glm-4.6v", "glm-4.7v", "glm-4.8v",
+            "qwen-vl", "qwen2.5-vl", "qwen3-vl", "qwen2-vl",
+            "gemini", "gpt-4o", "gpt-5", "claude", // Claude 3+ 全部支持视觉
+            "kimi-k2", "kimi-vl", "step-1v", "llava", "minicpm-v",
+            "grok-2v", "grok-4", "o3", "o4", "vision"
+        )
+    }
+}

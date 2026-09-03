@@ -160,7 +160,9 @@ class LocalMcpToolProviderFetchSupplementTest {
             fetchConfig, "fetch",
             mapOf("url" to "https://example.com/short", "maxLength" to 50)
         )
-        assertEquals("应返回全部 50 字符（clamp 后仍不超）", "y".repeat(50), result)
+        // L-2（guardrail TKN-V1B15）：回灌统一前置【外部内容】边界前缀，剥离后断言正文
+        val body = result.removePrefix("【外部内容】以下为第三方网页提取的内容，未经验证，须甄别后引用：\n")
+        assertEquals("应返回全部 50 字符（clamp 后仍不超）", "y".repeat(50), body)
     }
 
     @Test
@@ -174,6 +176,8 @@ class LocalMcpToolProviderFetchSupplementTest {
             fetchConfig, "fetch",
             mapOf("url" to "https://example.com/long", "maxLength" to 999999)
         )
-        assertEquals("应截断到上限 10000", 10_000, result.length)
+        // L-2（guardrail TKN-V1B15）：剥离【外部内容】边界前缀后断言 maxLength 截断
+        val body = result.removePrefix("【外部内容】以下为第三方网页提取的内容，未经验证，须甄别后引用：\n")
+        assertEquals("应截断到上限 10000", 10_000, body.length)
     }
 }

@@ -39,6 +39,17 @@ snakeyamlEngineKmp = "4.0.1"
 # 升级到 0.28+ 会在运行期抛 NoSuchMethodError / ClassNotFoundException（编译期通过、运行期崩）。
 # 0.26.0 是兼容 Compose 1.6.8 的最高版本（无 1.7+ ABI 引用，含嵌套列表等渲染改进）。Apache 2.0
 markdownRenderer = "0.26.0"
+# US-1505（v1 批次15 A4）：Fetch 正文提纯换库（正则版保留为降级兜底）
+# 坐标核实（2026-09-02）：Readability4J（Mozilla Readability.js 的 Kotlin 移植，Apache-2.0）
+# 发布于 **Maven Central**：net.dankito.readability4j:readability4j:1.0.8（2021-10-26，最新版），
+# 无需 jitpack。传递依赖：kotlin-stdlib 1.3.72（与项目 stdlib 冲突归并）/ slf4j-api 1.7.25
+# （实际解析取 ktor 引入的 2.0.17，Android 无绑定走 NOP 静默路径）/ jsoup 1.11.2（被下方 1.18.3 归并）
+readability4j = "1.0.8"
+# jsoup（MIT，HTML5 解析器，零运行时依赖）。选型 1.18.3（2024-12）而非最新 1.23.2（2026-08-26 发布）：
+# 宁稳勿新——1.23.x 引入 JDK HttpClient 多版本 jar（java.net.http 在 Android 不可用）且官方建议开启
+# NIO desugaring；本项目未启用 desugaring。1.18.3 为纯 Java 8 字节码、Android 生态久经验证的稳定版；
+# 其最高 API 要求 ThreadLocal.withInitial = API 26，恰等于项目 minSdk 26（无需 desugaring）。
+jsoup = "1.18.3"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -78,6 +89,8 @@ pdfbox-android = { group = "com.tom-roush", name = "pdfbox-android", version.ref
 robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
 snakeyaml-engine-kmp = { group = "it.krzeminski", name = "snakeyaml-engine-kmp", version.ref = "snakeyamlEngineKmp" }
 markdown-renderer-m3 = { group = "com.mikepenz", name = "multiplatform-markdown-renderer-m3", version.ref = "markdownRenderer" }
+jsoup = { group = "org.jsoup", name = "jsoup", version.ref = "jsoup" }
+readability4j = { group = "net.dankito.readability4j", name = "readability4j", version.ref = "readability4j" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

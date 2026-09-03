@@ -92,7 +92,14 @@ open class SkillExecutor(
      * 把工具回路的多轮 LLM 请求摊开，降低瞬时 RPM 峰值触发 429 概率。构造器默认 0 是为
      * 了既有单测（58 处直接构造）不因真实延时拖慢；生产路径唯一构造点已注入 2s。
      */
-    private val interRoundDelayMs: Long = 0L
+    private val interRoundDelayMs: Long = 0L,
+    /**
+     * v1 批次11（E，D11）：429 限流退避基础时长（毫秒）。默认 [RATE_LIMIT_BACKOFF_MS]（3s）。
+     *
+     * 测试注入小值避免真实指数退避拖慢单测（重试耗尽路径 6 次最长达 189s）；生产由
+     * 默认值生效（调用方无需传参）。
+     */
+    private val rateLimitBackoffMs: Long = RATE_LIMIT_BACKOFF_MS
 ) {
 
     /**
@@ -271,6 +278,11 @@ open class SkillExecutor(
 
             // UXR11 U2（ADR-033）：429 限流自动重试剩余次数（RPM 限流在重试耗尽前不中断工具回路）。
             var rateLimitRetriesLeft = MAX_RATE_LIMIT_RETRIES
+            // v1 批次11（E，D11）：本轮 429 错误携带的服务端 Retry-After 秒数（优先采纳）。
+            var roundRetryAfterSeconds: Long? = null
+            // v1 批次13（B/D16c，多模态降级）：本轮是否收到「模型不支持图片」400（visionUnsupported）。
+            // true 时剥离瞬态截图图片 + 通知手机操控截图降级 OCR/UI 树后重试本轮（见下方处理块）。
+            var visionUnsupportedSeen = false
             while (rounds < maxRounds) {
                 rounds++
                 // UXR11 U2（ADR-033）：工具回路轮间退避 —— LLM 端点（如 Moonshot Kimi 组织级
@@ -281,6 +293,19 @@ open class SkillExecutor(
                 // CancellationException 由 delay 自动传播（BR-error-handling-007）。
                 if (rounds > 1) delay(interRoundDelayMs)
                 lastRoundHadToolCall = false
+                // v1 批次13（M-2，guardrail TKN-V1B13-GUARDRAIL-001）：长工具链路只保留最近 1 张
+                // 瞬态截图参与本轮请求——否则每轮 screenshot 的 400KB base64 在后续每一轮都携带，
+                // 10 张 ≈ 4MB 请求体（触发端点 413/400 + 显著拖慢响应，与 ANR 同根因的不同形态）。
+                // 手机操控上下文只需最近一张（当前屏幕状态），旧截图已是过时状态。
+                val transientIndexes = currentMessages.mapIndexedNotNull { i, m ->
+                    if (m.transientImage && m.imageUrl != null) i else null
+                }
+                if (transientIndexes.size > 1) {
+                    val keepIndex = transientIndexes.last()
+                    currentMessages = currentMessages.mapIndexed { i, m ->
+                        if (m.transientImage && i != keepIndex && m.imageUrl != null) m.copy(imageUrl = null) else m
+                    }
+                }
                 val completedToolCalls = mutableListOf<StreamEvent.ToolCallComplete>()
                 // Q-LOW-2（guardrail TKN-UXR8-B3-GUARDRAIL-001）：本轮已实际执行的 tool_call id。
                 // ask_user 中断时若本轮有未执行 tool_call，assistant 占位须裁剪为已执行子集。
@@ -290,6 +315,9 @@ open class SkillExecutor(
                 // 否则工具回路第 2 轮请求返回 400。此处收集后传给
                 // [buildAssistantToolCallMessage] 构造占位消息时回传。
                 val roundReasoning = StringBuilder()
+                // v1 批次12（A，D13）：累积本轮流式响应正文 content（Delta），供无原生 tool_calls 时
+                // 解析文本型 <tool_call> 工具调用（glm-4.6v-flash 等文本工具型模型）。
+                val roundContent = StringBuilder()
                 // UXR11 U2（ADR-033）：本轮是否触发 429 限流（重试耗尽前不转发给用户）。
                 var roundRateLimited = false
                 // 1. 流式请求 + 收集 ToolCallComplete
@@ -325,12 +353,24 @@ open class SkillExecutor(
                         // 交由下方自动退避重试；重试耗尽后才原样转发给用户提示稍等。
                         if (event is StreamEvent.Error && isRateLimitError(event.message)) {
                             roundRateLimited = true
+                            // v1 批次11（E，D11）：优先采纳服务端 Retry-After 建议秒数（行业标准）
+                            roundRetryAfterSeconds = event.retryAfterSeconds ?: roundRetryAfterSeconds
                             return@collect
+                        }
+                        // v1 批次13（B/D16c，多模态降级）：视觉模型端点不支持图片（400 visionUnsupported）
+                        // → 标记降级（截图转 OCR/UI 树），下方剥离瞬态截图图片后重试本轮（模型以文本模式继续）。
+                        if (event is StreamEvent.Error && event.visionUnsupported) {
+                            visionUnsupportedSeen = true
+                            localToolExecutor?.onVisionUnsupported()
                         }
                         onEvent(event)
                         if (event is StreamEvent.ReasoningDelta) {
                             // UXR4 问题 1/4/6（ADR-024）：累积 reasoning 供 assistant 占位消息回传
                             roundReasoning.append(event.content)
+                        }
+                        if (event is StreamEvent.Delta) {
+                            // v1 批次12（A，D13）：累积正文供文本工具调用解析
+                            roundContent.append(event.content)
                         }
                         if (event is StreamEvent.ToolCallComplete) {
                             completedToolCalls.add(event)
@@ -350,29 +390,142 @@ open class SkillExecutor(
                     break
                 }
 
-                // UXR11 U2（ADR-033）：429 限流自动退避重试 —— 服务端"retry after"通常仅 1s，
-                // 等待 [RATE_LIMIT_BACKOFF_MS] 后重发同一轮请求。guardrail F1 幂等守卫：
-                // 仅当本轮**未执行任何工具**（completedToolCalls 为空）才重试——限流错误通常在
-                // 响应头即判定（首个事件即 Error），此条件恒真；若极端场景下已收集到工具调用
-                // （限流错误在中流到达），不清空、不回退轮号，直接按正常流程回灌结果后结束回路，
-                // 避免丢弃已执行结果或重复执行非幂等工具。
-                // 重试耗尽仍限流 → 落回正常逻辑（completedToolCalls 为空 → 回路自然结束），
-                // 由既有 429 专属文案（R2/ADR-032）提示用户稍等，不无限重试放大请求频率。
+                // UXR11 U2（ADR-033）+ v1 批次11（E，D11）：429 限流自动退避重试。
+                // guardrail F1 幂等守卫：仅当本轮**未执行任何工具**（completedToolCalls 为空）才重试——
+                // 限流错误通常在响应头即判定（首个事件即 Error），此条件恒真；若极端场景下已收集到
+                // 工具调用（限流错误在中流到达），不清空、不回退轮号，直接按正常流程回灌结果后结束
+                // 回路，避免丢弃已执行结果或重复执行非幂等工具。
+                // 退避策略：**优先服务端 Retry-After**（[roundRetryAfterSeconds]，行业标准）；
+                // 无则指数退避 3s × 2^(N-1)（3s/6s/12s/24s…）。重试耗尽仍限流 → 落回正常逻辑
+                // （completedToolCalls 为空 → 回路自然结束），补发明确文案提示用户。
                 if (roundRateLimited && completedToolCalls.isEmpty() && rateLimitRetriesLeft > 0) {
                     rateLimitRetriesLeft--
-                    val backoffMs = RATE_LIMIT_BACKOFF_MS * (MAX_RATE_LIMIT_RETRIES - rateLimitRetriesLeft)
-                    Log.w(TAG, "round $rounds 429 rate limit, retry in ${backoffMs}ms (left=$rateLimitRetriesLeft)")
+                    val attemptIndex = (MAX_RATE_LIMIT_RETRIES - 1) - rateLimitRetriesLeft
+                    val expBackoffMs = rateLimitBackoffMs * (1L shl attemptIndex)
+                    val retryAfterMs = roundRetryAfterSeconds?.let { it * 1000L }
+                    val backoffMs = maxOf(expBackoffMs, retryAfterMs ?: 0L)
+                    Log.w(TAG, "round $rounds 429 rate limit, retry in ${backoffMs}ms (left=$rateLimitRetriesLeft, retryAfter=$retryAfterMs)")
                     roundReasoning.clear()
+                    roundRetryAfterSeconds = null // 退避已采纳，防止下次重复放大
                     delay(backoffMs)
                     rounds-- // 重试同一轮（rounds 自增前 --，保持轮号不变）
                     continue
                 }
                 if (roundRateLimited) {
-                    // 重试耗尽：补发限流错误事件给用户（说明稍等重试）
-                    onEvent(StreamEvent.Error("请求过于频繁，触发服务端限流（429）。请稍等几秒后重试"))
+                    // 重试耗尽：补发限流错误事件给用户（说明已自动重试仍失败，请稍后重试）
+                    Log.w(TAG, "round $rounds 429 rate limit retries exhausted (${MAX_RATE_LIMIT_RETRIES})")
+                    onEvent(StreamEvent.Error("服务端持续限流（429）：已自动重试 ${MAX_RATE_LIMIT_RETRIES} 次仍失败，请稍等一两分钟后重试"))
                 }
 
-                // 2. 无工具调用 → 回路自然结束（纯文本响应）
+                // v1 批次13（B/D16c，多模态降级）：视觉不支持（400 visionUnsupported）处理。
+                // 本轮回灌消息中含瞬态截图图片（图片注入对当前端点失败）→ 剥离其 base64 后重试本轮：
+                // 模型不再收到图片（不再重复 400），转用 get_ui_state UI 树 / runScreenshot OCR 文本
+                //（截图路径已被 onVisionUnsupported 降级）继续任务，而非中断。
+                if (visionUnsupportedSeen && currentMessages.any { it.transientImage && it.imageUrl != null }) {
+                    Log.w(TAG, "round $rounds vision unsupported: 剥离瞬态截图图片，截图转 OCR/UI 树，重试本轮")
+                    currentMessages = currentMessages.map { msg ->
+                        if (msg.transientImage) msg.copy(imageUrl = null) else msg
+                    }
+                    roundReasoning.clear()
+                    roundContent.clear()
+                    rounds-- // 重试同一轮（rounds 自增前 --，保持轮号不变）
+                    continue
+                }
+
+                // 2. 无原生 tool_calls → 尝试文本型 <tool_call> 解析（v1 批次12，A/D13）。
+                //    glm-4.6v-flash 等模型把工具调用写成文本 XML 块（常包裹 ```html 围栏内），
+                //    应用此前只认原生 tool_calls → 工具从不执行（真机"连工具都用不了"）。
+                //    解析到文本工具调用后：执行（复用 executeToolCall 的用户确认/手机操控安全链），
+                //    结果以【工具执行结果】user 消息回灌（模型无关，不依赖 OpenAI tool 协议），继续回路。
+                if (completedToolCalls.isEmpty()) {
+                    val textCalls = TextToolCallParser.parse(roundContent.toString())
+                    if (textCalls.isNotEmpty()) {
+                        Log.i(TAG, "round $rounds 解析到 ${textCalls.size} 个文本工具调用: ${textCalls.map { it.name }}")
+                        val results = StringBuilder()
+                        // v1 批次13（B）：文本路径的截图图片（如有）挂到本轮回灌的 user 消息上
+                        var pendingScreenshotImage: String? = null
+                        textCalls.forEachIndexed { index, tc ->
+                            val synthetic = StreamEvent.ToolCallComplete(
+                                "textcall_${rounds}_$index",
+                                tc.name,
+                                tc.arguments
+                            )
+                            val result: String = try {
+                                executeToolCall(synthetic, mcpServers)
+                            } catch (e: CancellationException) {
+                                throw e // BR-error-handling-007
+                            } catch (e: Exception) {
+                                Log.w(TAG, "text tool execution failed: ${tc.name}", e)
+                                formatToolError(tc.name, e)
+                            }
+                            // v1 批次13（A/B）：提取截图图片标记，base64 从回灌文本剥离（防 ANR/膨胀）
+                            val (resultText, screenshotImageUrl) = extractScreenshotImage(result, tc.name)
+                            if (screenshotImageUrl != null) pendingScreenshotImage = screenshotImageUrl
+                            // 可观测：记录 ToolCallRecord（与原生路径一致）
+                            toolCallRecords.add(
+                                ToolCallRecord(
+                                    toolName = tc.name,
+                                    arguments = encodeArguments(tc.arguments),
+                                    result = resultText.take(MAX_RESULT_PREVIEW_LEN),
+                                    durationMs = 0L,
+                                    status = if (isFailureResult(resultText)) ExecutionStatus.FAIL else ExecutionStatus.SUCCESS
+                                )
+                            )
+                            // 重复工具熔断计数（与原生路径一致）
+                            consecutiveToolFailures[tc.name] =
+                                if (isFailureResult(resultText)) (consecutiveToolFailures[tc.name] ?: 0) + 1 else 0
+                            // 结果以 user 消息注入（文本工具型模型不认 tool role）；guardrail P3：
+                            // 结果（可能含 fetch/搜索注入的 <tool_call> 块）须先剥离，防跨轮再解析放大
+                            results.append("[工具执行结果 ${tc.name}] ")
+                                .append(TextToolCallParser.stripTextToolCalls(resultText))
+                                .append('\n')
+                            // ask_user 接管（如手机操控强制 MANUAL）：中断回路等待用户答复
+                            if (result.startsWith(AskUserLocalToolExecutor.RESULT_MARKER)) {
+                                val payload = parseAskUserPayload(
+                                    result.removePrefix(AskUserLocalToolExecutor.RESULT_MARKER)
+                                )
+                                if (payload != null && payload.questions.isNotEmpty()) {
+                                    Log.i(TAG, "text tool ask_user triggered, stopping loop for user input")
+                                    onEvent(StreamEvent.AskUser(payload.questions))
+                                    askUserPending = true
+                                    lastRoundHadToolCall = false
+                                }
+                            }
+                        }
+                        // 把助手正文（剥离工具块后）加入历史，保持上下文连贯；结果以 user 消息注入
+                        currentMessages = currentMessages + ChatMessage(
+                            id = idGenerator(),
+                            role = Role.ASSISTANT,
+                            content = TextToolCallParser.stripTextToolCalls(roundContent.toString()),
+                            timestamp = System.currentTimeMillis()
+                        )
+                        currentMessages = currentMessages + ChatMessage(
+                            id = idGenerator(),
+                            role = Role.USER,
+                            content = results.toString().trim(),
+                            // v1 批次13（B）：文本路径截图图片附在 user 消息上（image_url，模型看真图）
+                            imageUrl = pendingScreenshotImage,
+                            // v1 批次13（F1）：瞬态截图图片标记——持久化时剥离 base64（防历史膨胀/渲染 ANR）
+                            transientImage = true,
+                            timestamp = System.currentTimeMillis()
+                        )
+                        // guardrail P2（TKN-V1B12-GUARDRAIL-001）：文本路径 continue 前补重复工具熔断
+                        // 检查（与原生路径一致）——否则文本工具连续失败永不熔断，只能靠 maxRounds=50 硬顶。
+                        val failedTextTool = consecutiveToolFailures.entries
+                            .firstOrNull { it.value >= MAX_CONSECUTIVE_TOOL_FAILURES }
+                            ?.key
+                        if (failedTextTool != null) {
+                            Log.w(TAG, "text tool circuit breaker: $failedTextTool failed $MAX_CONSECUTIVE_TOOL_FAILURES times consecutively")
+                            effectiveTools = emptyList()
+                            effectiveSystemPrompt = (effectiveSystemPrompt ?: "") +
+                                "\n\n注意：工具「$failedTextTool」连续多次调用失败。请直接基于已有信息回答用户问题，不要再调用任何工具。"
+                            consecutiveToolFailures.clear()
+                            lastRoundHadToolCall = false
+                        }
+                        if (askUserPending) break else continue
+                    }
+                }
+                // 2b. 无工具调用（原生或文本均无）→ 回路自然结束（纯文本响应）
                 if (completedToolCalls.isEmpty()) break
                 lastRoundHadToolCall = true
                 // UXR6 问题 6（诊断工具循环行为）：记录每轮工具调用明细，
@@ -427,7 +580,10 @@ open class SkillExecutor(
                         formatToolError(toolCall.toolName, e)
                     }
                     // 从结果文本推断状态（executeToolCall 内部降级文案以特定前缀标识失败）
-                    if (isFailureResult(result)) {
+                    // v1 批次13（A/B）：截图图片标记提取——视觉模型截图结果含【手机截图图片】+dataUrl，
+                    // 提取后图片以 image_url 注入会话（模型看真图），base64 从持久化结果剥离（防 ANR）。
+                    val (resultText, screenshotImageUrl) = extractScreenshotImage(result, toolCall.toolName)
+                    if (isFailureResult(resultText)) {
                         toolStatus = ExecutionStatus.FAIL
                     }
                     // Q-LOW-2：记录已执行（拿到结果）的 tool_call id，供 ask_user 中断后裁剪占位
@@ -445,7 +601,7 @@ open class SkillExecutor(
                         ToolCallRecord(
                             toolName = toolCall.toolName,
                             arguments = encodeArguments(toolCall.arguments),
-                            result = result.take(MAX_RESULT_PREVIEW_LEN),
+                            result = resultText.take(MAX_RESULT_PREVIEW_LEN),
                             durationMs = toolDuration,
                             status = toolStatus
                         )
@@ -453,10 +609,23 @@ open class SkillExecutor(
                     val toolResultMessage = buildToolResultMessage(
                         toolCallId = toolCall.toolCallId,
                         toolName = toolCall.toolName,
-                        result = result,
+                        result = resultText,
                         idGenerator = idGenerator
                     )
                     currentMessages = currentMessages + toolResultMessage
+                    // v1 批次13（B）：截图图片以 user 消息 image_url 注入会话（模型直接查看屏幕）。
+                    // base64 不进任何持久化消息（防历史膨胀/渲染 ANR）。
+                    if (screenshotImageUrl != null) {
+                        currentMessages = currentMessages + ChatMessage(
+                            id = idGenerator(),
+                            role = Role.USER,
+                            content = "（手机截图，请直接查看屏幕内容）",
+                            imageUrl = screenshotImageUrl,
+                            // v1 批次13（F1）：瞬态截图图片标记——持久化时剥离 base64（防历史膨胀/渲染 ANR）
+                            transientImage = true,
+                            timestamp = System.currentTimeMillis()
+                        )
+                    }
 
                     // UXR8 N2 Phase 2（ADR-030）：反问/澄清 —— ask_user 结果带标记前缀 →
                     // 发射 AskUser 事件 + 中断当前回路（StopAtTools 语义）。
@@ -612,18 +781,20 @@ open class SkillExecutor(
         internal const val TOOL_LOOP_INTER_ROUND_DELAY_MS = 2_000L
 
         /**
-         * UXR11 U2（ADR-033）：429 限流自动重试次数上限。
+         * UXR11 U2（ADR-033）+ v1 批次11（E，D11）：429 限流自动重试次数上限。
          *
-         * 限流（RPM 配额）时按 [RATE_LIMIT_BACKOFF_MS] 退避重发同一轮请求（本轮未执行工具，
-         * 幂等安全）。上限 2 次 + 递增退避（3s/6s），避免无限重试放大请求频率叠加限流。
+         * 限流（RPM/模型过载）时按退避重发同一轮请求（本轮未执行工具，幂等安全）。
+         * v1 批次11：4→6 次，退避策略 = 优先服务端 Retry-After 头，否则指数退避
+         * （3s/6s/12s/24s/48s/96s；Retry-After 上限 60s/次），提高 glm code1305 / sensenova
+         * 并发等长限流窗口下的自愈率；仍设上限避免无限重试放大请求（D11：宁可多等也不失败）。
          */
-        internal const val MAX_RATE_LIMIT_RETRIES = 2
+        internal const val MAX_RATE_LIMIT_RETRIES = 6
 
         /**
-         * UXR11 U2（ADR-033）：429 限流重试基础退避时长（毫秒）。
+         * UXR11 U2（ADR-033）+ v1 批次11：429 限流重试基础退避时长（毫秒）。
          *
-         * 服务端 "retry after" 通常仅 1s；取 3s 保证越过限流窗口。退避随尝试次数递增
-         * （第 1 次 3s、第 2 次 6s）。
+         * 服务端 "retry after" 通常仅 1s；取 3s 保证越过限流窗口。v1 批次11 改为**指数退避**：
+         * 第 N 次重试等待 `3s × 2^(N-1)`（3s/6s/12s/24s），对模型过载等长限流窗口更有效。
          */
         internal const val RATE_LIMIT_BACKOFF_MS = 3_000L
 
@@ -832,6 +1003,11 @@ open class SkillExecutor(
                 // 不进失败识别）；⚠️ 前缀用于手机控制硬拦截结果。
                 result.startsWith("错误：") ||
                 result.startsWith("⚠️ ") ||
+                // v1 批次9（US-904，H-3，guardrail TKN-V1B9-GUARDRAIL-001）：热榜工具失败文案
+                //（HotListLocalToolExecutor 的 401/403/429/5xx/网络分支返回"热榜获取失败：…"）。
+                // 此前不在前缀清单 → 持续失败（Key 无效/限流）时熔断不触发，LLM 反复调用至
+                // maxRounds=50，放大请求频率叠加热榜 API 限流（与"抓取失败"同族回归）。
+                result.startsWith("热榜获取失败") ||
                 // UXR8 N2 Phase 2（ADR-030）：ask_user 反问结果不在失败识别之列
                 //（其为"等待用户输入"语义，非失败；由 executeLoop 检测标记前缀单独处理）。
                 false
@@ -859,6 +1035,34 @@ open class SkillExecutor(
                 lower.contains("max rpm") ||
                 RATE_LIMIT_RPM_REGEX.containsMatchIn(lower)
         }
+
+        /**
+         * v1 批次13（A/B，D16）：从工具结果提取「手机截图图片」标记。
+         *
+         * 视觉模型截图时 [io.prism.phonecontrol.PhoneControlLocalToolExecutor.runScreenshot]
+         * 返回 `【手机截图图片】+dataUrl`。本函数：
+         * - 命中标记：返回 (简短说明文本, dataUrl)——**base64 从持久化工具结果中剥离**
+         *   （真机 ANR 根因：400KB base64 单行渲染阻塞主线程 >5s），dataUrl 供调用方以
+         *   image_url 注入会话让模型直接看图；
+         * - 未命中：原样返回，dataUrl=null。
+         *
+         * @param result 工具执行结果
+         * @return (处理后的文本, 截图 dataUrl?)
+         */
+        internal fun extractScreenshotImage(result: String, toolName: String? = null): Pair<String, String?> {
+            // v1 批次13（L-3，guardrail）：仅对手机操控截图工具检测标记——防止 fetch/搜索等其它
+            // 工具结果恰好以「【手机截图图片】」开头时被误提取为 image_url 注入请求体（私有权重极低
+            // 但零成本防御）。toolName 缺省/null 时按旧行为检测（向后兼容既有测试）。
+            if (toolName != null && !toolName.endsWith("__screenshot")) return (result to null)
+            if (result.startsWith(SCREENSHOT_IMAGE_MARKER)) {
+                val dataUrl = result.removePrefix(SCREENSHOT_IMAGE_MARKER).trim()
+                return ("已截取屏幕（图片已作为视觉输入发送给模型查看）" to dataUrl)
+            }
+            return (result to null)
+        }
+
+        /** [extractScreenshotImage] 用的手机截图图片标记（与 [io.prism.phonecontrol.PhoneControlLocalToolExecutor.SCREENSHOT_IMAGE_MARKER] 对齐）。 */
+        private const val SCREENSHOT_IMAGE_MARKER = "【手机截图图片】"
 
         /**
          * 解析 ask_user 工具结果载荷（UXR8 N2 Phase 2，ADR-030，纯函数可测）。
@@ -994,9 +1198,15 @@ open class SkillExecutor(
          *
          * **安全性**：白名单是显式枚举，新增工具需人工评估其副作用后加入；
          * 未知工具名一律返回 false（fail-closed，纵深防御）。
+         *
+         * **v1 批次11（手机操控豁免）**：`phone_control__*` 虽不在只读白名单，但已在
+         * `PhoneControlLocalToolExecutor` 内置**专属安全层**（HighRiskApprovalMode 高危三态 +
+         * 敏感节点硬拦截 + 后台确认通知 + take_over 人工接管），不应再经 SkillExecutor 通用
+         * 逐次 UI 确认——否则 Prism 切至目标 App 后台时确认框不可见→工具被 UiConfirmationGate
+         * 挂起 30s（真机 launch_app 超时根因之一）。
          */
         internal fun isTrustedTool(toolName: String): Boolean =
-            toolName in TRUSTED_TOOL_WHITELIST
+            toolName in TRUSTED_TOOL_WHITELIST || toolName.startsWith(PHONE_CONTROL_TOOL_PREFIX)
 
         /** 免审批工具白名单（只读无副作用工具，显式枚举）。 */
         internal val TRUSTED_TOOL_WHITELIST: Set<String> = setOf(

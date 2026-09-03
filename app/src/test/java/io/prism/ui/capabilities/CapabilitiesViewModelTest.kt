@@ -222,14 +222,17 @@ class CapabilitiesViewModelTest {
     // ==================== US-010 远程预设加载 ====================
 
     @Test
-    fun `remote presets contains 12 templates`() = runTest(mainDispatcher) {
-        // O3（PRD UXR8）：9 → 12（新增 Firecrawl / n8n / TrendsMCP）
+    fun `remote presets contains 14 templates`() = runTest(mainDispatcher) {
+        // v1 批次8（US-001/US-004）：移除 Brave、新增 Bocha；v1 批次9（US-906）：
+        // 移除 Slack/Asana/Exa/Firecrawl/TrendsMCP；US-910：新增 5 个国内模板；
+        // v1 批次15（US-1508）：新增 Scrapling/crawl4ai 自建抓取中转模板
         val names = McpServerPresets.remotePresets.map { it.name }.toSet()
-        assertEquals(12, names.size)
+        assertEquals(14, names.size)
         assertEquals(
             setOf(
-                "GitHub", "Notion", "Slack", "Sentry", "Stripe", "Asana", "Brave", "Exa", "Context7",
-                "Firecrawl", "n8n", "TrendsMCP"
+                "GitHub", "Notion", "Sentry", "Stripe", "Context7",
+                "n8n", "Bocha", "Gitee", "聚合数据", "天行数据", "智谱 Web Search", "高德地图",
+                "Scrapling", "crawl4ai"
             ),
             names
         )

@@ -33,6 +33,7 @@ import io.prism.network.McpToolProvider
 import io.prism.network.McpToolProviderDispatcher
 import io.prism.network.OpenAICompatibleProvider
 import io.prism.network.WebSearchLocalToolExecutor
+import io.prism.network.WebViewFetchRenderer
 import io.prism.security.ApiKeyRepository
 import io.prism.security.CryptoService
 import io.prism.security.KeystoreCryptoService
@@ -210,7 +211,15 @@ class PrismApplication : Application() {
 
     /** 本地 MCP 工具提供者（进程内桥接 Filesystem Server，ADR-006 5.5；Fetch 用独立 fetchHttpClient） */
     val localMcpToolProvider: LocalMcpToolProvider by lazy {
-        LocalMcpToolProvider(filesystemMcpServer, fetchHttpClient)
+        // v1 批次15（US-1506 接线收口）：Fetch 第三级 WebView 渲染降级。
+        // 开关 settings_webview_fetch_enabled 默认 false（SearchEnhancementConfigRepository，
+        // 设置页「WebView 渲染抓取」行控制）；关闭时行为与现状完全一致。
+        LocalMcpToolProvider(
+            filesystemMcpServer,
+            fetchHttpClient,
+            webviewFetchEnabledProvider = { searchEnhancementConfigRepository.getWebviewFetchEnabled() },
+            webviewFetchRenderer = WebViewFetchRenderer(applicationContext)
+        )
     }
 
     /** MCP 工具提供者路由（按 serverType 分发 LOCAL/REMOTE，ADR-006 5.6） */
@@ -499,11 +508,77 @@ class PrismApplication : Application() {
     /**
      * 联网搜索本地工具执行器（问题 8b，ADR-020）—— 实现 LocalToolExecutor 接口。
      *
-     * 注册 `web_search__search` 工具，通过 Bing RSS 端点（零配置免费、国内可访问）检索，
+     * 注册 `web_search__search` 工具，通过 Bing HTML SERP（零配置免费、国内可访问）检索，
      * 由 [skillExecutor] 的本地工具分支调用。
+     *
+     * v1 批次9（US-902）：配置 Bocha Key 后优先走博查 REST（AI 原生语义重排，中文实体
+     * 命中率高），失败/无 Key 静默降级 Bing+Baidu。Key 与 Bocha MCP 模板共用 apiKeyRef=bocha。
+     *
+     * v1 批次15（PRD prd-search-fetch-enhancement US-1501/1502/1507）：引擎链扩展为
+     * Bocha → 智谱 → SearXNG → Tavily → Bing/Baidu 兜底。智谱/Tavily Key 经 [apiKeyRepository]
+     * 加密读取（apiKeyRef=zhipu / tavily，设置页「搜索增强」填写）；SearXNG 端点与可选
+     * Basic Auth 经 [searchEnhancementConfigRepository] 读取（用户自建，未配置完全跳过）。
      */
     val webSearchLocalToolExecutor: WebSearchLocalToolExecutor by lazy {
-        WebSearchLocalToolExecutor(searchHttpClient)
+        WebSearchLocalToolExecutor(
+            searchHttpClient,
+            bochaApiKeyProvider = {
+                apiKeyRepository.readApiKeyOnce(BOCHA_API_KEY_REF)
+            },
+            zhipuApiKeyProvider = {
+                apiKeyRepository.readApiKeyOnce(ZHIPU_API_KEY_REF)
+            },
+            tavilyApiKeyProvider = {
+                apiKeyRepository.readApiKeyOnce(TAVILY_API_KEY_REF)
+            },
+            searxngConfigProvider = {
+                searchEnhancementConfigRepository.getSearxngSettings()?.let { settings ->
+                    WebSearchLocalToolExecutor.SearxngConfig(
+                        endpoint = settings.endpoint,
+                        username = settings.username,
+                        password = settings.password
+                    )
+                }
+            },
+            preferredEngineProvider = {
+                // v1 批次15.1（US-1509）：用户设置的首选引擎（空白 = 默认顺序）
+                searchEnhancementConfigRepository.getPreferredEngine().takeIf { it.isNotBlank() }
+            }
+        )
+    }
+
+    /**
+     * PRD MCP/API 增强（US-002，guardrail M-1 修复）：今日热榜 HTTP 客户端。
+     *
+     * **与 [searchHttpClient] 的关键差异**：`expectSuccess = false`——非 2xx **返回响应**
+     * 交由 [io.prism.hotlist.HotListLocalToolExecutor] 按状态码生成可诊断文案（401→Key 无效、
+     * 429→限流等）。若复用 searchHttpClient（expectSuccess=true），非 2xx 在 `client.get`
+     * 抛异常，状态码分支成死代码（测试-生产漂移，ADR-032 R2 同款 bug）。
+     * 独立超时 5s（PRD US-002 非功能需求：热榜单次请求 ≤5s）。
+     */
+    val hotListHttpClient: HttpClient by lazy {
+        HttpClient(OkHttp) {
+            expectSuccess = false
+            install(HttpTimeout) {
+                requestTimeoutMillis = HOTLIST_REQUEST_TIMEOUT_MS
+            }
+        }
+    }
+
+    /**
+     * 今日热榜本地工具执行器（PRD MCP/API 增强，US-002）—— 实现 LocalToolExecutor 接口。
+     *
+     * 注册 `hotlist__get` 工具：查询微博/知乎/抖音等中文平台实时热榜（替代海外 TrendsMCP）。
+     * 经今日热榜官方 REST API（tophubdata.com，国内直连），Key 由 [apiKeyRepository] 加密读取
+     *（apiKeyRef = "tophubdata"），未配置时返回引导文案。
+     */
+    val hotListLocalToolExecutor: io.prism.hotlist.HotListLocalToolExecutor by lazy {
+        io.prism.hotlist.HotListLocalToolExecutor(
+            httpClient = hotListHttpClient,
+            apiKeyProvider = {
+                apiKeyRepository.readApiKeyOnce(HOTLIST_API_KEY_REF)
+            }
+        )
     }
 
     /**
@@ -557,6 +632,8 @@ class PrismApplication : Application() {
             listOf(
                 crossAppLocalToolExecutor,
                 webSearchLocalToolExecutor,
+                // PRD MCP/API 增强（US-002）：今日热榜本地工具（替代海外 TrendsMCP）
+                hotListLocalToolExecutor,
                 knowledgeBaseLocalToolExecutor,
                 documentLocalToolExecutor,
                 askUserLocalToolExecutor,
@@ -588,7 +665,25 @@ class PrismApplication : Application() {
                 }
             },
             // v1 真机二次修复（Issue 5）：后台执行高危动作时发系统通知让用户在其它 App 也能作答
-            askUserNotifier = phoneControlAskUserNotifier
+            askUserNotifier = phoneControlAskUserNotifier,
+            // v1 批次11（D9）：UI 树受限时截图 + OCR 提取「文字+坐标」，供纯文本模型继续操作
+            ocrTextExtractor = mlKitOcrTextExtractor,
+            // v1 批次13（B/D16b，多模态）：当前激活 Provider 是否支持视觉 —— 截图以图片注入会话
+            //（模型看真图，发挥 glm-4.6v-flash 等多模态能力），否则走 OCR 文字+坐标。
+            // 判定：用户**显式设置过**（supportsVisionSet，含设置页开关）→ 尊重用户值（显式关闭
+            // 不被覆盖，防截图静默外发）；未显式设置（旧配置默认 false）→ 按激活模型名自动检测兜底
+            //（配了视觉模型就应看真图的开箱即用预期）。误判（端点不支持图片）由 SkillExecutor 的
+            // 400 visionUnsupported 降级链自愈（转 OCR/UI 树）。
+            visionCapableProvider = {
+                val active = runCatching { providerConfigRepository.activeProviderFlow.value }.getOrNull()
+                when {
+                    active == null -> false
+                    // 用户显式设置过（supportsVisionSet）→ 尊重用户值（显式关闭不被覆盖）
+                    active.supportsVisionSet -> active.supportsVision
+                    // 未显式设置（旧配置）→ 按激活模型名自动检测兜底（开箱即用）
+                    else -> io.prism.data.ProviderConfig.detectVisionSupport(active.models.firstOrNull())
+                }
+            }
         )
     }
 
@@ -597,6 +692,14 @@ class PrismApplication : Application() {
      */
     val highRiskApprovalRepository: io.prism.config.HighRiskApprovalRepository by lazy {
         io.prism.config.HighRiskApprovalRepository(highRiskApprovalDataStore)
+    }
+
+    /**
+     * 搜索增强配置仓库（v1 批次15 US-1507）：SearXNG 自建端点（endpoint + 可选 Basic Auth）
+     * 与 WebView 渲染抓取开关（抓取侧 US-1506 消费）的 DataStore 持久化。
+     */
+    val searchEnhancementConfigRepository: io.prism.config.SearchEnhancementConfigRepository by lazy {
+        io.prism.config.SearchEnhancementConfigRepository(searchEnhancementDataStore)
     }
 
     /**
@@ -1014,6 +1117,9 @@ class PrismApplication : Application() {
     /** 手机操控高危动作确认策略 DataStore 进程级单例（v1 真机二次修复 Issue 4b）。 */
     private val Context.highRiskApprovalDataStore by preferencesDataStore(name = "prism_high_risk_approval")
 
+    /** 搜索增强配置 DataStore 进程级单例（v1 批次15 US-1507：SearXNG 端点 + WebView 抓取开关）。 */
+    private val Context.searchEnhancementDataStore by preferencesDataStore(name = "prism_search_enhancement")
+
     companion object {
         /**
          * 默认切片大小（字符数，ADR-011 5.2）。
@@ -1041,6 +1147,21 @@ class PrismApplication : Application() {
 
         /** Fetch MCP 工具请求超时（UXR9 Bug5 修复）：目标站多样，15s 缓冲。 */
         private const val FETCH_REQUEST_TIMEOUT_MS = 15_000L
+
+        /** 今日热榜 API Key 引用（ApiKeyRepository 加密键，US-002）。 */
+        private const val HOTLIST_API_KEY_REF = "tophubdata"
+
+        /** v1 批次9（US-902）：博查 Bocha API Key 引用（与 Bocha MCP 模板共用 apiKeyRef=bocha）。 */
+        private const val BOCHA_API_KEY_REF = "bocha"
+
+        /** v1 批次15（US-1501）：智谱 API Key 引用（ApiKeyRepository 加密键，设置页「搜索增强」填写）。 */
+        private const val ZHIPU_API_KEY_REF = "zhipu"
+
+        /** v1 批次15（US-1502）：Tavily API Key 引用（ApiKeyRepository 加密键，设置页「搜索增强」填写）。 */
+        private const val TAVILY_API_KEY_REF = "tavily"
+
+        /** 今日热榜请求超时（PRD US-002：单次请求 ≤5s）。 */
+        private const val HOTLIST_REQUEST_TIMEOUT_MS = 5_000L
 
         /**
          * UXR6 问题 5：流式共享 client 的建连超时（毫秒）。

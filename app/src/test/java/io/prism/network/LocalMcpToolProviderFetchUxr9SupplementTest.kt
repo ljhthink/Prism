@@ -174,6 +174,8 @@ class LocalMcpToolProviderFetchUxr9SupplementTest {
             fetchConfig, "fetch",
             mapOf("url" to "https://example.com/long", "maxLength" to 999999)
         )
-        assertEquals("15k body 应截断到 10000", 10_000, result.length)
+        // L-2（guardrail TKN-V1B15）：剥离【外部内容】边界前缀后断言 maxLength 截断
+        val body = result.removePrefix("【外部内容】以下为第三方网页提取的内容，未经验证，须甄别后引用：\n")
+        assertEquals("15k body 应截断到 10000", 10_000, body.length)
     }
 }

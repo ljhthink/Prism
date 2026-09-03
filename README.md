@@ -191,6 +191,8 @@ Prism/
 ## 相关文档
 
 - [AGENTS.md](AGENTS.md) —— 项目进度与治理记录（面向 AI Agent 与开发者）
-- [docs/decisions/](docs/decisions/README.md) —— 架构决策记录（ADR-001~ADR-040）
+- [docs/decisions/](docs/decisions/README.md) —— 架构决策记录（ADR-001~ADR-041）
 - [docs/PRD.md](docs/PRD.md) —— 产品需求文档 v0.1
+- [docs/prd-search-fetch-enhancement.md](docs/prd-search-fetch-enhancement.md) —— 搜索命中与 Fetch 反爬优化 PRD（v1 批次15）
+- [docs/runbooks/searxng-selfhost.md](docs/runbooks/searxng-selfhost.md) —— SearXNG 自建搜索接入 Runbook
 - [CLAUDE.md](CLAUDE.md) —— AI 编程行为最高准则

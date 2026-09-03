@@ -158,4 +158,77 @@ class McpClientManagerIntegrationTest {
         // 确保降级文案不含内部校验异常细节（CWE-209）
         assertTrue("不得泄露 IllegalArgumentException 细节", !result.contains("require"))
     }
+
+    // ==================== PRD MCP/API 增强（US-001）：Bocha 握手 ====================
+
+    /** 启动注册 bocha_web_search / bocha_ai_search 工具的嵌入式 MCP Server（模拟博查远程端点）。 */
+    private fun startBochaMcpServer(): Int {
+        val server = embeddedServer(Netty, port = 0) {
+            mcpStreamableHttp(enableDnsRebindingProtection = false) {
+                Server(
+                    serverInfo = Implementation("bocha-test-server", "1.0.0"),
+                    options = ServerOptions(
+                        capabilities = ServerCapabilities(
+                            tools = ServerCapabilities.Tools(listChanged = true)
+                        )
+                    )
+                ) {
+                    addTool(
+                        name = "bocha_web_search",
+                        description = "从博查搜索全网信息和网页链接",
+                        inputSchema = ToolSchema(
+                            schema = "object",
+                            properties = buildJsonObject {
+                                put("query", buildJsonObject { put("type", "string") })
+                                put("count", buildJsonObject { put("type", "integer") })
+                            },
+                            required = listOf("query")
+                        )
+                    ) { request ->
+                        CallToolResult(content = listOf(TextContent("web search result")))
+                    }
+                    addTool(name = "bocha_ai_search", description = "语义增强搜索与结构化模态卡") {
+                        CallToolResult(content = listOf(TextContent("ai search result")))
+                    }
+                }
+            }
+        }
+        server.start(wait = false)
+        teardowns.add { server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000) }
+        return runBlocking { server.engine.resolvedConnectors().first().port }
+    }
+
+    @Test
+    fun `listTools returns bocha tools via streamable http handshake`() = runBlocking {
+        // PRD US-001 AC-3：Bocha 模板（mcp.bocha.cn/mcp，Streamable HTTP + Bearer）应能
+        // 握手并 tools/list 出 bocha_web_search / bocha_ai_search。此处用嵌入式 Streamable HTTP
+        // MCP Server 模拟博查端点（真实握手，MockEngine 无法模拟 MCP 状态机）。
+        val port = startBochaMcpServer()
+        try {
+            // 复用 Bocha 预设（mcp.bocha.cn/mcp），端口替换为本地测试 server，验证协议路径
+            val preset = io.prism.data.McpServerPresets.findByName("Bocha")!!
+            val bochaConfig = preset.copy(baseUrl = "http://127.0.0.1:$port/mcp")
+            assertEquals("Bocha 预设应使用 Streamable HTTP", io.prism.data.McpTransport.STREAMABLE_HTTP, bochaConfig.transport)
+            val tools = withTimeout(10.seconds) { manager.listTools(bochaConfig) }
+            assertEquals("应列出 bocha 两个搜索工具", listOf("bocha_web_search", "bocha_ai_search"), tools)
+        } finally {
+            stopServers()
+        }
+    }
+
+    @Test
+    fun `callTool bocha web search returns text result`() = runBlocking {
+        // PRD US-001 AC-3：Bocha 工具调用返回文本结果（真实握手 + tools/call）
+        val port = startBochaMcpServer()
+        try {
+            val preset = io.prism.data.McpServerPresets.findByName("Bocha")!!
+            val bochaConfig = preset.copy(baseUrl = "http://127.0.0.1:$port/mcp")
+            val result = withTimeout(10.seconds) {
+                manager.callTool(bochaConfig, "bocha_web_search", mapOf("query" to "梧州一中"))
+            }
+            assertEquals("应返回博查搜索工具结果", "web search result", result)
+        } finally {
+            stopServers()
+        }
+    }
 }

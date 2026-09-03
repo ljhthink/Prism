@@ -419,6 +419,13 @@ fun ConversationScreen(
                     value = input,
                     onValueChange = { input = it },
                     onSend = {
+                        // v1 批次11（终止输出）：AI 正在生成时，再次点击发送按钮 = 终止输出，
+                        // 而非追加新消息（原 isTyping 守卫会静默丢弃；此处改为显式停止）。
+                        if (isTyping) {
+                            viewModel.stopGeneration()
+                            keyboardController?.hide()
+                            return@MessageInputBar
+                        }
                         // UXR3 问题 13（ADR-023）：编辑模式下发送走编辑重发（替换原消息 + 重新回答）
                         val editingId = editingMessageId
                         if (editingId != null) {
@@ -453,6 +460,8 @@ fun ConversationScreen(
                         pendingFileName = null
                         pendingFileText = null
                     },
+                    // v1 批次11（终止输出）：生成中把发送按钮切换为「停止」入口
+                    isGenerating = isTyping,
                     // UXR9 US-907：移除独立图片入口，统一走"＋"折叠栏（相册 / 文件）
                     onImagePick = { imagePickerLauncher.launch("image/*") },
                     onFilePick = {
@@ -933,17 +942,22 @@ private fun UserBubble(message: ChatMessage) {
     ) {
         Column(horizontalAlignment = Alignment.End) {
             // UXR8 N3（ADR-030）：图片消息渲染（data URL 解码 → Bitmap → Image）
-            message.imageUrl?.let { dataUrl ->
-                decodeImageDataUrl(dataUrl)?.let { bitmap ->
-                    Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = "用户发送的图片",
-                        modifier = Modifier
-                            .fillMaxWidth(0.7f)
-                            .clip(RoundedCornerShape(10.dp)),
-                        contentScale = ContentScale.Fit
-                    )
-                    Spacer(Modifier.height(8.dp))
+            // v1 批次13（M-3，guardrail TKN-V1B13-GUARDRAIL-001）：瞬态截图（transientImage=true）
+            // 是系统为 LLM 注入的手机操控截图，UI 展示提示文本即可——**跳过主线程 base64 解码渲染**
+            //（低端机 100-400KB 解码仍可能卡顿，且与 ANR 根因同源；截图内容对用户无回看价值）。
+            if (!message.transientImage) {
+                message.imageUrl?.let { dataUrl ->
+                    decodeImageDataUrl(dataUrl)?.let { bitmap ->
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "用户发送的图片",
+                            modifier = Modifier
+                                .fillMaxWidth(0.7f)
+                                .clip(RoundedCornerShape(10.dp)),
+                            contentScale = ContentScale.Fit
+                        )
+                        Spacer(Modifier.height(8.dp))
+                    }
                 }
             }
             if (message.content.isNotBlank()) {
@@ -1869,7 +1883,9 @@ private fun MessageInputBar(
     /** R5：待发送文件草稿文件名（非空时显示文件名预览）。 */
     pendingFileName: String? = null,
     /** R5：移除当前待发送附件草稿。 */
-    onRemoveAttachment: () -> Unit = {}
+    onRemoveAttachment: () -> Unit = {},
+    /** v1 批次11（终止输出）：AI 是否正在生成。为 true 时发送按钮变为「停止」入口（见 §发送/停止切换）。 */
+    isGenerating: Boolean = false
 ) {
     var uploadBarExpanded by remember { mutableStateOf(false) }
     Column(
@@ -2013,12 +2029,14 @@ private fun MessageInputBar(
                     )
                     .border(1.dp, PrismIndigo.copy(alpha = 0.5f), CircleShape)
                     // R5：附件存在时也可发送（"只发图/文件不配字"场景）
-                    .clickable(enabled = value.isNotBlank() || hasAttachment) { onSend() },
+                    // v1 批次11（终止输出）：isGenerating 时按钮始终可点（作为「停止」入口），即使输入为空
+                    .clickable(enabled = value.isNotBlank() || hasAttachment || isGenerating) { onSend() },
                 contentAlignment = Alignment.Center
             ) {
+                // v1 批次11（终止输出）：生成中显示「■ 停止」以替代「➤ 发送」，提示可二次点击终止
                 Text(
-                    text = "➤",
-                    color = Color.White,
+                    text = if (isGenerating) "■" else "➤",
+                    color = if (isGenerating) PrismCyan else Color.White,
                     fontSize = 17.sp
                 )
             }
@@ -2134,6 +2152,10 @@ internal fun sanitizeMarkdownLinks(markdown: String): String {
  * @return 剥离工具调用块并转义标签起始 `<` 后的 markdown
  */
 internal fun sanitizeToolCallSyntax(markdown: String): String {
+    // v1 批次12（B，D13）：预剥离文本型 <tool_call> 块（含 ```html 围栏包裹）——
+    // glm-4.6v-flash 等把工具调用写成文本 XML 而非原生 tool_calls，执行后不应把原始 XML 显示给用户。
+    // 该剥离在围栏感知状态机之前，避免 html 围栏内工具块被当作代码保留。
+    val preStripped = io.prism.skill.TextToolCallParser.stripTextToolCalls(markdown)
     // 缓冲式深度状态机单遍处理（guardrail F5）：
     // - 工具块**仅在闭合时剥离**：检测到开标签后把后续行缓冲，闭合标签到达（深度归零）时丢弃缓冲
     //   （= 剥离整块）；若块未闭合就遇到代码围栏 / 输入结束，放弃块判定并 flush 缓冲（正文不丢失）
@@ -2143,7 +2165,7 @@ internal fun sanitizeToolCallSyntax(markdown: String): String {
     var pending: MutableList<String>? = null
     var depth = 0
     var inFence = false
-    for (line in markdown.split('\n')) {
+    for (line in preStripped.split('\n')) {
         val trimmed = line.trimStart()
         if (trimmed.startsWith("```") || trimmed.startsWith("~~~")) {
             // 围栏边界：若在块判定中则放弃（flush），围栏内容不参与块剥离

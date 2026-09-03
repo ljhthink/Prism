@@ -66,8 +66,13 @@ class WebSearchLocalToolExecutorUxr7SupplementTest {
         )
         // 主查询 + 最多 3 个候选 = 4 次请求
         // 候选截断为 3 个：Bing 主+3 重试 = 4 次；随后百度兜底再查 1 次完整 query + 3 核心词 = 4 次，共 8 次
+        // 截断后应返回失败（第 4 候选未被重试）。v1 批次15（US-1504）：无 Key 且引擎全不相关
+        // 时文案升级为「错误：」前缀的搜索增强引导（列出可配置引擎），替代旧「搜索失败」死胡同。
         assertEquals("候选应截断为 3 个，总请求 8 次（Bing 主+3 + 百度兜底 query+3）", 8, callCount)
-        assertTrue("截断后应返回搜索失败（第 4 候选未被重试）", result.startsWith("搜索失败"))
+        assertTrue(
+            "截断后应返回「错误：」引导文案（US-1504）",
+            result.startsWith("错误：") && result.contains("搜索增强")
+        )
         // 搜索失败文案会回显完整 query（含"三月七"），此处断言"三月七"重试命中的结果特征不存在
         assertFalse("第 4 个候选'三月七'不应被重试命中", result.contains("三月七-百度百科"))
     }
@@ -106,7 +111,8 @@ class WebSearchLocalToolExecutorUxr7SupplementTest {
         )
         // query==term 时不应重复请求：仅 1 次 Bing；随后百度兜底查 1 次完整 query（核心词==query 跳过），共 2 次
         assertEquals("query==term 时 Bing 仅 1 次 + 百度兜底 1 次 = 2 次", 2, callCount)
-        assertTrue("应返回搜索失败", result.startsWith("搜索失败"))
+        // v1 批次15（US-1504）：无 Key 全不相关 → 「错误：」搜索增强引导文案
+        assertTrue("应返回「错误：」引导文案", result.startsWith("错误：") && result.contains("搜索增强"))
     }
 
     @Test

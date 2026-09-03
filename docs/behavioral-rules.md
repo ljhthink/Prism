@@ -1028,6 +1028,138 @@
 - 适用场景：dev / bugfix
 - 状态：active
 
+#### BR-network-002: 按状态码做诊断分支的 HTTP 客户端必须 expectSuccess=false，且测试 client 与生产配置一致（防测试-生产漂移）
+
+- 类别：error-handling / testing / network
+- 规则：若实现中写了 `resp.status.value !in 200..299` 之类的**状态码分支**（用于区分 401 Key 无效 / 429 限流 / 5xx 服务端错误等可诊断文案），则该请求的 HttpClient 必须 `expectSuccess = false`——否则非 2xx 在 `client.get` 抛 `ClientRequestException`，状态码分支成为**不可达死代码**，错误被吞成泛化文案。且**测试用 MockEngine 必须与生产 client 的 expectSuccess 配置一致**（测试默认 expectSuccess=false 会掩盖生产 expectSuccess=true 的行为漂移）。此为 ADR-032 R2（Fetch）与 v1 批次8（热榜）两度复现的根因。
+- 反例：生产 `searchHttpClient { expectSuccess = true }` 复用给需要区分状态码的热榜工具；测试 MockEngine（默认 false）断言 500→null 通过，生产 401 被吞成 `ServerResponseException`
+- 正例：需状态码诊断的工具用独立 `expectSuccess = false` client + 独立超时；补一条"用生产同款 client 配置跑 MockEngine"的契约测试验证状态码分支真实可达
+- 来源：guardrail TKN-V1B8-MCP-ENHANCE-001 M-1（v1 批次8 US-002，与 ADR-032 R2 同款）
+- 添加日期：2026-08-19
+- 适用场景：dev / bugfix / testing
+- 状态：active
+
+#### BR-vision-004: 端侧 OCR/视觉坐标必须与「执行坐标空间」一致，降采样后必须按比例还原到屏幕空间
+
+- 类别：vision / interface
+- 规则：任何「截图 → 视觉/OCR 处理 → 返回坐标给执行层」的链路，**执行坐标空间**（如 Accessibility bounds / tap 手势）与**处理坐标空间**（如降采样后位图像素）不一致时，返回坐标必须按 `scaleX=screenW/bitmapW, scaleY=screenH/bitmapH` 还原。截图降采样（最长边 ≤1024px）后直接在降采样位图上跑 OCR/目标检测返回坐标、而 tap 在全屏空间执行，会产生整体缩放错位（真机约 2.3 倍），表现为"识别到了但点不到/点错位"。坐标还原逻辑应抽为纯函数（如 `scaledOcrElement`）可单测。
+- 反例：`captureScreenshot` 降采样到 461×1024，`extractElements` 直接返回 OCR 的 461×1024 空间坐标，`tap(x,y)` 在 1080×2400 执行 → 全部点错位（v1 批次11 A 致命根因）
+- 正例：captureScreenshot 降采样前记录原始尺寸；extractElements 传 `screenWidth/Height`，坐标经纯函数 `scaledOcrElement` 按比例还原到屏幕空间后再回灌 LLM/执行 tap
+- 来源：v1 批次11 A 修复（真机"OCR 无法告诉 LLM 点击位置"根因链 #1，prd-v1-b11-phone §6.13.1）
+- 添加日期：2026-08-21
+- 适用场景：dev / bugfix / vision
+- 状态：active
+
+#### BR-security-008: 「按描述解析目标」类动作的敏感拦截必须用命中目标的真实文本，查询词/坐标仅作解析入口
+
+- 类别：security
+- 规则：对 tap/long_press 等按「LLM 描述/文本锚点」解析目标的动作，**敏感/高危拦截判断必须用命中目标（节点聚合文本 / OCR 行文本）的真实文本**，LLM 查询词与原始坐标只用于解析定位，不得作为敏感判断的唯一依据。典型绕过：`tap(text="确认")` 命中「确认支付」按钮——查询词"确认"不敏感但目标真实文本"确认支付"含支付词 → 用查询词判断会击穿支付类硬拦截。同理，坐标吸附（把点击坐标吸附到最近可点击节点中心）后也须确保吸附目标不落到敏感节点（吸附候选按真实文本预过滤）。另：查询词本身含敏感词也应作为附加防御直接拦截。
+- 反例：`tap(text="确认")` 命中「确认支付」→ `isSensitiveTargetText("确认")=false` → 支付硬拦截/人工确认双绕过（guardrail TKN-V1B11-GUARDRAIL-001 H-1 / 002 R-1）
+- 正例：`effectiveTargetText = 命中真实文本 ?: nodeTextOf(nodeId) ?: nodeTextAt(x,y) ?: 查询词`，四条路径（纯 text / node_id+text 双传 / 纯 node_id / 纯坐标）都用真实文本判定；snapToClickableCenter 按聚合文本过滤敏感候选；配红线单测"查询词不敏感但真实文本敏感 → 必须拦截"
+- 来源：guardrail TKN-V1B11-GUARDRAIL-001/002/003（H-1 + R-1，v1 批次11 文本锚点敏感拦截绕过）
+- 添加日期：2026-08-21
+- 适用场景：dev / bugfix / security
+- 状态：active
+
+#### BR-security-009: 「文本型工具调用」解析执行必须复用既有工具安全链 + 结果回灌前剥离工具块
+
+- 类别：security
+- 规则：为不产生原生 tool_calls 的模型（glm-4.6v-flash 等）新增**文本型 `<tool_call>` 解析**时，解析出的工具调用**必须复用既有 executeToolCall 安全链**（用户确认门 / phone_control 敏感拦截），不得绕过；执行结果以 user 消息回灌前**必须 stripTextToolCalls**——fetch/搜索注入的 `<tool_call>` 块若留在结果里会跨轮被再次解析放大；文本路径 continue 前必须补重复工具熔断检查（与原生路径一致），否则只能靠 maxRounds 硬顶。
+- 反例：文本工具调用直接执行不走确认门；工具结果原样注入历史导致注入块跨轮再解析（guardrail TKN-V1B12-GUARDRAIL-001 P1/P3）
+- 正例：TextToolCallParser.parse → executeToolCall（确认+安全链）→ 结果 stripTextToolCalls 后【工具执行结果】user 回灌 → 熔断检查 → continue
+- 来源：guardrail TKN-V1B12-GUARDRAIL-001/002（v1 批次12 glm 文本工具调用）
+- 添加日期：2026-08-21
+- 适用场景：dev / bugfix / security
+- 状态：active
+
+#### BR-security-010: 包名/别名纠正映射不得扩大功能面——纠正后包名必须仍过敏感黑名单（双重判定）
+
+- 类别：security
+- 规则：为 launch_app 新增**包名/别名纠正映射**（应用名/错包名 → 正确包名）时，映射的**正确包名必须仍落在金融敏感黑名单内**（否则"招商银行"中文名经映射解析成 cmb.pb、而 cmb.pb 不在黑名单 → prompt 注入启动银行 App 绕过硬拦截）；敏感判定须对**原始输入与纠正后包名双重**检查。映射"宁缺毋错"——不确定的包名不收录，错误映射比无映射更糟。金融黑名单须用**真实包名**（真机实证），不用 Activity 名。
+- 反例：映射"招商银行"→cmb.pb 但黑名单只有 com.cmbchina.ccd.pluto.cmbActivity（Activity 名非包名）→ 注入可启动招商银行无拦截（guardrail TKN-V1B12-GUARDRAIL-001 P0 阻断）
+- 正例：黑名单补 cmb.pb/com.chinamworld.bocmbci/com.chinamworld.main 等真实包名；runLaunchAction `if (isSensitivePackage(rawPkg) || isSensitivePackage(pkg))` 双重拦截；配红线单测（金融映射解析后必命中黑名单）
+- 来源：guardrail TKN-V1B12-GUARDRAIL-001 P0（v1 批次12 PhoneControlPackageMap + 金融黑名单绕过）
+- 添加日期：2026-08-21
+- 适用场景：dev / bugfix / security
+- 状态：active
+
+#### BR-interface-019: 工具结果/会话历史禁止内嵌大 base64 图片文本——多模态模型走 image_url 注入，文本模型用文本摘要
+
+- 类别：interface / performance
+- 规则：任何工具（尤其手机操控 `screenshot`）的**结果文本/会话历史中禁止内嵌全量 base64 data URL**（截图 ~200-400KB）——① 持久化进会话 JSON 使历史膨胀至数 MB，重开历史渲染 400KB 单行阻塞主线程 >5s → **ANR 崩溃**（真机闪退）；② 该 base64 作为文本喂回模型纯属上下文膨胀（多模态模型要的是**图片**不是 base64 文本）。正确做法：多模态模型（supportsVision）截图以 **image_url 注入会话**（模型看真图）、base64 从持久化消息剥离；纯文本模型返回 OCR 文字+坐标摘要。
+- 反例：`runScreenshot` 返回 `"截图成功（data URL）：$dataUrl$screenText"` → 400KB base64 进历史 → 重开对话 ANR 崩溃 + 每次截图上下文膨胀拖慢响应（v1 批次13 A 根因，真机 ANR 证据 prism_20260821_054307.log）
+- 正例：视觉模型返回 `【手机截图图片】+dataUrl` 标记，SkillExecutor 提取标记后以 user 消息 image_url 注入、base64 从持久化剥离；纯文本模型返回 OCR 文字+坐标（条目上限防膨胀）
+- 来源：v1 批次13 A/B（真机 ANR 崩溃 + 多模态图片注入，prd-v1-b11 §6.15）
+- 添加日期：2026-08-21
+- 适用场景：dev / bugfix / interface
+- 状态：active
+
+#### BR-vision-005: 视觉截图图片注入必须标记 transientImage 并持久化剥离；视觉不支持 400 必须降级重试而非中断
+
+- 类别：vision / interface / error-handling
+- 规则：多模态模型截图以 image_url 注入会话的 user 消息必须标记 `transientImage=true`，并由 `ChatMessageSerializer.encodeList` 在持久化时剥离 `imageUrl`（base64 仅用于当前会话 LLM 请求，不落历史——防会话 JSON 膨胀 + 切纯文本模型后历史每轮 400）。当工具回路收到 400 `visionUnsupported`（模型名含视觉字样但端点不支持 image_url）时，**不得让任务中断**：剥离已注入的瞬态截图图片 + 经 `LocalToolExecutor.onVisionUnsupported()` 通知手机操控截图降级 OCR/UI 树 + `rounds--` 重试本轮（模型以文本模式继续）。降级信号须经 Composite 门面转发给全部 delegate，接口用默认空实现向后兼容。
+- 反例：image_url 注入未标 transientImage → 400KB base64 落历史 → 重开对话 ANR（v1 批次13 F1，真机 ANR 证据 prism_20260821_054307.log）；视觉 400 直接转发错误结束回路 → 拼多多打开后后续任务中断
+- 正例：SkillExecutor 原生/文本两条路径注入均置 `transientImage=true`；ChatMessageSerializer 剥离；visionUnsupported → 剥离图片 + `onVisionUnsupported()`（截图转 OCR）+ 重试本轮；配单测「400 后重试 + base64 不出现在持久化 JSON」
+- 来源：v1 批次13 A/B/F1/D16c（guardrail TKN-V1B13-GUARDRAIL-001 F1 + 多模态降级链）
+- 添加日期：2026-08-21
+- 适用场景：dev / bugfix / vision
+- 状态：active
+
+#### BR-security-011: 截图等图片外发属隐私面——supportsVision 显式设置后不得被模型名自动检测覆盖
+
+- 类别：security / privacy / vision
+- 规则：手机操控截图内容会发送到 LLM 端点，属敏感数据外发。视觉能力判定若为「显式标记 > 自动检测」，则**用户显式设置过**（`supportsVisionSet=true`，设置页触碰开关）后运行时/保存逻辑必须尊重用户值——显式关闭 `supportsVision=false` 绝不能被「按模型名自动检测」重新开启（防截图静默外发）。旧配置 `supportsVisionSet=false`（默认）才允许按模型名自动检测兜底（开箱即用）。自动启用（模型名命中视觉模式）须同时落 `supportsVisionSet=true`，避免被后续保存误覆盖。
+- 反例：`visionCapableProvider = active.supportsVision || detectVisionSupport(model)` → 用户在设置页显式关闭视觉，模型名命中视觉模式仍被自动开启 → 截图静默外发（隐私回归）
+- 正例：`supportsVisionSet ? supportsVision : detectVisionSupport(model)`；SettingsScreen 触碰开关置 `supportsVisionTouched=true`（保存时写入 supportsVisionSet）；saveProvider 仅在未设置时自动启用；配单测「显式关闭 + 视觉模型名 → 保存后仍 false」
+- 来源：v1 批次13 B/D16b（视觉能力开箱即用 vs 隐私显式关闭的平衡设计）
+- 添加日期：2026-08-21
+- 适用场景：dev / bugfix / security
+- 状态：active
+
+#### BR-interface-021: 视觉能力开关保存时按模型名自动启用（开箱即用），但仅当用户未显式设置过
+
+- 类别：interface / vision / ux
+- 规则：为视觉模型（glm-4.6v-flash 等，模型名命中 [ProviderConfig.detectVisionSupport]）新增的「支持视觉」开关若默认为关，用户配置视觉模型后会继续走 OCR（能力未被利用）且不知该开此开关——违反开箱即用。保存 Provider 时应自动启用 `supportsVision=true` 并落 `supportsVisionSet=true`（仅当 `!supportsVisionSet`）。误判（模型名带视觉字样但端点不支持图片）由 400 降级链（BR-vision-005）自愈，用户仍可在设置页显式关闭。
+- 反例：supportsVision 默认 false 且无自动提示 → 用户配 glm-4.6v-flash 仍走 OCR 文本，多模态能力闲置
+- 正例：`SettingsViewModel.saveProvider` 未显式设置时 `detectVisionSupport(firstModel)` → `supportsVision=true + supportsVisionSet=true`；配单测「glm-4.6v-flash 保存后自动启用 / deepseek-chat 不启用 / 显式关闭不覆盖」
+- 来源：v1 批次13 B/D16b（视觉能力开箱即用，prd-v1-b11 §6.15）
+- 添加日期：2026-08-21
+- 适用场景：dev / ux / vision
+- 状态：active
+
+#### BR-ops-005: 常驻前台服务/长驻资源必须绑定「任务活跃期」而非「能力开关期」，并以空闲超时自动释放
+
+- 类别：ops / architecture / battery
+- 规则：前台服务（FGS）等常驻型系统资源，其启动条件不得绑定在「能力开关状态」（如无障碍服务已启用、某功能已配置），必须绑定在「任务活跃期」——由任务的实际工作单元（如工具调用入口）首次触发启动并刷新活跃时间戳，空闲超时后自动释放；服务重启策略用 START_NOT_STICKY（任务期服务被杀不复活，下次任务重新拉起），避免「杀不死」循环。同时：能力开关期常驻会与 Manifest `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` 用途声明名实不符（Play 政策风险）；订阅系统高频事件（如无障碍 TYPE_WINDOW_CONTENT_CHANGED）前必须确认处理器真的消费它，否则是纯 binder IPC 开销拖慢整机。
+- 反例：`onServiceConnected() { KeepAliveService.start(this) }` + `START_STICKY` + 订阅 typeWindowContentChanged 但处理器只认 STATE_CHANGED —— 真机 dumpsys 实证：服务常驻 1d8h10m、通知 ONGOING|NO_CLEAR 不间断、被杀自动重启，用户不使用软件也弹窗+整机卡顿
+- 正例：`PhoneControlSessionManager.onPhoneToolInvoked()` 由工具执行入口每次调用（首个调用 startForegroundService + 排定 idle 检查，锁内单次取值判空防 TOCTOU；满 IDLE_TIMEOUT_MS 自动 stopService）；START_NOT_STICKY；事件订阅收窄为实际消费的类型
+- 来源：v1 批次14 保活 Bug 修复（TKN-V1B14-KEEPALIVE-BUG-001，ADR-041；guardrail TKN-V1B14-GUARDRAIL-001 两轮 + ac-verifier TKN-V1B14-ACCEPTANCE-001 7/7 PASS）
+- 添加日期：2026-08-23
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-network-003: WebView 渲染抓取必须对主框架导航与终态 URL 做公网 https 校验（与直抓逐跳 SSRF 校验对齐）
+
+- 类别：security / network / webview
+- 规则：任何 WebView 渲染抓取路径，除初始 URL 的 SSRF 校验外，必须：① `shouldOverrideUrlLoading` 拦截指向非公网 https 的主框架导航（页内 JS `location`/meta refresh/链接跳转）；② `onPageFinished` 对终态 `view.url` 复验（服务端 302 不触发前者）。校验函数**禁止 DNS 解析**（回调在主线程，InetAddress 解析触发 NetworkOnMainThreadException），只做字符串级私网 IP 字面量/localhost 判定；「公网 DNS 名解析到内网」（rebinding）为既有已知局限，须与直抓路径同口径记录。否则内网响应体会经 outerHTML 提取回灌 LLM 上下文并随下轮请求外发云端端点。
+- 反例：WebViewClient 只覆盖 onPageFinished 且对任意 finishedUrl 一律 complete(true) → 攻击页 JS 跳 `http://127.0.0.1:11434`（命中 network_security_config localhost 明文放行）→ 本机服务响应被提取回灌（guardrail TKN-V1B15-GUARDRAIL-001 M-1）
+- 正例：shouldOverrideUrlLoading 拦截非公网 https 主框架导航 + onPageFinished 终态 `isFinalUrlAllowed` 复验（https scheme + userinfo 剥离 + localhost/.localhost/私网 IPv4 字面量/::1 拦截，无 DNS）+ 红线单测
+- 来源：v1 批次15 US-1506 WebView 渲染降级（guardrail TKN-V1B15-GUARDRAIL-001 M-1 修复）
+- 添加日期：2026-09-02
+- 适用场景：dev / security / webview
+- 状态：active
+
+#### BR-network-004: 用户自建明文 http 服务端点必须提供系统明文策略拦截的可诊断分支与绕行方案文档
+
+- 类别：network / ops / error-handling
+- 规则：`network_security_config` 仅放行 localhost/127.0.0.1 明文 http（不放宽为安全基线）。凡新增「用户自填 http 端点」功能（SearXNG 引擎、局域网自建 MCP 模板等），必须：① 捕获 `UnknownServiceException`（CLEARTEXT not permitted）输出专属可诊断日志/文案，与「端点填错/DNS 失败」区分（防用户按教程配置后功能静默永不可用）；② 配套文档给出绕行路径：`adb reverse tcp:<端口> tcp:<端口>`（端点填 `http://127.0.0.1:<端口>`，落既有放行域）或 https 反向代理或 VPN+https。**不得为便利而放宽 network_security_config 放行任意明文**。
+- 反例：SearXNG 引擎 `catch (Exception)` 统一静默降级 → 用户按 runbook 填局域网 http 端点后 OkHttp 抛 UnknownServiceException → 引擎永远不可用且日志仅 `failed (ClientRequestException)` 类无法定位（guardrail TKN-V1B15-GUARDRAIL-001 M-2）
+- 正例：fetchViaSearxng 独立 catch UnknownServiceException 输出 `blocked by cleartext policy` + runbook 第 6 节三种解法（adb reverse/https 反代/Tailscale）+ 故障排查表对应行
+- 来源：v1 批次15 US-1507 SearXNG + US-1508 局域网 MCP 模板（guardrail TKN-V1B15-GUARDRAIL-001 M-2 修复；同机制先例 ADR-039 批次6 Issue 1）
+- 添加日期：2026-09-02
+- 适用场景：dev / bugfix / network
+- 状态：active
+
 ## 审计记录
 
 | 日期 | 审计人 | 结果 | 备注 |
@@ -1088,3 +1220,6 @@
 | 2026-08-19 | 主 Agent | 新增 BR-ops-004 | v1 真机二次修复（ADR-037）开发期踩坑：CrossSessionMemoryManager.kt 多行函数替换多次不命中（CRLF vs LF，PowerShell String.Replace 静默 0 替换）+ ReadAllLines/Get-Content 行数不一致。新增 BR-ops-004（改源码前统一 CRLF→LF 或按行数组拼接 + 字节级复验，禁止 here-string 多行块直传 Replace） |
 | 2026-08-19 | guardrail-enforcer | 通过，A/C 建议采纳 | v1 真机修复审查（TKN-V1FIX-GUARDRAIL-001）：0 阻断，无注入/硬编码密钥/SSRF 回归/CWE-209，隐私授权边界完好（视觉旁路 OCR 本地兜底 + 云端仍受授权闸门）。采纳质量建议：ATOM_KEYWORDS 剔除淡化的非自我指涉词（防 L2 噪声）、CHALLENGE_MARKERS 分级（弱特征需正文极短才判定避免误伤正常长文）。全量回归通过 |
 | 2026-08-19 | guardrail-enforcer | 有条件通过，B-1 阻断项已修复；新增 BR-search-003 + BR-vision-003 | v1 批次7（ADR-040）审查（TKN-SEARCH-VISION-ROUND5-001）：搜索 Bing→Baidu 多引擎回退 + 视觉专用 Provider 跳过熔断。**B-1 阻断项**（MEDIUM 隐私回归）：专用 Provider 分支漏 `isConsentGiven()`，用户设置页撤销授权后图片仍外发。修复为专用分支 `auto && config.isConsentGiven()`（只跳过熔断、仍守 consent 铁门）+ 补单测"专用 Provider + 授权撤销→OCR"。A-No.2/3/4/5（专用限流退避 / Baidu 跳转解码 / 简称↔全称放宽 / 主模型=视觉未打标授权引导）列为后续迭代已知限制。新增规则：BR-search-003（多引擎回退须复核相关性+预算）、BR-vision-003（专用 Provider 可跳过熔断但不得绕过 consent 铁门）。全量回归 2270 用例 0 失败 |
+| 2026-08-19 | guardrail-enforcer | 有条件通过，M-1/M-2/M-3 已修复；新增 BR-network-002 | v1 批次8（PRD MCP/API 增强）审查（TKN-V1B8-MCP-ENHANCE-001）：US-001 博查模板 + US-002 今日热榜本地工具 + US-003 Jina Reader 抓取增强 + US-004 海外模板标注+移除 Brave。安全无阻断（SSRF/Key/日志脱敏/外部内容边界均合格）。**M-1**（Medium）：热榜复用 expectSuccess=true 的 searchHttpClient，状态码分支成死代码（ADR-032 R2 同款漂移）→ 独立 expectSuccess=false + 5s client + 状态码诊断文案；**M-2**（Medium）：Jina 失败无降级 → 改为降级直抓；**M-3**：Bocha 握手测试缺失 → 补嵌入式 Streamable HTTP Server 握手 + tools/list + callTool 测试。新增规则：BR-network-002（状态码诊断分支须 expectSuccess=false + 测试 client 与生产一致）。全量回归 2319 用例 0 失败 + APK 构建成功 |
+| 2026-08-21 | 主 Agent | 新增 BR-vision-005 + BR-security-011 + BR-interface-021 | v1 批次13（ADR-041，真机 ANR 崩溃 + 多模态 + 提速 + E 强化）：A 崩溃根治（runScreenshot 不再内嵌 base64——视觉模型返回图片标记 / 纯文本模型返回 OCR 文本+坐标）/ B 多模态（supportsVision + 设置页开关 + 运行时自动检测（supportsVisionSet 隐私铁门）+ SkillExecutor image_url 注入（transientImage 持久化剥离）+ 400 visionUnsupported 降级链（剥离图片 + onVisionUnsupported 截图转 OCR/UI 树 + 重试本轮））/ C 提速（OCR 40/图标 15 条目上限 + 上下文去 base64）/ D（E 强化）type 接入 before/after + 软提示纠偏引导。全量回归 2464 功能用例 0 失败（唯一失败为 pdfbox-android glyphlist 资源在纯 JVM 基准不可用的既有环境限制，非本批次回归；guardrail M-2/M-3/L-3 修复后 2466 用例仅剩既有性能抖动复跑通过）+ lint 0 errors + APK 构建成功。新增 3 规则：BR-vision-005（transientImage 持久化剥离 + 400 降级重试）、BR-security-011（supportsVision 显式设置不被自动检测覆盖，隐私）、BR-interface-021（视觉开关按模型名自动启用开箱即用） |
+| 2026-08-23 | 主 Agent + guardrail-enforcer + ac-verifier | 新增 BR-ops-005 | v1 批次14 保活 Bug 修复（ADR-041，真机「不用软件也弹窗+卡顿」）：根因为批次11 F2 把保活 FGS 绑在「无障碍启用期」而非「任务期」（dumpsys 实证常驻 1d8h10m + START_STICKY 重启循环）。修复：PhoneControlSessionManager 任务期动态保活状态机（首个 phone_control__* 工具调用启动/空闲 120s 停止/onDestroy reset）+ START_NOT_STICKY + FGS 后台启动拒绝可诊断降级 + 无障碍事件订阅收窄 typeWindowStateChanged+300ms（卡顿根治）。guardrail 两轮（M-1 TOCTOU 锁内单取值修复 / M-2 429 退避真空豁免记录）通过 + ac-verifier 7/7 PASS + 全量回归 2475 用例 0 失败 + lint 0 errors + 真机预验证（覆盖安装重绑后 KeepAlive 不再运行、id=2001 常驻通知消失）。新增规则：BR-ops-005（常驻资源绑定任务活跃期而非能力开关期 + 空闲超时释放 + 高频事件订阅须有消费者） |

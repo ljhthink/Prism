@@ -14,6 +14,7 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
+import io.ktor.server.response.header
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import io.ktor.server.sse.ServerSSESession
@@ -1212,8 +1213,10 @@ class OpenAICompatibleProviderTest {
     }
 
     @Test
-    fun `buildRequestBody serializes assistant null content when only tool_calls present`() {
-        // 验证 assistant 空 content + 非空 toolCalls 时 content=null（OpenAI 允许）
+    fun `buildRequestBody serializes assistant empty content when only tool_calls present`() {
+        // v1 批次11（D6 sensenova 兼容）：assistant 空 content + 非空 toolCalls 时，content 应为
+        // 空字符串 "" 而非 null —— OpenAI 两者都接受，但 sensenova/StepFun 等严格端点不接受
+        // content=null（400 "invalid tool_call function"）。故改为空串规避严格端点。
         val config = ProviderConfig(name = "X", baseUrl = "http://h", apiKeyRef = "", models = listOf("gpt"))
         val messages = listOf(
             ChatMessage(id = 0, role = Role.USER, content = "q", timestamp = 0),
@@ -1225,10 +1228,38 @@ class OpenAICompatibleProviderTest {
             )
         )
         val body = provider.buildRequestBody(config, messages)
-        // assistant 消息的 content 应为 null（空字符串时 toMessageBody 转为 null）
         assertTrue("应含 assistant 角色", body.contains("\"role\":\"assistant\""))
-        // 不应含空字符串 content（应为 null）
         assertTrue("应含 tool_calls 字段", body.contains("\"tool_calls\""))
+        // content 应为空串（而非 null），sensenova 等严格端点不接受 content=null
+        assertTrue("assistant content 应为空串而非 null", body.contains("\"content\":\"\""))
+    }
+
+    @Test
+    fun `buildRequestBody filters tool_calls with empty id or name for strict endpoints`() {
+        // v1 批次11（D6 sensenova 兼容）：过滤空 id / 空 functionName 的 tool_call 块。
+        // 流式中断/分片重组可产生空 id/name 的 tool_call，sensenova 直接 400
+        // （"function<path> cannot be empty"，siclaw#140 / cc-switch#4164 同根因）。
+        val config = ProviderConfig(name = "X", baseUrl = "http://h", apiKeyRef = "", models = listOf("gpt"))
+        val messages = listOf(
+            ChatMessage(id = 0, role = Role.USER, content = "q", timestamp = 0),
+            ChatMessage(
+                id = 1, role = Role.ASSISTANT, content = "", timestamp = 0,
+                toolCalls = listOf(
+                    // 合法块：保留
+                    ToolCallRef(id = "call_ok", functionName = "web_search__search", arguments = "{}"),
+                    // 空 id：丢弃
+                    ToolCallRef(id = "", functionName = "phone_control__tap", arguments = "{}"),
+                    // 空 name：丢弃
+                    ToolCallRef(id = "call_bad", functionName = "", arguments = "{}")
+                )
+            )
+        )
+        val body = provider.buildRequestBody(config, messages)
+        assertTrue("应保留合法 tool_call", body.contains("call_ok"))
+        assertTrue("应保留合法 name", body.contains("web_search__search"))
+        // 非法块应被过滤（其 id / name 不应出现在请求体）
+        assertFalse("空 id 的 tool_call 应被过滤", body.contains("\"phone_control__tap\""))
+        assertFalse("空 name 的 tool_call 应被过滤", body.contains("call_bad"))
     }
 
     @Test
@@ -1643,6 +1674,270 @@ class OpenAICompatibleProviderTest {
             val error = events.filterIsInstance<StreamEvent.Error>().firstOrNull()
             assertNotNull("429 应发射 Error 事件", error)
             assertTrue("429 应提示限流稍等重试", error!!.message.contains("限流"))
+            assertNull("无 Retry-After 头时 retryAfterSeconds 应为 null", error.retryAfterSeconds)
+        } finally {
+            server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
+        }
+    }
+
+    // ==================== v1 批次11（E，D11）：Retry-After 头解析（parseRetryAfter） ====================
+
+    @Test
+    fun `streamChat parses Retry-After seconds header into retryAfterSeconds`() = runBlocking {
+        val server = embeddedServer(Netty, port = 0) {
+            routing {
+                route("/chat/completions", HttpMethod.Post) {
+                    handle {
+                        call.response.header(io.ktor.http.HttpHeaders.RetryAfter, "3")
+                        call.respondText(
+                            """{"error":{"message":"rate limited"}}""",
+                            ContentType.Application.Json, HttpStatusCode.TooManyRequests
+                        )
+                    }
+                }
+            }
+        }
+        server.start(wait = false)
+        try {
+            val port = server.engine.resolvedConnectors().first().port
+            val config = ProviderConfig(
+                name = "Kimi", baseUrl = "http://127.0.0.1:$port",
+                apiKeyRef = "kimi", models = listOf("kimi-k2.6")
+            )
+            val events = provider.streamChat(config, sampleMessages()).toList()
+            val error = events.filterIsInstance<StreamEvent.Error>().firstOrNull()
+            assertNotNull(error)
+            assertEquals("秒数形式 Retry-After=3 应解析为 3L", 3L, error!!.retryAfterSeconds)
+        } finally {
+            server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
+        }
+    }
+
+    @Test
+    fun `streamChat parses Retry-After http-date header into seconds`() = runBlocking {
+        // RFC 7231 IMF-fixdate 形式：换算为距当前剩余秒数（≤60 上限）
+        val future = java.util.Date(System.currentTimeMillis() + 30_000)
+        val dateStr = java.text.SimpleDateFormat(
+            "EEE, dd MMM yyyy HH:mm:ss z", java.util.Locale.US
+        ).format(future)
+        val server = embeddedServer(Netty, port = 0) {
+            routing {
+                route("/chat/completions", HttpMethod.Post) {
+                    handle {
+                        call.response.header(io.ktor.http.HttpHeaders.RetryAfter, dateStr)
+                        call.respondText(
+                            """{"error":{"message":"rate limited"}}""",
+                            ContentType.Application.Json, HttpStatusCode.TooManyRequests
+                        )
+                    }
+                }
+            }
+        }
+        server.start(wait = false)
+        try {
+            val port = server.engine.resolvedConnectors().first().port
+            val config = ProviderConfig(
+                name = "Kimi", baseUrl = "http://127.0.0.1:$port",
+                apiKeyRef = "kimi", models = listOf("kimi-k2.6")
+            )
+            val events = provider.streamChat(config, sampleMessages()).toList()
+            val error = events.filterIsInstance<StreamEvent.Error>().firstOrNull()
+            assertNotNull(error)
+            assertTrue(
+                "HTTP-date 形式应换算为剩余秒数（1..60），实际 ${error!!.retryAfterSeconds}",
+                error.retryAfterSeconds in 1L..60L
+            )
+        } finally {
+            server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
+        }
+    }
+
+    @Test
+    fun `streamChat caps oversized Retry-After to 60 seconds`() = runBlocking {
+        // 边界：服务端异常大值（3600）不得无限拉长重试窗口 → coerceIn(1, 60)=60
+        val server = embeddedServer(Netty, port = 0) {
+            routing {
+                route("/chat/completions", HttpMethod.Post) {
+                    handle {
+                        call.response.header(io.ktor.http.HttpHeaders.RetryAfter, "3600")
+                        call.respondText(
+                            """{"error":{"message":"rate limited"}}""",
+                            ContentType.Application.Json, HttpStatusCode.TooManyRequests
+                        )
+                    }
+                }
+            }
+        }
+        server.start(wait = false)
+        try {
+            val port = server.engine.resolvedConnectors().first().port
+            val config = ProviderConfig(
+                name = "Kimi", baseUrl = "http://127.0.0.1:$port",
+                apiKeyRef = "kimi", models = listOf("kimi-k2.6")
+            )
+            val events = provider.streamChat(config, sampleMessages()).toList()
+            val error = events.filterIsInstance<StreamEvent.Error>().firstOrNull()
+            assertNotNull(error)
+            assertEquals("超大 Retry-After 应被截断到 60L", 60L, error!!.retryAfterSeconds)
+        } finally {
+            server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
+        }
+    }
+
+    @Test
+    fun `streamChat ignores invalid Retry-After header`() = runBlocking {
+        // 非法值（非秒数非 HTTP-date）→ 解析失败返回 null，调用方走指数退避
+        val server = embeddedServer(Netty, port = 0) {
+            routing {
+                route("/chat/completions", HttpMethod.Post) {
+                    handle {
+                        call.response.header(io.ktor.http.HttpHeaders.RetryAfter, "not-a-date")
+                        call.respondText(
+                            """{"error":{"message":"rate limited"}}""",
+                            ContentType.Application.Json, HttpStatusCode.TooManyRequests
+                        )
+                    }
+                }
+            }
+        }
+        server.start(wait = false)
+        try {
+            val port = server.engine.resolvedConnectors().first().port
+            val config = ProviderConfig(
+                name = "Kimi", baseUrl = "http://127.0.0.1:$port",
+                apiKeyRef = "kimi", models = listOf("kimi-k2.6")
+            )
+            val events = provider.streamChat(config, sampleMessages()).toList()
+            val error = events.filterIsInstance<StreamEvent.Error>().firstOrNull()
+            assertNotNull(error)
+            assertNull("非法 Retry-After 应解析为 null", error!!.retryAfterSeconds)
+        } finally {
+            server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
+        }
+    }
+
+    // ==================== v1 批次9（US-905）SSE 错误处理增强 ====================
+
+    @Test
+    fun `streamChat reports server error message on 5xx`() = runBlocking {
+        // B4/B6：5xx（服务端 502）此前落 else 通用"网络请求失败"，丢服务端错误诊断
+        val server = embeddedServer(Netty, port = 0) {
+            routing {
+                route("/chat/completions", HttpMethod.Post) {
+                    handle { call.respond(HttpStatusCode.BadGateway) }
+                }
+            }
+        }
+        server.start(wait = false)
+        try {
+            val port = server.engine.resolvedConnectors().first().port
+            val config = ProviderConfig(
+                name = "OpenAI", baseUrl = "http://127.0.0.1:$port",
+                apiKeyRef = "openai", models = listOf("gpt-4o")
+            )
+            val events = provider.streamChat(config, sampleMessages()).toList()
+            val error = events.filterIsInstance<StreamEvent.Error>().firstOrNull()
+            assertNotNull("5xx 应发射 Error 事件", error)
+            assertTrue("5xx 应提示服务端错误而非通用网络文案", error!!.message.contains("服务端错误（502）"))
+        } finally {
+            server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
+        }
+    }
+
+    @Test
+    fun `streamChat reports protocol mismatch on 200 json content type`() = runBlocking {
+        // B4/B6：服务端返回 200 + application/json（非 text/event-stream）→ Ktor SSE 抛
+        // SSEClientException(response=200) → 此前误报"网络请求失败"，现应提示协议不匹配。
+        val server = embeddedServer(Netty, port = 0) {
+            routing {
+                route("/chat/completions", HttpMethod.Post) {
+                    handle {
+                        call.respondText(
+                            """{"error":{"message":"not a stream"}}""",
+                            ContentType.Application.Json, HttpStatusCode.OK
+                        )
+                    }
+                }
+            }
+        }
+        server.start(wait = false)
+        try {
+            val port = server.engine.resolvedConnectors().first().port
+            val config = ProviderConfig(
+                name = "OpenAI", baseUrl = "http://127.0.0.1:$port",
+                apiKeyRef = "openai", models = listOf("gpt-4o")
+            )
+            val events = provider.streamChat(config, sampleMessages()).toList()
+            val error = events.filterIsInstance<StreamEvent.Error>().firstOrNull()
+            assertNotNull("200+JSON 应发射 Error 事件", error)
+            assertTrue("应提示服务端返回异常格式而非网络文案", error!!.message.contains("异常格式"))
+            assertFalse("不应误报网络请求失败", error.message.contains("网络请求失败"))
+        } finally {
+            server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
+        }
+    }
+
+    @Test
+    fun `streamChat does not flag tool-call-only stream as empty when no DONE`() = runBlocking {
+        // H-2（guardrail TKN-V1B9-GUARDRAIL-001）：纯工具调用响应（content/reasoning 均空）
+        // 但服务端**不发 [DONE]**（连接直接关闭）→ 不应判为空流（否则工具回路断裂）。
+        // 修复前 emittedAnyDelta 只统计 Delta → ToolCall* 事件不置位 → 误判空流。
+        val server = embeddedServer(Netty, port = 0) {
+            install(io.ktor.server.sse.SSE)
+            routing {
+                route("/chat/completions", HttpMethod.Post) {
+                    sse {
+                        sendChunk("""{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_h2","function":{"name":"read_file","arguments":"{}"}}]}}]}""")
+                        sendChunk("""{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}""")
+                        // 不发 [DONE]，直接关闭连接
+                    }
+                }
+            }
+        }
+        server.start(wait = false)
+        try {
+            val port = server.engine.resolvedConnectors().first().port
+            val config = ProviderConfig(
+                name = "OpenAI", baseUrl = "http://127.0.0.1:$port",
+                apiKeyRef = "openai", models = listOf("gpt-4o")
+            )
+            val events = provider.streamChat(config, sampleMessages()).toList()
+            // 不应因"无 DONE + 无 Delta"被判空流 → 必须收到 ToolCallComplete 且无空流 Error
+            assertTrue("应收到 ToolCallStart", events.any { it is StreamEvent.ToolCallStart })
+            assertTrue("应收到 ToolCallComplete", events.any { it is StreamEvent.ToolCallComplete })
+            assertFalse("纯工具调用流不应误判为空流", events.any { it is StreamEvent.Error && it.message.contains("未返回内容") })
+        } finally {
+            server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
+        }
+    }
+
+    @Test
+    fun `streamChat emits empty-stream error when 200 sse returns no delta and no DONE`() = runBlocking {
+        // B6：服务端 200 + SSE 但零增量且无 [DONE] → 此前静默 Done（空气泡），
+        // 现应补发可感知提示（"服务端未返回内容"），用户可重试而非假装成功。
+        val server = embeddedServer(Netty, port = 0) {
+            install(io.ktor.server.sse.SSE)
+            routing {
+                route("/chat/completions", HttpMethod.Post) {
+                    sse {
+                        // 不发送任何 chunk：sse 块直接返回 → 服务端 200 + 关闭连接（零增量、无 [DONE]）
+                        // 真实场景：模型静默失败/会话过期返回空流
+                    }
+                }
+            }
+        }
+        server.start(wait = false)
+        try {
+            val port = server.engine.resolvedConnectors().first().port
+            val config = ProviderConfig(
+                name = "OpenAI", baseUrl = "http://127.0.0.1:$port",
+                apiKeyRef = "openai", models = listOf("gpt-4o")
+            )
+            val events = provider.streamChat(config, sampleMessages()).toList()
+            val error = events.filterIsInstance<StreamEvent.Error>().firstOrNull()
+            assertNotNull("空流应发射 Error 提示", error)
+            assertTrue("应提示服务端未返回内容", error!!.message.contains("未返回内容"))
+            assertFalse("空流不应发射 Done（空气泡）", events.any { it is StreamEvent.Done })
         } finally {
             server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
         }

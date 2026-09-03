@@ -41,7 +41,7 @@
     },
     {
       "id": "2:2044962236284629724",
-      "lastPropertyId": "9:4990081859461232027",
+      "lastPropertyId": "11:3772056960433720405",
       "name": "ProviderConfig",
       "properties": [
         {
@@ -88,6 +88,16 @@
         {
           "id": "9:4990081859461232027",
           "name": "isVisionFallback",
+          "type": 1
+        },
+        {
+          "id": "10:8875612177038512208",
+          "name": "supportsVision",
+          "type": 1
+        },
+        {
+          "id": "11:3772056960433720405",
+          "name": "supportsVisionSet",
           "type": 1
         }
       ],

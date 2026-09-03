@@ -11,6 +11,7 @@ import android.util.Log
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import androidx.annotation.RequiresApi
 import androidx.core.view.accessibility.AccessibilityNodeInfoCompat
 import java.util.concurrent.atomic.AtomicLong
 
@@ -36,20 +37,73 @@ class PhoneControlAccessibilityService : AccessibilityService() {
     /** 节点序号生成器（UI 树采集时分配稳定 nid）。 */
     private val nodeCounter = AtomicLong(0L)
 
+    /**
+     * v1 批次10（Bug A1 修复）：最近一次已知的窗口根节点缓存。
+     * [onAccessibilityEvent] 在 `TYPE_WINDOW_STATE_CHANGED` 时更新；供
+     * [currentRoot] 在 [getRootInActiveWindow] 返回 null（窗口切换过渡期）时兜底使用。
+     * 参考 Android 官方 codelab「缓存最后一次已知根节点」方案。
+     */
+    @Volatile
+    private var lastKnownRoot: AccessibilityNodeInfo? = null
+
+    /** 保护 [lastKnownRoot] 读改写（事件线程写入 + 工具协程读取）与回收的锁。 */
+    private val cacheLock = Any()
+
+    /**
+     * v1 批次11（A 致命修复，OCR 坐标空间还原）：最近一次截图的**原始屏幕尺寸**（未降采样）。
+     *
+     * OCR 在降采样位图（最长边 ≤1024px）上识别，返回坐标是降采样空间；[captureScreenshot] 在
+     * 降采样前记录原始宽高，供 [lastScreenshotScreenSize] 计算缩放因子，把 OCR 坐标还原到
+     * 屏幕空间（与 tap/UI 树 bounds 同一坐标系），否则 tap 整体缩放错位（真机"点不到"根因）。
+     */
+    @Volatile
+    private var lastScreenshotOrigW: Int = 0
+
+    @Volatile
+    private var lastScreenshotOrigH: Int = 0
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        // v1 批次14（TKN-V1B14-KEEPALIVE-BUG-001）：不再在此无条件启动保活前台服务。批次11 F2 的
+        // 「连上即常驻」策略经真机取证（docs/reports/2026-08-23-keepalive-bug-debug.md：服务常驻
+        // 1d8h10m + 通知不间断 + START_STICKY 自动重启）修订为「任务期动态保活」——由
+        // [PhoneControlSessionManager] 在首个 phone_control__* 工具调用时启动、空闲 120s 停止
+        // （ADR-041）。任务进行中防 MIUI 回收的能力保持不变。
         Log.i(TAG, "手机操控无障碍服务已连接")
     }
 
     override fun onDestroy() {
         if (instance === this) instance = null
+        PhoneControlKeepAliveService.stop(this)
+        // v1 批次14：会话状态复位，保证下次连接后首个工具调用重新走 start 分支
+        PhoneControlSessionManager.reset()
+        // guardrail（批次10）：服务销毁时回收缓存根节点，杜绝 AccessibilityNodeInfo 句柄泄漏
+        synchronized(cacheLock) {
+            lastKnownRoot?.recycle()
+            lastKnownRoot = null
+        }
         Log.i(TAG, "手机操控无障碍服务已断开")
         super.onDestroy()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // 按需拉取状态（工具调用时实时采集），此处仅保持服务活跃
+        // 维护最后一次已知根节点缓存（Bug A1）：窗口状态变化时记录源节点为最近根。
+        // 仅缓存有效节点（避免把 null/回收节点写入）；nodeCounter 语义与 mapNode 一致。
+        if (event != null && event.eventType == android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val src = event.source
+            if (src != null) {
+                synchronized(cacheLock) {
+                    val prev = lastKnownRoot
+                    // guardrail（批次10）：缓存必须用 obtain() 复制一份自持句柄。event.source 由框架
+                    // 拥有，回调返回后可能被框架 recycle；直接持有/回收它会误伤框架生命周期。
+                    // obtain(src) 返回独立副本，由本缓存负责 recycle。
+                    lastKnownRoot = AccessibilityNodeInfo.obtain(src)
+                    // 替换缓存时回收旧的自持副本，杜绝句柄泄漏
+                    if (prev != null) prev.recycle()
+                }
+            }
+        }
     }
 
     override fun onInterrupt() = Unit
@@ -61,9 +115,67 @@ class PhoneControlAccessibilityService : AccessibilityService() {
      * @return 结构化文本；无活动窗口/服务未连接返回 null
      */
     fun getUiTreeText(maxNodes: Int = AccessibilityUiSerializer.MAX_NODES): String? {
-        val root = rootInActiveWindow ?: return null
-        val rootNode = mapNode(root, maxNodes) ?: return null
-        return AccessibilityUiSerializer.serialize(rootNode, maxNodes)
+        val root = currentRoot() ?: return null
+        try {
+            val rootNode = mapNode(root, maxNodes) ?: return null
+            return AccessibilityUiSerializer.serialize(rootNode, maxNodes)
+        } finally {
+            // currentRoot 返回自持硬引用（obtain 副本），用毕回收，杜绝句柄泄漏
+            root.recycle()
+        }
+    }
+
+    /**
+     * v1 批次10（Bug A1 修复）：获取当前可序列化的根节点，带「缓存 + 窗口遍历」兜底。
+     *
+     * **背景（真机日志 + 官方调研）**：[getRootInActiveWindow] 在窗口切换过渡期 / 新 App
+     * 尚未首绘 / 锁屏 / FLAG_SECURE 安全窗口时返回 null（Android 官方 codelab"缓存最后一次
+     * 已知根节点"方案 + auto-mobile #775）。`launch_app` 切到第三方 App 后立即 get_ui_state
+     * 极易命中该窗口 → 回灌"无法读取"→ LLM 反复重试（round=38）。
+     *
+     * **修复（缓存根 + getWindows 遍历）**：
+     * 1. 优先 `getRootInActiveWindow()`；
+     * 2. 为 null 时用 [lastKnownRoot]（[onAccessibilityEvent] 维护的最近一次有效根）；
+     * 3. 仍为 null 时遍历 [getWindows]() 找 `it.isActive()` 且有根的活动窗口（多窗口/分屏兜底）。
+     * 三者皆空才返回 null。
+     *
+     * @return 可用根节点的调用方自持硬引用（可能为 null）；调用方用毕后必须 recycle。
+     *   guardrail（批次10）：rootInActiveWindow / getWindows 兜底均为调用方自持引用直接返回；
+     *   仅共享缓存 [lastKnownRoot] 返回 obtain 副本（防止事件线程并发 recycle 正在遍历的节点）。
+     */
+    private fun currentRoot(): AccessibilityNodeInfo? {
+        // rootInActiveWindow / getWindows().root 返回的是调用方自持的硬引用（须由调用方 recycle），
+        // 直接返回即可；仅共享缓存 lastKnownRoot 需 obtain 副本（防止事件线程并发 recycle 正在遍历的节点）。
+        rootInActiveWindow?.let {
+            // v1 批次11 诊断：跨 App 读取到根时记录其包名，便于定位"读到哪个窗口"
+            Log.i(TAG, "currentRoot: hit rootInActiveWindow pkg=${it.packageName}")
+            return it
+        }
+        Log.w(TAG, "currentRoot: rootInActiveWindow=null（跨 App 读取失败，兜底 lastKnownRoot）")
+        synchronized(cacheLock) {
+            lastKnownRoot?.let {
+                Log.i(TAG, "currentRoot: hit lastKnownRoot pkg=${it.packageName}")
+                return AccessibilityNodeInfo.obtain(it)
+            }
+        }
+        Log.w(TAG, "currentRoot: lastKnownRoot=null，遍历 getWindows(${windows?.size ?: -1})")
+        // 遍历全部窗口，优先活动且具内容根的窗口（getWindows 需 flagRetrieveInteractiveWindows）
+        val allWindows = windows.orEmpty()
+        val active = allWindows.filter { it.isActive }
+        for (window in active.sortedByDescending { it.layer }) {
+            val root = window.root ?: continue
+            // AccessibilityWindowInfo 用 getBoundsInScreen 判断是否具可视区域（无直接 width/height getter）
+            val bounds = android.graphics.Rect()
+            window.getBoundsInScreen(bounds)
+            Log.i(TAG, "currentRoot: window layer=${window.layer} pkg=${root.packageName} visible=${!bounds.isEmpty}")
+            if (root.packageName != null && !bounds.isEmpty) {
+                return root
+            }
+            // guardrail（批次10/低风险）：未命中（无包名/无可视区）的 root 立即回收，杜绝句柄泄漏
+            root.recycle()
+        }
+        Log.w(TAG, "currentRoot: 全部兜底失败，总窗口=${allWindows.size} active=${active.size}")
+        return null
     }
 
     /**
@@ -90,8 +202,62 @@ class PhoneControlAccessibilityService : AccessibilityService() {
             }
             return "错误：节点 [$nodeId] 点击失败，请改用坐标"
         }
-        val clicked = dispatchTap(x, y)
-        return if (clicked) "已点击坐标 ($x, $y)" else "错误：手势点击失败"
+        // v1 批次11（坐标吸附）：LLM 给的坐标常偏离目标中心（尤其 OCR 定位不准），
+        // 吸附到最近可点击节点中心（阈值内）降低误触；无命中则原坐标点击。
+        val snapped = snapToClickableCenter(x, y)
+        return if (snapped != null) {
+            val clicked = dispatchTap(snapped.first, snapped.second)
+            if (clicked) "已点击坐标 ($x,$y)→吸附到可点击节点中心 (${snapped.first},${snapped.second})"
+            else "错误：手势点击失败"
+        } else {
+            val clicked = dispatchTap(x, y)
+            if (clicked) "已点击坐标 ($x, $y)" else "错误：手势点击失败"
+        }
+    }
+
+    /**
+     * v1 批次11（坐标吸附）：把目标坐标吸附到最近的可点击节点中心。
+     *
+     * **背景（真机 + 调研）**：LLM 基于 OCR/截图给的坐标常偏离真实可点击中心（OCR 识别框不居中、
+     * 模型估算误差），直接点易误触。taproot「坐标吸附」思路：在 [SNAP_THRESHOLD_PX] 阈值内
+     * 找距目标最近的可点击节点，点其中心。
+     *
+     * @param x/y 目标坐标
+     * @return 吸附后的 (cx, cy)；无命中返回 null（按原坐标点）
+     */
+    private fun snapToClickableCenter(x: Int, y: Int): Pair<Int, Int>? {
+        val root = rootInActiveWindow ?: return null
+        val compat = AccessibilityNodeInfoCompat.wrap(root)
+        val queue = ArrayDeque<AccessibilityNodeInfoCompat>()
+        queue.add(compat)
+        var best: AccessibilityNodeInfoCompat? = null
+        var bestDistSq = Long.MAX_VALUE
+        while (queue.isNotEmpty()) {
+            val n = queue.removeFirst()
+            val bounds = Rect()
+            n.getBoundsInScreen(bounds)
+            if (n.isClickable && !bounds.isEmpty) {
+                val cx = bounds.centerX()
+                val cy = bounds.centerY()
+                val dx = (cx - x).toLong()
+                val dy = (cy - y).toLong()
+                val distSq = dx * dx + dy * dy
+                // guardrail 低风险（TKN-V1B11-GUARDRAIL-001）：吸附不落到敏感节点（支付/密码等）上，
+                // 防止"坐标吸附把点击重定向到邻近敏感节点"绕过敏感拦截（纵深防御）。
+                val agg = aggregateNodeText(n)
+                if (PhoneControlSecurity.isSensitiveTargetText(agg)) continue
+                if (distSq < bestDistSq) {
+                    bestDistSq = distSq
+                    best = n
+                }
+            }
+            for (i in 0 until n.childCount) queue.addLast(n.getChild(i) ?: continue)
+        }
+        val b = best ?: return null
+        val bx = Rect().also { b.getBoundsInScreen(it) }
+        val dist = kotlin.math.sqrt(bestDistSq.toDouble())
+        if (dist > SNAP_THRESHOLD_PX) return null
+        return bx.centerX() to bx.centerY()
     }
 
     /** 长按节点（通过坐标手势，长按无标准 accessibility action）。 */
@@ -148,11 +314,21 @@ class PhoneControlAccessibilityService : AccessibilityService() {
             }
         }
         val t = target ?: return null
-        // BFS 聚合自身 + 后代文本（预算上限防膨胀）
+        return aggregateNodeText(t)
+    }
+
+    /**
+     * 聚合节点自身 + 后代文本/描述（预算上限防膨胀）—— [nodeTextOf] / [findNodeByTextNid]
+     * 共享的子树文本抽取（guardrail M-1：可点击容器的标签文本几乎总在子 TextView 上）。
+     *
+     * @param node 起始节点
+     * @return 拼接文本；空返回 null
+     */
+    private fun aggregateNodeText(node: AccessibilityNodeInfoCompat): String? {
         val agg = StringBuilder()
-        var budget = SENSITIVE_TEXT_AGG_BUDGET
+        var budget = TEXT_AGG_BUDGET
         val q = ArrayDeque<AccessibilityNodeInfoCompat>()
-        q.add(t)
+        q.add(node)
         while (q.isNotEmpty() && budget > 0) {
             val n = q.removeFirst()
             val text = n.text?.toString()?.trim()
@@ -170,6 +346,47 @@ class PhoneControlAccessibilityService : AccessibilityService() {
             }
         }
         return agg.toString().trim().takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * v1 批次11（C 文本锚点）：按文本模糊匹配定位 UI 树**可操作**节点（BFS）。
+     *
+     * 供 `tap(text=...)` 优先走 UI 树（比 OCR 更可靠）：聚合可点击/可输入节点的子树文本
+     * （同 [nodeTextOf] 语义 + 预算上限），按 [textSimilarity] 选最佳匹配，返回其 BFS 序号
+     * （nid，与 get_ui_state `[N]` / [findNodeByNid] 一致）。未命中返回 null（调用方兜底 OCR）。
+     *
+     * @param query 目标文本（如"发送"）
+     * @param threshold 相似度阈值（低于不采纳）
+     * @return 最佳匹配节点 nid；无命中返回 null
+     */
+    fun findNodeByTextNid(query: String, threshold: Float = TEXT_MATCH_THRESHOLD): Int? {
+        if (query.isBlank()) return null
+        val root = rootInActiveWindow ?: return null
+        val compat = AccessibilityNodeInfoCompat.wrap(root)
+        val queue = ArrayDeque<AccessibilityNodeInfoCompat>()
+        queue.add(compat)
+        var idx = 0
+        var bestNid: Int? = null
+        var bestScore = threshold
+        while (queue.isNotEmpty()) {
+            val n = queue.removeFirst()
+            // 仅对可操作节点聚合文本（降低 O(n²) 成本；不可点击文本非点击目标）
+            if (n.isClickable || n.isEditable) {
+                val agg = aggregateNodeText(n)
+                if (agg != null) {
+                    val score = textSimilarity(query, agg)
+                    if (score > bestScore) {
+                        bestScore = score
+                        bestNid = idx
+                    }
+                }
+            }
+            idx++
+            for (i in 0 until n.childCount) {
+                queue.addLast(n.getChild(i) ?: continue)
+            }
+        }
+        return bestNid
     }
 
     /**
@@ -202,6 +419,28 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         val b = best ?: return null
         return listOfNotNull(b.text?.toString(), b.contentDescription?.toString())
             .joinToString(" ").takeIf { it.isNotBlank() }
+    }
+
+    /**
+     * v1 批次11（B11-2 前台 App 判定）：返回当前最上层（前台）窗口所属应用的包名。
+     *
+     * 依赖 `flagRetrieveInteractiveWindows`；用于 `get_ui_state` 树不可读时告知 LLM"当前前台是谁"，
+     * 从而区分「目标 App 已打开但 UI 树受保护/未就绪（应等待）」与「App 根本没打开（应改动作）」，
+     * 避免 LLM 盲目重试、缓解"感知不到"死循环。
+     *
+     * @return 前台包名；无可判定窗口返回 null
+     */
+    fun currentForegroundPackage(): String? {
+        val best = windows
+            ?.filter { it.isActive }
+            ?.maxByOrNull { it.layer }
+            ?: return null
+        val root = best.root ?: return null
+        return try {
+            root.packageName?.toString()
+        } finally {
+            root.recycle()
+        }
     }
 
     /**
@@ -311,6 +550,9 @@ class PhoneControlAccessibilityService : AccessibilityService() {
             )
             val screenshot = future.get(SCREENSHOT_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
             val bitmap = screenshot.asBitmapCompat()
+            // v1 批次11（A）：降采样前记录原始屏幕尺寸，供 OCR 坐标还原到屏幕空间
+            lastScreenshotOrigW = bitmap.width
+            lastScreenshotOrigH = bitmap.height
             val scaled = downsampleBitmap(bitmap)
             if (scaled !== bitmap) bitmap.recycle()
             val bytes = java.io.ByteArrayOutputStream().apply {
@@ -329,6 +571,17 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * v1 批次11（A）：最近一次截图的原始屏幕尺寸（未降采样），供 OCR 坐标还原。
+     *
+     * @return (宽, 高)；尚无截图或失败返回 null
+     */
+    fun lastScreenshotScreenSize(): Pair<Int, Int>? {
+        val w = lastScreenshotOrigW
+        val h = lastScreenshotOrigH
+        return if (w > 0 && h > 0) w to h else null
+    }
+
     /** 等比降采样（最长边 ≤ [SCREENSHOT_MAX_EDGE_PX]；已达标则原样返回）。 */
     internal fun downsampleBitmap(bitmap: android.graphics.Bitmap): android.graphics.Bitmap {
         val scale = computeScreenshotScale(bitmap.width, bitmap.height)
@@ -342,13 +595,38 @@ class PhoneControlAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * [AccessibilityService.ScreenshotResult.asBitmap] 为 @SystemApi 隐藏 API，直接调用编译失败，
-     * 经反射取 Bitmap（Android 11+ 无障碍截图，SDK_INT ≥ R 时安全）。
+     * 将无障碍截图结果转为 Android Bitmap（API 30+，公开 API）。
+     *
+     * **v1 批次10（Bug B，真机 NoSuchMethodException 根治）**：旧实现用反射调
+     * `ScreenshotResult.asBitmap()`（@SystemApi 隐藏 API），国产 ROM（小米/vivo/OPPO 等）
+     * 未将该方法暴露为 public → `javaClass.getMethod("asBitmap")` 抛 NoSuchMethodException，
+     * 截图功能彻底不可用（真机日志 `captureScreenshot 失败（NoSuchMethodException）`）。
+     *
+     * **修复**：改用公开 API `Bitmap.wrapHardwareBuffer(screenshot.hardwareBuffer, colorSpace)`
+     *（API 29+ 公开、非隐藏，所有 Android 11+ 设备可用），不依赖 @SystemApi 反射。
+     * [AccessibilityService.ScreenshotResult.hardwareBuffer]/[ScreenshotResult.colorSpace]
+     * 均为 API 30+ 公开 getter，可直接访问，无 ROM 差异。
      */
+    @RequiresApi(Build.VERSION_CODES.R)
     private fun AccessibilityService.ScreenshotResult.asBitmapCompat(): android.graphics.Bitmap {
-        @Suppress("DEPRECATION")
-        val method = javaClass.getMethod("asBitmap")
-        return method.invoke(this) as android.graphics.Bitmap
+        val buffer = hardwareBuffer
+        try {
+            // wrapHardwareBuffer 返回的 Bitmap 与硬件缓冲区共享内存，需配置颜色空间
+            val bitmap = android.graphics.Bitmap.wrapHardwareBuffer(buffer, colorSpace)
+                ?: throw java.io.IOException("wrapHardwareBuffer 返回 null（硬件缓冲区不可用）")
+            try {
+                // 复制为软件位图，避免依赖硬件缓冲区内存在后续操作/回收时失效
+                val copy = bitmap.copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+                    ?: throw java.io.IOException("bitmap.copy 返回 null（软件位图分配失败）")
+                return copy
+            } finally {
+                bitmap.recycle()
+            }
+        } finally {
+            // guardrail（批次10）：try/finally 保证 buffer.close() 在 wrap-null / copy-异常 两条路径都执行，
+            // 杜绝 HardwareBuffer 资源泄漏
+            buffer.close()
+        }
     }
 
     /**
@@ -385,6 +663,11 @@ class PhoneControlAccessibilityService : AccessibilityService() {
                 val child = n.getChild(i) ?: continue
                 queue.addLast(child)
             }
+        }
+        // v1 批次11 诊断：微信/WebView/Flutter 等常对无障碍树暴露受限 → 根节点 childCount=0，
+        // BFS 只产出根 → 序列化近似空 → LLM 报"UI 树读取不到内部界面"。记录根节点类型与子节点数。
+        if (count <= 1) {
+            Log.w(TAG, "mapNode: 仅 ${count} 个节点（根 childCount=${root.childCount} className=${root.className}）—— 疑似无障碍树受限/空树，应走截图+坐标兜底")
         }
         // 组装 children（依据 AccessibilityNodeInfoCompat 引用）
         val rootCompat = AccessibilityNodeInfoCompat.wrap(root)
@@ -531,6 +814,47 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         private const val SCREENSHOT_TIMEOUT_MS = 10_000L
 
         /** 节点子树文本聚合预算（guardrail M-1：聚合后代文本时最多取 N 条，防上下文膨胀）。 */
-        private const val SENSITIVE_TEXT_AGG_BUDGET = 12
+        private const val TEXT_AGG_BUDGET = 12
+
+        /**
+         * v1 批次11（坐标吸附）：吸附距离阈值（px，屏幕空间）。LLM 给的坐标（尤其 OCR 定位）
+         * 距最近可点击节点中心在此阈值内时吸附到节点中心，降低误触；超出则按原坐标点击。
+         * 取屏幕对角线约 4% 量级（1080p 下 ≈ 105px），覆盖 OCR 框偏移而不过度吸附。
+         */
+        internal const val SNAP_THRESHOLD_PX = 120
+
+        /**
+         * v1 批次11（C 文本锚点）：文本匹配相似度阈值。
+         *
+         * [textSimilarity] 达到该值才采纳为目标。完全相等=1.0 / 目标含查询=0.95 / 查询含目标=0.8
+         * 均远高于阈值；0.6 允许 OCR 轻微误读（如"搜 索"→"搜索"）仍可命中，同时拒绝低重叠噪声。
+         */
+        internal const val TEXT_MATCH_THRESHOLD = 0.6f
+
+        /** [textSimilarity] 归一化用空白正则（OCR 常在中文字符间插入空格）。 */
+        private val WHITESPACE_REGEX = Regex("""\s+""")
+
+        /**
+         * v1 批次11（C 文本锚点）：文本相似度（纯函数可测）。
+         *
+         * 匹配策略：完全相等 > 目标包含查询（substring） > 查询包含目标 > 字符级 Dice 系数。
+         * 归一化：小写 + 去空白（OCR 常在中文字符间插入空格）。
+         *
+         * @param query 查询文本（LLM 给的锚点）
+         * @param target 候选文本（UI 树节点聚合 / OCR 行文本）
+         * @return 0..1 相似度
+         */
+        internal fun textSimilarity(query: String, target: String): Float {
+            val q = query.trim().lowercase().replace(WHITESPACE_REGEX, "")
+            val t = target.trim().lowercase().replace(WHITESPACE_REGEX, "")
+            if (q.isEmpty() || t.isEmpty()) return 0f
+            if (q == t) return 1f
+            if (t.contains(q)) return 0.95f
+            if (q.contains(t)) return 0.8f
+            val qChars = q.toSet()
+            val tChars = t.toSet()
+            val inter = qChars.intersect(tChars).size.toFloat()
+            return (2f * inter) / (qChars.size + tChars.size)
+        }
     }
 }

@@ -46,6 +46,7 @@ import io.prism.ui.components.PrismField
 import io.prism.ui.components.PrismGlassCard
 import io.prism.ui.components.PrismSheet
 import io.prism.ui.components.PrismSheetHost
+import io.prism.ui.components.PrismSegmented
 import io.prism.ui.components.PrismSwitch
 import io.prism.ui.components.PrismTopBar
 import io.prism.ui.theme.PrismCyan
@@ -86,6 +87,8 @@ fun SettingsScreen(
     var toolApprovalSheetVisible by remember { mutableStateOf(false) }
     // UXR8 N1（ADR-030）：用户规则编辑弹层（「关于我」+「如何回答」双字段）
     var userRulesSheetVisible by remember { mutableStateOf(false) }
+    // v1 批次15（US-1501/1502/1507）：搜索增强配置弹层（智谱/Tavily Key + SearXNG 端点）
+    var searchEnhancementSheetVisible by remember { mutableStateOf(false) }
 
     val providers by viewModel.providers.collectAsState()
     val activeProvider by viewModel.activeProvider.collectAsState()
@@ -108,6 +111,12 @@ fun SettingsScreen(
     val phoneControlConnected by viewModel.phoneControlConnected.collectAsState()
     // v1 真机二次修复（Issue 4b）：手机操控高危动作（发送/删除/拨号）确认策略
     val highRiskApprovalMode by viewModel.highRiskApprovalMode.collectAsState()
+    // v1 批次15（US-1501/1502/1507）：搜索增强（智谱/Tavily Key + SearXNG 端点 + WebView 抓取开关）
+    val zhipuKeyConfigured by viewModel.zhipuKeyConfigured.collectAsState()
+    val tavilyKeyConfigured by viewModel.tavilyKeyConfigured.collectAsState()
+    val searxngSettings by viewModel.searxngSettings.collectAsState()
+    val preferredEngine by viewModel.preferredEngine.collectAsState()
+    val webviewFetchEnabled by viewModel.webviewFetchEnabled.collectAsState()
 
     // M7 Phase C（US-042）：档位 UI 由 TierViewModel 驱动（替代原 PerfTier 本地 mock state）
     val tierViewModel: TierViewModel = viewModel(factory = TierViewModel.Factory)
@@ -283,6 +292,31 @@ fun SettingsScreen(
                     subtitle = "图片直传你配置的模型端点（无云端旁路），不支持视觉的模型会提示降级"
                 )
             }
+            // v1 批次15（US-1501/1502/1507）：搜索增强（智谱 / Tavily / SearXNG）
+            item { SetSection("搜索增强") }
+            item {
+                SetRow(
+                    icon = "⌕",
+                    iconColor = PrismMint,
+                    title = "搜索引擎增强",
+                    subtitle = searchEnhancementSubtitle(zhipuKeyConfigured, tavilyKeyConfigured, searxngSettings != null),
+                    onClick = { searchEnhancementSheetVisible = true }
+                )
+            }
+            item {
+                SetRow(
+                    icon = "◍",
+                    iconColor = PrismIndigo,
+                    title = "WebView 渲染抓取",
+                    subtitle = "增强被反爬拦截页面的抓取成功率；仅访问公网 https 页面",
+                    trailing = {
+                        PrismSwitch(
+                            checked = webviewFetchEnabled,
+                            onCheckedChange = { viewModel.setWebviewFetchEnabled(it) }
+                        )
+                    }
+                )
+            }
             item { SetSection("设备档位") }
             item {
                 SetRow(
@@ -384,6 +418,35 @@ fun SettingsScreen(
                 onClose = { userRulesSheetVisible = false }
             )
         }
+        // v1 批次15（US-1501/1502/1507）：搜索增强配置弹层（智谱/Tavily Key + SearXNG 端点）
+        PrismSheetHost(visible = searchEnhancementSheetVisible, onDismiss = { searchEnhancementSheetVisible = false }) {
+            SearchEnhancementSheet(
+                searxngEndpoint = searxngSettings?.endpoint.orEmpty(),
+                searxngUsername = searxngSettings?.username.orEmpty(),
+                searxngPassword = searxngSettings?.password.orEmpty(),
+                preferredEngine = preferredEngine,
+                viewModel = viewModel,
+                onClose = { searchEnhancementSheetVisible = false }
+            )
+        }
+    }
+}
+
+/**
+ * 搜索增强行副标题（v1 批次15，US-1501/1502/1507）。
+ *
+ * 无任何配置 → "未配置 · 配置 Key/端点提升搜索命中率"；有配置 → 列出已配置引擎。
+ */
+private fun searchEnhancementSubtitle(zhipu: Boolean, tavily: Boolean, searxng: Boolean): String {
+    val configured = listOfNotNull(
+        "智谱".takeIf { zhipu },
+        "Tavily".takeIf { tavily },
+        "SearXNG".takeIf { searxng }
+    )
+    return if (configured.isEmpty()) {
+        "未配置 · 配置 Key/端点提升搜索命中率"
+    } else {
+        "已配置：${configured.joinToString("、")}"
     }
 }
 
@@ -866,6 +929,12 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
     // v1 US-301（方案 B 识图）：是否设为「视觉旁路 Provider」——主模型不支持图片时，
     // 图片会发往该 Provider 生成描述（隐私：设置开启前需在「识图」设置中授权）。
     var visionFallback by remember(config.id) { mutableStateOf(config.isVisionFallback) }
+    // v1 批次13（B）：该 Provider 是否支持视觉（多模态图片输入）——手机操控截图直接以图片
+    // 注入会话供模型查看（发挥多模态），否则走 OCR 文字+坐标。保存时按模型名自动提示。
+    var supportsVision by remember(config.id) { mutableStateOf(config.supportsVision) }
+    // v1 批次13（B/D16b）：supportsVision 是否被用户**显式触碰**（隐私语义：显式关闭不得被
+    // 模型名自动检测覆盖，防截图内容静默外发）。初始取 config.supportsVisionSet 保持跨编辑持久。
+    var supportsVisionTouched by remember(config.id) { mutableStateOf(config.supportsVisionSet) }
     // 自定义请求头用 SnapshotStateList：原地改值（headers[index]=…）会触发重组，
     // 与删除/新增重建列表行为一致，避免丢输入（guardrail Q2）。
     val headers = remember(config.id) {
@@ -914,7 +983,11 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
                             models = models.split(",").map { it.trim() }.filter { it.isNotEmpty() },
                             headers = validHeaders.toMap(),
                             isActive = false,
-                            isVisionFallback = visionFallback
+                            isVisionFallback = visionFallback,
+                            // v1 批次13（B）：多模态开关（保存时若用户未显式改过，可经模型名自动提示——
+                            // 此处取 UI 当前值 + 是否被显式触碰；SettingsViewModel.saveProvider 内做自动提示合并）
+                            supportsVision = supportsVision,
+                            supportsVisionSet = supportsVisionTouched
                         )
                     )
                     if (activateAfterSave) {
@@ -1018,6 +1091,26 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
                 )
             }
             PrismSwitch(checked = visionFallback, onCheckedChange = { visionFallback = it })
+        }
+        Spacer(Modifier.height(12.dp))
+        // v1 批次13（B）：支持视觉（多模态）开关 —— 手机操控截图直接以图片注入会话供模型查看，
+        // 否则走 OCR 文字+坐标。保存时按模型名自动提示（detectVisionSupport）。
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(text = "支持视觉（多模态）", color = PrismText, fontSize = 14.sp)
+                Text(
+                    text = "手机操控截图将直接以图片发送给该模型查看（需模型支持图片输入），否则用 OCR 文字+坐标",
+                    color = PrismTextFaint, fontSize = 10.sp
+                )
+            }
+            PrismSwitch(
+                checked = supportsVision,
+                onCheckedChange = {
+                    supportsVision = it
+                    // 用户触碰开关 → 标记显式设置（保存时不再被模型名自动检测覆盖）
+                    supportsVisionTouched = true
+                }
+            )
         }
         Spacer(Modifier.height(12.dp))
         PrismButton(
@@ -1211,6 +1304,174 @@ private fun UserRulesSheet(
         Spacer(Modifier.height(20.dp))
         PrismButton(text = "保存", onClick = { onSave(about, respond) })
         Spacer(Modifier.height(8.dp))
+        PrismButton(text = "关闭", variant = PrismButtonVariant.Ghost, onClick = onClose)
+    }
+}
+
+/**
+ * 搜索引擎增强配置弹层（v1 批次15，US-1501/1502/1507）。
+ *
+ * - **智谱 API Key**（apiKeyRef=zhipu）：到 bigmodel.cn 注册获取；Keystore 加密存储。
+ * - **Tavily API Key**（apiKeyRef=tavily）：到 tavily.com 注册获取；Keystore 加密存储。
+ * - **SearXNG 端点**：用户自建服务地址（http/https），可选 Basic Auth 用户名/密码；
+ *   部署教程见 docs/runbooks/searxng-selfhost.md。端点为用户显式配置，可达性由用户自担。
+ *
+ * Key 保存语义与 [ApiKeySheet] 一致（BR-security-006：清空保存 = 删除已存密钥）；
+ * SearXNG 端点填空保存 = 清除配置（引擎链完全跳过该引擎）。
+ *
+ * @param searxngEndpoint 当前 SearXNG 端点（空 = 未配置）
+ * @param searxngUsername 当前 Basic Auth 用户名
+ * @param searxngPassword 当前 Basic Auth 密码
+ * @param viewModel 设置 ViewModel（Key/SearXNG 读写）
+ * @param onClose 关闭按钮回调
+ */
+@Composable
+private fun SearchEnhancementSheet(
+    searxngEndpoint: String,
+    searxngUsername: String,
+    searxngPassword: String,
+    preferredEngine: String,
+    viewModel: SettingsViewModel,
+    onClose: () -> Unit
+) {
+    var zhipuKey by remember { mutableStateOf("") }
+    var zhipuLoaded by remember { mutableStateOf(false) }
+    var tavilyKey by remember { mutableStateOf("") }
+    var tavilyLoaded by remember { mutableStateOf(false) }
+    var endpoint by remember(searxngEndpoint) { mutableStateOf(searxngEndpoint) }
+    var username by remember(searxngUsername) { mutableStateOf(searxngUsername) }
+    var password by remember(searxngPassword) { mutableStateOf(searxngPassword) }
+    // v1 批次15.1（US-1509）：首选引擎（空串 = 跟随默认顺序）
+    val engineOptions = listOf("默认顺序", "博查", "智谱", "SearXNG", "Tavily")
+    val engineValues = listOf("", "bocha", "zhipu", "searxng", "tavily")
+    var selectedEngine by remember(preferredEngine) {
+        mutableStateOf(engineValues.indexOf(preferredEngine).takeIf { it >= 0 } ?: 0)
+    }
+
+    if (!zhipuLoaded) {
+        viewModel.loadApiKey(SettingsViewModel.ZHIPU_API_KEY_REF) { v ->
+            zhipuKey = v.orEmpty()
+            zhipuLoaded = true
+        }
+    }
+    if (!tavilyLoaded) {
+        viewModel.loadApiKey(SettingsViewModel.TAVILY_API_KEY_REF) { v ->
+            tavilyKey = v.orEmpty()
+            tavilyLoaded = true
+        }
+    }
+
+    PrismSheet(
+        title = "搜索引擎增强",
+        subtitle = "智谱 / Tavily / SearXNG · 配置后自动接入搜索链"
+    ) {
+        Text(
+            text = "配置任一引擎后，联网搜索将按 博查 → 智谱 → SearXNG → Tavily → Bing/Baidu 的顺序优先使用，首个成功即返回。",
+            color = PrismTextFaint,
+            fontSize = 11.sp,
+            lineHeight = 16.sp
+        )
+        Spacer(Modifier.height(16.dp))
+        // v1 批次15.1（US-1509）：首选引擎——自建 SearXNG 后需选它为首选才会被实际使用
+        //（默认顺序下 Bocha 成功即短路，后续引擎不再尝试）
+        Text(
+            text = "首选引擎（首个尝试）",
+            color = PrismTextDim,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.4.sp,
+            modifier = Modifier.padding(bottom = 7.dp)
+        )
+        PrismSegmented(
+            options = engineOptions,
+            selected = engineOptions[selectedEngine],
+            onSelect = { option ->
+                val idx = engineOptions.indexOf(option)
+                if (idx >= 0 && idx != selectedEngine) {
+                    selectedEngine = idx
+                    viewModel.setPreferredEngine(engineValues[idx])
+                }
+            },
+            labelOf = { it }
+        )
+        Spacer(Modifier.height(16.dp))
+        PrismField(
+            label = "智谱 API Key",
+            value = zhipuKey,
+            onValueChange = { zhipuKey = it },
+            placeholder = "到 bigmodel.cn 注册获取",
+            secret = true,
+            hint = "加密保存 · 清空后保存即删除"
+        )
+        Spacer(Modifier.height(8.dp))
+        PrismButton(
+            text = "保存智谱 Key",
+            variant = PrismButtonVariant.Ghost,
+            onClick = {
+                if (zhipuKey.isEmpty()) {
+                    viewModel.removeApiKey(SettingsViewModel.ZHIPU_API_KEY_REF)
+                } else {
+                    viewModel.saveApiKey(SettingsViewModel.ZHIPU_API_KEY_REF, zhipuKey)
+                }
+            }
+        )
+        Spacer(Modifier.height(16.dp))
+        PrismField(
+            label = "Tavily API Key",
+            value = tavilyKey,
+            onValueChange = { tavilyKey = it },
+            placeholder = "到 tavily.com 注册获取",
+            secret = true,
+            hint = "加密保存 · 清空后保存即删除"
+        )
+        Spacer(Modifier.height(8.dp))
+        PrismButton(
+            text = "保存 Tavily Key",
+            variant = PrismButtonVariant.Ghost,
+            onClick = {
+                if (tavilyKey.isEmpty()) {
+                    viewModel.removeApiKey(SettingsViewModel.TAVILY_API_KEY_REF)
+                } else {
+                    viewModel.saveApiKey(SettingsViewModel.TAVILY_API_KEY_REF, tavilyKey)
+                }
+            }
+        )
+        Spacer(Modifier.height(16.dp))
+        PrismField(
+            label = "SearXNG 端点",
+            value = endpoint,
+            onValueChange = { endpoint = it },
+            placeholder = "如 http://192.168.1.10:8080",
+            hint = "自建 SearXNG 服务地址（http/https）· 部署见 docs/runbooks/searxng-selfhost.md"
+        )
+        Spacer(Modifier.height(8.dp))
+        PrismField(
+            label = "SearXNG 用户名（可选 Basic Auth）",
+            value = username,
+            onValueChange = { username = it },
+            placeholder = "未启用认证可留空"
+        )
+        Spacer(Modifier.height(8.dp))
+        PrismField(
+            label = "SearXNG 密码（可选 Basic Auth）",
+            value = password,
+            onValueChange = { password = it },
+            placeholder = "未启用认证可留空",
+            secret = true
+        )
+        Spacer(Modifier.height(8.dp))
+        PrismButton(
+            text = "保存 SearXNG 配置",
+            variant = PrismButtonVariant.Ghost,
+            onClick = { viewModel.saveSearxngSettings(endpoint, username, password) }
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "SearXNG 端点为你显式配置的自建服务，可达性由你自担；端点留空保存即清除配置。",
+            color = PrismTextFaint,
+            fontSize = 11.sp
+        )
+        Spacer(Modifier.height(20.dp))
         PrismButton(text = "关闭", variant = PrismButtonVariant.Ghost, onClick = onClose)
     }
 }

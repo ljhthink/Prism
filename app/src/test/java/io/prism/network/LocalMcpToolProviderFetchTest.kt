@@ -476,4 +476,191 @@ class LocalMcpToolProviderFetchTest {
         // 非标准输入兜底（截断）
         assertTrue(provider.sanitizeUrlForLog("not a url").length <= 120)
     }
+
+    // ==================== PRD MCP/API 增强（US-003）：Jina Reader ====================
+
+    @Test
+    fun `fetch useJinaReader routes to r jina ai with url-encoded target`() = runBlocking {
+        // useJinaReader=true 时请求 r.jina.ai/<url-encoded target>，返回内容截断
+        var capturedUrl: String? = null
+        val engine = MockEngine { request ->
+            capturedUrl = request.url.toString()
+            respond(
+                content = "# 标题\n\n正文内容",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/markdown")
+            )
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "https://example.com/page", "useJinaReader" to true)
+        )
+
+        assertTrue("应请求 r.jina.ai", capturedUrl.orEmpty().startsWith("https://r.jina.ai/"))
+        assertTrue("目标 URL 应被 URL 编码", capturedUrl.orEmpty().contains("https%3A%2F%2Fexample.com%2Fpage"))
+        assertTrue("应返回 Jina Reader 内容", result.contains("标题"))
+    }
+
+    @Test
+    fun `fetch useJinaReader still rejects internal url without request`() = runBlocking {
+        // Jina 路径同样先过 isPublicHttpUrl SSRF 校验：内网 URL 不应发起请求
+        var requestCount = 0
+        val engine = MockEngine {
+            requestCount++
+            respond("unexpected", HttpStatusCode.OK)
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "http://192.168.1.10/admin", "useJinaReader" to true)
+        )
+
+        assertTrue("内网地址应被拒绝", result.contains("公网"))
+        assertEquals("不应发起请求", 0, requestCount)
+    }
+
+    @Test
+    fun `fetch useJinaReader degrades to direct fetch on jina http error`() = runBlocking {
+        // guardrail M-2：Jina 非 2xx（如限流 429）时降级到普通 Fetch 直抓，不直接返回失败
+        val engine = MockEngine { request ->
+            if (request.url.host.contains("r.jina.ai")) {
+                respond("Too Many Requests", HttpStatusCode.TooManyRequests)
+            } else {
+                respond("<html><body>直抓降级内容</body></html>", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/html"))
+            }
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "https://example.com/page", "useJinaReader" to true)
+        )
+
+        assertTrue("Jina 失败应降级到直抓", result.contains("直抓降级内容"))
+    }
+
+    @Test
+    fun `fetch useJinaReader degrades to direct fetch on network exception`() = runBlocking {
+        // guardrail M-2：Jina 网络异常（连接失败）时降级到普通 Fetch 直抓
+        var jinaAttempted = false
+        val engine = MockEngine { request ->
+            if (request.url.host.contains("r.jina.ai")) {
+                jinaAttempted = true
+                throw java.io.IOException("jina connection reset")
+            } else {
+                respond("<html><body>直抓成功</body></html>", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/html"))
+            }
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "https://example.com/page", "useJinaReader" to true)
+        )
+
+        assertTrue("应先尝试 Jina", jinaAttempted)
+        assertTrue("Jina 网络失败应降级到直抓", result.contains("直抓成功"))
+    }
+
+    @Test
+    fun `fetch useJinaReader default false keeps direct fetch path`() = runBlocking {
+        // 未显式传 useJinaReader 时走直抓路径（不回退 Jina），保持向后兼容
+        var capturedUrl: String? = null
+        val engine = MockEngine { request ->
+            capturedUrl = request.url.toString()
+            respond("<html><body>直接抓取</body></html>", HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "text/html"))
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "https://example.com/page")
+        )
+
+        assertFalse("默认不应走 r.jina.ai", capturedUrl.orEmpty().startsWith("https://r.jina.ai/"))
+        assertTrue("应返回直接抓取内容", result.contains("直接抓取"))
+    }
+
+    // ==================== v1 批次9（US-903）本地 HTML 主干提纯 ====================
+
+    @Test
+    fun `fetch extracts readable text from article main container ignoring nav scripts`() = runBlocking {
+        // 静态页正文在 <article> 内、nav/script/footer 干扰时，本地提纯应提取正文而非裸剥离噪声
+        val engine = MockEngine {
+            respond(
+                content = """<html><head><script>var x=1;</script></head>
+                    <body><nav>导航菜单 首页 关于</nav>
+                    <article><h1>梧州市第一中学简介</h1>
+                    <p>梧州市第一中学是一所百年名校，创办于 1905 年。</p>
+                    <p>学校位于广西梧州市万秀区。</p></article>
+                    <footer>版权信息</footer></body></html>""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/html")
+            )
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "https://example.com/school")
+        )
+
+        assertTrue("应提取正文标题", result.contains("梧州市第一中学简介"))
+        assertTrue("应提取正文段落", result.contains("百年名校"))
+        assertFalse("不应包含导航菜单噪声", result.contains("导航菜单"))
+        assertFalse("不应包含脚本文本", result.contains("var x"))
+    }
+
+    @Test
+    fun `fetch plain script shell still reported as empty after local extraction`() = runBlocking {
+        // 纯脚本挑战壳（无正文 <p>/<article>）：本地提纯后仍为空 → 维持空壳文案，不误报成功
+        val engine = MockEngine {
+            respond(
+                content = """<html><body><script>window.location.href='/challenge';</script></body></html>""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/html")
+            )
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "https://example.com/spa")
+        )
+
+        assertTrue("纯脚本壳应返回空壳诊断", result.contains("页面无有效正文"))
+    }
+
+    @Test
+    fun `fetch body with only paragraphs extracted without article tag`() = runBlocking {
+        // 无 <article>/<main> 时回退提取全部 <h1-h6>/<p> 段落
+        val engine = MockEngine {
+            respond(
+                content = """<html><body><h1>标题</h1><p>第一段内容</p><p>第二段内容</p></body></html>""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "text/html")
+            )
+        }
+        val client = HttpClient(engine) { followRedirects = false }
+        val provider = providerWith(client)
+
+        val result = provider.callTool(
+            fetchConfig, "fetch",
+            mapOf("url" to "https://example.com/plain")
+        )
+
+        assertTrue("应提取标题", result.contains("标题"))
+        assertTrue("应提取第一段", result.contains("第一段内容"))
+        assertTrue("应提取第二段", result.contains("第二段内容"))
+    }
 }

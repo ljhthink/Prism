@@ -45,4 +45,15 @@ interface LocalToolExecutor {
      * @return 执行结果文本（成功/失败描述，回灌给 LLM）
      */
     suspend fun execute(toolName: String, arguments: Map<String, Any?>): String
+
+    /**
+     * v1 批次13（B/D16c，多模态降级）：通知执行器「当前视觉模型端点不支持图片」。
+     *
+     * 由 [io.prism.skill.SkillExecutor] 在收到 400 visionUnsupported 错误时调用——
+     * 截图**图片注入**路径对当前端点失效，实现方应自降级（如手机操控截图转回 OCR/UI 树
+     * 文本路径），保证任务在纯文本模式下继续而非中断。
+     *
+     * **向后兼容**：默认空实现（无状态执行器不受影响），实现方可按需覆写。
+     */
+    fun onVisionUnsupported() {}
 }

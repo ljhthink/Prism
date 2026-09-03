@@ -49,7 +49,15 @@ sealed class StreamEvent {
          *
          * **向后兼容**：默认 false，现有 `when` 穷尽匹配与既有测试不受影响。
          */
-        val visionUnsupported: Boolean = false
+        val visionUnsupported: Boolean = false,
+        /**
+         * v1 批次11（E，D11）：服务端 429 限流响应头 `Retry-After` 建议的等待秒数。
+         *
+         * 由 [OpenAICompatibleProvider] 在 429 时从响应头解析（可为 null）；调用方
+         * [io.prism.skill.SkillExecutor] 限流退避时优先采纳该值（行业标准，优于固定 3s×2^n）。
+         * 默认 null 向后兼容（无 Retry-After 时走既有指数退避）。
+         */
+        val retryAfterSeconds: Long? = null
     ) : StreamEvent()
 
     /**

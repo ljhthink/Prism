@@ -240,6 +240,50 @@ class ConversationViewModelPhaseDTest {
         assertTrue(phoneTools.contains("phone_control__screenshot"))
     }
 
+    @Test
+    fun `buildTools default excludes hotlist tool for backward compat`() {
+        // v1 批次9（US-904）：默认 hotListEnabled=false（向后兼容）→ 不注入 hotlist__get
+        val tools = ConversationViewModel.buildTools(emptyList(), webSearchEnabled = true)
+        assertTrue(
+            "默认不应包含热榜工具",
+            tools.none { it.function.name.startsWith("hotlist__") }
+        )
+    }
+
+    @Test
+    fun `buildTools includes hotlist tool when hotListEnabled true`() {
+        // v1 批次9（US-904）：热榜注册链验证（此前仅有代码审查、无集成测试）
+        val tools = ConversationViewModel.buildTools(
+            emptyList(), webSearchEnabled = true, hotListEnabled = true
+        )
+        val names = tools.map { it.function.name }
+        assertTrue("应注入 hotlist__get", names.contains("hotlist__get"))
+        val def = tools.first { it.function.name == "hotlist__get" }
+        assertTrue("工具描述应含触发词", def.function.description.contains("热搜"))
+    }
+
+    @Test
+    fun `mergeSystemPrompt injects hotlist guidance when enabled`() {
+        // v1 批次9（US-904）：热榜启用时 systemPrompt 应声明热榜能力（LLM 感知通道）
+        val result = ConversationViewModel.mergeSystemPrompt(
+            ragPrompt = null,
+            hotListGuidance = ConversationViewModel.HOTLIST_GUIDANCE,
+            enabledSkills = emptyList()
+        )
+        assertTrue("应注入热榜能力声明", result.contains("热榜"))
+        assertTrue("应声明 hotlist__get 工具", result.contains("hotlist__get"))
+    }
+
+    @Test
+    fun `mergeSystemPrompt skips hotlist guidance when disabled`() {
+        // v1 批次9（US-904）：未启用热榜时 systemPrompt 不含热榜声明（默认向后兼容）
+        val result = ConversationViewModel.mergeSystemPrompt(
+            ragPrompt = null,
+            enabledSkills = emptyList()
+        )
+        assertFalse("未启用热榜不应注入声明", result.contains("hotlist__get"))
+    }
+
     // ==================== 纯函数测试：mergeSystemPrompt ====================
 
     @Test

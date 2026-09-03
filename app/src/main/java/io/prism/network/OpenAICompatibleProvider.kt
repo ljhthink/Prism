@@ -141,6 +141,13 @@ class OpenAICompatibleProvider(
         // tool_calling 跨 chunk 状态：index → 累加器。flow{} 作用域内单协程访问（flowOn IO），无需同步。
         val pendingToolCalls = mutableMapOf<Int, ToolCallAccumulator>()
         var terminated = false
+        // v1 批次9（US-905，B6）：跟踪本流是否发射过任何"有意义事件"，用于空流检测。
+        // 服务端返回 200 + 空流（零 content/reasoning/tool_calls 增量，如会话过期/模型静默失败）时，
+        // 此前静默补发 Done → UI 出现"空气泡"，用户无感知、无重试指引。
+        // H-2 修复（guardrail TKN-V1B9-GUARDRAIL-001）：不仅统计 Delta，还要统计
+        // ReasoningDelta 与 ToolCall*（纯工具调用响应不含 content/reasoning，若只统计 Delta
+        // 会把"仅工具调用 + 无 DONE"误判为空流，工具回路断裂）。
+        var emittedAnyMeaningfulEvent = false
         try {
             httpClient.sse(endpoint, {
                 method = HttpMethod.Post
@@ -179,6 +186,15 @@ class OpenAICompatibleProvider(
                     val events = chunkToEvents(chunk, pendingToolCalls, json, collectReasoning = true)
                     for (e in events) {
                         if (e is StreamEvent.Done) terminated = true
+                        // H-2：Delta/ReasoningDelta/ToolCall* 均为"有意义事件"（证明非空流）
+                        if (e is StreamEvent.Delta ||
+                            e is StreamEvent.ReasoningDelta ||
+                            e is StreamEvent.ToolCallStart ||
+                            e is StreamEvent.ToolCallDelta ||
+                            e is StreamEvent.ToolCallComplete
+                        ) {
+                            emittedAnyMeaningfulEvent = true
+                        }
                         emit(e)
                     }
                 }
@@ -194,20 +210,29 @@ class OpenAICompatibleProvider(
             val errorBody = try { e.response?.bodyAsText() } catch (_: Exception) { null }
             val safeBody = errorBody?.let { sanitizeErrorBody(it) }
             Log.w("OpenAIProvider", "SSE 请求失败 status=$statusCode body=$safeBody")
-            emit(mapHttpError(statusCode, errorBody, requestHasImage))
+            emit(mapHttpError(statusCode, errorBody, requestHasImage, parseRetryAfter(e.response)))
             return@flow
         } catch (e: ClientRequestException) {
             val errorBody = try { e.response.bodyAsText() } catch (_: Exception) { null }
             val safeBody = errorBody?.let { sanitizeErrorBody(it) }
             Log.w("OpenAIProvider", "HTTP 请求失败 status=${e.response.status.value} body=$safeBody")
-            emit(mapHttpError(e.response.status.value, errorBody, requestHasImage))
+            emit(mapHttpError(e.response.status.value, errorBody, requestHasImage, parseRetryAfter(e.response)))
             return@flow
         } catch (e: Exception) {
             // 网络/协议错误映射为通用文案，避免内部路径/异常细节泄露（CR-05）
             emit(StreamEvent.Error("网络请求失败，请检查网络连接或 Provider 配置"))
             return@flow
         }
-        // SSE 流正常结束但未收到 Done（如服务端关闭连接）—— 兜底补发 Done
+        // v1 批次9（US-905，B6）：SSE 流正常结束但既无 DONE 也无任何有意义事件 → 空流。
+        // 此前 `if (!terminated) emit(Done)` 让空气泡静默出现；现改为补发可感知提示，
+        // 供 UI 展示"服务端未返回内容"（用户可重试），不再假装成功。
+        // H-2 修复：仅当零 Delta/ReasoningDelta/ToolCall* 时才判空流（纯工具调用不受影响）。
+        if (!terminated && !emittedAnyMeaningfulEvent) {
+            Log.w("OpenAIProvider", "SSE 空流：200 但零有意义事件且无 DONE，补发空流提示")
+            emit(StreamEvent.Error("服务端未返回内容（空响应），请重试或检查 Provider 配置"))
+            return@flow
+        }
+        // SSE 流正常结束但未收到 Done（如服务端关闭连接，已有增量）—— 兜底补发 Done
         if (!terminated) emit(StreamEvent.Done)
     }.flowOn(Dispatchers.IO)
 
@@ -424,7 +449,8 @@ class OpenAICompatibleProvider(
     private fun mapHttpError(
         status: Int,
         errorBody: String? = null,
-        requestHasImage: Boolean = false
+        requestHasImage: Boolean = false,
+        retryAfterSeconds: Long? = null
     ): StreamEvent.Error {
         val detail = errorBody
             ?.takeIf { it.isNotBlank() }
@@ -435,7 +461,11 @@ class OpenAICompatibleProvider(
             status == HttpStatusCode.Unauthorized.value ->
                 StreamEvent.Error("鉴权失败，请检查 API Key$detail")
             status == HttpStatusCode.TooManyRequests.value ->
-                StreamEvent.Error("请求过于频繁，触发服务端限流（429）。请稍等几秒后重试$detail")
+                // v1 批次11（E，D11）：携带服务端 Retry-After 秒数，供 SkillExecutor 限流退避时优先采纳
+                StreamEvent.Error(
+                    "请求过于频繁，触发服务端限流（429）。请稍等几秒后重试$detail",
+                    retryAfterSeconds = retryAfterSeconds
+                )
             status == 400 && requestHasImage && isVisionUnsupportedError(detail) ->
                 // v1 US-301：携带 visionUnsupported=true 信号，供上层触发云端视觉旁路/OCR 兜底
                 StreamEvent.Error(
@@ -445,7 +475,42 @@ class OpenAICompatibleProvider(
             status == 400 && requestHasImage ->
                 StreamEvent.Error("图片请求被拒绝（400）$detail。若该模型支持视觉，请确认图片格式/大小后重试")
             status in 400..499 -> StreamEvent.Error("请求被拒绝（$status）$detail，请检查 Provider 配置")
+            // v1 批次9（US-905，B4/B6）：补齐此前落入 else 的三种可诊断状态——
+            // -1（SSEClientException 无 response：连接中断/重连耗尽）：区分"网络中断"与"配置错误"
+            // 200（协议不匹配：服务端返回非 text/event-stream 的 200，如 application/json 错误体）：
+            //   此前误报"网络请求失败"，实际是协议问题，需明确提示
+            // 5xx（服务端 500/502/503/504）：此前也落 else 通用文案，丢服务端错误诊断
+            status == -1 ->
+                StreamEvent.Error("网络连接中断，请检查网络后重试$detail")
+            status == HttpStatusCode.OK.value ->
+                StreamEvent.Error("服务端返回异常格式（HTTP 200 但非流式内容）$detail，请检查 Provider 端点配置")
+            status >= 500 ->
+                StreamEvent.Error("服务端错误（$status）$detail，请稍后重试或检查 Provider 配置")
             else -> StreamEvent.Error("网络请求失败，请检查网络连接或 Provider 配置")
+        }
+    }
+
+    /**
+     * v1 批次11（E，D11）：解析 429 响应头 `Retry-After` 建议等待秒数（行业标准）。
+     *
+     * Retry-After 可为「秒数」（如 "3"）或 HTTP-date（RFC 7231 IMF-fixdate）；date 形式
+     * 需换算为距当前时间剩余秒数。解析失败返回 null（调用方走既有指数退避）。
+     * 上限 [MAX_RETRY_AFTER_SEC] 防止服务端异常值导致重试窗口无限拉长。
+     */
+    private fun parseRetryAfter(response: io.ktor.client.statement.HttpResponse?): Long? {
+        if (response == null) return null
+        val raw = try { response.headers[io.ktor.http.HttpHeaders.RetryAfter] } catch (_: Exception) { null }
+            ?.trim().orEmpty()
+        if (raw.isEmpty()) return null
+        // 秒数形式（"3"）
+        raw.toLongOrNull()?.let { return it.coerceIn(1, MAX_RETRY_AFTER_SEC) }
+        // HTTP-date 形式（RFC 7231 IMF-fixdate）
+        return try {
+            val date = java.text.SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss z", java.util.Locale.US)
+                .parse(raw) ?: return null
+            ((date.time - System.currentTimeMillis()) / 1000L).coerceIn(1, MAX_RETRY_AFTER_SEC)
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -695,10 +760,20 @@ class OpenAICompatibleProvider(
             )
         }
         Role.ASSISTANT -> {
-            val replay = toolCalls.takeIf { it.isNotEmpty() }?.map { ToolCallWire.fromRef(it) }
+            // v1 批次11（sensenova 兼容修复，D6）：防御净化——过滤空 id/空 functionName 的
+            // tool_call 块。sensenova/StepFun/Kimi 等严格 OpenAI 兼容端点对空 id / 空 name 直接 400
+            // （"function<path> cannot be empty"），而这些空块常由流式中断/分片重组产生（siclaw#140 /
+            // cc-switch#4164 同根因）。发送前丢弃非法块，防止"某轮后会话永久 400"。
+            val replay = toolCalls
+                .filter { !it.id.isNullOrBlank() && !it.functionName.isNullOrBlank() }
+                .takeIf { it.isNotEmpty() }
+                ?.map { ToolCallWire.fromRef(it) }
+            // 空 content + 非空 toolCalls：OpenAI 允许 null，但 sensenova 等端点不接受 content=null；
+            // 改为空字符串（OpenAI 亦接受空串 content + tool_calls），规避严格端点 400。
             MessageBody(
                 role = ASSISTANT_ROLE,
-                content = content.takeIf { it.isNotEmpty() }?.let { JsonPrimitive(it) },
+                content = content.takeIf { it.isNotEmpty() }?.let { JsonPrimitive(it) }
+                    ?: if (replay != null) JsonPrimitive("") else null,
                 toolCalls = replay,
                 reasoningContent = thinkingChain
             )
@@ -718,6 +793,9 @@ class OpenAICompatibleProvider(
         const val ASSISTANT_ROLE = "assistant"
         const val TOOL_ROLE = "tool"
         const val FINISH_TOOL_CALLS = "tool_calls"
+
+        /** 单次 Retry-After 采纳上限（秒）：与 SkillExecutor 重试 6 次相乘 ≈ 6 分钟总重试窗口（D11）。 */
+        private const val MAX_RETRY_AFTER_SEC = 60L
 
         /** 合法思考强度集合（S-3 纵深防御，对齐 DeepSeek API 文档 low/high/max）。 */
         internal val VALID_EFFORTS = setOf("low", "high", "max")

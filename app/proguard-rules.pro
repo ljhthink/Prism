@@ -158,6 +158,18 @@
 -dontwarn okio.**
 
 # =============================================================================
+# 11.1 Readability4J / jsoup（US-1505，v1 批次15 A4：Fetch 正文提纯换库）
+# =============================================================================
+
+# Readability4J（net.dankito.readability4j）传递依赖 slf4j-api：依赖冲突解析取 ktor
+# 引入的 2.0.17（高于 readability4j 声明的 1.7.25，debugRuntimeClasspath 已核实）。
+# Android 端无 slf4j 绑定 → LoggerFactory 走 NOP 静默日志路径（预期行为）。
+# dontwarn 保留为解析漂移（回退 1.7.x 时存在 StaticLoggerBinder Class.forName 查找）的安全网。
+-dontwarn org.slf4j.impl.**
+# jsoup 1.18.3 无反射解析路径，常规 R8 剪枝即可，无需 keep。
+# Readability4J 为纯 Kotlin DOM 操作（无反射），无需 keep。
+
+# =============================================================================
 # 11. Prism 应用自身入口点
 # =============================================================================
 
