@@ -3,6 +3,7 @@
 > 从 `docs/templates/reports/acceptance-template.md` 复制新建，依 CLAUDE.md 第十一节 + 7.2.4 回退闭环。
 > 本报告由 ac-verifier 子 Agent 生成，覆盖主 Agent 在 TKN-M4-PHASEB-ACCEPTANCE-002 受限通过后主动回退修复的重新验收。
 > 前序报告：
+>
 > - [2026-08-09-m4-phaseB-acceptance.md](2026-08-09-m4-phaseB-acceptance.md)（TKN-M4-PHASEB-ACCEPTANCE-002，受限通过，US-022 AC-5 受限根因：SkillRegistryTest 缺失）
 > - [2026-08-09-m4-phaseB-guardrail-round3.md](2026-08-09-m4-phaseB-guardrail-round3.md)（TKN-M4-PHASEB-GUARDRAIL-003，通过，回退修复复审）
 
@@ -502,9 +503,11 @@ guardrail 第三轮 §2.2 已独立核实 `isReturnDefaultValues = true` 配置�
 ### 11.1 结论依据
 
 **US-021（SKILL.md 解析器）**：5/5 AC 通过（无回归）。
+
 - AC-1~AC-5 全部通过，SkillManifestParser.kt 未修改，SkillManifestParserTest 33 测试独立运行 0 失败。
 
 **US-022（SkillRegistry）**：6/6 AC 通过（AC-5 从「受限通过」升级为「通过」）。
+
 - AC-1~AC-4 + AC-6 通过（无回归）
 - **AC-5 升级为通过**：39 测试充分覆盖 AC-5 三大场景（扫描 15 + 同步 12 + enabledSkills 过滤 5 + 去重 6 + SyncDiff 1），独立运行 39/0/0/0 通过，重构等价性已核实，公开 API 不变
 

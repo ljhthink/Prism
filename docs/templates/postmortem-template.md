@@ -8,7 +8,7 @@ related_adr: ADR-001
 # 事后复盘模板（Postmortem）
 
 > Blameless culture：对事不对人，目的是改进系统而非追责。
-> 关联流程见 [solution-report](../reports/2026-08-02-bugfix-ops-workflow-solution.md) 第 5.2 节。
+> 关联流程见 [CLAUDE.md 第二十一~二十三节](../../CLAUDE.md) 第 5.2 节。
 
 ## 1. 元信息
 

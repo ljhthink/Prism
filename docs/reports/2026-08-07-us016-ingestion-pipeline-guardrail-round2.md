@@ -39,6 +39,7 @@
 **修复位置**：[IngestionPipeline.kt:91-103](../../app/src/main/java/io/prism/ingestion/IngestionPipeline.kt)
 
 **修复代码**：
+
 ```kotlin
 if (knowledgeBaseId < 0) {
     try {
@@ -63,11 +64,13 @@ if (knowledgeBaseId < 0) {
 | (e) 协程取消 | parse 阶段已关闭 ✓ | parse 阶段已关闭 ✓（不变） |
 
 **关键验证点**：
+
 1. `require` 位于 `try` 块（第 108 行）**之前**，故 `require` 抛出的 `IllegalArgumentException` 不被任何 `catch` 捕获，直接抛给调用方——正确的 fail-fast 参数校验。
 2. `close` 异常用 `catch (_: Exception)` 吞掉，避免掩盖后续 `require` 的 `IllegalArgumentException`——符合「不掩盖原始异常」原则。
 3. `if (knowledgeBaseId < 0)` + `require(knowledgeBaseId >= 0)` 略冗余（require 在 if 内必然失败），但保持了标准异常消息格式，可接受。
 
 **测试验证**：[IngestionPipelineTest.kt:417-427](../../app/src/test/java/io/prism/ingestion/IngestionPipelineTest.kt) `ingest_negative_knowledge_base_id_still_closes_input_stream`
+
 - 用 `TrackedInputStream` 传入 `-1L`，断言 `trackedStream.closed == true` + 抛 `IllegalArgumentException`。✓
 
 **结论**：M1 修复有效，资源泄漏闭合。符合 BR-error-handling-006（proposed）。
@@ -77,11 +80,13 @@ if (knowledgeBaseId < 0) {
 **修复位置**：[IngestionEvent.kt:59-68](../../app/src/main/java/io/prism/ingestion/IngestionEvent.kt)、[IngestionPipeline.kt:182,194](../../app/src/main/java/io/prism/ingestion/IngestionPipeline.kt)
 
 **修复方式**：KDoc 安全约定（非结构变更）
+
 - `Failed.throwable` KDoc 明确标注「仅供日志/调试，禁止直接展示 message/堆栈给用户」
 - 引用 BR-error-handling-003（保留业务语义区分）
 - catch 块注释同步标注 M2 安全约定
 
 **评估**：
+
 - 第一轮建议增加 `errorMessage` 安全字段，主 Agent 选择 KDoc 约束替代。
 - KDoc 约束 + BR-error-handling-003 引用提供了明确的 UI 层映射指导，**可接受**。
 - 缺点：依赖 US-018 自觉遵守，无编译期强制。
@@ -94,6 +99,7 @@ if (knowledgeBaseId < 0) {
 **修复位置**：[IngestionPipeline.kt:180-196](../../app/src/main/java/io/prism/ingestion/IngestionPipeline.kt)
 
 **修复内容**：4 个 catch 块均补充归一化策略注释：
+
 - `catch (DocumentParseException)`：致命错误 + M2 安全约定 ✓
 - `catch (CancellationException)`：Kotlin 协程铁律 + 必须在 `catch(Exception)` 之前 ✓
 - `catch (IllegalArgumentException)`：编程错误直接抛 + input 已关闭 ✓
@@ -106,6 +112,7 @@ if (knowledgeBaseId < 0) {
 **修复位置**：[IngestionPipelineTest.kt:433-459](../../app/src/test/java/io/prism/ingestion/IngestionPipelineTest.kt) `ingest_cancellation_stops_processing_at_chunk_boundary`
 
 **测试逻辑复核（sequential-thinking 确认）**：
+
 1. 构造 5 段文档，每段独立成块。
 2. `collect` 内第 1 个 `ChunkEmbedded` 后抛 `CancellationException("测试取消")`。
 3. 关键时序：`repository.addChunk(chunk)`（第 162 行）在 `emit(ChunkEmbedded)`（第 166 行）**之前**，故第 1 个 chunk 已入库。
@@ -113,6 +120,7 @@ if (knowledgeBaseId < 0) {
 5. 断言：仅 1 个 `ChunkEmbedded`、无 `Completed`、仅 1 chunk 入库。✓
 
 **评估**：
+
 - 用 `collect` 内抛 `CancellationException` 模拟协程取消，等效于取消语义（`CancellationException` 是协程取消信号）。
 - 覆盖了 chunk 边界停止行为，验证 `ensureActive` 与 `catch(CancellationException){throw e}` 协同。
 - 未额外断言 `input` 关闭，但取消发生在 parse 阶段之后（`input` 已被 `use{}` 关闭），无需断言。
@@ -126,6 +134,7 @@ if (knowledgeBaseId < 0) {
 **位置**：[IngestionPipeline.kt:188-191](../../app/src/main/java/io/prism/ingestion/IngestionPipeline.kt)
 
 **代码**：
+
 ```kotlin
 } catch (e: IllegalArgumentException) {
     // 编程错误（如 repository.addChunk 内部 require 失败）：直接抛给调用方，不走 Failed 事件
@@ -137,6 +146,7 @@ if (knowledgeBaseId < 0) {
 ### 3.1 catch 顺序安全性（sequential-thinking 验证）
 
 修复后完整 catch 链：
+
 ```
 1. catch (DocumentParseException)     → emit Failed
 2. catch (CancellationException)      → throw e（重新抛出）
@@ -145,11 +155,13 @@ if (knowledgeBaseId < 0) {
 ```
 
 **继承链分析**：
+
 - `CancellationException` → `IllegalStateException` → `RuntimeException` → `Exception`
 - `IllegalArgumentException` → `RuntimeException` → `Exception`
 - `DocumentParseException` → `RuntimeException` → `Exception`
 
 **关键结论**：
+
 - `CancellationException` 与 `IllegalArgumentException` 互不继承（均直接继承 `RuntimeException` 的不同子类），`catch(CancellationException)` 不会捕获 `IllegalArgumentException`，反之亦然。**取消语义不受影响**。✓
 - `catch(IllegalArgumentException)` 位于 `catch(Exception)` 之前，保证 `IllegalArgumentException` 被重新抛出而非落入 `catch(Exception)` emit `Failed`。✓
 - `DocumentParseException` 不是 `IllegalArgumentException` 子类，`catch(DocumentParseException)` 在前优先捕获解析异常。✓

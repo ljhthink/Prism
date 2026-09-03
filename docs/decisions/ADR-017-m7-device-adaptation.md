@@ -100,6 +100,7 @@ val totalRamGb = totalRamBytes / (1024L * 1024L * 1024L)
 ### 4.4 用户覆盖持久化
 
 `TierConfigRepository` 仿 `MemoryConfigRepository` 模式（ADR-015 5.3）：
+
 - 独立 DataStore 文件 `prism_tier_config`（与 `prism_memory_config` / `prism_api_keys` 隔离）
 - `stringPreferencesKey("tier_override")` 存枚举名（`FULL` / `STANDARD` / `MINIMAL` / `CHAT_ONLY` / `AUTO`）
 - `AUTO` 表示无覆盖（使用 RAM 检测结果），为默认值
@@ -155,6 +156,7 @@ val Factory: ViewModelProvider.Factory = viewModelFactory {
 ### 4.7 RAG_TOP_K 动态化
 
 将 `ConversationViewModel` 的 `RAG_TOP_K` 从 `private const val` 改为构造参数 `ragTopK: Int`，由 Factory 按 tier 传入：
+
 - FULL: 5
 - STANDARD: 3
 - MINIMAL/CHAT_ONLY: 0（RAG 禁用，值不使用）

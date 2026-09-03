@@ -75,6 +75,7 @@ PRD [US-003](../PRD.md) 验收标准 7 条覆盖情况（通过 US-011~US-019 �
 | 7. 4GB RAM 设备可用 top-k=3 | US-014/017/019 | top-k=3 硬编码 + CPU 降级 + 小批次设计 | JVM 基线（真机未验证） | 一致（受限：无真机/模拟器验证） |
 
 **A.2 结论**：PRD US-003 验收标准 7 条中，**5 条完全一致**，**2 条有偏差但不阻断**：
+
 - AC-1（PDF 解析方案）：PRD 文案未同步 ADR-007 修正（PdfRenderer → PDFBox），属文档同步遗漏
 - AC-5（分库管理）：数据层完整实现+测试，UI 入口延后至后续 US（已知 GAP，不阻断 M3 核心功能）
 
@@ -230,7 +231,7 @@ M3 引入 7 条 BR 规则（非任务背景所述 9 条，实际为 7 条）：
 |---|---|---|---|---|---|
 | BR-concurrency-002 | US-014 | active | active | 一致 | US-014 embed 持锁 + US-016 摄入 + US-019 buildRagPlan 在 IO 线程 — 一致执行 |
 | BR-concurrency-003 | US-015 | active | active | 一致 | US-015 级联删除 findIds + Box.remove — 一致执行 |
-| BR-concurrency-004 | US-018 | active | active | 一致 | US-018 _uiState.update CAS + US-019 _messages.update CAS — 一致执行 |
+| BR-concurrency-004 | US-018 | active | active | 一致 | US-018 _uiState.update CAS + US-019_messages.update CAS — 一致执行 |
 | BR-error-handling-005 | US-014 | active | active | 一致 | US-014 close 先置 null — 一致执行 |
 | BR-error-handling-006 | US-016 | **proposed** | **active** | **不一致** | US-016 acceptance 已确认 M1 修复有效 + 测试验证，应转 active |
 | BR-error-handling-007 | US-019 | active | active | 一致 | US-019 CancellationException 重抛 — 一致执行 |

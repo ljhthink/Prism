@@ -25,6 +25,7 @@
 ### 1.1 作者意图
 
 将 `ConversationViewModel` 的 Mock 占位回复替换为真实 OpenAI 兼容 SSE 流式请求：
+
 1. 抽离 `internal` 纯函数（buildEndpoint / buildAuthHeader / buildRequestBody / applyCustomHeaders / parseChunkData）以规避 MockEngine 不支持 `SSECapability` 的测试障碍（ADR-004 §4.7）；
 2. 用 `StreamEvent` 密封类 + `Flow` 表达增量流，依赖倒置注入 `ChatStreamProvider` 接口；
 3. 通过 `flowOn(Dispatchers.IO)` 将网络 IO 移出主线程。
@@ -172,9 +173,9 @@ if (chunk.choices.isEmpty()) return StreamEvent.Done
 
 ### 4.2 强建议（本轮或下轮修复）
 
-3. **CR-03（中）**：空 `choices[]` 判定为 Done 的提前终止风险，补充兼容性说明或细化判定。
-4. **CR-04（中）**：补齐真正的 401 鉴权失败用例，移除名不符实的不可达端口测试的未用服务器。
-5. **CR-05（低）**：异常 message 映射为通用安全文案。
+1. **CR-03（中）**：空 `choices[]` 判定为 Done 的提前终止风险，补充兼容性说明或细化判定。
+2. **CR-04（中）**：补齐真正的 401 鉴权失败用例，移除名不符实的不可达端口测试的未用服务器。
+3. **CR-05（低）**：异常 message 映射为通用安全文案。
 
 ### 4.3 修复后回归防线（ac-verifier 阶段必须补充）
 

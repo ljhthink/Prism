@@ -5,7 +5,7 @@
 | 状态 | Accepted |
 | 日期 | 2026-08-05（决策）/ 2026-08-06（验收闭环） |
 | 决策者 | 主 Agent（基于 tech-selection-researcher 选型报告） |
-| 关联文档 | [ADR-001](ADR-001-prism-tech-stack.md) / [ADR-003](ADR-003-prism-provider-config-settings.md) / [prd.json](../prd.json) |
+| 关联文档 | [ADR-001](ADR-001-prism-tech-stack.md) / [ADR-003](ADR-003-prism-provider-config-settings.md) / [prd.json](../../prd.json) |
 | 上游调研 | [US-006 流式请求技术选型报告](../reports/2026-08-05-us006-provider-streaming-tech-selection.md) |
 | 验收报告 | [US-006 验收报告](../reports/2026-08-06-us006-acceptance.md)（TKN-NETWORK-US006-AC-001，通过） |
 | 风险等级 | P3 重大（引入新网络框架 Ktor + 接口扩展 ApiKeyRepository + INTERNET 权限） |
@@ -35,6 +35,7 @@ Mock 占位回复（`delay(1400)`），需替换为真实流式请求。
 （编译时序列化），coroutines 提升至 **1.10.1**。
 
 **理由**：
+
 - **版本硬约束**：项目 ADR-001 已锁定 Kotlin 2.1.0。最新 Ktor 3.5.x 以 Kotlin 2.4 构建，
   其元数据无法被 Kotlin 2.1.0 编译器读取，且强制 coroutines 1.11.0。故必须选用以 Kotlin 2.1.0
   构建的 **Ktor 3.1.x 系列（最新补丁 3.1.3）**。这是决定性约束。
@@ -63,6 +64,7 @@ when 分支，测试友好。
 ### 4.3 请求构造：`OpenAICompatibleProvider` + URL/鉴权组装
 
 **决策**：新建 `OpenAICompatibleProvider`（含 `StreamEvent` 与请求方法），负责：
+
 - 端点：`baseUrl` + `/chat/completions`
 - 鉴权头：`Authorization: Bearer <apiKeyRef 对应明文>`
 - 自定义头：合并 `ProviderConfig.headers`
@@ -122,6 +124,7 @@ Ktor 3.1.3 SSE 客户端插件对非 200 响应**一律抛 `io.ktor.client.plugi
 无论 `expectSuccess` 值如何，均绕过 `ClientRequestException` 路径。
 
 **决策**：
+
 - 生产 `PrismApplication.httpClient` 仍设 `expectSuccess = true`（语义正确，供未来非 SSE 请求复用）。
 - `OpenAICompatibleProvider.streamChat` 新增 `catch (e: SSEClientException)`，从
   `e.response?.status?.value` 读取状态码，经 `mapHttpError(status)` 映射：

@@ -17,12 +17,14 @@
 PRD US-003 验收 5「分库管理」要求知识库支持按库组织文档（如工作/学习/个人）。US-015 落地分库数据模型，为后续 US-016 摄入管线 / US-017 向量检索 / US-018 知识库管理 UI / US-019 RAG 对话集成提供持久化基础。
 
 当前数据层（考古报告 §1）：
+
 - `KnowledgeChunk` 是唯一无 Repository 封装的实体，零业务依赖，仅 5 个测试文件直接操作 `Box`。
 - 3 个既有实体（KnowledgeChunk / ProviderConfig / McpServerConfig）完全扁平独立，**零 `@Relation`/`ToOne`/`ToMany` 关系注解先例**。
 - `runInTx` 事务仅 1 处先例（[ProviderConfigRepository.kt:52-67](../../app/src/main/java/io/prism/data/ProviderConfigRepository.kt) 的单激活不变式）。
 - ObjectBox schema `retiredPropertyUids=[]`，项目从未发生破坏性迁移。
 
 设计未决问题（考古报告 R7）：
+
 1. KnowledgeBase 实体字段集（是否含统计字段如 docs/chunks/indexed）？
 2. KnowledgeChunk 与 KnowledgeBase 的关联方式（`@Relation` vs 扁平外键）？
 3. 级联删除策略（`@Relation` 自动级联 vs `runInTx` 手动级联）？
@@ -44,6 +46,7 @@ data class KnowledgeBase(
 ```
 
 **理由**：
+
 - 与 [McpServerConfig.kt](../../app/src/main/java/io/prism/data/McpServerConfig.kt) 扁平实体风格一致。
 - 统计字段（docs/chunks/indexed/citations）运行时按 `knowledgeBaseId` 聚合查询计算，避免写入路径维护一致性成本（每入库/删除一个 chunk 都需更新库级计数器，多步骤事务易破坏不变式）。
 - UI Mock（[KnowledgeBaseScreen.kt:78-82](../../app/src/main/java/io/prism/ui/knowledge/KnowledgeBaseScreen.kt)）的 `docs/chunks/updated/indexed/citations/glow` 字段属视图层装饰，运行时计算即可满足。
@@ -63,6 +66,7 @@ data class KnowledgeChunk(
 ```
 
 **理由**：
+
 - **不引入 `@Relation`/`ToOne`/`ToMany`**。web-access 调研发现 ObjectBox `ToMany` 有三类已知副作用：
   - GitHub Issue [objectbox-java#1065](https://github.com/objectbox/objectbox-java/issues/1065)：Backlink ToMany 删除顺序敏感，先 `box.remove` 再 `applyChangesToDb()` 会导致实体「复活」。
   - GitHub Issue [objectbox-java#583](https://github.com/objectbox/objectbox-java/issues/583)：`applyChangesToDb()` 仅创建/销毁关系本身，**不会自动 remove 或 update 已存在的关联实体**，必须手动用 box 删除。
@@ -74,6 +78,7 @@ data class KnowledgeChunk(
 ### 5.3 默认库语义：`knowledgeBaseId = 0L` 代表虚拟默认库，不写入 KnowledgeBase 表
 
 **理由**：
+
 - 旧 KnowledgeChunk 记录无 `knowledgeBaseId` 字段，加字段后 ObjectBox 自动填默认值 `0L`（考古报告 §4.2 兼容性变更），**旧数据自动归属默认库，无孤儿数据风险**（考古 R1 缓解）。
 - 默认库不持久化为 KnowledgeBase 记录：
   - 避免与「KnowledgeBase 表 id 从 1 开始自增」冲突（0L 不在 ObjectBox `@Id` 分配范围）；
@@ -106,6 +111,7 @@ fun remove(id: Long) {
 ```
 
 **理由**：
+
 - 考古报告 §3.2 已确认 `runInTx` 是项目唯一事务先例，模式成熟。
 - ObjectBox 官方 Data Modeling 指南明确推荐：「Use a transaction for logical groups of writes... Batch put/remove within a single transaction where it makes sense. Handle errors inside the transaction and fail fast.」
 - `@Relation` 不提供自动级联删除（GitHub Issue #583 确认），手动级联是 ObjectBox 的必然选择。

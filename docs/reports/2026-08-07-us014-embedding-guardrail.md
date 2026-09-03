@@ -98,6 +98,7 @@ flowchart TD
 ### 2.1 输入与边界审计（Stage 1）
 
 #### 2.1.1 数值与类型边界
+
 - `maxLength`：[BertWordPieceTokenizer.kt:83](../../../app/src/main/java/io/prism/embedding/BertWordPieceTokenizer.kt) `require(maxLength >= 2)` 显式下界校验，符合。
 - `maxInputCharsPerWord`：[BertWordPieceTokenizer.kt:181](../../../app/src/main/java/io/prism/embedding/BertWordPieceTokenizer.kt) `if (token.length > maxInputCharsPerWord) return listOf(unkToken)`，符合。
 - `embeddingDim` 校验：[OnnxEmbedder.kt:192-194](../../../app/src/main/java/io/prism/embedding/OnnxEmbedder.kt) `require(hiddenStates[0].size == embeddingDim)`，符合。
@@ -106,17 +107,20 @@ flowchart TD
 - 算术溢出：mean pooling 用 Float 累加，384 维 × seq≤512，无溢出风险。
 
 #### 2.1.2 集合与缓冲边界
+
 - `inputIds`/`attentionMask`/`tokenTypeIds` 三张量等长不变式：[BertWordPieceTokenizer.kt:94-96](../../../app/src/main/java/io/prism/embedding/BertWordPieceTokenizer.kt) 同一 `full.size` 构造，符合。
 - `names` 按位置取用：[OnnxEmbedder.kt:82-85](../../../app/src/main/java/io/prism/embedding/OnnxEmbedder.kt) `INPUT_IDS_IDX=0`/`ATTENTION_MASK_IDX=1` 由 `validateInputNames`（require size>=2）保护；`TOKEN_TYPE_IDS_IDX=2` 由 `if (names.size > TOKEN_TYPE_IDS_IDX)` 保护，符合。
 - `meanPoolAndNormalize` 越界：G-04 已记录 `minOf` 静默截断为质量缺陷（非安全漏洞，输入来自受控 tokenizer）。
 
 #### 2.1.3 业务状态机约束
+
 - session 生命周期：`null → loaded → unloaded(null) → loaded...`，`close()` 永久 null。G-01（并发）与 G-02（异常后状态）为状态机一致性缺陷，已记录。
 - `close()` 后复活（G-09）违反 AutoCloseable 状态契约。
 
 ### 2.2 执行安全审计（Stage 2）
 
 #### 2.2.1 注入防护
+
 - **SQL/NoSQL 注入**：本模块无数据库交互（ObjectBox 集成在后续 US），无拼接查询，无风险。
 - **OS 命令注入**：无 `Runtime.exec`/`ProcessBuilder`，无风险。
 - **代码/表达式注入**：无 `eval`/`ScriptEngine`/反射执行用户字符串，无风险。
@@ -124,12 +128,14 @@ flowchart TD
 - **ONNX 反序列化**：`env.createSession(modelBytes, options)` 反序列化模型字节。模型来自 `assets/`（随 APK 分发，受 APK 签名保护），属受信来源。攻击者需篡改 APK 才能替换模型，属 APK 完整性威胁而非代码漏洞。**不报告**（信任边界内）。
 
 #### 2.2.2 最小权限
+
 - 数据库/服务账号：本模块不涉及。
 - OS 权限：仅文件 I/O（读 assets），无多余权限。
 - 容器化：本项目为 Android 应用，无容器 securityContext。
 - 符合。
 
 #### 2.2.3 输出编码
+
 - 嵌入向量输出为 `FloatArray`，不涉及 HTML/JS/URL 上下文，无需转义。
 - 异常 message（G-12）：含 `e.message`，可能泄露内部细节，CWE-209 信息泄露（LOW）。
 
@@ -306,6 +312,7 @@ while (line != null) {
 - [ ] 通过（可进入测试阶段）
 
 **主 Agent 须完成的最小修复集（方可重新提交审查）**：
+
 1. G-01：修复并发 use-after-close（全程持锁或引用计数），新增并发测试。
 2. G-02：close/checkAndUnload 异常后状态置位。
 3. G-03：unchecked cast 捕获并转 EmbeddingException。

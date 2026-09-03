@@ -76,9 +76,11 @@ flowchart LR
 且 `save()`（[48,52]）仅 `box.put` 后 `refreshFlows()`，**不**执行去激活。
 
 ProviderEditSheet [298,314] 的开关 `enabled` 经：
+
 ```kotlin
 viewModel.saveProvider(config.copy(..., isActive = enabled))
 ```
+
 直接写入 `isActive=true`。若 Provider A 已激活，用户对 B 打开开关并保存，则 A、B 同时 `isActive=true`。
 触发路径真实可达（开关 → 保存按钮）。后果：`refreshFlows()` 中
 `_activeProviderFlow.value = _providers.value.find { it.isActive }`（[162]）取首个激活，
@@ -88,11 +90,13 @@ viewModel.saveProvider(config.copy(..., isActive = enabled))
 #### Q2 详析（组合体副作用 + 数据覆盖）
 
 ApiKeySheet [344,352] 用 `var loaded by remember(...)` 守卫，仅首次加载。ProviderEditSheet [275,277] 无此守卫：
+
 ```kotlin
 viewModel.loadApiKey(config.apiKeyRef) { loaded ->
     if (loaded != null) apiKey = loaded
 }
 ```
+
 每次重组（用户编辑 name/baseUrl/models、切换开关）重复启动 `loadApiKey` 协程，读取旧存值并覆盖 `apiKey` 状态。
 后果：① 用户正在编辑 API Key 时，改任一其他字段即触发重组，`apiKey` 被重置为旧存值；② 用户清空 Key 字段后，
 下次重组又回填旧值，**无法清空已存 Key**。与 ApiKeySheet 处理不一致（同一文件内两处模式分叉）。
@@ -100,12 +104,14 @@ viewModel.loadApiKey(config.apiKeyRef) { loaded ->
 #### Q3 详析（死代码 / 未闭环）
 
 SettingsScreen [80,84]:
+
 ```kotlin
 if (payload.isNotEmpty()) {
     // 简单提示：在此不引入 Snackbar，交由详情弹层标题/副标题承载；消费防止重复
     Unit
 }
 ```
+
 `consumeEvent()`（SettingsViewModel [110,112]）在生产 UI 无任何调用点。`saveProvider`/`createFromPreset`/`deleteProvider`/`saveApiKey`
 写入的 `_payload`（"已保存 X"/"API Key 已加密保存" 等）**永不显示、永不消费**。注释称「交由详情弹层承载」但各弹层未引用 `payload`。
 属功能缺口 + 死代码，非安全泄露（payload 不含明文 Key，仅 Provider 名与通用文案）。
@@ -189,6 +195,7 @@ if (payload.isNotEmpty()) {
 
 > 判定依据：本改动集**安全面（加密 API Key 处理 / 无注入 / 无硬编码 / 掩码 / DataStore 单例）全部通过，无阻断级漏洞**
 > （无 SQL 注入、无命令注入、无 eval、无明文密钥落盘、无日志泄露）。但存在：
+>
 > - **S1**：单一激活不变式被开关路径绕过（可致多 Provider 同时激活，影响后续 Provider 选择正确性）；
 > - **S2**：`loadApiKey` 组合体副作用导致 API Key 字段被旧值覆盖、无法清空；
 > - **S3**：payload 一次性提示死代码，保存/删除/API Key 操作结果对用户不可见。
@@ -275,6 +282,7 @@ jobs:
 - 新建路径安全性：`ProviderEditSheet` 仅由 `ProviderListSheet.onSelect`（既有 Provider）触发，`config.id` 恒 >0，`setActive(config.id)` 不会命中不存在的 id=0。✔
 
 **不变式测试**（app/src/test/java/io/prism/data/ProviderConfigRepositoryTest.kt）：
+
 - `save_active_config_deactivates_others`（:247-257）：保存 A、B（均非激活），再「经通用 save 直写 A.isActive=true」，断言 A 激活、B 被取消。真实覆盖「绕过 setActive 直写」这一兜底场景。✔
 - `save_active_new_config_deactivates_existing`（:259-268）：保存 A 并 setActive(A)，再经 save 写入 B(isActive=true)（新建），断言 A 被取消、B 激活。覆盖「新建即激活」场景。✔
 
@@ -313,6 +321,7 @@ app/src/main/java/io/prism/ui/settings/SettingsScreen.kt:266-275：`ProviderEdit
 ### 7.6 复审总判定
 
 原有 S1（高）、S2（高）、S3（中）三项修复均已核实**正确且完整**：
+
 - S1：数据层 `save()` runInTx 去激活兜底 + UI 统一经 `setActive` + 2 条不变式测试，三层收敛，不变式得到保证；
 - S2：`apiKeyLoaded` 守卫消除重组覆盖，且保留「可清空已存 Key」语义；
 - S3：payload 机制生产/测试代码彻底移除，无残留引用与未用 import。

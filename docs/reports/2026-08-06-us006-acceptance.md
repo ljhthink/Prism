@@ -79,6 +79,7 @@
 | JUnit 4 | ConversationViewModelTest 9 | 9 | 0 | — | **通过** |
 
 **覆盖率说明**：项目未配置 JaCoCo 覆盖率工具（build.gradle.kts 无 jacoco 插件），无法自动打印语句/分支百分比。采用**纯函数全分支人工审查 + 测试覆盖分析**替代：
+
 - `buildEndpoint`：1 分支（trimEnd），全覆盖。
 - `buildAuthHeader`：`isNotBlank` 分支全覆盖（null/空串/空白/有效）。
 - `buildRequestBody`：无分支（纯序列化），全语句覆盖。
@@ -185,6 +186,7 @@
 - [x] **通过**（AC-2 受限通过，真机公网延时待 US-007/后期补测；无阻断缺陷，无回归）
 
 **判定依据**：
+
 1. AC-1/AC-3/AC-4/AC-5 全部通过，证据充分（23 用例含 10 新增极端场景 + 真实 Netty SSE 集成）。
 2. AC-2 初版性能基线 p99=4.13ms，远低于 1s 门禁，标记"受限通过"并注明真机补充计划。
 3. 安全专项两项（注入、敏感信息泄露）通过，无 HIGH/MEDIUM。

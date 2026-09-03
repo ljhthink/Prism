@@ -101,6 +101,7 @@
 **推荐：ObjectBox 5.4.2 原生向量搜索（零新增依赖）**
 
 **核心理由**：
+
 1. **零新增依赖 + 复用既有主库**——ADR-001 已集成 ObjectBox 5.4.2，`KnowledgeChunk` 已含 `FloatArray?` embedding 字段（US-002 已实现 CRUD）。M3 只需在 embedding 字段上加 `@HnswIndex` 注解并建立 HNSW 索引，无需引入第二套存储，完美命中 C2。
 2. **License 合规**——官方一手来源确认：bindings 为 Apache 2.0，核心数据库免费，**向量搜索免费**（仅 Data Sync、Time Series 为商业付费）。满足 C1。
 3. **HNSW 原生近似检索**——满足 C7（384 维 + COSINE），`nearestNeighbors()` + `findWithScores()` 直接返回相似度分数，贴合 RAG 检索需求。
@@ -109,6 +110,7 @@
 6. **官方 Android API 成熟**——`@HnswIndex(dimensions=384, distanceType=HnswDistanceType.COSINE)` 注解 float[] 字段即可，与项目 Kotlin 栈无缝。
 
 **否决方案与理由**：
+
 - **sqlite-vector（接管版）**：**License 从 MIT/Apache 改为 Elastic License 2.0**，生产环境需商业许可，违反 C1（合规风险）。原版 asg017/sqlite-vec 虽双许可但**仅支持暴力扫描**，无 ANN 近似检索，性能不达标，且维护者已转投新项目版本停滞。
 - **FAISS**：无官方 Android 原生产物，需手动交叉编译，体积大、集成成本高。
 - **LanceDB**：Python/Rust 为主，Android 无官方后端支持，端侧集成不可行。
@@ -202,6 +204,7 @@ ADR-001 3.7 引用 Continuous-learning 设计「vector cosine 0.7 + BM25 0.3 混
 **推荐：onnxruntime-android 1.27.0（with all-MiniLM-L6-v2 ONNX INT8 模型）**
 
 **核心理由**：
+
 1. **MIT License**——商业闭源友好，满足 C1。
 2. **官方 Maven 产物**——`com.microsoft.onnxruntime:onnxruntime-android:1.27.0`（最新稳定版 2026-06-30），无需手动打包。
 3. **v1.19+ Mobile 包停发**——ADR-001 已确认改用 full 包；full 包含全部算子/数据类型，all-MiniLM-L6-v2 的算子（Embedding/LayerNorm/MatMul）均在支持范围。
@@ -244,12 +247,14 @@ ADR-001 3.7 引用 Continuous-learning 设计「vector cosine 0.7 + BM25 0.3 混
 **推荐组合：PDF 用 Android 原生 PdfRenderer + DOCX/XLSX 用 Apache POI（poi-ooxml 5.5.1）+ MD/TXT 自研解析器**
 
 **核心理由**：
+
 1. **PDF 零依赖**——Android `PdfRenderer`（API 21+，minSdk 26 满足）原生渲染 PDF 并抽取文本，规避 pymupdf 的 AGPL 风险（ADR-001 3.8 已明确禁用 pymupdf）。
 2. **Apache POI 功能全面**——poi-ooxml 5.5.1（Apache 2.0，最新稳定版 2025-11-30）支持 DOCX（XWPF）与 XLSX（XSSF）完整文本抽取，满足「文本摄入 RAG」需求。
 3. **License 全部友好**——Apache 2.0 / 系统 API / 自研，无 AGPL 传染，满足 C1。
 4. **MD/TXT 自研**——RAG 摄入本源格式，轻量解析器，无第三方依赖。
 
 **代价与缓解**：
+
 - **Apache POI 体积大**（~10.8MB AAR）：需启用 Multidex + ProGuard 裁剪未用功能；也可考虑 `centic9/poi-on-android`（shadow jar）但更新慢（5.2.5-4，2024-04），故**优先官方 poi-ooxml 5.5.1 + ProGuard 精简**。
 - **java.awt 部分功能缺失**（自选列宽/图片渲染）：RAG 仅需文本抽取（`XWPFWordExtractor` / `XSSFWorkbook` 遍历单元格），不依赖这些缺失功能，无影响。
 
@@ -351,6 +356,7 @@ poi-ooxml = { group = "org.apache.poi", name = "poi-ooxml", version.ref = "poiOo
 ```
 
 > **注意**：
+>
 > 1. `org.apache.poi:poi-ooxml:5.5.1` 是 Maven Central **最新稳定版**（2025-11-30），非 5.4.1（2025-04-06）。ADR-001 若引用 5.4.1 需更新为 5.5.1。
 > 2. 引入 Apache POI 需在 `defaultConfig` 启用 `multiDexEnabled = true`（若 minSdk 26 且方法数超限），并配置 ProGuard 规则。
 > 3. 引入 onnxruntime-android 需内存策略：模型按需加载，避免常驻内存（4GB 低端机）。
@@ -394,6 +400,7 @@ poi-ooxml = { group = "org.apache.poi", name = "poi-ooxml", version.ref = "poiOo
 ### 7.3 关键引用链接索引
 
 #### ObjectBox（向量存储）
+
 - [ObjectBox 向量搜索官方文档（HNSW/api）](https://docs.objectbox.io/on-device-vector-search)
 - [ObjectBox AI 导航（License：bindings Apache 2.0，Data Sync 付费）](https://objectbox.io/llms.txt)
 - [ObjectBox FAQ（License & Pricing）](https://objectbox.io/FAQ/)
@@ -403,18 +410,22 @@ poi-ooxml = { group = "org.apache.poi", name = "poi-ooxml", version.ref = "poiOo
 - [ObjectBox 向量搜索性能博客（百万级 <10ms）](https://blog.gitcode.com/f49131588a66b196934a22c5d09b6389.html)
 
 #### ONNX Runtime（嵌入运行时）
+
 - [onnxruntime-android Maven（1.27.0，MIT）](https://mvnrepository.com/artifact/com.microsoft.onnxruntime/onnxruntime-android)
 - [ONNX Runtime v1.18.0 Release（Mobile 包停发公告）](https://github.com/microsoft/onnxruntime/releases/v1.18.0)
 
 #### Apache POI（文档解析）
+
 - [poi-ooxml Maven（5.5.1 最新稳定版，Apache 2.0）](https://mvnrepository.com/artifact/org.apache.poi/poi-ooxml)
 - [SUPERCILEX/poi-android（POI 在 Android 的适配与限制）](https://gitmemories.com/index.php/SUPERCILEX/poi-android)
 - [centic9/poi-on-android（shadow jar 方案，更新慢）](https://github.com/centic9/poi-on-android/releases)
 
 #### Android 系统 API
+
 - [Android PdfRenderer（PDF 文本/渲染）](https://developer.android.com/reference/android/graphics/pdf/PdfRenderer)
 
 #### 项目既有决策
+
 - [ADR-001 Prism 技术栈与架构选型](../decisions/ADR-001-prism-tech-stack.md)（向量库 ObjectBox 5.4.2 / 嵌入模型 all-MiniLM-L6-v2 ONNX INT8 / pymupdf AGPL 禁用）
 
 ---

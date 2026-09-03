@@ -535,7 +535,7 @@
 #### BR-ops-004: 用 PowerShell 修改源码文件前必须统一 CRLF→LF 或按行数组拼接，且多行替换后按字节级校验
 
 - 类别：ops
-- 规则：在 Windows PowerShell 中用 `ReadAllText`/`String.Replace` 对源码做**多行字符串替换**时，目标文件可能是 CRLF（git autocrlf）而脚本构造的块为 LF，`Replace` 静默不命中（返回 0 替换却"看似成功"），导致改了却未落盘直到编译失败。可靠做法：(1) 替换前 `.Replace("`r`n","`n")` 归一化再写回（整文件转 LF，Kotlin/git 可接受）；(2) 或按 `ReadAllLines` 行数组 + `List.RemoveRange`/`Insert` 拼接后 `WriteAllLines`（绕过 here-string 的引号/行尾坑），但对大文件需确认 `ReadAllLines` 长度与 `Get-Content` 一致（不一致说明编码/行尾异常，禁止直接覆盖）；(3) 写回后必须**字节级**用 `Get-Content -Encoding UTF8` 复验目标内容已变化（BR-ops-003）。禁止用 `@'...'@` here-string 构造含 `>`/`（`/中文/`$i` 的多行块传给 `Replace`——终端会分页展开引号导致内容与文件不符。
+- 规则：在 Windows PowerShell 中用 `ReadAllText`/`String.Replace` 对源码做**多行字符串替换**时，目标文件可能是 CRLF（git autocrlf）而脚本构造的块为 LF，`Replace` 静默不命中（返回 0 替换却"看似成功"），导致改了却未落盘直到编译失败。可靠做法：(1) 替换前 `.Replace("`r`n","`n")` 归一化再写回（整文件转 LF，Kotlin/git 可接受）；(2) 或按 `ReadAllLines` 行数组 + `List.RemoveRange`/`Insert` 拼接后 `WriteAllLines`（绕过 here-string 的引号/行尾坑），但对大文件需确认`ReadAllLines` 长度与 `Get-Content` 一致（不一致说明编码/行尾异常，禁止直接覆盖）；(3) 写回后必须**字节级**用 `Get-Content -Encoding UTF8` 复验目标内容已变化（BR-ops-003）。禁止用 `@'...'@` here-string 构造含 `>`/`（`/中文/`$i` 的多行块传给 `Replace`——终端会分页展开引号导致内容与文件不符。
 - 反例：`$content.Replace($oldBlock, $newBlock)`（$oldBlock 为 LF here-string，文件为 CRLF）→ 0 次替换，文件未变，编译报 Unresolved reference；或 `ReadAllLines`（738 行）与 `Get-Content`（597 行）长度不一致仍直接覆盖 → 丢行/错乱
 - 正例：`$content=$content.Replace("`r`n","`n"); $content=$content.Replace($old,$new)`（先归一化行尾再替换再写回）+ WriteAllLines 前校验行数 / 写回后 UTF8 复验关键词存在
 - 来源：v1 真机二次修复（2026-08-19）CrossSessionMemoryManager.kt 多行函数替换多次不命中（CRLF vs LF）+ ReadAllLines/Get-Content 行数不一致；ConversationScreen.kt/sanitize 正则多行替换（BR-ops-003 会话）

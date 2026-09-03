@@ -9,7 +9,7 @@ related_adr: ADR-001
 
 > 运维知识库条目，供 AI Agent 在 RCA 阶段通过 RAG 检索复用。
 > 命名规范：`docs/runbooks/RB-<domain>-<NNN>-<short-title>.md`。
-> 关联流程见 [solution-report](../reports/2026-08-02-bugfix-ops-workflow-solution.md) 第 5.2 节。
+> 关联流程见 [CLAUDE.md 第二十一~二十三节](../../CLAUDE.md) 第 5.2 节。
 
 ## 1. 元信息
 

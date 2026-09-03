@@ -10,7 +10,7 @@ related_adr: ADR-001
 > 动态累积层：将 Bug 根因 / accepted review / postmortem 转为持久行为规则，
 > 防止同类错误跨会话复发。借鉴 Microsoft 论文（arXiv:2607.13091），实证 0% 复发率。
 > 本文件是 `CLAUDE.md`（静态核心层）的动态补充，分层避免核心规则膨胀。
-> 关联流程见 [solution-report](../reports/2026-08-02-bugfix-ops-workflow-solution.md) 第 5.3 节。
+> 关联流程见 [CLAUDE.md 第二十一~二十三节](../../CLAUDE.md) 第 5.3 节。
 
 ## 使用规范
 

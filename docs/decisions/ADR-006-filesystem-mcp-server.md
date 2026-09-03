@@ -5,7 +5,7 @@
 | 状态 | Accepted |
 | 日期 | 2026-08-06 |
 | 决策者 | 主 Agent（基于 SDK 字节码复核 + SAF 调研 + 用户确认进程内桥接方案） |
-| 关联文档 | [ADR-001](ADR-001-prism-tech-stack.md) / [ADR-005](ADR-005-mcp-client-integration.md) / [prd.json](../prd.json) |
+| 关联文档 | [ADR-001](ADR-001-prism-tech-stack.md) / [ADR-005](ADR-005-mcp-client-integration.md) / [prd.json](../../prd.json) |
 | 上游调研 | [US-009 Filesystem MCP Server 源码考古](../reports/2026-08-06-us009-filesystem-mcp-archaeology.md) |
 | 风险等级 | P3 重大（引入 mcp-kotlin-sdk-server 生产依赖 + 新增进程内 Transport / SAF 访问层 / 用户确认机制） |
 
@@ -33,14 +33,14 @@ US-009 需要让 AI **读取本地文件**，实现形态 B「内置本地 Serve
 
 源码考古（TKN-PRISM-ARCHAEOLOGY-US009-001）确认：
 
-- `McpToolProvider` 接口（listTools / callTool）与 `McpClientManager` 实现均可直接复用，
++ `McpToolProvider` 接口（listTools / callTool）与 `McpClientManager` 实现均可直接复用，
   本地实现只需实现同一接口。
-- MCP SDK 的 `Transport` 接口（start / send / close / onClose / onError / onMessage）+ `AbstractTransport`
++ MCP SDK 的 `Transport` 接口（start / send / close / onClose / onError / onMessage）+ `AbstractTransport`
   基类（自带 onMessage/onError/onClose 存取与 `invokeOnCloseCallback`），为自研进程内 Transport 提供挂载点。
-- `Server.createSession(transport)` 内部调用 `ServerSession.connect(transport)`，
++ `Server.createSession(transport)` 内部调用 `ServerSession.connect(transport)`，
   与 `Client.connect(transport)` 同源 `Protocol.connect`——后者依次设置 onClose/onError/onMessage
   并调用 `transport.start()`。因此**自研 Transport 只需实现 start/send/close，onMessage 由 SDK 自动装配**。
-- `CapabilitiesScreen` 的 `McpRow`（enabled = baseUrl.isNotBlank）与 `McpConfigSheet`
++ `CapabilitiesScreen` 的 `McpRow`（enabled = baseUrl.isNotBlank）与 `McpConfigSheet`
   （canSave 要求 http(s) URL）需为 LOCAL serverType 放行。
 
 ## 决策（Decision）
@@ -69,9 +69,9 @@ object InProcessTransport {
 }
 ```
 
-- `start()`：启动接收协程，从 `receiveFrom` 读取消息并派发给 `onMessage`；通道关闭时回调 `onClose`。
-- `send(message, options)`：写入 `sendTo` 通道。
-- `close()`：取消接收协程并关闭两个通道。
++ `start()`：启动接收协程，从 `receiveFrom` 读取消息并派发给 `onMessage`；通道关闭时回调 `onClose`。
++ `send(message, options)`：写入 `sendTo` 通道。
++ `close()`：取消接收协程并关闭两个通道。
 
 **理由**：`Protocol.connect` 会自动装配 onMessage 并调用 `start()`，
 故本实现只需处理消息搬运。`Channel.UNLIMITED` 避免握手阶段背压死锁（初始化/通知并发）。
@@ -91,8 +91,8 @@ interface FileSystemAccess {
 }
 ```
 
-- `SafFileAccess`：基于 `DocumentFile.fromTreeUri` / `DocumentContract` + `ContentResolver` 的空闲目录授权访问。
-- `InMemoryFileAccess`（test）：内存 Map 树，供 JVM 单测验证工具逻辑。
++ `SafFileAccess`：基于 `DocumentFile.fromTreeUri` / `DocumentContract` + `ContentResolver` 的空闲目录授权访问。
++ `InMemoryFileAccess`（test）：内存 Map 树，供 JVM 单测验证工具逻辑。
 
 **理由**：SAF 依赖 Android Context 不可 JVM 单测，抽象接口后工具处理器可独立测试；
 生产端 `SafFileAccess` 由 DI 注入，与远程 Provider 模式一致。
@@ -110,9 +110,9 @@ interface ToolConfirmationGate {
 }
 ```
 
-- 生产实现 `UiConfirmationGate`：经 `MutableSharedFlow` 暴露确认请求，UI 弹「AI 请求执行 <tool>」对话框，
++ 生产实现 `UiConfirmationGate`：经 `MutableSharedFlow` 暴露确认请求，UI 弹「AI 请求执行 <tool>」对话框，
   用户「允许/拒绝」，`confirm` 挂起直至响应。
-- 测试 fake `AutoConfirmGate`：直接返回 true / false。
++ 测试 fake `AutoConfirmGate`：直接返回 true / false。
 
 **理由**：AC-3 要求执行前确认。将门禁置于服务器工具处理器（而非客户端），
 使确认逻辑与传输解耦、对任何调用方（含远程 Client）生效；SAF 初授权只控「可见范围」，不控单次操作。
@@ -120,10 +120,11 @@ interface ToolConfirmationGate {
 ### 5.5 本地 Server：`FilesystemMcpServer` + `LocalMcpToolProvider`
 
 **决策**：
-- `FilesystemMcpServer`：构建 MCP `Server`（单例，工具注册一次），
+
++ `FilesystemMcpServer`：构建 MCP `Server`（单例，工具注册一次），
   注册 8 个工具（7 只读 + 1 写 `write_file`），每个处理器先经 `ToolConfirmationGate.confirm`
   再调用 `FileSystemAccess`，返回 `CallToolResult`（错误时 `isError=true`）。
-- `LocalMcpToolProvider : McpToolProvider`：`listTools` / `callTool` 每次调用建立
++ `LocalMcpToolProvider : McpToolProvider`：`listTools` / `callTool` 每次调用建立
   一对 `InProcessTransport` + `server.createSession` + `client.connect`，完成调用后统一清理。
 
 **工具集**（对齐 MCP Filesystem Server 子集，SAF 可映射）：
@@ -151,8 +152,9 @@ override suspend fun listTools(config) =
 ### 5.7 UI 放行本地 Server
 
 **决策**：`CapabilitiesScreen`：
-- `McpRow`：`enabled = server.baseUrl.isNotBlank()` → `= server.serverType == McpServerType.LOCAL || server.baseUrl.isNotBlank()`。
-- `McpConfigSheet`：`canSave`/`testEnabled` 对 LOCAL 跳过 http(s) URL 约束；
+
++ `McpRow`：`enabled = server.baseUrl.isNotBlank()` → `= server.serverType == McpServerType.LOCAL || server.baseUrl.isNotBlank()`。
++ `McpConfigSheet`：`canSave`/`testEnabled` 对 LOCAL 跳过 http(s) URL 约束；
   本地 Server 的 Base URL 字段隐藏或置灰，显示「本地内置 · 零配置」。
 
 **理由**：本地 Server 无需 baseUrl，guardrail M2 的约束仅针对远程；US-009 起本地 Server 可启用。
@@ -161,17 +163,17 @@ override suspend fun listTools(config) =
 
 **决策**：针对 guardrail 审查「有条件通过」必改项的修复：
 
-- **S1 权限对称释放**：`removeFilesystemRoot` 先经 `SafFileAccess.uriFor` 取回 URI，
++ **S1 权限对称释放**：`removeFilesystemRoot` 先经 `SafFileAccess.uriFor` 取回 URI，
   调用 `releasePersistableUriPermission` 释放系统级持久化授权，再移除逻辑根并持久化（BR-security-004）。
-- **C1 线程安全**：`SafFileAccess.roots` 由普通 `LinkedHashMap` 改为 `MutableStateFlow<Map<String, Uri>>`
++ **C1 线程安全**：`SafFileAccess.roots` 由普通 `LinkedHashMap` 改为 `MutableStateFlow<Map<String, Uri>>`
   原子快照作为唯一事实源，`addRoot`/`removeRoot` 经 `update {}` 原子更新，读路径读 `.value`（BR-concurrency-002）。
-- **C2 确认协议兜底**：① `ToolConfirmationHost` 提升为全局宿主（`PrismApp` NavHost 外层），
++ **C2 确认协议兜底**：① `ToolConfirmationHost` 提升为全局宿主（`PrismApp` NavHost 外层），
   任意 Tab 均有收集者；② UI 侧改为 FIFO 队列逐条确认，避免并发请求被单值状态覆盖；
   ③ `confirm` 经 `withTimeoutOrNull(30s)` 超时按拒绝处理，`MutableSharedFlow` 用 `DROP_OLDEST`
   （BR-concurrency-003）。
-- **C3 初始化竞态**：`onCreate` 持久化根加载与 `registerFilesystemRoot` 经 `rootsMutex` 串行化。
-- **S2 路径防御**：`resolveFile`/`writeFile` 逐段白名单校验（非空、非 `.`/`..`）。
-- **C4/C5/C6/C7**：`LocalMcpToolProvider` catch 补结构化日志；根目录名清洗拒绝 `/` 与控制字符；
++ **C3 初始化竞态**：`onCreate` 持久化根加载与 `registerFilesystemRoot` 经 `rootsMutex` 串行化。
++ **S2 路径防御**：`resolveFile`/`writeFile` 逐段白名单校验（非空、非 `.`/`..`）。
++ **C4/C5/C6/C7**：`LocalMcpToolProvider` catch 补结构化日志；根目录名清洗拒绝 `/` 与控制字符；
   `search_files.limit` 上限 100；确认对话框参数长字符串截断展示。
 
 **理由**：最小权限、跨线程共享容器、一次一请求确认协议均为既定规则（BR-security-004 /
@@ -193,22 +195,22 @@ BR-concurrency-002 / BR-concurrency-003），修复后 fs 模块 25 用例全部
 
 ## 后果（Consequences）
 
-- 正面后果：
-  - AI 可通过本地 Filesystem MCP Server 读取用户授权目录内的文件
-  - 本地 Server 复用 `McpToolProvider` 契约，UI 层零感知，路由集中
-  - 进程内 Transport 复用 MCP SDK 自动装配，实现最小、可测
-  - 文件操作经确认门禁，满足 AC-3「防误操作」安全要求
-- 负面后果 / 代价：
-  - `mcp-kotlin-sdk-server` 成为生产依赖，APK 体积增加
-  - 新增 7 个模块（Transport / FileSystemAccess / SafFileAccess / Gate / Server / Provider / Dispatcher）
-  - SAF 生产实现依赖真机验证，JVM 单测仅覆盖 in-memory 路径
-- 需要同步更新的文档或代码：
-  - `app/build.gradle.kts`（依赖移动）
-  - 新增 `InProcessTransport` / `FileSystemAccess` / `SafFileAccess` / `ToolConfirmationGate` /
++ 正面后果：
+  + AI 可通过本地 Filesystem MCP Server 读取用户授权目录内的文件
+  + 本地 Server 复用 `McpToolProvider` 契约，UI 层零感知，路由集中
+  + 进程内 Transport 复用 MCP SDK 自动装配，实现最小、可测
+  + 文件操作经确认门禁，满足 AC-3「防误操作」安全要求
++ 负面后果 / 代价：
+  + `mcp-kotlin-sdk-server` 成为生产依赖，APK 体积增加
+  + 新增 7 个模块（Transport / FileSystemAccess / SafFileAccess / Gate / Server / Provider / Dispatcher）
+  + SAF 生产实现依赖真机验证，JVM 单测仅覆盖 in-memory 路径
++ 需要同步更新的文档或代码：
+  + `app/build.gradle.kts`（依赖移动）
+  + 新增 `InProcessTransport` / `FileSystemAccess` / `SafFileAccess` / `ToolConfirmationGate` /
     `UiConfirmationGate` / `FilesystemMcpServer` / `LocalMcpToolProvider` / `McpToolProviderDispatcher`
-  - 改造 `CapabilitiesViewModel` / `CapabilitiesScreen` / `PrismApplication`
-  - `docs/decisions/README.md` / `README.md` 索引
-  - `prd.json`（US-009 passes 置 true）
+  + 改造 `CapabilitiesViewModel` / `CapabilitiesScreen` / `PrismApplication`
+  + `docs/decisions/README.md` / `README.md` 索引
+  + `prd.json`（US-009 passes 置 true）
 
 ---
 
@@ -227,8 +229,8 @@ BR-concurrency-002 / BR-concurrency-003），修复后 fs 模块 25 用例全部
 
 ## 参考
 
-- [US-009 Filesystem MCP Server 源码考古](../reports/2026-08-06-us009-filesystem-mcp-archaeology.md)
-- [MCP Kotlin SDK Server 文档](https://kotlin.sdk.modelcontextprotocol.io/kotlin-sdk-server/index.html)
-- [Android Storage Access Framework](https://developer.android.com/guide/topics/providers/document-provider)
-- [ADR-001](ADR-001-prism-tech-stack.md)：技术栈锁定 / 形态 A+B 预设
-- [ADR-005](ADR-005-mcp-client-integration.md)：McpToolProvider 契约 / 测试策略
++ [US-009 Filesystem MCP Server 源码考古](../reports/2026-08-06-us009-filesystem-mcp-archaeology.md)
++ [MCP Kotlin SDK Server 文档](https://kotlin.sdk.modelcontextprotocol.io/kotlin-sdk-server/index.html)
++ [Android Storage Access Framework](https://developer.android.com/guide/topics/providers/document-provider)
++ [ADR-001](ADR-001-prism-tech-stack.md)：技术栈锁定 / 形态 A+B 预设
++ [ADR-005](ADR-005-mcp-client-integration.md)：McpToolProvider 契约 / 测试策略

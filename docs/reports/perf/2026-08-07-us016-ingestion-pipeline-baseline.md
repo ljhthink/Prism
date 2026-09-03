@@ -17,6 +17,7 @@
 **测量内容**：管线编排开销（parse→chunk→embed→addChunk 链路）+ ObjectBox 写入（含 HNSW 索引重建）。
 
 **关键局限**：
+
 - 使用 `FakeEmbedder`（返回 384 维 one-hot 向量，微秒级），**无法测量真实 OnnxEmbedder ONNX 推理延迟**（生产 ~100ms/chunk，BR-concurrency-002 持锁）。
 - 真实端侧集成（真 ONNX + 真文件解析 + Android SAF InputStream）因无模拟器受限，与 US-002~015 同模式跳过。
 - 故本基线**仅反映管线 + DB 层开销**，生产环境总延迟 = 本基线 + N×100ms（ONNX 推理）。

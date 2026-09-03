@@ -8,7 +8,7 @@ related_adr: ADR-001
 # Bug 报告模板
 
 > 用于项目后期用户手动测试发现 Bug 后的结构化报告。复制本模板填写后提交。
-> 关联流程见 [solution-report](../reports/2026-08-02-bugfix-ops-workflow-solution.md) 第 5.1 节。
+> 关联流程见 [CLAUDE.md 第二十一~二十三节](../../CLAUDE.md) 第 5.1 节。
 
 ## 1. 元信息
 
@@ -35,9 +35,9 @@ related_adr: ADR-001
 
 > 必须可被 AI 复现。Mozilla 原则：「请给出可执行、可复现的测试用例证明问题真实存在」。
 
-1. 
-2. 
-3. 
+1.
+2.
+3.
 
 ## 3. 期望行为
 

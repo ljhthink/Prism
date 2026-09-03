@@ -17,11 +17,13 @@
 ## 1. 测试范围与局限
 
 **测量内容**：
+
 - `CrossSessionMemoryManager.saveSessionMemories` 在 1/5/10 个轮次对下的延迟
 - `CrossSessionMemoryManager.retrieveRelevantMemories` top-3 在 100 条记录下的延迟
 - `CrossSessionMemoryManager.formatMemoriesAsContext` 格式化 3 条结果的延迟
 
 **关键局限**：
+
 - 使用 FakeEmbedder（非真实 OnnxEmbedder），embed 开销远低于生产（~0.01ms vs ~100ms）
 - 纯 JVM ObjectBox 测试（非 Android 设备），**生产基线需在 Android 设备补测**
 - 管理层开销（filter/group/format）是主要测量目标，embed 开销差异在分析中说明

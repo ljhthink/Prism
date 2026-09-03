@@ -44,6 +44,7 @@
 ### 0.3 构建验证复核
 
 主 Agent 声明：
+
 - `./gradlew assembleDebug` BUILD SUCCESSFUL（2m 17s）—— 采信（编译型语言假设）
 - `./gradlew testDebugUnitTest` 9/9 通过 —— 采信（测试代码已审查，用例合理）
 - `./gradlew lintDebug` 0 errors —— 采信
@@ -225,6 +226,7 @@ flowchart TD
 | kotlin-kapt | 2.1.0 | 构建插件 | 无 | Apache 2.0 | 处于维护模式（KSP 是推荐方向），功能完整；技术债记录 |
 
 **依赖管理验证**：
+
 - `settings.gradle.kts` 配置 `FAIL_ON_PROJECT_REPOS`，防止项目级仓库覆盖——符合供应链安全。
 - content 过滤（BR-build-003）确保 AndroidX 从 google 镜像获取，`io.objectbox` 从 mavenCentral 获取——降低交叉投毒风险。
 - ObjectBox 插件自动添加核心依赖，无手动 implementation，避免版本冲突。

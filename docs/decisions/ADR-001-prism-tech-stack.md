@@ -34,6 +34,7 @@ Prism 是一款手机端 AI 聊天 Agent 应用，定位为"个人 AI Agent 平�
 **决策**：仅 Android，最低 Android 8.0（API 26）+ 3GB RAM（最低）/ 4GB RAM（推荐），分档降级。
 
 **理由**：
+
 - 仅 Android 规避 iOS 沙盒对跨 App 能力的严格限制
 - API 26 覆盖 2026 年 >97% 设备，是现代 Android 实际起点
 - 纯云端 BYOK 不跑端侧 LLM，峰值 RAM <700MB，4GB 设备可跑全功能
@@ -63,6 +64,7 @@ Prism 是一款手机端 AI 聊天 Agent 应用，定位为"个人 AI Agent 平�
 | **Key 存储** | Android Keystore + DataStore（Tink AEAD 加密）+ 生物识别 | DataStore 1.3.0-alpha07+ |
 
 **核心理由**：
+
 - **Flutter 被否决**：仅 Android 场景 Flutter 跨平台优势无法发挥，且 +15ms 冷启动、54fps 滚动、+12MB APK、+12-28MB 内存是纯负担
 - **官方 MCP Kotlin SDK 发现代替 mcp_client Dart**：使原生方案不再需要"自实现"，全原语覆盖
 - **ObjectBox 优于 Zvec**：原生方案下 ObjectBox Java/Kotlin 更成熟（HNSW <10ms 百万级，<8MB binary，800K+ 开发者）
@@ -83,11 +85,13 @@ Prism 是一款手机端 AI 聊天 Agent 应用，定位为"个人 AI Agent 平�
 **决策**：纯 Kotlin 重实现 OpenClaw 设计架构（NullClaw 交叉编译经考古判定不可行，不采用）。
 
 **理由**：
+
 - OpenClaw 是 MIT 许可证，可自由复用设计；是 Kimi Claw 的基础，架构成熟
 - OpenClaw 原版 TS 无法直接跑在 Android，需用 Kotlin 重新实现架构（SKILL.md 格式/Agent 路由/沙箱/记忆引擎）
 - **NullClaw 交叉编译经 code-archaeologist 考古（TKN-PRISM-ARCHAEOLOGY-002）判定不可行**：Zig 无法链接 Android libc（上游 ziglang/zig#23906）；沙箱机制（Landlock/Firejail/Bubblewrap/Docker）全不适用 Android；守护进程架构与 Android App 生命周期冲突；集成成本 40-60 人天且高风险
 
 **复用清单**（详见 [OpenClaw 考古报告](../reports/2026-08-02-openclaw-archaeology.md)）：
+
 - 直接采用：SKILL.md 格式、6 层加载优先级、智能体允许列表、{baseDir} 变量、渐进式披露、队列模式、vtable 接口模式
 - 参考重写：Agent 路由（简化）、门控机制（Android 化）、沙箱策略（Android 权限模型）、记忆引擎（ObjectBox+FTS5，vector cosine 0.7 + BM25 0.3 混合）、ClawHub（简化为本地+GitHub Releases）
 - 不可复用：Docker 沙箱、Node.js 运行时、DM Pairing、Pi Agent RPC

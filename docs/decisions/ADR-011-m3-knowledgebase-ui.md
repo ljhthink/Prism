@@ -27,6 +27,7 @@ PRD US-018 要求在 App 内管理知识库、导入文档并查看进度。考�
 ### 5.1 导航入口：保留底部导航一级 Tab，改造既有 KnowledgeBaseScreen
 
 **理由**：
+
 - 既有 KnowledgeBaseScreen 已是 4 Tab 之一（[PrismApp.kt:59](../../app/src/main/java/io/prism/ui/PrismApp.kt)），用户已建立心智模型。
 - 项目零二级路由先例，引入需新增 NavHost 嵌套图概念，破坏既有 4 Tab 简洁架构。
 - 用户已明确选择（2026-08-07 对话）：「保留一级 Tab，改造 Mock→真实」。
@@ -52,11 +53,13 @@ val ingestionPipeline: IngestionPipeline by lazy {
 ```
 
 **参数选型**：
+
 - `Chunker(chunkSize = 512, overlap = 64)`：ADR-007 5.4 推荐 256–1024 token 范围，512 是中位默认值；overlap = chunkSize/8 ≈ 64，符合 RAG 最佳实践（保留上下文衔接又不过度冗余）。
 - `Embedder` 经 `EmbedderFactory.create` 从 `assets/models/` 加载 ONNX 模型（既有资源，US-014 已落地）。
 - 全部 `by lazy`：首次访问时初始化，避免 Application.onCreate 阻塞启动；embedder 加载耗时 ~200ms，仅在用户首次进入知识库 Tab 时发生。
 
 **理由**：
+
 - 与既有 `providerConfigRepository` / `mcpServerRepository` 等 `by lazy` 注入模式完全一致（考古报告 §4.1）。
 - 无 Hilt/Dagger，沿用项目既有手动注入风格。
 - `Embedder` 单例化：OnnxEmbedder 持久加载模型（~23MB 内存），不应每次实例化；HNSW 索引无状态，可安全跨协程复用（BR-concurrency-002 已规避）。
@@ -89,6 +92,7 @@ class KnowledgeBaseViewModel(
 ```
 
 **理由**：
+
 - UiState 单一数据类聚合所有 UI 状态，避免多 StateFlow 散落（[SettingsViewModel](../../app/src/main/java/io/prism/ui/settings/SettingsViewModel.kt) / [CapabilitiesViewModel](../../app/src/main/java/io/prism/ui/capabilities/CapabilitiesViewModel.kt) 既有模式）。
 - `IngestionUiState` sealed interface 仿 `CapabilitiesViewModel.TestState`（连接测试状态机），表达 Idle/Running/Completed/Failed 四态。
 - `IngestionEvent.ChunkEmbedded` / `ChunkSkipped` 累计映射到 `Running.embedded/skipped`；`Completed` 映射到 `Completed`；`Failed` 安全映射通用文案（见 5.5）。
@@ -112,6 +116,7 @@ PrismButton(text = "选择文件", onClick = {
 ```
 
 **ViewModel 侧**：
+
 ```kotlin
 fun startIngestion(uri: Uri, fileName: String, knowledgeBaseId: Long) {
     viewModelScope.launch(Dispatchers.IO) {
@@ -124,6 +129,7 @@ fun startIngestion(uri: Uri, fileName: String, knowledgeBaseId: Long) {
 ```
 
 **理由**：
+
 - 沿用 [CapabilitiesScreen.kt:748](../../app/src/main/java/io/prism/ui/capabilities/CapabilitiesScreen.kt) SAF 授权先例，改用 `OpenDocument`（选单文件）替代 `OpenDocumentTree`（选目录）。
 - `OpenDocument` 选单文件**无需** `takePersistableUriPermission`：导入完即关流，一次性读取即可（考古报告 §6.5）。
 - `contentResolver.openInputStream(uri)` 返回 InputStream，直接传给 `pipeline.ingest`（管线内 `input.use {}` 负责关闭，ADR-009 5.7）。
@@ -140,6 +146,7 @@ private fun mapFailedToMessage(throwable: Throwable): String = when (throwable) 
 ```
 
 **理由**：
+
 - [IngestionEvent.kt:60-67](../../app/src/main/java/io/prism/ingestion/IngestionEvent.kt) 明确安全约定：`throwable.message` / 堆栈禁止展示给用户。
 - BR-error-handling-003：UI 不暴露内部路径/类名/堆栈。
 - `DocumentParseException` 是已知致命错误（解析失败），可识别为「格式不支持」；其他异常统一为「摄入失败」。
@@ -156,6 +163,7 @@ items(state.libraries) { kb ->
 ```
 
 **理由**：
+
 - ADR-008 5.3：默认库 0L 不在 `knowledgeBases` Flow 中，UI 须单独处理入口。
 - 默认库禁用删除/重命名按钮（`remove(0L)` 会抛 IllegalArgumentException，ADR-008 5.4）。
 - 默认库 chunk 计数通过 `repository.chunkCount(0L)` 聚合，与自建库同模式。
@@ -164,6 +172,7 @@ items(state.libraries) { kb ->
 ### 5.7 进度节流策略：单次摄入仅维护最新 Running 状态
 
 **理由**：
+
 - R-5：IngestionPipeline chunk 边界 emit（~100ms/次），大文档 chunk 多时 emit 频繁。
 - ViewModel `MutableStateFlow<IngestionUiState>` 每次 emit 直接 `.value =` 赋值，自动 conflate（StateFlow 默认 conflate 最新值）。
 - 无需额外 `sample()` / `conflate()` 操作符，StateFlow 语义足够（考古报告 §4.2 既有模式）。

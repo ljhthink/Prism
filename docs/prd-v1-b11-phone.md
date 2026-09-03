@@ -94,9 +94,11 @@
 ## 6.7 真机复测新增根因（2026-08-21 01:31 + 01:38）
 
 **问题① 微信树空确认（D5 已决：自动切视觉/坐标）**
+
 - `mapNode: 仅 1 个节点（根 childCount=0 className=null）`——**微信对无障碍树完全屏蔽**，UI 树方案对它本质不可用；截图已验证可用（SkJpegEncoder 成功）。get_ui_state 已改为失败时引导 LLM 用 screenshot+坐标，仍需在系统层强制自动切换（D5）。
 
 **问题② sensenova 400 确认（D6 已决：先调研再改）**
+
 - `SSE 请求失败 status=400 {"error":{"message":"invalid tool_call function, function<path> cannot be empty","code":"3"}}`
 - 网络调研确证：sensenova 6.7 Flash-Lite 校验严格——
   - `assistant.content: null`（伴随 tool_calls）在 sensenova 为 **unspecified/不被接受**（我们正是这样发的）
@@ -116,10 +118,12 @@
 ## 6.10 三轮真机根因（2026-08-21 01:53 + 01:59）
 
 **① sensenova 400 已修复 → 现仅剩 429 并发限流**
+
 - 日志：`status=429 body={"error":{"message":"...max organization concurrency: 1..."}}`
 - **结论**：`invalid tool_call function` 400 已不再出现（D6 修复生效）；现为 **sensenova 免费档账号并发=1** 的限流，非代码 bug。工具回路 3s/6s 自动重试仍在，但并发 1 会串行排队。
 
 **② deepseek 视觉兜底指令已生效，但纯文本模型读不了截图**
+
 - 日志：`round=5 toolCalls=[phone_control__screenshot]`（LLM 已按引导截图）→ 之后又 get_ui_state → take_over
 - **结论**：`runScreenshot` 只返回图片 data URL；deepseek 是**纯文本模型读不了图**，截图后无法获取坐标 → 死循环。需给手机操控截图接 **OCR（ML Kit，US-302 已有）→ 返回屏幕文字 + 坐标**，纯文本模型才能继续。
 
@@ -208,6 +212,7 @@
 ### 6.13.6 已实施（2026-08-21，全量回归 0 失败）
 
 **A（致命）OCR 坐标空间还原**：
+
 - [PhoneControlAccessibilityService.captureScreenshot] 降采样前记录原始屏幕尺寸 `lastScreenshotOrigW/H` +
   [lastScreenshotScreenSize]；[OcrTextExtractor.extractElements] 新增 `screenWidth/Height` 参数，
   [MlKitOcrTextExtractor] 按 `screenW/bitmapW`、`screenH/bitmapH` 把降采样坐标还原到屏幕空间
@@ -215,25 +220,30 @@
   **修复前 OCR 坐标与 tap 空间相差约 2.3 倍 → 全部点错位（"识别不准、点不到"直接根因）。**
 
 **B（质量）OCR 行级聚合 + 编号列表**：
+
 - [MlKitOcrTextExtractor.extractElements] 从 element 碎片粒度改为 **line 行级**聚合（整行文本 + 行包围盒）
-  + 置信度过滤（<0.15 丢弃）；[runScreenshot] 输出 `[N] 文本（坐标 x,y）` 编号列表（SoM 文本版）。
+  - 置信度过滤（<0.15 丢弃）；[runScreenshot] 输出 `[N] 文本（坐标 x,y）` 编号列表（SoM 文本版）。
 
 **C（核心）tap 文本锚点（text grounding）**：
+
 - tap/long_press/double_tap 工具新增 `text` 参数；[runTargetAction] 优先 UI 树
   [findNodeByTextNid]（BFS 聚合可点击/可输入节点子树文本 + [textSimilarity] 模糊匹配）→ 兜底 OCR
   [resolveTextAnchor]（截图 → OCR 模糊匹配 → 命中元素中心 → tap 坐标吸附）。LLM 不再需要猜像素坐标。
 - 敏感拦截保持：锚点文本/命中文本/密码节点/高危三态均复用原安全链。
 
 **D（引导）主动调用 OCR**：
+
 - screenshot 工具描述移除"纯文本模型请勿调用"（与空树引导自相矛盾），改为声明【OCR 文字+坐标】【图标区域】
   与 tap(text=...) 用法；get_ui_state 空树引导对齐；[PHONE_CONTROL_GUIDANCE] 新增「OCR 兜底工作流」第 4 条。
 
 **F（D12）图标区域检测**：
+
 - 新增 [IconRegionDetector]：纯像素启发式（灰度 → Sobel 边缘 → 排除 OCR 文字框 → 4-连通域 →
   尺寸/面积过滤 → 按面积取前 20），零新依赖/零模型；[detectIcons] 输出 `[N] 图标（坐标 x,y）` 占位元素，
   [runScreenshot] 分节输出。局限已文档明示：无模型无法识别图标"含义"，仅作候选坐标提示（主路径仍是文本锚点）。
 
 **E（D11）429 限流增强**：
+
 - [StreamEvent.Error] 新增 `retryAfterSeconds`；[OpenAICompatibleProvider] 从 429 响应头解析
   Retry-After（秒数/HTTP-date，[parseRetryAfter] 上限 60s）；[SkillExecutor] 退避**优先 Retry-After**，
   否则指数退避；重试上限 4→6；重试耗尽文案明确「已自动重试 N 次仍失败」；**非工具流**
@@ -255,6 +265,7 @@ PhoneControlLocalToolExecutorTest 增补（tap text 参数/screenshot 描述）�
 ### 6.14.2 glm-4.6v-flash 根因（用户证据 + 代码核验）
 
 **用户证据**（glm 输出原样）：
+
 ```
 我会帮助您打开拼多多并搜索相关产品。首先，我需要启动拼多多应用。
 我需要重新尝试启动拼多多应用。如果仍然失败，我将考虑使用搜索功能直接搜索相关内容。
@@ -265,6 +276,7 @@ PhoneControlLocalToolExecutorTest 增补（tap text 参数/screenshot 描述）�
 <arg_value>com.pinduoduo.pinduoduo</arg_value> 
 </tool_call> 
 ```
+
 ```
 
 **根因**：glm-4.6v-flash 通过配置端点**不产生原生 `tool_calls`**（OpenAI 结构化函数调用未被该模型/端点支持或被理解），而是把工具调用写成**文本型 `<tool_call>` XML 块**（HTML 代码围栏内）。应用链路只认流式原生 `ToolCallComplete`：

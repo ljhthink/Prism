@@ -22,12 +22,14 @@
 ## 决策（Decision）
 
 ### 子决策 A：Fetch 明文拦截 —— http→https 升级 + 可诊断日志（问题 1）
+
 - **根因**：公网明文 `http://` 被 Android 网络安全策略拦截（OkHttp 抛 `UnknownServiceException: CLEARTEXT ... not permitted`），被误判为反爬失败。
 - **修复**：`LocalMcpToolProvider.fetchUrl` 对公网 `http://` URL **先升级为 `https://`** 再请求（同 host，`isPublicHttpUrl` SSRF 复检；绝大多数站点支持 https）。**刻意不**放宽 `network_security_config` 全局明文（ADR-004 安全边界不变）；http-only 的极少数站点返回可诊断文案。
 - **日志脱敏**：失败日志补 `sanitizeUrlForLog`（丢弃 query/fragment/**userinfo**，仅留 host+path，CWE-532），此前只记异常类型无法定位是哪一层失败。新增 `fetch upgrades public http url to https` / `sanitizeUrlForLog strips query fragment userinfo` 单测。
 - guardrail LOW-1：sanitizeUrlForLog 剥离 userinfo（`substringAfterLast('@')`）已修复。
 
 ### 子决策 B：搜索命中 —— Bing RSS 改 HTML SERP + 修正后缀误剥（问题 2）
+
 - **根因**：Bing `format=rss` 中文实体排名坍缩（校名返回市级）；后缀表误剥实体词。
 - **修复 1（解析）**：`fetchSearch` 改请求 `https://cn.bing.com/search`（`mkt=zh-CN`+`setlang=zh-hans`+`count`+浏览器 UA/Accept-Language/Referer），`parseBingHtml` 提取 `li.b_algo` 块（title/href/snippet），`decodeBingUrl` 处理直链与 `//cn.bing.com/ck/a?...u=a1<base64url>` 跳转解码。不引入 HTML 解析依赖（Karpathy 简洁 + 避免 R8 风险）。
 - **修复 2（后缀）**：`QUERY_SUFFIXES` 移除实体词后缀（中学/大学/学校/公司/功能/详情…），仅保留疑问/泛化后缀，"梧州市第一中学"保持完整实体。
@@ -35,6 +37,7 @@
 - **安全**：解码出的 URL 仅作为搜索**结果链接**回灌 LLM（前置【外部内容】不可信边界），不进入本 App 抓取/Intent/WebView sink；渲染侧 scheme 白名单双保险（guardrail 复核通过）。
 
 ### 子决策 C：视觉旁路可启用 + 端到端可观测（问题 3）
+
 - **Provider 解析升级**：`handleVisionUnsupportedError` 视觉配置改为 `findVisionFallback() ?: providerRepository.activeProviderFlow.value`——未配置独立 `isVisionFallback` Provider 时**回退到当前激活主 Provider** 充当图像描述端点，对齐用户"激活了视觉模型却只能 OCR"的预期。是否真具视觉能力交给远端判断，失败自然落 OCR。
 - **隐私不破坏**：图像外发仍受 orchestrator `isBypassAvailable()`（consent && auto && failures<3）闸门管控；未授权不进云→OCR。主 Provider 即聊天主端点，用户本就会向其发图/消息，不构成新增外发面。
 - **可观测（根治静默吞）**：`cloudDescriber`（PrismApplication）显式记录 `cloud bypass ok/failed provider=... err=...`；VM 记录 `vision bypass: dedicated=... cloudConfig=...`。修复后真机可见到底走没走 Cloud、为何失败。

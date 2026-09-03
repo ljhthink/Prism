@@ -8,7 +8,7 @@
 | 版本 | v0.1（待用户确认） |
 | 日期 | 2026-08-17 |
 | 作者 | Prism 主 Agent |
-| 关联文档 | [考古报告 2026-08-17-uxr9-archaeology.md](reports/2026-08-17-uxr9-archaeology.md)、[ADR-012](decisions/ADR-012-rag-architecture.md)、[ADR-023](decisions/ADR-023-uxr3-fixes.md)、[ADR-030](decisions/ADR-030-uxr8-b3.md) |
+| 关联文档 | [考古报告 2026-08-17-uxr9-archaeology.md](reports/2026-08-17-uxr9-archaeology.md)、[ADR-012](decisions/ADR-012-m3-rag-conversation-integration.md)、[ADR-023](decisions/ADR-023-ux-r3-fixes.md)、[ADR-030](decisions/ADR-030-uxr8-b3-new-features.md) |
 | 风险等级 | P2（跨模块：RAG 检索链路 / 输入区 UI 重构 / 记忆写入链路） |
 
 ## 1. 背景
@@ -44,7 +44,8 @@
   - [x] 全量回归 0 失败
 
 > **UXR9-B1 实现记录**：换多语言嵌入模型 paraphrase-multilingual-MiniLM-L12-v2 qint8（~113MB）
-> + Unigram tokenizer（tokenizer.json ~9MB）。实测相似度分布（ChineseSimilarityDiagnosticTest）：
+>
+> - Unigram tokenizer（tokenizer.json ~9MB）。实测相似度分布（ChineseSimilarityDiagnosticTest）：
 > 相关中文句对 0.582/0.655，无关中文句对 -0.067~0.322 → 阈值校准为 **0.5**（旧英文模型无关
 > 片段 0.4~0.7 是 RAG 污染结构性根因，已换模型根治）。`RAG_SIMILARITY_THRESHOLD` 与
 > `KnowledgeBaseLocalToolExecutor.SIMILARITY_THRESHOLD` 均校准为 0.5；注入条数上限 top-2。
@@ -87,7 +88,7 @@
 
 > **UXR9-B1 实现记录**：`isImportantTurnPair` 重要性过滤（寒暄/确认/继续跳过，偏好/身份/任务
 > 信号词或实质问题保留）；`saveSessionMemories` 注入 `ConversationSummarizer` 做 LLM 摘要
-> （`[摘要] ` 前缀单条记录入库），失败降级为规则抽取（逐对存储重要轮次）；`retrieveRelevantMemories`
+> （`[摘要]` 前缀单条记录入库），失败降级为规则抽取（逐对存储重要轮次）；`retrieveRelevantMemories`
 > 检索阈值 0.4（会话隔离：新会话 sessionId 全新，天然只命中旧会话记录）。
 
 ### US-905: Fetch MCP 工具可用（修复 Bug 5）
@@ -118,7 +119,8 @@
   - [x] 文档解析失败/过大给出可见提示，不触发 LLM 空转
 
 > **UXR9-B2 实现记录**：PPTX 解析器（PptxDocumentParser，POI XSLF，零新增依赖）+ DocumentType.PPTX
-> + 注册表分发。文档消息截断上限 30000 字符。`notifyDocumentError` 走系统提示通道（不触发 LLM）。
+>
+> - 注册表分发。文档消息截断上限 30000 字符。`notifyDocumentError` 走系统提示通道（不触发 LLM）。
 
 ### US-908: Skills 调用 UI 反馈
 
@@ -129,10 +131,12 @@
   - [x] 既有"正在调用工具: xxx"状态与工具执行指示不冲突
 
 > **UXR9-B2 实现记录**：`SkillCallCard`（完整工具命名空间 + 参数摘要[按 toolCallId 反查 arguments]
-> + 结果片段 + ✓成功/✕失败状态徽标）；`ToolCallIndicator` 增强为「⟳ 执行中」卡片；
+>
+> - 结果片段 + ✓成功/✕失败状态徽标）；`ToolCallIndicator` 增强为「⟳ 执行中」卡片；
 > `summarizeToolArguments` 纯函数压缩参数 JSON。
-
+<!-- -->
 > **UXR9-B3 模拟器验证记录（2026-08-18，emulator-5556 x86_64，`-Pprism.includeX86` 构建）**：
+>
 > - App 安装启动成功，全程零 FATAL/ANR，进程稳定（pid 无重启）
 > - US-901 **设备端摄入嵌入实测成功**：知识库导入 test_ingest.md →「摄入完成：已嵌入 2 个片段」，多语言模型（113MB ONNX + Unigram tokenizer）在设备端加载并推理正常
 > - US-907 **"＋"折叠栏实测通过**：输入框右侧"＋"点击展开 🖼 相册 + 📄 文件 + ✕ 收起（替换原独立图片入口）

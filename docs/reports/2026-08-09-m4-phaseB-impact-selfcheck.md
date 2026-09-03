@@ -38,11 +38,13 @@ implementation(libs.snakeyaml.engine.kmp)
 ```
 
 **选型依据**(tech-selection-researcher 报告 [2026-08-09-m4-toolcalling-tech-selection.md](2026-08-09-m4-toolcalling-tech-selection.md) + ADR-013 5.2):
+
 - `charleskorn/kaml` 已归档(2025-11-30),不可用
 - `snakeyaml-engine-kmp` 是 kaml 底层引擎,KMP 原生,Apache 2.0,活跃维护(最后提交 2026-08-08)
 - `StandardConstructor` 默认仅构造标准 YAML 类型,**不构造任意 Java 类**(沙箱化,满足 ADR-013 5.6 安全要求)
 
 **契约影响**:
+
 - **传递依赖**:snakeyaml-engine-kmp 4.0.1 依赖 `org.snakeyaml:snakeyaml-engine` 纯 JVM 实现,无 Kotlin Native 库,不与既有依赖冲突
 - **方法数**:snakeyaml-engine-kmp ~300 方法,远低于 64K dex 上限(且已启用 multidex)
 - **包名**:`it.krzeminski.snakeyaml.engine.kmp.api.Load` / `LoadSettings`,无包名冲突
@@ -52,12 +54,14 @@ implementation(libs.snakeyaml.engine.kmp)
 ### 1.2 PrismApplication 启动初始化扩展(P2 启动流程变更)
 
 **变更前**(Phase A 后):
+
 ```kotlin
 val skillRepository: SkillRepository by lazy { SkillRepository(boxStore) }
 // onCreate 中无 Skill 初始化
 ```
 
 **变更后**(Phase B):
+
 ```kotlin
 val skillRepository: SkillRepository by lazy { SkillRepository(boxStore) }
 val skillRegistry: SkillRegistry by lazy { SkillRegistry(this, skillRepository) }
@@ -74,6 +78,7 @@ override fun onCreate() {
 ```
 
 **契约影响**:
+
 - 启动时新增一个 IO 协程任务,不阻塞 UI 线程(已在 `appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)` 中)
 - 失败容错:`runCatching` 包裹,失败仅记录 Log.e,不阻断应用启动
 - 顺序依赖:`boxStore` 必须在 `skillRegistry` 延迟初始化前赋值(已在 onCreate 第一行 `boxStore = MyObjectBox.builder()...build()` 保证)
@@ -102,6 +107,7 @@ class SkillRegistry(...) {
 ### 1.5 新增内置 Skill assets(P0 资源文件,无契约变更)
 
 5 个内置 Skill 的 SKILL.md(位于 `app/src/main/assets/skills/builtin/`):
+
 - `translator/SKILL.md` —— 中英互译翻译助手
 - `code-reviewer/SKILL.md` —— 代码审查助手
 - `meeting-notes/SKILL.md` —— 会议纪要助手(声明 read_file 工具)
@@ -179,6 +185,7 @@ Refs: ADR-013
 ## 5. README.md 索引更新
 
 本次新增文档:
+
 - `docs/reports/2026-08-09-m4-phaseB-impact-selfcheck.md`(本文件)
 - Phase B guardrail 报告(待生成)
 - Phase B acceptance 报告(待生成)
@@ -227,6 +234,7 @@ Refs: ADR-013
 **问题**:`parseToEntry` 中 `displayName = manifest.description.lineSequence().firstOrNull()?.take(60) ?: manifest.name`。description 字段语义是「短描述」(≤160 字符),用其作为 displayName 会导致 UI 显示过长文本(最多 60 字符)而非简洁名称。
 
 **评估**:
+
 - ADR-013 5.1 SkillConfig 字段定义:`displayName` 是「UI 展示名称」
 - OpenClaw SKILL.md 规范无 `display_name` 字段,只有 `name`(slug)+ `description`
 - 当前实现用 description 首行 60 字符作为 displayName,意图是给用户一个有意义的展示名(因为 slug `translator` 不友好)
@@ -255,6 +263,7 @@ Refs: ADR-013
 ## 10. 修复后二次自检(CLAUDE.md 7.2.5)
 
 guardrail-enforcer 第一轮审查结论为「通过」,但发现 7 项 G 项,其中:
+
 - **G-01**(中危):PrismApplication `runCatching` 包裹 suspend 函数,违反 active 规则 BR-error-handling-007
 - **G-02 + G-07**(中危):SkillManifestParser `LoadSettings` 默认 `allowRecursiveKeys` 风险(guardrail 误判默认值为 true,实际源码确认为 false,但仍按纵深防御显式配置)
 - **G-03**(低危):scanBuiltin 错误处理风格不一致

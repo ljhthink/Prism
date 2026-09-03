@@ -17,6 +17,7 @@
 ## 1. 测试范围与局限
 
 **测量内容**：
+
 - `SlidingWindowMemoryManager.truncateMessages` 不同消息数量下的截断延迟
 - `OpenAICompatibleProvider.parseCompletionResponse` 典型/异常 LLM 响应的解析延迟
 - `SlidingWindowMemoryManager.processMessages` 无摘要路径（messages.size <= N）延迟
@@ -24,6 +25,7 @@
 - `SlidingWindowMemoryManager.processMessages` 截断降级路径延迟
 
 **关键局限**：
+
 - 摘要路径使用 FakeProvider（即时返回，不测量真实网络延迟 ~100-500ms）
 - DataStore 使用 FakePreferenceDataStore（内存操作，不测量磁盘 I/O）
 - 纯 JVM 测试（非 Android 设备），生产基线需在 Android 设备补测
@@ -58,6 +60,7 @@
 | 截断降级路径 | 500 | 10,300ns | 12,700ns | 27,300ns | 253,200ns | 1,229,000ns | 78,740.2 |
 
 **分析**：
+
 - 无摘要路径 p50=10.6μs（DataStore 读 + coerceIn + 比较 + 列表返回）
 - 摘要路径 p50=6.8μs（FakeProvider 即时返回，仅测量滑动窗口分割逻辑开销）
 - 截断降级路径 p50=12.7μs（DataStore 读 + summarize(null) + truncateMessages(15msgs)）

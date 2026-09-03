@@ -8,7 +8,7 @@
 | 状态 | Accepted |
 | 日期 | 2026-08-06（Proposed → Accepted 2026-08-09，M3 里程碑审计 TKN-M3-MILESTONE-AUDIT-001 同步） |
 | 决策者 | 主 Agent（基于 tech-selection-researcher 调研 + 用户确认） |
-| 关联文档 | [ADR-001](ADR-001-prism-tech-stack.md) / [PRD.md](../PRD.md) US-003 / [prd.json](../prd.json) |
+| 关联文档 | [ADR-001](ADR-001-prism-tech-stack.md) / [PRD.md](../PRD.md) US-003 / [prd.json](../../prd.json) |
 | 上游调研 | [M3 RAG 技术选型对比分析报告](../reports/2026-08-06-m3-rag-tech-selection.md) |
 | 风险等级 | P3 重大（引入 onnxruntime-android / poi-ooxml 生产依赖 + 端侧向量索引 + 嵌入推理） |
 
@@ -66,6 +66,7 @@ INT8 支持、与 ADR-001 的 ONNX 技术栈一致。
 ### 5.3 文档解析：PDFBox（PDF）+ Apache POI poi-ooxml 5.5.1（DOCX/XLSX）+ 自研（MD/TXT）
 
 **决策**：
+
 - **PDF**：`org.apache.pdfbox:pdfbox`（Apache 2.0，`PDFTextStripper` 文本抽取）。
   **修正**：原决策「Android PdfRenderer」无法抽取文本（`android.graphics.pdf.PdfRenderer`
   仅渲染位图，无文本 API），经用户确认改用 PDFBox 满足 RAG 文本摄入，规避 pymupdf AGPL。

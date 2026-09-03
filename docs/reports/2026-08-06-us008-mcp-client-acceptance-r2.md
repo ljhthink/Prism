@@ -139,7 +139,7 @@ US-008 关联用例明细（较上轮 200 新增 5 集成 + 9 ViewModel = 214）
 
 | 检查项 | 结果 | 证据 |
 | --- | --- | --- |
-| 无硬编码密钥/令牌/内部地址 | **通过** | grep `(api[_-]?key|token|secret|password)=["']…` 于 `app/src/main/java/io/prism/network` 无匹配；`apiKeyRef` 仅存引用，明文经 `ApiKeyRepository.readApiKeyOnce` 只读即用 |
+| 无硬编码密钥/令牌/内部地址 | **通过** | grep `(api[_-]?key|token|secret|password)=["']…` 于 `app/src/main/java/io/prism/network`无匹配；`apiKeyRef` 仅存引用，明文经 `ApiKeyRepository.readApiKeyOnce` 只读即用 |
 | 错误信息不泄露 e.message（CWE-209） | **通过** | MCallTool 返回固定通用文案「工具调用失败…」（[L86-89](../../app/src/main/java/io/prism/network/McpClientManager.kt#L86-L89)）；CapabilitiesViewModel.testConnection 返回固定「连接失败…」（[L116-120](../../app/src/main/java/io/prism/ui/capabilities/CapabilitiesViewModel.kt#L116-L120)）；`e.message` 仅存在于注释（L87/L117/L119）；UI 展示的 `Fail.message` 为上述固定文案，非原始异常 |
 | CRLF 纵深防御（CWE-113/93） | **通过** | `resolveHeaders` 剔除含 CR/LF 键值（[L177-190](../../app/src/main/java/io/prism/network/McpClientManager.kt#L177-L190)）；`isValidBaseUrl` 对 trim 前原始值校验 CRLF（[L141-146](../../app/src/main/java/io/prism/network/McpClientManager.kt#L141-L146)）；集成测试 [L159](../../app/src/test/java/io/prism/network/McpClientManagerIntegrationTest.kt#L159) 断言降级文案不含校验异常细节 |
 | baseUrl 白名单 | **通过** | `isValidBaseUrl` 要求非空 + http(s) 前缀 + 无 CRLF；connect 用 trim 后局部变量统一校验（[L107-110](../../app/src/main/java/io/prism/network/McpClientManager.kt#L107-L110)） |

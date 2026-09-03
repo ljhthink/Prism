@@ -17,6 +17,7 @@
 PRD US-003 验收 3「检索」与 US-017 验收标准要求：top-k 检索（默认 k=5，可配置）基于 nearestNeighbors；支持指定库或全库检索；检索结果含相似度分数与来源（文件/片段位置）；检索单元测试通过（含空库、无匹配）。
 
 考古报告（TKN-US017-ARCH-001）确认的关键事实与风险：
+
 - ObjectBox `nearestNeighbors` 返回 **COSINE 距离**（值越低越相似，范围 [0,2]），非相似度。US-017 要求「相似度分数」须显式转换（§5.1 风险）。
 - 全项目 11 处 nearestNeighbors 用法**均不带 equal 过滤**；3 处 equal(knowledgeBaseId) 全部用于 count/findIds。**组合用法零先例**（§5.2 风险）。
 - 维度不匹配属 ObjectBox 未定义行为，US-017 须前置校验 query.size==384（§5.3 风险）。
@@ -25,6 +26,7 @@ PRD US-003 验收 3「检索」与 US-017 验收标准要求：top-k 检索（�
 - HNSW 索引实体级，全库检索跨库返回，分库检索须叠加 equal 过滤（§5.7 风险）。
 
 设计未决问题：
+
 1. 检索方法归属（扩展 KnowledgeBaseRepository / 新建 RetrievalService）？
 2. 相似度转换公式（`1-d` 范围[-1,1] / `1-d/2` 范围[0,1]）？
 3. 分库检索策略（query 内组合 nearestNeighbors+equal / 全库 top-N + 内存过滤）？
@@ -58,6 +60,7 @@ class KnowledgeBaseRepository(private val boxStore: BoxStore) {
 ```
 
 **理由**：
+
 - 与 ADR-009 5.2「KnowledgeChunk 由 KB Repository 代管」模式一致，避免散落 Box 访问点。
 - `search` 与 `chunkCount` 同属读路径，职责内聚；当前 Repository 8 方法，加 `search` 后 9 方法，仍属合理范围。
 - 复用私有 `chunkBox`，统一 Query 资源管理（`use{}` 关闭）。
@@ -70,6 +73,7 @@ val similarity = 1.0 - match.getScore()  // ObjectBox COSINE 距离 d∈[0,2] �
 ```
 
 **理由**：
+
 - **数学语义对齐**：ObjectBox COSINE 距离 `d = 1 - cos(θ)`，故 `sim = 1 - d = cos(θ)`，与数学余弦相似度严格一致。
 - **实证一致**：web-access 调研发现 PicQuery 项目（juejin.cn）采用相同公式 `cosineSimilarity = 1.0 - result.score`。
 - all-MiniLM-L6-v2 输出已 L2 归一化，`cos(θ)` 即点积，语义清晰。
@@ -89,6 +93,7 @@ val query = queryBuilder.build()
 ```
 
 **理由**：
+
 - **探针测试实证**（[ProbeNearestNeighborsWithEqualTest.kt](../../app/src/test/java/io/prism/data/ProbeNearestNeighborsWithEqualTest.kt) 5 用例全通过）：
   - `probe_nearestNeighbors_with_equal_returns_only_specified_kb`：指定 kbId=0L 仅返回默认库 3 条
   - `probe_nearestNeighbors_with_equal_returns_self_built_kb`：指定 kbId=1L 仅返回自建库 3 条
@@ -116,6 +121,7 @@ fun search(
 | `>0` | 指定自建库 | nearestNeighbors + equal(knowledgeBaseId, id) |
 
 **理由**：
+
 - 与 ADR-008 5.3 默认库语义一致（`0L` = 虚拟默认库）。
 - `null` 明确表达「不过滤」，与 `0L`（过滤默认库）语义区分清晰，避免用魔法值（如 `-1`）表达全库。
 - 默认值 `null`（全库）与 AC「支持指定库或全库」中「全库」作为默认行为一致。
@@ -129,6 +135,7 @@ fun search(query: FloatArray, k: Int = DEFAULT_SEARCH_K, ...): List<RetrievalRes
 ```
 
 **理由**：
+
 - AC 明确「默认 k=5，可配置」。
 - PRD US-003 注「4GB 低端机小批次 top-k=3」是运行时调优建议，非接口默认值；接口默认值用 AC 的 5，调用方（US-019 RAG 集成）可按设备配置传 k=3。
 - `require(k > 0)` 前置校验，fail-fast 拒绝非正 k。
@@ -149,6 +156,7 @@ fun search(query: FloatArray, k: Int = DEFAULT_SEARCH_K, knowledgeBaseId: Long? 
 ```
 
 **理由**：
+
 - 考古报告 §5.3 + US-011 验收报告 §8：ObjectBox 5.4.2 对维度不匹配属**未定义行为**（可能抛异常/返回空/返回 2.0 哨兵）。
 - `require` fail-fast 抛 `IllegalArgumentException`，不依赖 ObjectBox 未定义行为。
 - `EMBEDDING_DIM = 384` 常量与 OnnxEmbedder `embeddingDim` 对齐。
@@ -173,6 +181,7 @@ return query.use { q ->
 ```
 
 **理由**：
+
 - 考古报告 §5.4 + BR-concurrency-003：ObjectBox Query 持有 native 句柄，须显式 close。
 - `use {}` 是 Kotlin 惯用模式（等价 try-finally close），与 `chunkCount`/`remove` 既有模式一致。
 - **禁止照搬** `KnowledgeChunkVectorSearchTest.kt` 4 用例未 close 的瑕疵模式（考古报告 §3.4 已标注）。
@@ -203,6 +212,7 @@ data class RetrievalResult(
 ```
 
 **理由**：
+
 - AC 要求「检索结果含相似度分数与来源（文件/片段位置）」：`similarity` + `documentTitle` + `chunkIndex` 满足。
 - `similarity: Double`（非 Float）：分数比较精度更高，与 ObjectBox `getScore()` 返回的 Double 对齐。
 - `title` 原文保留：避免解析失败时丢失信息，UI 层可直接展示原文。
@@ -228,6 +238,7 @@ private fun parseTitle(title: String): Pair<String, Int?> {
 ```
 
 **理由**：
+
 - 考古报告 §5.5：IngestionPipeline 生成 title = `"${documentTitle}#${index+1}"`，documentTitle 可含 `#`（如「C#入门.pdf」→「C#入门#1」）。
 - `lastIndexOf('#')` 取最后一个 `#` 分割，规避文件名含 `#` 的歧义。
 - `idx > 0`：排除 `#` 在首位（无文档标题的退化情况）。

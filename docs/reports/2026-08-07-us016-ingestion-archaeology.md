@@ -250,6 +250,7 @@ graph TD
 ```
 
 **IngestionPipeline 将依赖**：
+
 - `DocumentParserRegistry`（解析分发）
 - `Chunker`（切片）
 - `Embedder`（接口，生产用 `OnnxEmbedder`，测试可注入 Fake）

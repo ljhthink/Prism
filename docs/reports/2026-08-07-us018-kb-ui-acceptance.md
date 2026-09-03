@@ -118,6 +118,7 @@ KnowledgeBaseViewModelTest 采用**真实依赖集成**策略（非 Mock），�
 | 摄入进度实时展示 | 受限通过 | 同上 |
 
 **缓解措施**（ADR-011 备选方案表已说明）：
+
 - ViewModel 单测覆盖所有业务逻辑（35 测试）
 - KnowledgeBaseScreen.kt UI 代码静态审查确认：StateFlow collectAsState 订阅、SAF launcher 集成、ImportSheet 状态映射均与 ADR-011 设计一致
 - 项目零 instrumented 测试先例，引入需新增 androidTest 依赖与 manifest（ADR-011 备选方案已否决）
@@ -216,6 +217,7 @@ KnowledgeBaseViewModelTest 采用**真实依赖集成**策略（非 Mock），�
 | .md 文件 file:/// 绝对路径 | 既有违规 | 5 个既有文件含 file:///（CLAUDE.md + 4 个历史报告），非本次 US-018 引入。US-018 所有报告使用相对路径 |
 
 **文档修正建议**（CLAUDE.md 第十四节）：
+
 - ADR-011 5.4 节代码示例应更新为实际实现（`uriString: String` + `inputStreamProvider: (String) -> InputStream?`），以反映「Uri→String 解耦支持纯 JVM 单测」的设计改进。此为低优先级，不影响验收。
 
 ## 9. 缺陷列表
@@ -225,6 +227,7 @@ KnowledgeBaseViewModelTest 采用**真实依赖集成**策略（非 Mock），�
 | 无 | - | 本次验收未发现新缺陷 | - | - |
 
 **已修复缺陷回顾**（guardrail 阶段）：
+
 - G-01~G-05（R1 中危）：全部修复（R2 确认）
 - R2-1（低危）：日志敏感信息泄露，已修复验证（见 §7）
 

@@ -8,7 +8,7 @@
 | 版本 | v1.0（规划；当前 build.gradle.kts versionName=0.1.0，用户口径 1.0） |
 | 日期 | 2026-08-19 |
 | 作者 | 主 Agent + 用户 |
-| 关联文档 | 三份技术选型调研报告（记忆/手机操控/识图）、考古报告 [2026-08-19 源码考古](#)、[ADR-015](decisions/ADR-015-m5-memory-system-architecture.md)、[ADR-031](decisions/ADR-031-uxr9-multilingual-embedding-and-l2-memory.md)、[ADR-033](decisions/ADR-033-uxr11-real-device-fixes.md) |
+| 关联文档 | 三份技术选型调研报告（记忆/手机操控/识图）、考古报告 2026-08-19 源码考古（docs/reports/）、[ADR-015](decisions/ADR-015-m5-memory-system-architecture.md)、[ADR-031](decisions/ADR-031-uxr9-multilingual-embedding-and-l2-memory.md)、[ADR-033](decisions/ADR-033-uxr11-real-device-fixes.md) |
 | 风险等级 | P3（重大：新增系统权限 + 新依赖 + 跨模块数据模型/接口变更） |
 
 ---

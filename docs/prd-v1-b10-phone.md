@@ -15,11 +15,13 @@
 用户真机测试报告 2 项手机操控问题（此前"网络请求失败"为叠加现象，本轮聚焦本体）：
 
 ### Bug A「打开第三方 App 后无法感知当前状态 / 超时」
+
 - **现象**：提出"打开应用商店搜索崩坏星穹铁道并下载"→ 打开应用商店后超时；"打开微信给联系人回复"→ 打开微信后无法感知当前状态。日志 `SkillExecutor round=38 大量 get_ui_state 重试`。
 - **根因 A1（主）**：`launchApp()` 启动后立即返回，`get_ui_state` 是**单次快照**；`getRootInActiveWindow()` 在窗口切换过渡期 / 新 App 尚未首绘 / FLAG_SECURE 安全窗口时返回 null → 回灌"无法读取当前屏幕内容" → LLM 反复重试。参考 Android 官方 codelab「缓存最后一次已知根节点」+ auto-mobile #775。
 - **根因 A2（次）**：`instance` 是进程内静态，切微信/大内存 App 后 Prism 进程被杀 → `instance=null`，但 `isEnabledInSystem` 读系统设置恒 true → 返回"重连中"，LLM 视为可恢复无限重试。
 
 ### Bug B「截图失败（NoSuchMethodException）」
+
 - **现象**：日志 `captureScreenshot 失败（NoSuchMethodException)`。
 - **根因**：`asBitmapCompat()` 用反射 `javaClass.getMethod("asBitmap")` 调 `ScreenshotResult.asBitmap()`（**@SystemApi 隐藏 API**）→ 国产 ROM（小米/vivo/OPPO）未暴露 public → 抛 NoSuchMethodException。`takeScreenshot` 三参签名本身无误（API 30 官方唯一签名）。
 

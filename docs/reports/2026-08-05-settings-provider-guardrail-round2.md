@@ -136,6 +136,7 @@ activeProvider 收集器）真实覆盖该路径并断言 `activeProvider.id == 
 - [ ] 有条件通过
 
 > 判定依据：
+>
 > - **DEF-01**：`saveProvider` 返回 id + `setActive(savedId)` 的新建激活路径经代码审计与测试
 >   双重验证正确；单激活不变式延续上一轮 S1 收敛方案（save 恒 `isActive=false`，激活仅经
 >   `setActive` 事务），无竞态、无状态漂移。新建模式按钮禁用/隐藏逻辑正确。

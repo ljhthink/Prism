@@ -8,7 +8,7 @@
 | 版本 | v0.1 |
 | 日期 | 2026-09-02 |
 | 作者 | 主 Agent |
-| 关联文档 | [调研报告](reports/2026-09-02-search-fetch-enhancement-research.md)、ADR-020/023/032/033/038~041、docs/prd-open-box-api-mcp-enhancement.md（US-002 蓝图承接） |
+| 关联文档 | 调研报告 docs/reports/2026-09-02-search-fetch-enhancement-research.md（一次性工件，不入库）、ADR-020/023/032/033/038~041、docs/prd-open-box-api-mcp-enhancement.md（US-002 蓝图承接） |
 | 风险等级 | P2（跨模块：本地工具引擎扩展 + 新依赖 + WebView + MCP 模板） |
 
 ## 1. 背景与目标

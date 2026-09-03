@@ -16,12 +16,14 @@
 用户配置 DeepSeek Provider 后对话可用，但发现 LLM 自称"文本改写助手"（提示词污染），即使用户未主动要求调用任何 MCP/Skills/知识库。
 
 **根因（考古确认）**：
+
 1. **直接原因**：内置 `rewriter` Skill 处于**启用状态**（`isEnabled=true` 跨会话持久化），其 `SKILL.md` 的 `system-prompt` 为"你是灵活的文本改写助手"，经 `mergeSystemPrompt` 无条件合并到 `messages[0]` system 消息，强制 LLM 身份为"改写助手"。
 2. **根本设计缺陷**：`mergeSystemPrompt` 默认状态（无 RAG/记忆/Skill）返回 `null`，LLM **无任何 system message 引导**；一旦某 Skill 启用，其完整 `systemPrompt` 全权接管身份，导致"启用即被强制角色"。
 
 **用户诉求**：启用 Skill 后 LLM 应**识别到能力存在**，但**具体是否调用由 AI 按任务类型判断**，或由用户显式发出调用指令。即"按需调用"，而非"启用即强制身份"。
 
 **调研结论**（OpenAI/DeepSeek/Anthropic 2026 最佳实践）：
+
 - 系统提示词应管**长期稳定原则**（角色边界、诚实、输出风格），Skill 管特定任务流程，Resources 管模板细节（Anthropic 甚至砍掉 80% 系统提示词）。
 - Skill 采用**渐进式加载（Progressive Disclosure）**：轻量 metadata（name + description + when_to_use）常驻让 LLM 感知，完整 systemPrompt/instructions/tools **按需加载/调用**，避免"启用即全量注入"导致的 Prompt 膨胀与注意力稀释。
 

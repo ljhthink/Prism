@@ -346,6 +346,7 @@ IngestionEvent.Failed KDoc 原文（[IngestionEvent.kt:62-67](../../app/src/main
 R1 G-03 建议代码：`Log.w(TAG, "ingestion failed: ${event.throwable.javaClass.simpleName}", event.throwable)`——message 仅用 simpleName，throwable 作为第三参数（堆栈由 logger 框架输出）。
 
 修复后代码（L462-466）：
+
 ```kotlin
 logger.log(
     Level.WARNING,
@@ -357,6 +358,7 @@ logger.log(
 **张力分析**：修复后代码在日志 message 字符串中显式拼接 `${event.throwable.message}`，使其成为结构化日志字段的一部分。而 IngestionEvent.Failed KDoc 明确 `throwable.message` **可能含内部路径**。这与 ADR-011 5.5「日志不含路径」的字面约定存在张力。
 
 **但是**：
+
 - 这是日志（logcat，开发可见），非 UI（用户不可见，除非用户主动读 logcat）。
 - `throwable` 作为 `logger.log` 第三参数本身也会在日志中输出堆栈（含 message），所以 message 信息无论如何都会出现在日志中——拼接 `${e.message}` 只是使其成为结构化字段而非仅堆栈一部分。
 - TRAE-security-review §8.4 判定文件路径非 PII，不 reportable 为安全漏洞。

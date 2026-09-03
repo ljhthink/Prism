@@ -78,6 +78,7 @@ data class KnowledgeChunk(
 ```
 
 要点：
+
 - `@HnswIndex(dimensions = 384, COSINE)` 对应 all-MiniLM-L6-v2 ONNX INT8 量化向量（ADR-007 5.1/5.2），`embedding` 在文本入库阶段为 `null`，向量化后回填。
 - schema 中 `embedding` 的 `type: 28, flags: 8`（见 [default.json:28-33](../../../app/objectbox-models/default.json)），是 ObjectBox 的向量属性类型 + HNSW 索引标记（`indexId: 1:2432317062331387289`）。
 - 实体注释（[KnowledgeChunk.kt:16-18](../../../app/src/main/java/io/prism/data/KnowledgeChunk.kt)）已警示：`FloatArray` 导致 `data class` 自动生成的 `equals/hashCode` 用引用比较，关联行为规则 `BR-security-001`。

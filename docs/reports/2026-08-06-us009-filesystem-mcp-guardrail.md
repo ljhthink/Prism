@@ -117,6 +117,7 @@
 **证据**：`UiConfirmationGate` 用 `MutableSharedFlow(extraBufferCapacity = 16)`（无 replay、无 `onBufferOverflow` 策略）。`confirm` 中 `_requests.emit(...)` 后 `deferred.await()`。UI 宿主 `ToolConfirmationHost` **仅组合于 `CapabilitiesScreen`**，且持单一 `pending` 状态。
 
 **两个子问题**：
+
 1. **无收集者挂起**：当前 `McpToolProviderDispatcher` 仅注入 `CapabilitiesViewModel`，`callTool` 尚未接入聊天流；但一旦聊天调用文件工具，`CapabilitiesScreen` 未显示时 `requests` 无收集者——前 16 次 emit 静默入缓冲，`deferred.await()` 永不返回 → 工具调用**永久阻塞**。缓冲满后 `emit` 挂起。
 2. **并发请求丢失**：即使宿主激活，`collectAsState(initial=null)` 单值状态在多个确认请求并发到达时，后到覆盖先到，**先到的 `deferred` 永不 resolve → 挂死**。
 

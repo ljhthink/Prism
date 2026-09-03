@@ -42,6 +42,7 @@ US-005「实现聊天 UI 骨架」是 M1 BYOK 聊天核心的 UI 入口。当前
 ### 4.2 状态管理：ViewModel + StateFlow
 
 **决策**：
+
 - 使用 `androidx.lifecycle:lifecycle-viewmodel-compose` 的 `viewModel()` 获取 `ConversationViewModel`
 - `ConversationViewModel` 用 `MutableStateFlow<List<ChatMessage>>` 暴露 `messages`
 - `sendMessage(text)` 追加用户消息 + 占位 AI 回复，更新 UI（暂不接 AI）
@@ -65,6 +66,7 @@ US-005「实现聊天 UI 骨架」是 M1 BYOK 聊天核心的 UI 入口。当前
 
 **配色来源**（依 `wiki/design/color-resources.md` colorhunt 方法论，WCAG AA ≥4.5:1 校验）：
 锚定 colorhunt 实时 AI 配色 [Mint Saber Neon](https://colorhunt.co/palette/211951836fff15f5baf0f3ff)（6k 赞）：
+
 - `#836FFF` 靛蓝紫 → 主色（AI 智能）；`#15F5BA` 薄荷青 → 点缀（对话/活力）
 - `#211951` 深靛蓝 → 暗色基；`#F0F3FF` 亮白 → 浅色基
 - 原始色值饱和度偏高（如 `#836FFF` 对白字仅约 3.7:1），按 Material 3 语义色对主/辅色做明度微调以保证 AA，色相忠实原配色
@@ -105,6 +107,7 @@ US-005「实现聊天 UI 骨架」是 M1 BYOK 聊天核心的 UI 入口。当前
 | 空态插画 | `KnowledgeGraphEmptyState`：Lottie 微动画（手写 JSON `assets/animations/prism_knowledge_graph.json`）——中央三棱镜 + 5 节点按序脉冲 + 连线渐入 | 知识图谱 |
 
 **美术资源利用方式**（资源作参考/规范，不贴图）：
+
 - `wiki/design/image-resources.md`（undraw.co）—— 矢量构图结构参考
 - `wiki/design/icon-resources.md`（lucide/phosphor）—— 圆头 2px 线性描边语言，统一线宽
 - `wiki/design/animation-resources.md`（lottiefiles）—— 微动画节奏（0.5–3s、循环、缓动）

@@ -392,6 +392,7 @@ Greeting(name: String)
 **性能基线文件**：本节为 M0 初版基线，后续迭代对比此基线检查性能回退。
 
 **性能回退门禁**：
+
 - 构建时间下降 >50% → 失败
 - 构建时间下降 >20% → 警告
 - APK 大小增长 >50% → 失败
@@ -581,6 +582,7 @@ Greeting(name: String)
 ## **US-001 M0 脚手架验收通过**
 
 **通过条件**：
+
 - 4 项验收标准：3 项完全通过 + 1 项部分通过（已记录技术债）
 - 分层测试 8 层：7 层通过 + 1 层 N/A（M0 预期）
 - 安全验证：全部通过或 N/A
@@ -588,15 +590,18 @@ Greeting(name: String)
 - 0 个回归问题
 
 **附带技术债**：
+
 1. DEF-001：targetSdk 34 → 建议在 M1 前升级至 35+（需安装 android-35 平台）
 2. DEF-005：补充 dataExtractionRules → 建议在 M1 前完成
 
 **提交前必做事项**：
+
 1. 更新 README.md 文档索引引用本验收报告
 2. 确认 .gitattributes / gradlew.bat / gradle-wrapper.jar 已 git add（guardrail 第三轮 11.13 节）
 3. G-10/G-11 为建议改进项，可在后续迭代中处理
 
 **下一阶段建议**：
+
 - M1 BYOK 聊天核心迭代前：(1) 安装 android-35 平台消除 targetSdk 技术债；(2) 建立测试框架；(3) 配置 CI build.yml 工作流；(4) 补充 dataExtractionRules
 
 ---

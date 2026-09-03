@@ -26,9 +26,11 @@
 ## 1. 代码质量审查（TRAE-code-review）
 
 ### 意图推断
+
 本轮为修复驱动的第三轮复审。作者意图是为前两轮确认的三处缺陷落地修复：S2 连接失败资源释放、S3 testConnection 去信息泄露 + 结构化并发、M1-残 baseUrl 连接层白名单校验。架构未变，纯函数抽取延续 ADR-005 5.4 可测性模式。
 
 ### 变更概览（mermaid）
+
 ```mermaid
 flowchart LR
     CLIENT[McpClientManager.connect] -->|S2: try/catch close+rethrow| CONN[client.connect(transport)]
@@ -45,6 +47,7 @@ flowchart LR
 ```
 
 ### Karpathy Guidelines 符合性
+
 - 命名 / 设计 / 可维护性：`isValidBaseUrl` / `closeQuietly` 命名清晰，注释准确说明纵深防御意图。✔
 - 错误处理：S2 的 `connect()` 内 try/catch 释放后重抛，符合"资源构建与使用分离时构建失败路径必须显式释放"规则；调用方 finally 兜底。✔
 - 交叉核验：`isValidBaseUrl` 与 `resolveHeaders` 的 CRLF 过滤形成 baseUrl/头值的双层 CRLF 纵深防御，方向一致。✔
@@ -55,9 +58,11 @@ flowchart LR
 ## 2. 安全漏洞扫描（TRAE-security-review）：上轮修复核验
 
 ### 2.1 S2（CWE-404/772 连接生命周期泄漏）—— 已修复 ✔
+
 `McpClientManager.kt:120-126`：`client.connect(transport)` 用 try/catch 包裹，失败时 `closeQuietly(client)` 后 `throw e` 重抛。
 
 **泄漏路径核验（全路径穷举）**：
+
 | 失败点 | 是否在 client 创建前 | 处理 | 结果 |
 |---|---|---|---|
 | `require(isValidBaseUrl)` L107 | 是 | 直接抛，无 client | 无泄漏 ✔ |
@@ -68,7 +73,9 @@ flowchart LR
 **双重释放核验**：Kotlin 赋值语义 —— `client = connect(config)`（listTools L55 / callTool L81）的 RHS 抛异常时赋值不执行，`client` 保持 `null`；调用方 finally `closeQuietly(null)` 为 no-op。故失败路径仅由 `connect()` 内部释放一次，成功路径由调用方 finally 释放一次，**无泄漏、无双重释放**。`closeQuietly` 内部 try/catch 亦兜底。✔
 
 ### 2.2 S3（CWE-248/209 testConnection）—— 已修复 ✔
+
 `CapabilitiesViewModel.kt:107-123`：
+
 - `catch (e: CancellationException) { throw e }`（L113-115）优先于 `catch (e: Exception)`，保持结构化并发 CR-01。✔
 - Fail 分支 `TestState.Fail("连接失败，请检查网络或 Server 配置")`（L120），不再拼接 `e.message`，对齐 CR-05。✔
 - `import kotlinx.coroutines.CancellationException`（L14）已补充。✔
@@ -76,9 +83,11 @@ flowchart LR
 **防御分支评估（主 Agent 自问 2）**：`catch (e: Exception)` 在 `McpClientManager.listTools` 已对业务异常降级返回（返回空列表）的前提下，仅对"未来 provider 替换或意外异常"触发，属合法纵深防御。L118 注释明确标注"此处为第二道防线"，**非误导、非冗余**。该分支吞掉意外异常换取 UI 不崩溃，符合降级契约，可接受。
 
 ### 2.3 M1-残（baseUrl 连接层白名单，CWE-113 纵深防御）—— 主体已修复，发现 1 处 LOW 边缘缺陷
+
 新增 `internal fun isValidBaseUrl`（L138-142）并在 `connect()` 入口 `require(isValidBaseUrl(config.baseUrl))`（L107）校验。主体设计正确：非空 + http(s) 前缀 + 无 CRLF。**但存在 trim 顺序缺陷，详见第 3 节 R3-1。**
 
 ### 2.4 密钥与配置 / 依赖供应链 —— 无新问题
+
 - 无硬编码密钥；测试用 `"sk-abc"` 为测试桩值，非真实凭证。✔
 - 无新增依赖。✔
 
@@ -97,9 +106,11 @@ flowchart LR
 ## 4. 主 Agent 自问两题评估
 
 ### 4.1 `require(isValidBaseUrl)` 在 listTools/callTool 的降级是否安全、`throw e` 后资源是否一定释放？
+
 **确认安全。** 已穷举全部失败点（见 2.1 表）：`require` 失败在 client 创建前抛出，无泄漏；`client.connect` 失败由 `connect()` 内部释放后重抛。调用方因赋值 RHS 抛异常时 `client` 保持 null，finally 为 no-op。**成功路径与失败路径均恰好释放一次，无泄漏、无双重释放。**
 
 ### 4.2 S3 的 Fail 分支作为"第二道防线"是否引入误导/冗余、是否影响测试覆盖？
+
 **不引入误导/冗余。** `catch (e: Exception)` 是合法的防御性纵深编程，注释（L118）明确标注"第二道防线"，与项目"零侥幸"原则一致。**测试覆盖提示**：该防御分支无直接单测（ViewModel 协程测试成本高），属可接受缺口；但建议在 `McpClientManagerTest` 中补充 `isValidBaseUrl` 的尾部 CRLF 与空白包围 URL 用例（见第 5 节），以覆盖 R3-1 与边界。
 
 ---
@@ -107,14 +118,18 @@ flowchart LR
 ## 5. 修复建议
 
 ### R3-1（LOW，建议修复）
+
 `isValidBaseUrl` 的 CRLF 检查应作用于**原始值**（trim 前），而非 trim 后；或使连接层使用与校验一致的 trim 值。
 
 建议（示意，非补丁）：
+
 - 对原始 `baseUrl` 先做 `!baseUrl.contains('\r') && !baseUrl.contains('\n')` 检查（trim 前），再对 `trimmed` 做非空 + 前缀检查；
 - 或 `connect()` 中统一使用 `config.baseUrl.trim()` 构造传输，保证校验与使用一致。
 
 ### R3-1 补充测试建议
+
 在 `McpClientManagerTest` 新增：
+
 - 负向：`isValidBaseUrl("https://good.com\r\n")` 应拒绝（若按"trim 前检查 CRLF"语义）；
 - 正向：`isValidBaseUrl("  https://good.com/mcp  ")`（空白包围合法 URL）边界行为。
 
@@ -128,6 +143,7 @@ flowchart LR
 **判定依据**：未发现阻断级漏洞（无注入、无硬编码密钥、无权限绕过）。第二轮要求的 S2（连接泄漏）、S3（CancellationException 误捕 + e.message 泄露）、M1-残（baseUrl 白名单）均已正确实现，且经全路径穷举确认 S2 无泄漏/无双重释放、S3 符合 CR-01/CR-05。唯一新增项为 `isValidBaseUrl` 的尾部 CRLF trim 旁路（LOW，CWE-113 纵深防御）。
 
 **修复前置条件（回退至编码阶段处理）**：
+
 1. **R3-1（LOW）**：`isValidBaseUrl` 的 CRLF 检查改为作用于原始值（trim 前），保证校验与 `connect()` 实际使用的 URL 一致；建议补充尾部 CRLF 负向用例与空白包围 URL 正向用例。
 
 修复完成后按第七节闭环重新提交 guardrail-enforcer 复审；通过后启动 ac-verifier。该 LOW 项不构成阻断，但按"零侥幸"原则建议在本周期内修复。

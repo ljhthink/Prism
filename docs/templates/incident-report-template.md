@@ -8,7 +8,7 @@ related_adr: ADR-001
 # 运维事件报告模板
 
 > 运维事件发生时的实时处置记录（区别于 postmortem 的事后复盘）。
-> 关联流程见 [solution-report](../reports/2026-08-02-bugfix-ops-workflow-solution.md) 第 5.2 节。
+> 关联流程见 [CLAUDE.md 第二十一~二十三节](../../CLAUDE.md) 第 5.2 节。
 
 ## 1. 元信息
 

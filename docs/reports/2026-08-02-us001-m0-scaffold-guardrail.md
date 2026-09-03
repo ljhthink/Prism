@@ -301,9 +301,9 @@ dependencies {
 
 ### 建议修复项（不阻断但推荐）
 
-3. G-03：补全测试依赖或添加注释
-4. G-04：标记为技术债，M1 前修改 allowBackup
-5. G-05-G-08：低风险优化项
+1. G-03：补全测试依赖或添加注释
+2. G-04：标记为技术债，M1 前修改 allowBackup
+3. G-05-G-08：低风险优化项
 
 ### 检查范围统计
 
@@ -543,6 +543,7 @@ git update-index --chmod=+x gradlew
 **US-001 M0 脚手架通过 guardrail-enforcer 第二轮审查，可进入 ac-verifier 验收阶段。**
 
 ac-verifier 需重点关注：
+
 1. 实际执行 `./gradlew assembleDebug` 构建验证（主 Agent 自述因网络超时尚未完成此步）
 2. APK 可安装并显示空白界面（US-001 验收标准）
 3. G-09 gradlew 权限在提交前已处理
@@ -970,6 +971,7 @@ git add .gitattributes gradlew.bat gradle/wrapper/gradle-wrapper.jar
 第三轮环境适配变更审查**通过**。无阻断级问题，无高风险问题。1 个中风险（G-10：镜像 content 过滤）和 1 个低风险（G-11：.gitattributes 覆盖范围）均为建议改进项，不阻断。
 
 核心验证：
+
 - 构建**成功**（`BUILD SUCCESSFUL in 1m 52s`，APK 8.65 MB）
 - 依赖降级**无已知 CVE**
 - compileSdk 34 对 M0**无安全影响**
@@ -993,6 +995,7 @@ git add .gitattributes gradlew.bat gradle/wrapper/gradle-wrapper.jar
 **US-001 M0 脚手架通过 guardrail-enforcer 第三轮审查，可进入 ac-verifier 验收阶段。**
 
 ac-verifier 需重点关注：
+
 1. 实际执行 `./gradlew assembleDebug` 构建验证（主 Agent 已报告 BUILD SUCCESSFUL）
 2. APK 可安装并显示空白界面（US-001 验收标准："App 可编译运行空白界面"）
 3. 提交前确保 `.gitattributes` / `gradlew.bat` / `gradle-wrapper.jar` 已 git add（11.13 节）

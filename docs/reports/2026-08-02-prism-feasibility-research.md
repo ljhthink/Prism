@@ -191,6 +191,7 @@ Prism 是一款**仅 Android 端**的 AI 聊天 Agent 应用，定位为"个人 
 | **L3 用户画像** | 越用越懂你 | 显式偏好（用户设定）+ 隐式偏好（从对话中抽取），结构化存储，注入 system prompt |
 
 **防幻觉配套**（针对用户原始痛点）：
+
 - 强制引用（参考 ZettelMancer）：知识库回答必须标注来源
 - 会话隔离：不同话题会话不串味
 - 不确定性表达：检索置信度低时主动说明
@@ -227,10 +228,12 @@ Prism 是一款**仅 Android 端**的 AI 聊天 Agent 应用，定位为"个人 
 | Android 客户端 | ✅ [Kimi Claw Android](https://www.kimi.com/help/kimi-claw/kimi-claw-android-guide)，Android 8.0+，5GB 存储，OpenClaw 部署到手机当 24/7 Gateway | ✅ Android 8.0+ |
 
 **关键差异**：
+
 - **Kimi Claw Android 把手机当 24/7 服务器**，通过消息平台远程控制；**Prism 是手机本身就是聊天客户端**，用户直接在手机上用。两者产品形态不同。
 - Kimi Claw 绑定 Kimi 模型 + 付费订阅；Prism 是 BYOK + 免费开源。
 
 **对 Prism 的启示**：
+
 1. **OpenClaw 是可直接复用或深度参考的开源基础**——其 ClawHub、SKILL.md、多渠道、记忆、沙箱设计成熟
 2. **NullClaw**（[slashdot 对比页](https://slashdot.org/software/comparison/Kimi-Claw-vs-NullClaw/)）是 Zig 实现的超轻量替代（678KB 单二进制，1MB RAM，原生 MCP + 22 模型 provider + 混合向量+FTS5 记忆 + 多级沙箱），对移动端极友好，值得评估作为 Prism 的本地 Agent 内核
 3. Prism 差异化：**纯手机本地客户端 + BYOK + 免费**，避开 Kimi Claw 的付费云端定位
@@ -367,6 +370,7 @@ Prism 是一款**仅 Android 端**的 AI 聊天 Agent 应用，定位为"个人 
 ### 9.2 Prism 切入点
 
 **移动端原生 + MCP + 端侧 RAG + BYOK + 免费** 的组合是蓝海：
+
 - Kimi Claw 付费且绑模型，Prism 免费 + BYOK
 - Bring Your Own AI / SpeakGPT 只做聊天，Prism 是 Agent 平台
 - OpenClaw 不在手机本地，Prism 是手机原生 App
@@ -397,17 +401,20 @@ Prism 是一款**仅 Android 端**的 AI 聊天 Agent 应用，定位为"个人 
 ## 11. 参考资料
 
 ### MCP 移动端
+
 - [mcp_client Dart 包](https://pub.dev/packages/mcp_client)
 - [mcp-mobile-interaction](https://www.npmjs.com/package/mcp-mobile-interaction)
 - [Rork × MCP 实现指南](https://rorklab.net/en/articles/rork-ai/rork-mcp-model-context-protocol-mobile-app-guide)
 - [MCP in Browser & Mobile](https://www.mcpserverspot.com/learn/integrations/mcp-browser-mobile)
 
 ### Skills 系统
+
 - [OpenClaw 评测](https://pyshine.com/OpenClaw-Personal-AI-Assistant/)
 - [maid 移动端 AI 框架](https://blog.csdn.net/weixin_27230891/article/details/160672257)
 - [OpenAI Plugin architecture](https://developers.openai.com/plugins/concepts/plugins)
 
 ### 端侧 RAG
+
 - [MobileRAG 论文 arxiv 2507.01079](https://arxiv.org/pdf/2507.01079)
 - [Zvec 0.4.0 Mobile](https://zvec.org/en/blog/2026-06-22-zvec-mobile/)
 - [移动端本地知识库+大模型部署](https://blog.csdn.net/renhongxia1/article/details/156568003)
@@ -415,6 +422,7 @@ Prism 是一款**仅 Android 端**的 AI 聊天 Agent 应用，定位为"个人 
 - [ZettelMancer 个人 Wiki RAG](https://gist.github.com/danyshs/5477a1468e8810b6e703ee03f20400f2)
 
 ### BYOK
+
 - [Bring Your Own AI](https://apps.apple.com/ca/app/bring-your-own-ai/id6784853025)
 - [SpeakGPT 评测](https://blog.csdn.net/weixin_28676983/article/details/160837391)
 - [EchoFlow](https://www.productcool.com/product/echoflow-2)
@@ -422,11 +430,13 @@ Prism 是一款**仅 Android 端**的 AI 聊天 Agent 应用，定位为"个人 
 - [BYOK 工具大全](https://byoklist.com/?category=chatbot)
 
 ### 跨 App
+
 - [Android 无障碍服务](https://blog.csdn.net/yesemenglongyulong/article/details/148754050)
 - [Android 无障碍实战](https://blog.csdn.net/z4a5b6/article/details/153174569)
 - [iPhone Shortcuts vs MacroDroid](https://lifetips.alibaba.com/tech-efficiency/iphone-shortcuts-vs-macrodroid-real-control-without-developer-mode/)
 
 ### Kimi Claw / OpenClaw / NullClaw
+
 - [Kimi Claw 介绍](https://programb.blog.csdn.net/article/details/159649306)
 - [Kimi Claw Android 指南](https://www.kimi.com/help/kimi-claw/kimi-claw-android-guide)
 - [Kimi Claw vs NullClaw](https://slashdot.org/software/comparison/Kimi-Claw-vs-NullClaw/)

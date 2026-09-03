@@ -22,12 +22,14 @@ PRD US-003 验收 2「摄入→切片→嵌入→入库全链路」要求用户�
 4. **KnowledgeBaseRepository**（US-015，[KnowledgeBaseRepository.kt](../../app/src/main/java/io/prism/data/KnowledgeBaseRepository.kt)）：持有 `chunkBox` 但**无公开 put 方法**，需扩展
 
 考古报告（TKN-US016-ARCH-001）确认的关键事实：
+
 - 4 个组件**全部 blocking 非 suspend**；OnnxEmbedder.embed 全程持 `ReentrantLock`（~100ms/次，BR-concurrency-002）
 - 无任何组件用 `Result<T>`；DocumentParser 抛 `DocumentParseException`，OnnxEmbedder 抛 `EmbeddingException(stage)`
 - OnnxEmbedder 按需加载 session 缓存，管线多次调用不会反复加载模型；`close` 后不可复用（抛 IllegalStateException）
 - KnowledgeChunk 是项目唯一无 Repository 封装的实体，既有测试直接 `boxStore.boxFor(KnowledgeChunk).put()`
 
 US-016 验收标准：
+
 - AC-1：IngestionPipeline：解析→切片→嵌入→写入指定库
 - AC-2：摄入进度与错误可观察
 - AC-3：嵌入为 null 的片段不建索引并提示
@@ -35,6 +37,7 @@ US-016 验收标准：
 - AC-5：Typecheck passes
 
 设计未决问题（考古报告 §7.3）：
+
 1. 写入路径（扩展 KnowledgeBaseRepository.addChunk / 新建 KnowledgeChunkRepository / 直接 Box.put）？
 2. 嵌入失败降级策略（skip / retry / fail-fast）？
 3. 事务边界（chunk 级 put / 文档级 runInTx）？
@@ -57,6 +60,7 @@ class IngestionPipeline(
 ```
 
 **理由**：
+
 - web-access 调研 LlamaIndex [IngestionPipeline](https://llamaindex.openml.io/python/framework/module_guides/loading/ingestion_pipeline/) 确认 transformations 链式（splitter→embedder→vector store）是业界标准模式。
 - 4 个组件职责单一、接口稳定，管线仅做编排不做转换，符合单一职责。
 - 构造注入便于测试用 Fake 替身隔离（BR-testing-001）。
@@ -72,6 +76,7 @@ fun addChunk(chunk: KnowledgeChunk): Long {
 ```
 
 **理由**：
+
 - 考古报告 R-2 建议此方案：KnowledgeBaseRepository 已持有 `chunkBox` 且有级联删除/计数先例，扩展 `addChunk` 保持单一写入入口。
 - 否决新建 `KnowledgeChunkRepository`：US-015 已确立 KnowledgeChunk 由 KB Repository 代管模式，新建会破坏既有架构一致性。
 - 否决直接 `boxStore.boxFor(KnowledgeChunk).put()`：散落写入路径，无法统一校验 knowledgeBaseId 合法性。
@@ -99,6 +104,7 @@ fun ingest(
 ```
 
 **理由**：
+
 - `Flow<IngestionEvent>` 比 `StateFlow<IngestionProgress>` 更适合：摄入是事件流（Started→Parsed→Chunked→ChunkEmbedded×N→Completed），非状态快照。
 - 比 callback 模式更符合 Kotlin 协程习惯，调用方 `collect` 时自动支持背压与取消。
 - chunk 边界 emit（非 embed 锁内 emit），避免 OnnxEmbedder 锁竞争（考古 R-5）。
@@ -126,6 +132,7 @@ repository.addChunk(chunk)
 ```
 
 **理由**：
+
 - AC-3「嵌入为 null 的片段不建索引并提示」：OnnxEmbedder.embed 返回非 nullable FloatArray，失败抛 EmbeddingException。IngestionPipeline 主动 catch → 保持 `embedding = null` → HNSW 索引自动排除（[KnowledgeChunkVectorSearchTest.kt:73-86](../../app/src/test/java/io/prism/data/KnowledgeChunkVectorSearchTest.kt) 已验证）→ 入库仍可按文本检索（US-017 全文检索兜底）。
 - web-access 调研确认 per-step graceful degradation 是 RAG 业界共识（[theneuralbase.com](https://theneuralbase.com/rag-fundamentals/learn/intermediate/error-handling-per-step/)）：单 chunk 失败不应中断整管线，避免一个坏 chunk 导致整文档摄入失败。
 - 否决 retry：OnnxEmbedder 无重试契约，端侧推理失败多为模型/输入问题，重试浪费资源且大概率仍失败。
@@ -135,6 +142,7 @@ repository.addChunk(chunk)
 ### 5.5 事务边界：chunk 级独立 `addChunk`，不强制文档级 `runInTx`
 
 **理由**：
+
 - 嵌入是昂贵操作（~100ms/chunk），文档级事务若中途 OOM 全回滚会丢失已嵌入结果，违反「贵重结果不回滚」原则。
 - chunk 级 put 失败不影响已入库 chunk，符合 AC-3 降级语义。
 - HNSW 索引下 batch put 与逐条 put 性能差异小（ObjectBox 官方建议事务粒度匹配业务不变式，此处无跨 chunk 不变式需维护）。
@@ -156,6 +164,7 @@ flow {
 ```
 
 **理由**：
+
 - web-access 调研 Kotlin 官方 [Cancellation and timeouts](https://kotlinlang.org/docs/cancellation-and-timeouts.html) 文档确认：`ensureActive()` 是长循环检查取消的标准模式。
 - OnnxEmbedder.embed 持 `ReentrantLock` 不可中断（BR-concurrency-002），单次 ~100ms 可接受；在 chunk 边界（即每次 embed 前）检查取消，最坏延迟 100ms 响应取消。
 - `flow {}` builder 内每个 `emit` 也是挂起点，自然支持取消传播。
@@ -172,6 +181,7 @@ fun ingest(..., input: InputStream, ...): Flow<IngestionEvent> = flow {
 ```
 
 **理由**：
+
 - DocumentParser.parse 契约规定「调用方负责关闭」（[DocumentParser.kt:14](../../app/src/main/java/io/prism/document/DocumentParser.kt)）。
 - `use {}` 保证无论正常返回还是异常，InputStream 都被关闭，避免文件句柄泄漏。
 - flow {} 内 use {} 块在协程取消时也会通过 finally 关闭（InputStream.close 非 suspend，可在 Cancelling 状态执行）。

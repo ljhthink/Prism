@@ -86,6 +86,7 @@ for (i in lines.indices) {
 **验证结论**：类型映射覆盖完整（null/String/Boolean/Int/Long/Double/Float/Number/List/Map + else 兜底）。但**递归无深度限制**——若 YAML 含循环引用（通过别名/锚点 `&a [*a]`），`toJsonElement` 会无限递归导致 `StackOverflowError`。
 
 snakeyaml-engine-kmp 4.0.1 的 `LoadSettings` 默认配置：
+
 - `maxAliasesForCollections = 50`（限制别名展开总数，防 billion laughs）
 - `nestingDepthLimit = 50`（限制 YAML 解析器嵌套深度，防深度嵌套栈溢出）
 - `allowRecursiveKeys = true`（**默认允许递归键**，可创建循环引用的 Java 对象）
@@ -103,6 +104,7 @@ snakeyaml-engine-kmp 4.0.1 的 `LoadSettings` 默认配置：
 [SkillManifestParser.kt:152-171](../../app/src/main/java/io/prism/skill/SkillManifestParser.kt#L152-L171)
 
 **验证结论**：校验规则正确。
+
 - `name`：slug 正则 `^[a-z0-9-]{1,64}$`（OpenClaw 规范）
 - `description`：非空 + ≤160 字符
 - `maxRounds`：1..50 范围
@@ -115,6 +117,7 @@ snakeyaml-engine-kmp 4.0.1 的 `LoadSettings` 默认配置：
 [SkillManifestParser.kt:120-251](../../app/src/main/java/io/prism/skill/SkillManifestParser.kt#L120-L251)
 
 **验证结论**：类型容错设计良好。
+
 - `getString`：返回非空字符串或 null（`takeIf { it.isNotBlank() }`）
 - `getBoolean`：支持 Boolean / String("true") / null(默认值)
 - `getInt`：支持 Int / Long / Number / String / null(默认值)
@@ -150,6 +153,7 @@ snakeyaml-engine-kmp 4.0.1 的 `LoadSettings` 默认配置：
 [SkillRegistry.kt:233-266](../../app/src/main/java/io/prism/skill/SkillRegistry.kt#L233-L266)
 
 **验证结论**：策略正确。
+
 - 新增：`existingConfig == null` → 创建 `SkillConfig(isEnabled=false)`
 - 更新：`existingConfig != null` → `existingConfig.copy(...)` 保留 `isEnabled`（未在 copy 参数中覆盖）
 - 标记缺失：表里有但扫描未发现 → `setInstalled(false)`
@@ -200,6 +204,7 @@ appScope.launch {
 | **缺失场景** | 循环引用 YAML / 超大 YAML / 多行 description displayName 截取 / SkillRegistry 集成测试 |
 
 **建议补充测试**（不阻断）：
+
 1. `toJsonElement` 递归深度限制测试（若添加深度限制后）
 2. `splitFrontmatter` Windows 换行符 `\r\n` 兼容性测试
 3. `SkillRegistry.scanAndSync` 集成测试（Mock assets + filesDir）
@@ -237,6 +242,7 @@ snakeyaml-engine-kmp 4.0.1 底层依赖 snakeyaml-engine 3.x，使用 `StandardC
 `nestingDepthLimit = 50` 限制的是 YAML **解析阶段**的嵌套深度，不限制解析后 Java 对象图的遍历深度。循环引用 `Map A → Map A` 的 YAML 嵌套深度为 1，通过 `nestingDepthLimit` 检查，但 `toJsonElement` 递归遍历会无限。
 
 **当前阶段风险评估**：
+
 - 内置 assets（APK 内置，不可修改）：**安全**
 - filesDir/skills/user（用户自建）：用户自伤自害，**低风险**
 - filesDir/skills/remote（远程下载）：Phase B 未实现，**当前无风险**
@@ -250,10 +256,12 @@ snakeyaml-engine-kmp 4.0.1 底层依赖 snakeyaml-engine 3.x，使用 `StandardC
 **分析**：
 
 `SkillRegistry.scanDirectory` 扫描 `filesDir/skills/user/` 和 `filesDir/skills/remote/`：
+
 - `skillDirs` 来自 `dir.listFiles { f -> f.isDirectory }`，不直接拼接用户输入
 - `SKILL.md` 是固定文件名，不存在路径拼接
 
 `SkillRegistry.scanBuiltin` 扫描 `assets/skills/builtin/`：
+
 - `dirName` 来自 `context.assets.list(builtinAssetsRoot)`，是 assets 目录列表，非用户输入
 - `skillMdPath = "$builtinAssetsRoot/$dirName/SKILL.md"` 拼接的 `dirName` 来自系统 API
 
@@ -363,6 +371,7 @@ appScope.launch {
 **问题**：`runCatching { }` 捕获所有 `Throwable`（含 `CancellationException`），破坏结构化并发的取消传播。违反 **BR-error-handling-007**（active 状态）。
 
 **实际影响评估**：
+
 - `appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)` —— SupervisorJob 不会被取消（除非进程终止）
 - `scanAndSync()` 内部 `withContext(ioDispatcher)` 检查取消状态时抛出的 `CancellationException` 会被 `runCatching` 捕获
 - 但 appScope 生命周期与进程相同，协程取消的实际概率为 0
@@ -371,6 +380,7 @@ appScope.launch {
 **严重度判定**：中危（而非高危）。理由：违反 active 行为规则，但实际影响为 0（appScope 不会被取消）。不构成阻断。
 
 **修复建议**：
+
 ```kotlin
 appScope.launch {
     try {
@@ -390,6 +400,7 @@ appScope.launch {
 **问题**：`toJsonElement` 是递归函数，处理 `List<*>` 和 `Map<*, *>` 时递归调用自身。若 YAML frontmatter 含循环引用（通过别名/锚点 `&a [*a]`），snakeyaml-engine 解析后创建循环引用的 Java 对象，`toJsonElement` 递归遍历会无限递归 → `StackOverflowError`。
 
 **snakeyaml-engine-kmp 4.0.1 `LoadSettings` 默认配置**（经网络调研确认）：
+
 - `maxAliasesForCollections = 50`：限制别名展开总数（防 billion laughs）
 - `nestingDepthLimit = 50`：限制 YAML 解析器嵌套深度（防深度嵌套栈溢出）
 - `allowRecursiveKeys = true`：**默认允许递归键**（可创建循环引用）
@@ -401,6 +412,7 @@ appScope.launch {
 **修复建议**（二选一）：
 
 方案 A：禁用递归键
+
 ```kotlin
 val settings = LoadSettings.builder()
     .setAllowRecursiveKeys(false)
@@ -409,6 +421,7 @@ Load(settings).loadOne(frontmatterText)
 ```
 
 方案 B：添加递归深度限制
+
 ```kotlin
 internal fun toJsonElement(value: Any?, depth: Int = 0, maxDepth: Int = 50): JsonElement {
     require(depth < maxDepth) { "YAML nesting depth exceeds $maxDepth" }

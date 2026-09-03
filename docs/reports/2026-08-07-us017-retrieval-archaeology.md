@@ -92,6 +92,7 @@ data class KnowledgeChunk(
 ```
 
 关键点：
+
 - `embedding` 可空。`@HnswIndex(dimensions=384, COSINE)` 是**实体级索引**——所有 KnowledgeChunk（不论 knowledgeBaseId）共享同一个 HNSW 索引。
 - `knowledgeBaseId` 是扁平 Long 外键（非 `@Relation`），`0L` 代表虚拟默认库（ADR-008 5.2/5.3）。
 - `FloatArray` 字段导致 data class 的 `equals/hashCode` 用引用比较（BR-security-001），US-017 若需按内容比较检索结果须显式覆盖。
@@ -110,6 +111,7 @@ interface Embedder : AutoCloseable {
 ```
 
 关键点：
+
 - `embed` 返回**非 nullable** `FloatArray`，固定 384 维（OnnxEmbedder `embeddingDim=384`，`OnnxEmbedder.kt:53`）。
 - 失败抛 `EmbeddingException(stage)`，不返回 null。
 - `embed` 全程持 `ReentrantLock`（`OnnxEmbedder.kt:79` `lock.withLock`），**串行化**，单次 ~100ms（BR-concurrency-002）。US-017 检索时 `embed(queryText)` 是并发瓶颈。
@@ -130,6 +132,7 @@ US-017 retrieval 模块**不应直接操作 Box**（遵循 ADR-009 5.2 单一写
 | `remove` | `(id: Long)` | `:108` | runInTx 级联删除，findIds+Box.remove 规避 #1209 |
 
 Repository 持有 `private val chunkBox: Box<KnowledgeChunk>`（`:37`）但**未暴露**。US-017 有两条路径：
+
 - **方案 A（推荐）**：扩展 KnowledgeBaseRepository 新增 `search(query: FloatArray, k: Int, kbId: Long?): List<检索结果>`，复用私有 chunkBox，统一 Query 资源管理。
 - **方案 B**：新建 `VectorRetrievalRepository`/`RetrievalService`，注入 BoxStore 自行 `boxFor(KnowledgeChunk)`。
 
@@ -185,6 +188,7 @@ val matches = query.findWithScores()
 | 维度不匹配（未定义行为） | `2.0` 哨兵 | ObjectBox 5.4.2 实测返回上界 |
 
 **score 范围 [0, 2]，是距离不是相似度。** US-017 要求「结果含相似度分数」，须做转换：
+
 - `similarity = 1.0 - distance`（范围 [-1, 1]，1=完全相同）—— 推荐语义对齐
 - 或 `similarity = 1.0 - distance / 2.0`（范围 [0, 1]，1=完全相同）—— 推荐归一化展示
 
@@ -306,6 +310,7 @@ class XxxVectorSearchTest {
 ```
 
 要点：
+
 - `MyObjectBox` 由 ObjectBox plugin 编译期生成，自动包含所有 `@Entity`（KnowledgeChunk/KnowledgeBase）。
 - `createTempDirectory` 隔离测试数据，`tearDown` 清理。
 - `oneHot(dominantIndex)` 构造 384 维 one-hot 向量，便于控制 COSINE 距离（正交=1.0，同向=0.0）。

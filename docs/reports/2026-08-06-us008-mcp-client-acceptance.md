@@ -149,7 +149,7 @@ US-008 未覆盖的测试类：**无 `CapabilitiesViewModelTest`**（见缺口 G
 
 | 检查项 | 结果 | 证据 |
 | --- | --- | --- |
-| 无硬编码密钥/令牌/内部地址 | **通过** | grep `(api[_-]?key|token|secret|password|sk-|Bearer)\s*=["'][^"']+["']` 于 `app/src/main/java/io/prism` 无匹配；`apiKeyRef` 仅存引用（如 "context7"），明文经 `ApiKeyRepository.readApiKeyOnce` 只读即用 |
+| 无硬编码密钥/令牌/内部地址 | **通过** | grep `(api[_-]?key|token|secret|password|sk-|Bearer)\s*=["'][^"']+["']` 于 `app/src/main/java/io/prism`无匹配；`apiKeyRef` 仅存引用（如 "context7"），明文经 `ApiKeyRepository.readApiKeyOnce` 只读即用 |
 | 错误信息不泄露 e.message | **通过** | [McpClientManager.callTool](../../app/src/main/java/io/prism/network/McpClientManager.kt#L86-L90) 返回通用文案「工具调用失败，请检查网络连接或 Server 配置」，不拼接 e.message；[CapabilitiesViewModel.testConnection](../../app/src/main/java/io/prism/ui/capabilities/CapabilitiesViewModel.kt#L116-L120) 同；e.message 仅存在于注释（L87） |
 | CRLF 纵深防御（CWE-113/93） | **通过** | `resolveHeaders` 剔除含 CR/LF 键值（[L177-190](../../app/src/main/java/io/prism/network/McpClientManager.kt#L177-L190)）；`isValidBaseUrl` 对原始值（trim 前）校验 CRLF（[L141-146](../../app/src/main/java/io/prism/network/McpClientManager.kt#L141-L146)）；UI 层 `validHeaders`/`urlSafe` 第一道防线 |
 | baseUrl 校验（白名单） | **通过** | `isValidBaseUrl` 要求非空 + http(s) 前缀 + 无 CRLF；connect 用 trim 后局部变量统一校验与传输构造（R3-1） |
