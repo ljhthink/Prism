@@ -72,7 +72,7 @@ Prism 定位为**手机端个人 AI Agent 平台**，通过 MCP + Skills + 端�
 
 - 作为用户，我希望把文档（PDF/DOCX/XLSX/MD/TXT）导入 App 形成知识库，AI 回答时能检索并引用来源，以便降低幻觉
 - 验收标准：
-  - [ ] 支持导入格式：PDF/DOCX/XLSX/MD/TXT（PDF 用 PDFBox 3.0.8 Apache 2.0，详见 [ADR-007](docs/decisions/ADR-007-m3-rag-tech-stack.md) 5.3；不用 pymupdf）
+  - [ ] 支持导入格式：PDF/DOCX/XLSX/MD/TXT（PDF 用 PDFBox 3.0.8 Apache 2.0，详见 [ADR-007](decisions/ADR-007-m3-rag-tech-stack.md) 5.3；不用 pymupdf）
   - [ ] 文档解析→切片（可配置 chunk size/overlap）→嵌入（all-MiniLM-L6-v2 ONNX INT8）→存入 ObjectBox 向量库
   - [ ] 对话时自动检索 top-k 相关片段（可配置 k，默认 5）注入 prompt
   - [ ] AI 回答必须标注引用来源（文件名+片段位置），无引用时主动说明
