@@ -24,22 +24,27 @@ v1.0.0 真机手动测试发现 5 项问题：
 ## 决策（Decision）
 
 ### 子决策 A：Fetch 反爬增强（问题 1）
+
 - 在既有完整浏览器指纹头（UA Chrome/126 + `Sec-CH-UA` 系列）基础上，**新增 `Referer: https://cn.bing.com/`**（编译期常量，无注入面）——贴近"搜索 → 点进结果页"的正常来源，降低 Referer 校验型站点的 403。
 - SSRF 纵深不破坏：`followRedirects=false` + 逐跳 `isPublicHttpUrl` 复检 + 3 跳上限 + 内容纯度判定（`isAntiBotOrEmpty`）全部原样保留（ADR-033/037 不变量）。
 
 ### 子决策 B：搜索直接命中（问题 2，`stripTrailingQuerySuffix` 实体提取）
+
 - **根因**：无空格/标点中文句（如"梧州一中是什么学校"）被正则 `[\u4e00-\u9fff]{2,}` 当成**一个**连续 CJK run，核心词=整句；`filterRelevantItems`/`isRelevant` 都要求字面整句命中 → 只返回"大概相关"。且降级重试用 `term==query` 跳过了唯一候选（整句），无真实降级。
 - **修复**：`extractCoreTerms` 对每个 CJK run 再剥尾部疑问/泛化后缀（`stripTrailingQuerySuffix`，最长后缀优先：`是什么学校/怎么/如何/…`），衍生前置实体候选（"梧州一中是什么学校"→"梧州一中"）。实体候选进入 `coreTerms`，主查询命中率提升；仍不相关时按实体短整词降级重试（original `term==query` 跳过整句，实体词才真正重试）。
 
 ### 子决策 C：视觉旁路 Cloud 可启用 + 熔断可恢复（问题 3）
+
 - **consent 自动授权（已有）**：把 Provider 标记为 `isVisionFallback` 本身即用户"图片外发到该端点"的明确意图 → `saveProvider` 同步 `setConsent(true)` + `setAutoBypassEnabled(true)`，避免"激活了视觉模型仍只见 OCR"。
 - **熔断可恢复（本次新增）**：`saveProvider` 在 `isVisionFallback` 时**额外 `resetFailures()`** —— 清零云端旁路连续失败计数。旁路"连续失败 3 次自动停用"熔断后，配置修好前 Cloud 永不触发、只剩 OCR；激活/保存动作代表用户"期望云端旁路可用"的信号，应重置熔断让 Cloud 重试。
 
 ### 子决策 D：无障碍系统判定 + 高危三态（问题 4）
+
 - **误报根治**：新增 `PhoneControlAccessibilityService.isEnabledInSystem(context)`，读 `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES` 判断本服务是否被系统启用（真实、不受进程实例空窗影响）。设置页 `phoneControlStatusProvider` 与工具执行器 `accessibilityEnabledProvider` 均改用它，从而区分「系统已启用但实例重连中」（SERVICE_REBINDING_MSG，提示稍后重试，不让 LLM 误判放弃）与「未启用」（引导开启）。
 - **高危三态**：新增 `HighRiskApprovalMode`（`BLOCK` 全部拦截 / `ALLOW` 全部放行 / `ASK` 逐次确认，默认 ASK）+ `HighRiskApprovalRepository`（独立 DataStore 持久化）。`PhoneControlLocalToolExecutor.runTargetAction`/`runTypeAction` 对命中发送/删除/拨号/短信的高危动作按三态处置：BLOCK 返回 ⚠️ 硬拦截、ALLOW 直接放行执行、ASK 触发 `manualConfirm`（ask_user 提问卡片）。设置页新增「高危操作」三态循环选择行。
 
 ### 子决策 E：后台确认系统通知（问题 5）
+
 - **方案选型**：用**高优先级通知 + 允许/拒绝操作按钮**（免 `SYSTEM_ALERT_WINDOW` 悬浮窗权限，走系统标准通知通道，Android 13+ 需通知运行时权限）让确认在后台也可见。
 - `PhoneControlAskUserNotifier`：
   - `request(question)` → 分配 `askId` + 发高优先级通知（`BigTextStyle`、`CATEGORY_CALL`、`VISIBILITY_PRIVATE` 锁屏不泄详情、点通知本体默认拒绝=安全）；发新通知前**先撤旧通知**（`activeAskId` 单槽 + 防陈旧按钮误批新确认，guardrail LOW-1）。

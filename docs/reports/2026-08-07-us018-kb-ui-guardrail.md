@@ -274,9 +274,11 @@ sequenceDiagram
 - **风险**：中——UI 短暂不一致（自愈，下一帧 collect 修正），非崩溃/数据丢失，但破坏状态一致性承诺，且测试用 `Dispatchers.Unconfined` 难以复现（时序依赖）。
 - **BR 规则**：关联 BR-concurrency-001 精神（多步骤状态变更须原子）。
 - **建议**：所有 `_uiState` 变更改用原子 CAS 语义的 `update`：
+
   ```kotlin
   _uiState.update { current -> current.copy(ingestionState = ..., chunkCounts = ...) }
   ```
+
   `MutableStateFlow.update {}` 内部为 CAS 自旋循环，保证 read-modify-write 原子性。
 
 #### G-02: `refreshChunkCounts` 实际运行在 Main 线程，与类 KDoc「在 Dispatchers.IO 中执行」承诺矛盾
@@ -309,6 +311,7 @@ sequenceDiagram
 - **风险**：中——非安全漏洞，但严重损害可观测性与可诊断性；与 ADR 显式契约冲突。
 - **BR 规则**：**违反 BR-error-handling-004**（active）+ ADR-011 5.5 契约违反。
 - **建议**：在映射前记录结构化日志（异常类型 + message，不含密钥/路径/完整堆栈给用户）：
+
   ```kotlin
   is IngestionEvent.Failed -> {
       Log.w(TAG, "ingestion failed: ${event.throwable.javaClass.simpleName}", event.throwable)
@@ -321,6 +324,7 @@ sequenceDiagram
 - **严重度**：中危
 - **位置**：[KnowledgeBaseViewModel.kt:307-315](../../app/src/main/java/io/prism/ui/knowledge/KnowledgeBaseViewModel.kt)
 - **描述**：
+
   ```kotlin
   val input = try {
       inputStreamProvider(uriString)
@@ -330,6 +334,7 @@ sequenceDiagram
       null
   }
   ```
+
   `catch (_: Exception) { null }` 用 `_` 丢弃异常对象，将 `SecurityException`（权限撤销）、`FileNotFoundException`（文件已删）、`IOException`（IO 错误）等全部归一化为 `null` →「无法打开所选文件，请重新选择」，**无任何日志**。无法区分「权限问题」与「文件不存在」与「IO 错误」，生产定位困难。
   
   `CancellationException` 单独 catch 并重新抛出是正确的（协程铁律），但通用 `Exception` 分支违反 BR-error-handling-004（静默吞异常、无结构日志、无归一化注释）。
@@ -337,12 +342,14 @@ sequenceDiagram
 - **风险**：中——非安全漏洞，但违反 active BR 规则，损害可诊断性。
 - **BR 规则**：**违反 BR-error-handling-004**（active）。
 - **建议**：记录异常类型后再降级：
+
   ```kotlin
   } catch (e: Exception) {
       Log.w(TAG, "openInputStream failed: ${e.javaClass.simpleName}", e)
       null
   }
   ```
+
   或若项目暂无结构化日志基建，至少保留注释说明异常被归一化（BR-error-handling-004 允许的降级路径）。
 
 #### G-05: `createLibrary` 无 try-catch / `deleteLibrary` 仅 catch `IllegalArgumentException`，持久化运行期异常逃逸致崩溃
@@ -357,6 +364,7 @@ sequenceDiagram
 - **风险**：中——正常运行概率低（磁盘满/DB 损坏罕见），但一旦发生即应用崩溃（用户无降级提示）。与项目既有 ViewModel 模式（SettingsViewModel 等 CRUD 也未包裹）一致，但 deleteLibrary 已开先例用了 catch，应统一并补全。
 - **BR 规则**：关联 BR-error-handling-004（兜底异常须处理不崩溃）+ BR-error-handling-006 精神（资源/状态异常安全）。
 - **建议**：为 createLibrary 与 deleteLibrary 的 repository 调用统一加 try-catch，捕获 `IllegalArgumentException`（编程错误，映射友好错误）+ 更宽的运行期异常（映射通用错误 + 日志），保留 CancellationException 语义（虽此处非协程，仍建议显式）：
+
   ```kotlin
   else -> {
       try {

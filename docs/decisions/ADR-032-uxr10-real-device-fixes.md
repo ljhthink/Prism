@@ -105,6 +105,7 @@
 ## 后果（Consequences）
 
 **正面**：
+
 - 真机上传 PDF/DOCX/XLSX/PPTX 不再崩溃（pdfbox-android 与 android.graphics 兼容）。
 - 多模态模型发图不再被误报「不支持图片」；429 限流给出可理解文案并停止回路。
 - Fetch 被反爬拦截时给出可诊断文案，LLM 不再无脑重试（缓解 RPM 打满）。
@@ -112,6 +113,7 @@
 - 上传交互符合预期：选图/选文件 → 输入需求 → 统一发送。
 
 **负面 / 需注意**：
+
 - pdfbox-android 需 `PDFBoxResourceLoader.init`（已在 Application.onCreate 注入，低风险）。
 - 内置 Skill 默认启用后，未启用的旧数据（DB 中 isEnabled=false 且非 hidden）不会自动翻转为启用
   （toUpdate 保留 isEnabled）——仅**新安装**的首次扫描生效；已在 UI 禁用过的用户需手动再启用。

@@ -17,11 +17,13 @@
 ## 1. 测试范围与局限
 
 **测量内容**：
+
 - `MemoryRepository.searchByVector(query, topK=3)` 在 100 条记录下的 HNSW 检索延迟
 - `MemoryRepository.save(record)` 单条记录保存延迟（含 StateFlow 刷新）
 - `MemoryRepository.getBySession(sessionId)` 100 条记录内存过滤延迟
 
 **关键局限**：
+
 - 使用 oneHot 向量（非真实 OnnxEmbedder 向量），HNSW 索引开销可能与真实场景略有差异
 - 纯 JVM ObjectBox 测试（非 Android 设备），**生产基线需在 Android 设备补测**
 - 不含 Embedder.embed 延迟（生产 ~100ms/次，BR-concurrency-002 持锁）

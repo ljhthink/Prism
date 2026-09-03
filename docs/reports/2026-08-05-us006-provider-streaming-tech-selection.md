@@ -99,12 +99,14 @@
 **推荐：Ktor Client（Android 用 OkHttp engine，版本 3.1.3）**
 
 **核心理由**：
+
 1. **SSE 原生 Flow 化**——官方 `io.ktor.client.plugins.sse` 插件把 `text/event-stream` 解析为 `incoming: Flow<ServerSentEvent>`，与 Compose `collectAsState`/`LaunchedEffect` 天然契合，满足 C5。
 2. **与 MCP Kotlin SDK 同栈**——MCP SDK 0.12.0 内部即用 Ktor（需自行声明 engine），选用 Ktor 避免维护两套 HTTP 栈，满足 C4。
 3. **3.1.0 起 SSE 重连/心跳/序列化就绪**——严格命中流式中断处理需求。
 4. **引擎可选**——Android 上选 `ktor-client-okhttp`（成熟、HTTP/2、遵循 Android 惯例），退路是 CIO。
 
 **否决方案与理由**：
+
 - **Retrofit**：流式支持弱，需 OkHttp StreamingCall + 自定义 converter，且与 MCP SDK 的 Ktor 栈冲突（违反 C4）。
 - **裸 OkHttp**：无 SSE 原生解析，需手写 SSE 行解析器（见 3.2），且引入第二套栈。
 
@@ -190,6 +192,7 @@ install(SSE) {
 | `choices[]` | **部分 Provider 结束 chunk 可能是空数组**，索引前必须判空（防崩溃，命中验收「不崩溃」） |
 
 **兼容格式核实**：OpenAI 兼容 Provider（**Ollama**、**OpenRouter**、DeepSeek、GLM、Qwen、Gemini 等经兼容网关）基本复用同一 `chat.completion.chunk` SSE 格式与 `[DONE]` 终止。差异点：
+
 - 部分推理模型（DeepSeek 等）会发 `delta.reasoning_content`（可忽略或合并）。
 - 结束 chunk 空 `choices[]` 的兼容问题必须判空处理。
 - 统一路径：**累积每个 chunk 的 `choices[0].delta.content`** 重建完整消息。
@@ -221,6 +224,7 @@ install(SSE) {
 **推荐：kotlinx.serialization（版本 1.8.1）**
 
 **核心理由**：
+
 1. **Kotlin 原生 + 编译时**，无运行时反射，性能优、空安全（本就 Kotlin 2.1.0 项目）。
 2. **与 Ktor 官方集成**——`ktor-serialization-kotlinx-json` 是 ContentNegotiation 官方序列化器。
 3. **与 MCP kotlin-sdk 一致**——避免两套序列化体系。
@@ -284,6 +288,7 @@ enum class ProviderErrorCode { UNAUTHORIZED, TIMEOUT, NETWORK, INTERRUPTED, MALF
 | SSE 状态码异常 | `SSEClientException`（如 524） | `UNKNOWN`/`NETWORK` |
 
 **要点**：
+
 - 在 `client.sse{}` 的 `incoming.collect{}` 外包裹 `try/catch`，把异常转为 `StreamEvent.Error` 而非抛给 UI。
 - 用 `catch` + `emit` 把异常注入 Flow，UI 侧 `collect` 见 `Error` 事件即更新状态，不崩溃（命中验收）。
 - 流中断时**保留已累积文本**，`Error(recovered=false)` 让 UI 显示「响应中断」+ 已收内容。
@@ -448,6 +453,7 @@ kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", versi
 ### 7.3 关键引用链接索引
 
 #### Ktor 官方
+
 - [Ktor SSE Client 文档](https://ktor.io/docs/client-server-sent-events.html)
 - [Ktor Client Testing（MockEngine）](https://ktor.io/docs/client-testing.html)
 - [Ktor 3.1.0 Release（Kotlin 2.1.0 / SSE 特性）](https://github.com/ktorio/ktor/releases/tag/3.1.0)
@@ -457,19 +463,23 @@ kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", versi
 - [Ktor CHANGELOG（3.5.2 SSE/CIO bugfix）](https://github.com/ktorio/ktor/blob/main/CHANGELOG.md)
 
 #### OpenAI 流式格式
+
 - [OpenAI Streaming Events 官方](https://developers.openai.com/api/reference/resources/chat/subresources/completions/streaming-events)
 - [Aivene Streaming Events 文档](https://docs.aivene.com/api-reference/chat/streaming-events)
 - [apiyi OpenAI 兼容模式响应处理](https://docs.apiyi.com/en/api-capabilities/openai/response-handling)
 
 #### OkHttp SSE
+
 - [okhttp-sse ServerSentEventReader 源码](https://github.com/square/okhttp/blob/master/okhttp-sse/src/main/kotlin/okhttp3/sse/internal/ServerSentEventReader.kt)
 - [OkHttp 流式响应处理（官方 issue）](https://github.com/square/okhttp/issues/7263)
 
 #### JSON 序列化
+
 - [Kotlin-JSON-Deserialization-Benchmark](https://github.com/javierpe/Kotlin-JSON-Deserialization-Benchmark/)
 - [sdmaid-se Moshi→kotlinx 迁移 PR](https://github.com/d4rken-org/sdmaid-se/pull/2350)
 
 #### MCP SDK 与版本佐证
+
 - [MCP Kotlin SDK 官方仓库](https://github.com/modelcontextprotocol/kotlin-sdk/)
 - [idesense#65（Ktor 版本与 coroutines 兼容实测）](https://github.com/vcth4nh/idesense/pull/65)
 - [MCP Kotlin SDK Getting Started（engine 不传递依赖）](https://deepwiki.com/modelcontextprotocol/kotlin-sdk/3-getting-started)

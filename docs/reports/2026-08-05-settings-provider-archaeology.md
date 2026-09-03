@@ -58,6 +58,7 @@ graph TD
 ### Q1. 依赖注入模式：Settings 应如何获取 repository
 
 **现状证据**：
+
 - `PrismApplication.kt` 文档第 17 行明确「后续可通过 Hilt 注入或 Application cast 访问」。
 - `ConversationScreen.kt` 第 86-88 行采用既有模式：`val app = context.applicationContext as? PrismApplication`，再读 `app?.providerConfigRepository?.activeProviderFlow`。
 - `ADR-002` 第 4.3 节决策「本 US 不引入 Hilt」，第 4.5 节「仅展示读 activeProviderFlow」。
@@ -73,6 +74,7 @@ graph TD
 ### Q2. ApiKeyRepository 的 DataStore 来源
 
 **现状证据**：
+
 - `ApiKeyRepository.kt` 构造签名第 27-30 行：`(dataStore: DataStore<Preferences>, cryptoService: CryptoService)`。
 - `PrismApplication` 暴露了 `cryptoService`（lazy），但**未暴露** `DataStore` 或 `ApiKeyRepository`。
 - `ApiKeyRepository.kt` 文档第 18 行确认 DataStore 文件名为 `prism_api_keys.preferences_pb`。
@@ -103,11 +105,13 @@ val apiKeyRepository: ApiKeyRepository by lazy {
 ### Q3. ViewModel 模式：SettingsViewModel 的工厂方式
 
 **现状证据**：
+
 - `ConversationViewModel` 无参构造，`ConversationScreen.kt` 第 81 行用默认 `viewModel()`（ViewModelProvider 默认工厂）。
 - `gradle/libs.versions.toml` 第 6 行 `lifecycleRuntimeKtx = "2.8.3"`，`lifecycle-viewmodel-compose` 同版本（第 22 行引用同 ref）。
 - `app/build.gradle.kts` 第 64 行已 `implementation(libs.androidx.lifecycle.viewmodel.compose)`。
 
 **结论**：`lifecycle-viewmodel-compose 2.8.3` **同时支持两种注入方式**：
+
 1. `viewModel(factory = ...)`（`ViewModelProvider.Factory`，`viewModelFactory` DSL，2.5.0+ 支持）。
 2. `viewModel { SettingsViewModel(...) }`（`initializer` 重载，lifecycle-viewmodel 2.5.0+ 支持，`CreationExtras` 提供 `APPLICATION_KEY`）。
 
@@ -142,6 +146,7 @@ fun SettingsScreen(
 **结论**：本次需接入数据层的仅 **Provider 配置** 与 **API Key** 两行。`SettingsScreen()` 当前为无参叶子 Composable，且是底部 Tab 叶子路由（`PrismApp.kt` 第 87 行 `composable(SETTINGS) { SettingsScreen() }`），**尚无详情页导航**。
 
 **建议方案**：
+
 - 为使「Provider 配置」行可点击进入详情页，需在 `PrismApp.kt` NavHost 新增叶子路由（如 `settings/provider`、`settings/provider/{id}`），或改用嵌套 nav graph。`SettingsScreen` 需接收 `onNavigateToProviderDetail` 回调或 `NavController`。
 - 「API Key」行可升级为可编辑详情页，或直接在当前设置项内触发读写（推荐独立详情页，避免列表页内并发 I/O）。
 
@@ -150,6 +155,7 @@ fun SettingsScreen(
 ### Q5. Provider 数据流：Settings 如何订阅 Provider 列表
 
 **现状证据**（`ProviderConfigRepository.kt`）：
+
 - 暴露 `getAll(): List<ProviderConfig>`（第 59 行，同步 `box.all.sortedBy { it.createdAt }`）。
 - 暴露 `activeProviderFlow: StateFlow<ProviderConfig?>`（第 32 行），仅在 `refreshActiveProvider()`（第 146 行）处更新，而 `refreshActiveProvider()` 仅在 `init`（第 35 行）、`setActive`（第 105 行）、`clearActive`（第 123 行）调用。
 - **无列表 Flow**。

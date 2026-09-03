@@ -21,6 +21,7 @@
 **核心结论**：ObjectBox 5.4.2 与 Prism 现有技术栈（AGP 8.13.0 + Kotlin 2.1.0 + compileSdk 34 + 阿里云镜像）**完全兼容**。ObjectBox 官方 README 明确提供了 AGP 8.13 及以下版本的配置方式，使用 `org.jetbrains.kotlin.kapt` 插件（而非 AGP 9.0+ 的 `com.android.legacy-kapt`）。ObjectBox 插件与 Compose Compiler 插件作用域不同，不冲突。阿里云镜像 content 过滤不影响 `io.objectbox` 组的依赖解析。
 
 **关键发现**：
+
 - ObjectBox 插件要求 AGP 8.1+ / Gradle 7.0+ / JDK 11+ / Android API 21+，Prism 全部满足
 - ObjectBox 插件在 Maven Central 发布（非 Gradle Plugin Portal），Prism 的 `settings.gradle.kts` 已配置 `mavenCentral()`
 - ObjectBox 插件自动添加核心依赖和配置注解处理器，无需手动添加 `implementation` 依赖
@@ -87,6 +88,7 @@ plugins {
 #### 1.2.3 App 构建脚本（[app/build.gradle.kts](../../app/build.gradle.kts)）
 
 关键配置：
+
 - namespace = "io.prism"
 - compileSdk = 34 / buildToolsVersion = "36.1.0"
 - minSdk = 26 / targetSdk = 34
@@ -137,6 +139,7 @@ kotlin.code.style=official
 | [AndroidManifest.xml](../../app/src/main/AndroidManifest.xml) | — | 无 `android:name` 声明（无 Application subclass） |
 
 **关键观察**：
+
 - 包结构为 `io.prism`，无子包（无 `data/`、`database/`、`domain/` 等分层目录）
 - 无 Application subclass
 - 无测试目录（`src/test/` 和 `src/androidTest/` 均不存在）
@@ -172,6 +175,7 @@ kotlin.code.style=official
 | **AGP 8.13-** | `org.jetbrains.kotlin.kapt` | `version.ref = "kotlin"` | ObjectBox README "Android Gradle Plugin 8.13 or older" |
 
 **Prism 使用 AGP 8.13.0，必须使用**：
+
 ```toml
 kotlin-kapt = { id = "org.jetbrains.kotlin.kapt", version.ref = "kotlin" }
 ```
@@ -192,6 +196,7 @@ objectbox = { id = "io.objectbox", version.ref = "objectbox" }
 ```
 
 > 说明：
+>
 > - ObjectBox 插件 ID 为 `io.objectbox`，在 Maven Central 发布
 > - ObjectBox 插件版本与运行时库版本一致（5.4.2）
 > - kapt 插件版本跟随 Kotlin 版本（2.1.0）
@@ -484,6 +489,7 @@ ObjectBox 5.4.2 与 Prism 现有技术栈**完全兼容**，可放心集成。�
 **无需阻断的风险**：所有风险均为低/中等级，可通过首次构建验证消除。唯一的高等级风险（RISK-003 向量搜索许可证）不在 US-002 范围内。
 
 **建议关注的验证点**：
+
 1. 首次 `assembleDebug` 构建——验证 kapt 执行 + MyObjectBox 生成 + 构建成功
 2. APK 体积——确认 ObjectBox native 库大小在可接受范围
 3. lint 检查——确认无新增 error

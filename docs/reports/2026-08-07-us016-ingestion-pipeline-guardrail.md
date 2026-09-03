@@ -27,6 +27,7 @@
 - 主 Agent 须修复 M1 后重新提交本 Agent 审查；M2/Q3/Q6 建议同步修复，可在修复 M1 时一并处理。
 
 > 严格回答主 Agent 自问盲区：
+>
 > - **「CancellationException 是否会被吞」**：**否**。`catch (e: CancellationException) { throw e }` 位于 `catch (e: Exception)` 之前，Kotlin 异常顺序匹配保证取消异常被先捕获并重新抛出。详见 §3.1。
 > - **「InputStream.use 是否所有路径关闭」**：**否**。`require(knowledgeBaseId >= 0)` 位于 `input.use {}` 之前，当 `knowledgeBaseId < 0` 时 `require` 抛 `IllegalArgumentException`，`input` 未被 `use {}` 包裹，不会被关闭——构成资源泄漏。其余路径（正常/解析失败/其他异常/协程取消）均通过 `use {}` 的 finally 关闭。详见 §3.2。
 
@@ -66,6 +67,7 @@
 **位置**：[IngestionPipeline.kt:170-179](../../app/src/main/java/io/prism/ingestion/IngestionPipeline.kt)
 
 **代码**：
+
 ```kotlin
 } catch (e: DocumentParseException) {
     emit(IngestionEvent.Failed(e))
@@ -79,6 +81,7 @@
 ```
 
 **验证结论（sequential-thinking 确认）**：
+
 1. `kotlin.coroutines.cancellation.CancellationException`（import 于第 15 行）在 JVM 平台是 `java.util.concurrent.CancellationException` 的 typealias，继承链：`CancellationException → IllegalStateException → RuntimeException → Exception`，即 **CancellationException IS-A Exception**。
 2. 若 `catch (e: Exception)` 在 `catch (e: CancellationException)` 之前，会吞掉取消异常。但代码中 `catch (e: CancellationException)` 在前并 `throw e`，Kotlin 异常顺序匹配保证取消异常被先捕获并重新抛出。
 3. `kotlinx.coroutines.CancellationException`（自 Kotlin 1.5 起）与 `kotlin.coroutines.cancellation.CancellationException` 互为 typealias；`ensureActive()` 抛出的异常及 `JobCancellationException` 均继承自该类型，故 `catch (e: CancellationException)` 能捕获所有协程取消异常。
@@ -91,6 +94,7 @@
 **位置**：[IngestionPipeline.kt:91-103](../../app/src/main/java/io/prism/ingestion/IngestionPipeline.kt)
 
 **问题代码**：
+
 ```kotlin
 fun ingest(...): Flow<IngestionEvent> = flow {
     require(knowledgeBaseId >= 0) {                 // 第 91 行：在 use{} 之前
@@ -118,11 +122,13 @@ fun ingest(...): Flow<IngestionEvent> = flow {
 | (f) embed/addChunk 抛异常 | 通过 | ✓ parse 阶段已关闭 | 关闭 |
 
 **违规点**：
+
 - KDoc（第 80 行）声明「**input 由本方法负责关闭**（use {}）」，但路径 (b) 违反此契约。
 - 违反 BR-error-handling-005 精神（显式关闭资源的异常处理须保证状态置位/资源释放覆盖所有路径）。
 - 测试 [ingest_negative_knowledge_base_id_throws_illegal_argument](../../app/src/test/java/io/prism/ingestion/IngestionPipelineTest.kt)（第 402-411 行）用 `ByteArrayInputStream`（`close()` 为 no-op），**未检测到此泄漏**。
 
 **影响**：
+
 - 触发条件：调用方传入负数 `knowledgeBaseId`（编程错误）。
 - 生产环境中若 `input` 为 `FileInputStream` 或 Android SAF `ContentResolver` InputStream，`require` 失败导致文件描述符泄漏；多次触发可耗尽 FD 上限。
 - 注意：`require` 位于 `flow {}` 冷流内部，仅在 `collect` 时执行——调用方可能在 `collect` 前已打开 InputStream，`require` 失败后调用方收到的 `IllegalArgumentException` 不携带「input 未关闭」的提示。
@@ -130,6 +136,7 @@ fun ingest(...): Flow<IngestionEvent> = flow {
 **修复建议**（两种方案任选其一）：
 
 方案 A（推荐，最小改动——将参数校验移入 use{} 之后，并用 try-finally 兜底关闭）：
+
 ```kotlin
 fun ingest(...): Flow<IngestionEvent> = flow {
     require(knowledgeBaseId >= 0) {
@@ -156,6 +163,7 @@ fun ingest(...): Flow<IngestionEvent> = flow {
 ```
 
 方案 B（彻底修复——require 也纳入资源保护范围，先校验再 use，但 require 失败时手动关闭）：
+
 ```kotlin
 fun ingest(...): Flow<IngestionEvent> = flow {
     if (knowledgeBaseId < 0) {
@@ -180,11 +188,13 @@ fun ingest(...): Flow<IngestionEvent> = flow {
 **位置**：[IngestionEvent.kt:60](../../app/src/main/java/io/prism/ingestion/IngestionEvent.kt)、[IngestionPipeline.kt:172,178](../../app/src/main/java/io/prism/ingestion/IngestionPipeline.kt)
 
 **问题**：
+
 ```kotlin
 data class Failed(val throwable: Throwable) : IngestionEvent()
 ```
 
 `Failed` 事件直接封装原始 `Throwable`，调用方（US-018 UI）若直接显示 `throwable.message` 或 `throwable.stackTrace`，可能泄露内部细节：
+
 - `DocumentParseException`：message = `"文档解析失败: $fileName"`（含文件名，用户提供的，风险低）；但其 `cause` 可能是 PDFBox/Apache POI 内部异常，含库版本、内部路径、Java 类名。
 - ObjectBox 写入异常：可能含 DB 文件路径、SQL/查询细节。
 - 其他 `RuntimeException`：堆栈含内部包结构 `io.prism.*`、ObjectBox native 路径。
@@ -194,6 +204,7 @@ data class Failed(val throwable: Throwable) : IngestionEvent()
 **缓解因素**：US-018 尚未实现，调用方如何消费 `Failed` 未知。当前是潜在风险而非已实现泄露。
 
 **修复建议**：`Failed` 事件额外提供安全的 `errorMessage` 字段，`throwable` 保留供日志/诊断（但不建议直接渲染给用户）：
+
 ```kotlin
 data class Failed(
     val throwable: Throwable,
@@ -226,6 +237,7 @@ catch (e: Exception) {
 当前注释说明了异常**去向**（终止管线），但未明确说明「异常已归一化为 Failed 事件，未输出结构化日志，诊断依赖 Failed.throwable」。`catch (e: EmbeddingException)` 块（第 136-143 行）的注释较完整（提及 BR-error-handling-004），但 `catch (e: Exception)` 块未对齐。
 
 **修复建议**：补充注释明确归一化语义：
+
 ```kotlin
 } catch (e: Exception) {
     // BR-error-handling-004：异常归一化为 Failed 事件传递给调用方，
@@ -258,6 +270,7 @@ catch (e: Exception) {
 | M1 修复后：负数 kbId 时 input 关闭 | ✗ 未覆盖 | 验证 M1 修复 |
 
 **修复建议**：补充以下测试（建议由 ac-verifier 在验收阶段强制要求，或主 Agent 修复 M1 时一并补充）：
+
 ```kotlin
 @Test fun ingest_cancels_at_chunk_boundary_and_closes_input() = runBlocking {
     // 构造大文档，collect 中途取消，验证抛出 CancellationException + input 已关闭

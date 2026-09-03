@@ -456,6 +456,7 @@ jobs:
 ```
 
 **Semgrep 自定义规则建议**（针对 ObjectBox Query 注入防护）：
+
 ```yaml
 rules:
   - id: objectbox-query-no-string-concat

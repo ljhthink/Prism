@@ -381,22 +381,22 @@ PrismButton(text = "选择授权目录", onClick = { launcher.launch(null) })
 
 ### 8.2 第二阶段：UI 架构与模式参考（编码前阅读）
 
-5. [PrismApp.kt](../../app/src/main/java/io/prism/ui/PrismApp.kt)：导航结构与路由定义（理解 4 Tab + NavHost）。
-6. [SettingsScreen.kt](../../app/src/main/java/io/prism/ui/settings/SettingsScreen.kt) + [SettingsViewModel.kt](../../app/src/main/java/io/prism/ui/settings/SettingsViewModel.kt)：设置页 `SetRow` + `PrismSheetHost` 弹层 + ViewModel 注入模式（US-018 入口/VM 最佳参考）。
-7. [CapabilitiesScreen.kt](../../app/src/main/java/io/prism/ui/capabilities/CapabilitiesScreen.kt) + [CapabilitiesViewModel.kt](../../app/src/main/java/io/prism/ui/capabilities/CapabilitiesViewModel.kt)：列表 + 弹层 + 连接测试（`sealed interface TestState`）+ **SAF 文件选择先例**（`FilesystemAuthorizationSection` 第 692 行）——US-018 导入文档的最佳参考。
-8. [KnowledgeBaseScreen.kt](../../app/src/main/java/io/prism/ui/knowledge/KnowledgeBaseScreen.kt)：既有 Mock 原型，视觉骨架（`KbSpaceCard`/`PrismIndexBar`/`ImportSheet`）可复用，数据层须重写。
+1. [PrismApp.kt](../../app/src/main/java/io/prism/ui/PrismApp.kt)：导航结构与路由定义（理解 4 Tab + NavHost）。
+2. [SettingsScreen.kt](../../app/src/main/java/io/prism/ui/settings/SettingsScreen.kt) + [SettingsViewModel.kt](../../app/src/main/java/io/prism/ui/settings/SettingsViewModel.kt)：设置页 `SetRow` + `PrismSheetHost` 弹层 + ViewModel 注入模式（US-018 入口/VM 最佳参考）。
+3. [CapabilitiesScreen.kt](../../app/src/main/java/io/prism/ui/capabilities/CapabilitiesScreen.kt) + [CapabilitiesViewModel.kt](../../app/src/main/java/io/prism/ui/capabilities/CapabilitiesViewModel.kt)：列表 + 弹层 + 连接测试（`sealed interface TestState`）+ **SAF 文件选择先例**（`FilesystemAuthorizationSection` 第 692 行）——US-018 导入文档的最佳参考。
+4. [KnowledgeBaseScreen.kt](../../app/src/main/java/io/prism/ui/knowledge/KnowledgeBaseScreen.kt)：既有 Mock 原型，视觉骨架（`KbSpaceCard`/`PrismIndexBar`/`ImportSheet`）可复用，数据层须重写。
 
 ### 8.3 第三阶段：数据层契约（接入前阅读）
 
-9. [KnowledgeBaseRepository.kt](../../app/src/main/java/io/prism/data/KnowledgeBaseRepository.kt)：CRUD + `knowledgeBases` StateFlow + `chunkCount` 聚合 + 默认库约束。
-10. [IngestionPipeline.kt](../../app/src/main/java/io/prism/ingestion/IngestionPipeline.kt) + [IngestionEvent.kt](../../app/src/main/java/io/prism/ingestion/IngestionEvent.kt) + [IngestionResult.kt](../../app/src/main/java/io/prism/ingestion/IngestionResult.kt)：`ingest` 签名 + 事件序列 + `Failed.throwable` 安全约定。
-11. [PrismApplication.kt](../../app/src/main/java/io/prism/PrismApplication.kt)：理解现有 `by lazy` 注入模式，US-018 须在此新增 5 个依赖暴露。
-12. [EmbedderFactory.kt](../../app/src/main/java/io/prism/embedding/EmbedderFactory.kt) + [Embedder.kt](../../app/src/main/java/io/prism/embedding/Embedder.kt)：`Embedder` 从 assets 加载模型的方式（若 US-018 需在 Application 构造 Embedder）。
+1. [KnowledgeBaseRepository.kt](../../app/src/main/java/io/prism/data/KnowledgeBaseRepository.kt)：CRUD + `knowledgeBases` StateFlow + `chunkCount` 聚合 + 默认库约束。
+2. [IngestionPipeline.kt](../../app/src/main/java/io/prism/ingestion/IngestionPipeline.kt) + [IngestionEvent.kt](../../app/src/main/java/io/prism/ingestion/IngestionEvent.kt) + [IngestionResult.kt](../../app/src/main/java/io/prism/ingestion/IngestionResult.kt)：`ingest` 签名 + 事件序列 + `Failed.throwable` 安全约定。
+3. [PrismApplication.kt](../../app/src/main/java/io/prism/PrismApplication.kt)：理解现有 `by lazy` 注入模式，US-018 须在此新增 5 个依赖暴露。
+4. [EmbedderFactory.kt](../../app/src/main/java/io/prism/embedding/EmbedderFactory.kt) + [Embedder.kt](../../app/src/main/java/io/prism/embedding/Embedder.kt)：`Embedder` 从 assets 加载模型的方式（若 US-018 需在 Application 构造 Embedder）。
 
 ### 8.4 第四阶段：组件复用（编码时查阅）
 
-13. [components/](../../app/src/main/java/io/prism/ui/components/) 全部组件：见本报告 §6 可复用清单。
-14. [theme/Color.kt](../../app/src/main/java/io/prism/ui/theme/Color.kt)：深空色板语义色。
+ 1. [components/](../../app/src/main/java/io/prism/ui/components/) 全部组件：见本报告 §6 可复用清单。
+ 2. [theme/Color.kt](../../app/src/main/java/io/prism/ui/theme/Color.kt)：深空色板语义色。
 
 ---
 

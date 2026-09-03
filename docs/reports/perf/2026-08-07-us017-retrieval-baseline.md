@@ -17,6 +17,7 @@
 **测量内容**：`KnowledgeBaseRepository.search(query, k=5)` 在不同 chunk 数量下的 HNSW 检索延迟。
 
 **关键局限**：
+
 - 使用 oneHot 向量（非真实 OnnxEmbedder 向量），HNSW 索引开销可能与真实场景略有差异（oneHot 向量极度稀疏，真实 embedding 更密集）。
 - 纯 JVM ObjectBox 测试（非 Android 设备），**生产基线需在 Android 设备补测**。
 - 不含 Embedder.embed 延迟（生产 ~100ms/次，BR-concurrency-002 持锁）。总检索延迟 = 本基线 + embed 延迟。

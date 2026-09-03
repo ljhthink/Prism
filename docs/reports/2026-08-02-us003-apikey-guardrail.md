@@ -425,6 +425,7 @@ US-003 API Key 加密存储模块的代码变更经 `TRAE-code-review`（代码�
 1 个中风险问题（G-01 StrongBox 异常捕获范围）影响可用性而非安全性，强烈建议后续修复但不阻断本次验收。10 个低风险/建议项作为持续优化输入。
 
 **主 Agent 可启动 ac-verifier 子 Agent 执行验收测试。** ac-verifier 应特别关注：
+
 1. AC-5 Typecheck 验证；
 2. 边界场景测试补充（G-09）；
 3. 真机 Keystore 集成受限通过的合理性评估；
@@ -473,6 +474,7 @@ jobs:
 ```
 
 **Semgrep 自定义规则建议**（针对本次发现）：
+
 - 检测 `catch (StrongBoxUnavailableException)` 后无通用 catch 回退（G-01）
 - 检测 `catch (e: Exception)` 宽泛捕获（G-02）
 - 检测 `byteArrayPreferencesKey` 前无 `require` 校验（G-03）

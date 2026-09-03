@@ -3,6 +3,7 @@
 > 从 `docs/templates/reports/guardrail-template.md` 复制新建，依 CLAUDE.md 第十节 + 7.2.5 回退闭环。
 > 本报告由 guardrail-enforcer 子 Agent 生成，覆盖 ac-verifier TKN-M4-PHASEB-ACCEPTANCE-002 受限通过后主 Agent 主动回退修复的复审。
 > 前序报告：
+>
 > - [2026-08-09-m4-phaseB-guardrail.md](2026-08-09-m4-phaseB-guardrail.md)（TKN-M4-PHASEB-GUARDRAIL-001，通过 7G）
 > - [2026-08-09-m4-phaseB-guardrail-round2.md](2026-08-09-m4-phaseB-guardrail-round2.md)（TKN-M4-PHASEB-GUARDRAIL-002，通过 R2-1）
 > - [2026-08-09-m4-phaseB-acceptance.md](2026-08-09-m4-phaseB-acceptance.md)（TKN-M4-PHASEB-ACCEPTANCE-002，受限通过，US-022 AC-5 受限根因：SkillRegistryTest 缺失）
@@ -257,6 +258,7 @@ val remoteSkillsDir = File(context.filesDir, "skills/remote")
 ```
 
 **等价性**：
+
 - 生产环境：`context.filesDir` 在 `scanAndSync` 调用时（PrismApplication.onCreate 的 IO 协程）访问，与重构前在构造期访问返回相同值（filesDir 在 Application 生命周期内稳定）。**等价**。
 - 测试环境：构造器不再触发 `context.filesDir` 访问，SkillRegistry 可在纯 JVM 测试中实例化（虽然本次测试直接调用 companion 纯函数，未实例化 SkillRegistry）。**新增可测性，无行为变化**。
 

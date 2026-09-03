@@ -26,6 +26,7 @@ Continuous-learning 是桌面端（Tauri + Node.js + Python parser），Prism �
 可能低估了 Python parser 模块的价值——它包含文档解析逻辑（docx/pdf/xlsx/md→结构化文本），若与语言无关可复用。可能高估了 server 模块的复用价值——它深度依赖 Node 生态。wiki/ 目录下的知识库组织方式可能是最值得复用的"数据模型"设计。
 
 **考古结论**：三个盲区均已验证——
+
 1. Python parser 的解析**规则**（PDF 按页提取+表格、DOCX 按段落+标题层级+表格、XLSX 按工作表→markdown 表格）确实与语言无关，可移植到 Kotlin；但 pymupdf 的 **AGPL-3.0 许可证**与 Prism 的 Apache 2.0 不兼容，必须替换为 Android 兼容库。
 2. server 模块确实深度依赖 Node 生态（`@modelcontextprotocol/sdk` TS 版、`js-yaml`、`zod`），无法直接移植；但 17 个 MCP tools 的**接口契约设计**可指导 Prism 用 MCP Kotlin SDK 重写。
 3. wiki/ 目录的**数据模型设计**（frontmatter schema、双索引、领域分类、知识图谱）确实是最有价值的复用点，差点忽略的判断正确。
@@ -321,6 +322,7 @@ graph TD
 | 4 | `server/src/index.ts` | MCP 入口，每次新增 tool 都修改 |
 
 **热点分析结论**：
+
 - **最活跃区域**：write.ts（写入逻辑）和 schemas.ts（接口定义），反映核心业务逻辑仍在快速迭代。
 - **测试覆盖良好**：p3-evolution.test.ts（27770 字节）和 missing-features.test.ts（24824 字节）是最大的测试文件，覆盖了持续进化和缺失功能补全两个核心场景。
 - **wiki 内容稳定**：thealgorithms-*.md 系列文件变更频率高（6-9 次），但这是内容沉淀而非代码变更。
@@ -512,7 +514,7 @@ graph TD
 1. **读测试结构**：[server/src/tests/](../../Continuous-learning/server/src/tests/) 目录 — 13 个测试文件覆盖所有核心场景
 2. **读测试 setup**：[server/src/tests/setup.ts](../../Continuous-learning/server/src/tests/setup.ts) — 临时 KB fixture 构建
 3. **读 MCP 冒烟测试**：[smoke-mcp-full.mjs](../../Continuous-learning/server/smoke-mcp-full.mjs) — JSON-RPC over stdio 端到端测试
-4. **读前端测试**：[frontend/src/lib/__tests__/](../../Continuous-learning/frontend/src/lib/__tests__/) — RAG/LLM/图谱单元测试
+4. **读前端测试**：[frontend/src/lib/**tests**/](../../Continuous-learning/frontend/src/lib/__tests__/) — RAG/LLM/图谱单元测试
 
 ---
 

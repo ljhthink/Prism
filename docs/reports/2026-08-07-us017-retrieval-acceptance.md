@@ -199,6 +199,7 @@ EDGE_CASE: 正交向量场景 k=5, 库内 7 条正交 chunk, 实际返回 5 条
 **主 Agent 遗憾**：既有测试仅覆盖 similarity≈-1.0（完全反向）端点，未覆盖 distance=1.5（similarity=-0.5）中间值。
 
 **测试构造**：
+
 - 120° 夹角：query=oneHot(0), chunk=[-0.5, √3/2, 0, ...]，cos(120°)=-0.5, similarity=-0.5
 - 60° 夹角：query=oneHot(0), chunk=[0.5, √3/2, 0, ...]，cos(60°)=0.5, similarity=0.5
 
@@ -263,6 +264,7 @@ EDGE_CASE: 零向量查询 k=5, 库内 2 条, 返回 2 条
 ### 6.3 guardrail 安全审计复核
 
 guardrail-enforcer 报告（[2026-08-07-us017-retrieval-guardrail.md](2026-08-07-us017-retrieval-guardrail.md)）已确认：
+
 - 无 SQL/NoSQL 注入 ✓（与 6.1 一致）
 - 无硬编码密钥 ✓（与 6.2 一致）
 - Query use{} 关闭 ✓（与 6.2 一致）

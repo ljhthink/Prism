@@ -23,12 +23,14 @@
 ## 1. 代码质量审查（TRAE-code-review）
 
 ### 1.1 Karpathy Guidelines 符合性
+
 - **命名**：组件/状态命名清晰（`PrismSheet`/`PrismField`/`PrismSegmented`），语义与设计规范一致。数据类与枚举职责单一。✅
 - **设计**：组件复用度高（`PrismField` 的 `trailing` 插槽、`PrismCard` 的 `onClick` 可选参数），避免了过度设计。`PrismGlassCard` 保留为 `@Deprecated` 委托，兼容既有调用方，迁移策略合理。✅
 - **错误处理**：UI 层无 IO/网络，未发现「吞异常」或空 catch。✅ 但存在不安全强转（问题 Q5）。
 - **避免过度设计**：双层 `AnimatedVisibility` 属冗余（问题 Q3）。
 
 ### 1.2 逻辑错误 / 性能隐患 / 可维护性
+
 | 编号 | 严重度 | 位置（相对路径） | 描述 | 修复建议 |
 |---|---|---|---|---|
 | Q1 | 中 | `knowledge/KnowledgeBaseScreen.kt` L181-189、L195-206 | **布局错误（主 Agent 盲区证实）**：ImportSheet 中「来源类型」「目标知识库」的 `PrismSegmented` 作为 `PrismField.trailing` 时未指定宽度。`PrismSegmented` 内部 `BoxWithConstraints` 使用 `fillMaxWidth()`，在 `PrismField` 的 `Row` 中属非 `weight` 子项，会被测量为整行宽度，从而把同 `Row` 的 `BasicTextField`（`weight(1f)`）挤压至近零宽度，弹层字段几乎不可编辑。对比 `capabilities/CapabilitiesScreen.kt` L263 已正确使用 `Modifier.width(160.dp)`。 | 为 ImportSheet 中两个 trailing `PrismSegmented` 增加宽度约束（如 `Modifier.width(...)`），与 MCP 弹层保持一致，或改用 `weight` 布局。 |
@@ -39,12 +41,14 @@
 | Q6 | 低 | `components/PrismStatusDot.kt` L45 | **性能**：所有状态（含非 RUN）都创建 `rememberInfiniteTransition`，仅 RUN 真正触发无限动画，其余状态浪费一次 transition 对象。 | 仅在 `state == PrismDotState.RUN` 时创建 transition。 |
 
 ### 1.3 Compose 最佳实践
+
 - **状态提升**：`PrismField`/`PrismSwitch`/`PrismSegmented` 采用单向数据流（value + onValueChange），状态提升正确。✅
 - **remember 作用域**：`McpConfigSheet`/`SkillDetailSheet` 用 `remember(server.name)`/`remember(skill.name)` 作 key，切换目标时正确重置；`McpRow`/`SkillRow` 的 `enabled` 为局部状态，满足 Mock 场景。✅
 - **重组**：`LazyColumn` 中 `item` 未提供 key（`KnowledgeBaseScreen`、`CapabilitiesScreen`），当前列表静态故无即时影响，但列表动态化后需补 key。列为建议。
 - **动画**：`animateDpAsState`/`animateColorAsState`/`graphicsLayer` 用法正确，未发现整棵子树不必要重组。`Chat` 消息气泡恒 `AnimatedVisibility(visible=true)` 包装，滚动回收时可能重放入场动画，列为建议。
 
 ### 1.4 测试框架与基础用例充分性
+
 本次审查未收到主 Agent 提供的 UI 测试用例文件清单；`app/src/test/java/io/prism/data/` 存在数据层测试（ProviderConfig 系列）。**UI 组件层（PrismSegmented 边界、PrismSheetHost 动画、PrismField 布局）缺少对应 compose-ui-test 用例**，建议在 ac-verifier 阶段补充（尤其 Q1 布局、Q4 边界）。
 
 ## 2. 安全漏洞扫描（TRAE-security-review）
@@ -52,16 +56,19 @@
 > 说明：本次变更为纯 UI 层（Compose），无网络 IO、无数据库、无命令行执行。数据层为 Mock，未接真实请求。
 
 ### 2.1 输入与边界审计
+
 - `PrismField` 的 `onValueChange` 仅更新本地 Compose 状态，未进入任何危险 sink（无 SQL/命令/URL 拼接）。✅
 - `PrismSegmented` 采用类型化枚举/数据类选项，无字符串拼接注入面。✅
 - 未发现数组越界/整数溢出/缓冲区问题（Compose 托管内存，记忆安全不在审计范围）。✅
 
 ### 2.2 执行安全审计（注入 / 最小权限 / 输出编码）
+
 - **注入**：无 SQL 拼接、无 OS 命令执行、无 `eval`/模板注入面。UI 文本均以 `Text(text=...)` 字面量渲染，无动态 HTML/富文本解析。✅
 - **最小权限**：`PrismApp` 仅声明 4 个 Tab 导航，无多余权限请求；`build.gradle.kts` 未发现危险权限声明。✅
 - **输出编码**：无 Web 输出面；Compose 文本渲染天然转义，无 XSS 风险。✅
 
 ### 2.3 密钥与配置安全
+
 | 编号 | 严重度 | 位置 | 描述 | 修复建议 |
 |---|---|---|---|---|
 | S1 | 低 | `capabilities/CapabilitiesScreen.kt` L276-284 | **敏感字段明文显示**：`McpConfigSheet` 的「Token / API Key」输入框使用普通 `BasicTextField`，明文展示，存在肩窥/截屏泄露风险。当前 token 仅存于局部状态、未持久化/未日志，非直接泄露，属纵深防御缺口。 | 使用 `PasswordVisualTransformation` 掩码显示，并提供「眼睛」切换明文；确认该字段不进入日志。 |
@@ -70,6 +77,7 @@
 | S4 | 通过 | 全量扫描 | 未发现硬编码 API Key、密码、令牌、内部 IP/域名。`https://api.example.com/mcp` 为占位符，非真实端点泄露。✅ | — |
 
 ### 2.4 依赖与供应链风险
+
 - 本次新增依赖 `lottie-compose` v6.4.0（`gradle/libs.versions.toml` L14）。虽在本次 UI 变更中未直接引用（`build.gradle.kts` L67 已声明），仍应在 CI 中纳入依赖漏洞扫描。
 - 建议运行：`./gradlew :app:dependencies` 配合 `npm audit` 类工具（Android 侧建议集成 `OSS Index` / `Dependabot`），确认 lottie 6.4.0 无已知高危 CVE。
 - ADR 要求：lottie 属 P1 重要依赖，升级前应查看 changelog；本次为固定版本引用，符合 `18.5 固定版本`要求。✅
@@ -89,6 +97,7 @@
 - [x] **有条件通过** —— 无阻断级安全漏洞，但需修复/确认以下项后再进入 ac-verifier：
 
 **必须处理（修复或人工确认）：**
+
 1. **Q1（中）**：ImportSheet 两个 `PrismSegmented` 无宽度约束，导致标签输入框被挤压。修复后需验证布局。
 2. **Q2（中）**：`PrismGlassStrong`（已别名化为描边色）被误用作背景填充，需改为 `PrismPanel`/`PrismPanel2` 并人工视觉确认。
 
@@ -99,6 +108,7 @@
 6. Q5：`ConversationScreen` 安全强转。
 
 **列入 ac-verifier 关注：**
+
 - 补充 UI 组件测试（PrismSegmented 边界、PrismSheetHost 动画、PrismField 布局）。
 - 依赖审计（lottie-compose 6.4.0）。
 
@@ -117,6 +127,7 @@
 ## 6. 自动化建议（CI/CD Integration）
 
 建议在 `.github/workflows/` 增加或扩展：
+
 - **静态安全检查**：集成 Android Lint 安全检查 + `detekt` 规则（检测硬编码密钥、`PrismGlass*` 误用、`as` 强转）。
 - **依赖扫描**：`Dependabot`（已配置）+ CI 中 `./gradlew :app:dependencies` 输出依赖树供人工核对 lottie 等 P1 依赖。
 - **UI 测试门禁**：`ac-verifier` 阶段加入 `compose-ui-test`（`createComposeRule`）覆盖 PrismSegmented 边界与 PrismSheetHost 动画。

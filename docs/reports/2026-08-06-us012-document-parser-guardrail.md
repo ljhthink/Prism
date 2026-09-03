@@ -74,6 +74,7 @@ sequenceDiagram
 - 问题：`CellType.FORMULA -> cell.cellFormula` 返回公式字符串（如 `=SUM(A1:A2)`、`=B1*0.1`），而非该单元格的缓存计算值（如 `30`）。对 RAG 纯文本摄入而言，这会把公式算式而非实际数据写入切片，导致检索命中「公式」而非「数据」，属数据正确性缺陷。与文书语义相悖（用户期望抽取到数值）。
 - 证据：`XSSFWorkbook.cellType` 对公式单元格返回 `FORMULA`，`cellFormula` 返回未求值表达式；缓存值须经 `cell.cachedFormulaResultType` + 对应 getter 或 `DataFormatter` 获取。
 - 建议（修复）：
+
   ```kotlin
   org.apache.poi.ss.usermodel.CellType.FORMULA -> {
       // 用缓存计算结果而非公式表达式
@@ -85,6 +86,7 @@ sequenceDiagram
       }
   }
   ```
+
 - 修复后需补 FORMULA 单元格单测（见 G-09）。
 
 #### G-02（中）输入流所有权在三个解析器间不一致
@@ -105,6 +107,7 @@ sequenceDiagram
 - 位置：[PlainTextDocumentParser.kt:58-66](../../app/src/main/java/io/prism/document/PlainTextDocumentParser.kt#L58-L66)
 - 问题：`stripMarkdown` 在 `lineSequence().joinToString` 内对每一行都 `Regex(...)` 构造一次，6 个正则因子 × 行数 次编译。大 MD 文件下产生无谓对象分配与编译开销。
 - 建议：将正则提升为 `companion object` 的 `val` 常量，一次编译复用。
+
   ```kotlin
   companion object {
       private val HEADING = Regex("^#{1,6}\\s+")
@@ -223,13 +226,16 @@ sequenceDiagram
 **结论：有条件通过（Conditional Pass）**
 
 无条件放行项（可立即进入 ac-verifier）：
+
 - 无阻断级安全漏洞；无注入/XXE/路径遍历/硬编码密钥/不安全反序列化；资源释放基本正确；26 用例全通过。
 
 **必须满足的条件（否则不得进入正式摄入链路 / 生产）**：
+
 1. **G-01（中）**：FORMULA 单元格改为返回缓存计算值，修复后补单测。此为数据正确性缺陷，建议在 US-012 内修复（或至少在 US-016 摄入前修复）。
 2. **G-03（高）**：单文件大小上限与内存防护必须在 **US-016 摄入管线**强制落地（解析器入口建议加防御性 `maxBytes`），在 US-016 完成前不得将该解析器接入正式摄入流程。
 
 **建议项（不强阻断，纳入 US-016 或近期迭代）**：
+
 - G-02 输入流所有权契约统一；G-04 正则提升常量；G-05 空单元格清洗；G-06 日志 fileName 过滤；G-07 调用方补结构化日志；G-08 数值边界；G-09 补边界测试。
 
 **cc-verifier 移交提示**：ac-verifier 阶段应补充中文召回语义评估（对应主 Agent 遗憾②）、内存峰值基准（大文件占位样例）、以及 XLSX FORMULA/BLANK 与 MD 边界用例。

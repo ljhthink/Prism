@@ -34,6 +34,7 @@ Factory 注入、stateIn 订阅、internal 纯函数）均在现有代码中建�
 ### 5.1 依赖升级：Kotlin 2.3.21 + Ktor 3.3.3 + kotlinx-serialization 1.11.0
 
 **决策**：升级 `gradle/libs.versions.toml`：
+
 - Kotlin `2.1.0` → **2.3.21**（MCP SDK 0.12.0 编译目标要求）
 - Ktor `3.1.3` → **3.3.3**（MCP SDK 传递依赖对齐）
 - kotlinx-serialization `1.8.1` → **1.11.0**（与 Kotlin 2.3.x 对齐）
@@ -111,6 +112,7 @@ val mcpClientManager: McpClientManager by lazy { McpClientManager(httpClient, ap
 ### 5.5 UI 层：`CapabilitiesViewModel` + 替换 `CapabilitiesScreen` 静态数据
 
 **决策**：新建 `CapabilitiesViewModel`（仿 `SettingsViewModel`）：
+
 - 构造注入 `McpServerRepository` + `McpClientManager`
 - `servers: StateFlow<List<McpServerConfig>>` 用 `stateIn`
 - `Factory` 从 `PrismApplication` 读取 `app.mcpServerRepository` / `app.mcpClientManager`
@@ -126,6 +128,7 @@ SectionHeader 计数「本地内置」/「远程模板」改为动态。
 ### 5.6 测试策略：纯函数 + 真实 MCP 服务器集成测试
 
 **决策**：复用 ADR-004 4.7 两层策略：
+
 1. **纯函数单元层**：单测 `McpClientManager` 的 internal 纯函数（transport 构造 / 鉴权头 /
    工具结果映射），覆盖核心逻辑。
 2. **真实集成层**：用嵌入式 Ktor Netty HTTPServer 起真实 MCP Streamable HTTP 端点，

@@ -30,7 +30,7 @@
 4. **人工接管（US-202）**：`take_over` 与高危动作返回 `【需要用户回答】` + AskUserPayload JSON（复用 UXR8 N2 协议），SkillExecutor 检测标记 → 发 `StreamEvent.AskUser` + StopAtTools 中断回路，UI 提问卡片等待用户接管。
 5. **截图增强（US-203）**：API30+ `takeScreenshot(displayId, executor, callback)` + `ScreenshotResult.asBitmap()` 反射调用（@SystemApi 隐藏 API）；**复用 N3 降采样链路**（最长边 ≤1024px + JPEG q80 + base64 上限 400KB）控会话 JSON 膨胀；工具描述引导「仅多模态模型 + UI 树不足时使用」。
 6. **性能档位（US-204）**：`PerformanceTier.isPhoneControlEnabled`（FULL/STANDARD 启用，MINIMAL/CHAT_ONLY 禁用），Factory 按 `tier.isPhoneControlEnabled` 注入；设置页「手机操控」区块引导开启无障碍 + 用途声明（prominent disclosure）+ 安全拦截说明。**保活说明**：无障碍服务由系统保活（M7 无前台服务机制，本功能无需新增前台服务）。
-7. **失败识别（US-202 配套）**：`SkillExecutor.isFailureResult` 新增 `错误：` 与 `⚠️ ` 前缀（手机控制失败/硬拦截纳入重复工具熔断，防 LLM 同参数反复重试）；AskUser 接管结果（`【需要用户回答】`）不纳入失败识别（由 executeLoop 单独处理）。
+7. **失败识别（US-202 配套）**：`SkillExecutor.isFailureResult` 新增 `错误：` 与 `⚠️` 前缀（手机控制失败/硬拦截纳入重复工具熔断，防 LLM 同参数反复重试）；AskUser 接管结果（`【需要用户回答】`）不纳入失败识别（由 executeLoop 单独处理）。
 
 ## 备选方案（Alternatives）
 
@@ -53,7 +53,7 @@
   - 新增无障碍权限（系统设置手动开启，Android 12+ 无法代码拉起授权页）——设置页显著披露用途。
   - 通用模型对复杂长链路（跨 App 多步）规划成功率中等（SOTA 视觉模型复杂基准 35-47%，社区实测常见任务 85-95%）。
   - 无障碍截图仅 Android 11+（API30+），低版本自动降级（工具返回提示）。
-  - `isFailureResult` 前缀扩展：`错误：`/`⚠️ ` 属通用前缀，若未来其它工具正常结果以此开头会误判失败（已知局限，与既有前缀策略一致）。
+  - `isFailureResult` 前缀扩展：`错误：`/`⚠️` 属通用前缀，若未来其它工具正常结果以此开头会误判失败（已知局限，与既有前缀策略一致）。
 - 需要同步更新的文档或代码：
   - `AGENTS.md` 进度记录（批次3 完成）、`docs/prd-v1-features.md` 执行状态表、本 ADR 索引。
 

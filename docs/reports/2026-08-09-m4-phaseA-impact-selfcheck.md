@@ -42,6 +42,7 @@ fun streamChat(
 **向后兼容性**：新增参数均带默认值 `null`。既有调用方（ConversationViewModel.sendMessage）未传 tools/toolChoice，行为与 US-019 完全一致。
 
 **实现侧影响**：
+
 - `OpenAICompatibleProvider.streamChat` override 签名同步新增 `tools`/`toolChoice`（override 不可带默认值，故为必填参数）。Phase A **仅对齐签名，不序列化 tools 到请求体**——实际 tool_calling 请求序列化与 delta 状态机解析属 Phase C（US-024）。当前非 null tools 会被忽略，已在 KDoc 明确标注。
 - 测试侧 3 个 fake provider（FakeChatStreamProvider / RecordingChatStreamProvider / MultiRoundRecordingProvider）override 签名同步更新。
 
@@ -50,6 +51,7 @@ fun streamChat(
 新增 3 个子类型（ADR-014 5.1）：`ToolCallStart` / `ToolCallDelta` / `ToolCallComplete`。
 
 **穷尽性影响**：所有 `when (event: StreamEvent)` 表达式必须新增分支方可编译。受影响位置：
+
 - `ConversationViewModel.sendMessage` 的 `stream.collect { when (event) }` → 已新增 no-op 分支（Phase D US-026 接管工具执行回路）
 - `OpenAICompatibleProviderTest` 第 356 行 `when (ev)` → 已新增空分支
 
@@ -134,6 +136,7 @@ Refs: ADR-013, ADR-014
 ## 5. README.md 索引更新
 
 本次新增文档：
+
 - `docs/reports/2026-08-09-m4-phaseA-impact-selfcheck.md`（本文件）
 - Phase A guardrail 报告（待生成）
 - Phase A acceptance 报告（待生成）

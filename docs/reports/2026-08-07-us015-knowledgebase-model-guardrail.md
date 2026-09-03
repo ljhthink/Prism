@@ -99,21 +99,25 @@ flowchart TD
 ### 2.1 输入与边界审计（Stage 1）
 
 #### 2.1.1 数值与类型边界
+
 - `id: Long` 参数（`get`/`remove`/`chunkCount`）：`remove` 有 `require(id != 0L)` 防御默认库；`get` 有 `if (id==0L) return null` 防御。负数 id 未防御（G-04，质量项非安全漏洞——非法 id 抛 IllegalArgumentException 或 no-op，无数据损坏）。无算术运算，无溢出风险。
 - `name: String`：Repository 层不限制长度/内容（`save_empty_name_is_allowed` 显式记录），校验属 UI 层。与 ProviderConfig/McpServer 一致。本地 DB 无远程输入注入面。
 - `knowledgeBaseId: Long = 0L`：默认值使旧数据自动归属默认库（考古 R1 缓解），无孤儿风险。
 
 #### 2.1.2 集合与缓冲边界
+
 - `box.all` 返回物化 `List` 快照（非活游标），`forEach` 遍历快照安全；循环内修改 `chunkBox`（不同 Box）不影响迭代；`box.removeAll()` 在 forEach 之后。无 ConcurrentModificationException 风险（见 1.5 已验证）。
 - 无 `strcpy`/`sprintf`/裸指针（Kotlin/JVM 托管内存）。
 
 #### 2.1.3 业务状态机约束
+
 - 默认库 0L 状态机：`remove(0L)` 拒绝、`get(0L)` 返回 null、`getAll`/Flow 结构性不含（0L 永不持久化为 KnowledgeBase 记录，`@Id` 自增从 1 开始）、`chunkCount(0L)` 返回默认库 chunk 数。ADR-008 5.3「默认库不持久化」在 Repository 层**完整对应实现**（审查重点 #7 通过）。
 - 无绕过状态检查路径（remove 经 require 入口校验，无公开字段直改）。
 
 ### 2.2 执行安全审计（Stage 2）
 
 #### 2.2.1 注入防护
+
 - **NoSQL 注入**：ObjectBox `.equal(KnowledgeChunk_.knowledgeBaseId, id)` 为类型安全参数化查询（`Property` + `Long` 值），**无字符串拼接**。`findByName` 用 `box.all.find { it.name == name }`（内存相等比较）。无注入向量。
 - **SQL 注入**：ObjectBox 非 SQL DB，无 SQL 拼接。
 - **OS 命令注入**：无 `Runtime.exec`/`ProcessBuilder`。
@@ -122,9 +126,11 @@ flowchart TD
 - **反序列化**：ObjectBox 二进制序列化为受信本地数据，无远程反序列化面。
 
 #### 2.2.2 最小权限
+
 - 本模块为端侧 Android 本地 DB 层，无 DB 账户/OS 服务账户/容器 securityContext 概念。仅文件 I/O（ObjectBox 目录），无多余权限。
 
 #### 2.2.3 输出编码
+
 - 输出为 `KnowledgeBase` 实体与 `Long` 计数，不涉及 HTML/JS/URL 上下文，无需转义。
 - `require` 异常 message 含 `id=$DEFAULT_KB_ID`（即 0L），无敏感信息泄露。
 
@@ -308,6 +314,7 @@ fun chunkCount(id: Long): Long = synchronized(countQuery) {
 - [ ] 阻断（存在严重质量缺陷或高危安全漏洞）
 
 **主 Agent 须完成的最小修复集（方可重新提交审查）**：
+
 1. **G-01（HIGH）**：新增 embedding chunk 的级联删除验证测试；若 ObjectBox 5.4.2 触发 #1209，改用 `findIds()` + `Box.remove(ids)` 规避；ADR-008 5.4 增补 HNSW 删除风险说明。
 2. **G-02（MEDIUM）**：`remove`/`removeAll`/`chunkCount` 的 Query 用 `use{}` 关闭，或 `chunkCount` 改可复用 Query + `setParameter`。
 

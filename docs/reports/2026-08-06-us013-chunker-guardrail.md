@@ -63,6 +63,7 @@
 类 KDoc 明示「段落优先……**避免跨段落拼接语义无关内容**」（[Chunker.kt:12](../../app/src/main/java/io/prism/document/Chunker.kt#L12)），但 `applyOverlap` 在 `chunk()` 最后对结果列表整体应用（[Chunker.kt:54](../../app/src/main/java/io/prism/document/Chunker.kt#L54)），未区分块间边界是否跨越段落。当 `chunk[i]` 为段落 A 末块、`chunk[i+1]` 为段落 B 首块时，会把 A 末尾 `overlap` 字符拼到 B 开头，产生跨段落语义粘连，与文档自述意图直接矛盾。
 
 > 该行为究竟是缺陷还是有意设计需主 Agent/用户决策：
+>
 > - 方案 A（符合 KDoc）：在段落边界重置 overlap，仅在同段落相邻块间应用；需改造 `applyOverlap` 及 `chunk` 的块来源记录。
 > - 方案 B（有意为之）：overlap 跨段落用于检索上下文衔接，需**更新 KDoc 与 ADR-007 5.4**，消除文档与实现矛盾，并在测试中显式断言该语义。
 >

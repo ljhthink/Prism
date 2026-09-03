@@ -60,6 +60,7 @@
 **AC-4 原文**：「ChatMessage 新增 Role.TOOL + toolCallId + toolName + toolCalls 字段，Role.toRequestRole 扩展 TOOL→tool」
 
 **实现状态**：
+
 - ✅ ChatMessage 新增 `Role.TOOL`（enum 值）
 - ✅ ChatMessage 新增 `toolCallId: String? = null`
 - ✅ ChatMessage 新增 `toolName: String? = null`
@@ -82,6 +83,7 @@
 5. **规则符合性**：BR-naming-001（本次提议转 active）明确支持「新值分支必须显式处理（实现或 Fail Fast 抛异常）」。Karpathy Guidelines「显式暴露假设」+ CLAUDE.md 19.4「Fail Fast」均支持此实现。
 
 **附加条件**（必须在后续 Phase 完成）：
+
 - Phase C（US-024 AC-1）必须完成完整 TOOL→"tool" 映射（含 `MessageBody` 扩展 `toolCallId` 字段 + `ToolCallRef` 序列化）
 - 届时 `toRequestRole` 的 `Role.TOOL` 分支应改为 `Role.TOOL -> "tool"`，并在 `buildRequestBody` 中注入 `tool_call_id` 字段
 
@@ -143,6 +145,7 @@
 Phase A 为数据层 + 接口层，无跨模块集成测试需求。ObjectBox 持久化已由 SkillRepositoryTest 覆盖（使用真实 `MyObjectBox.builder().directory(tempDir).build()` 临时目录 BoxStore，非 Mock，验证真实持久化 + 类型转换器往返）。
 
 **接口契约验证**：
+
 - ChatStreamProvider → OpenAICompatibleProvider：override 签名对齐已通过编译验证
 - 3 fake provider（FakeChatStreamProvider / RecordingChatStreamProvider / MultiRoundRecordingProvider）：override 签名同步已通过 ConversationViewModelTest 全量通过验证
 
@@ -181,6 +184,7 @@ Phase A 无 UI 交互（Phase E US-027 才有 Skills UI），不适用。OpenAIC
 **性能回退分析**：
 
 Phase A 接口扩展（新增 `tools`/`toolChoice` 参数默认 null）**不改变请求体**：
+
 - `buildRequestBody(config, messages, systemPrompt, ragContext)` 签名未变，输出完全相同（`ChatCompletionRequest(model, messages, stream=true)`，无 tools 字段）
 - `parseChunkData(data)` 解析逻辑未变（只解析 `choices[0].delta.content`，不解析 tool_calls）
 - streamChat 中新增的 `if (tools != null) Log.w(...)` 仅在非 null 时执行（当前所有调用方传 null），不影响性能
@@ -235,6 +239,7 @@ Phase A 无权限控制逻辑（Phase D 工具执行回路才涉及 ToolConfirma
 | 全量 testDebugUnitTest | 556 | 531 | 0 | 25 | ✅ 通过 |
 
 **跳过项说明**（25 个，均为预存非回归）：
+
 - 7 个性能 benchmark（默认跳过，需 `-PignorePerformanceTests=false` 手动运行）——本次手动运行了 OpenAICompatibleProviderPerformanceBenchmark（2 测试通过）
 - 18 个需真实 MCP 服务器/嵌入式服务器的集成测试（环境限制）
 

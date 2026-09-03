@@ -115,6 +115,7 @@ flowchart TD
 ### 1.7 测试充分性
 
 已覆盖：
+
 - 并发竞态（G-01）：2 个并发测试，复现 use-after-close 场景并验证修复 ✓
 - close 后复活（G-09）：`embed_after_close_throws_instead_of_reviving` ✓
 - golden master 双门禁（G-07）：分量绝对误差 + 余弦 0.985 ✓
@@ -122,11 +123,13 @@ flowchart TD
 - 维度正确、向量一致、L2 归一化、语义相似、空文本、懒加载、闲置卸载、重载、close、batch、坏模型、长文本 ✓
 
 未直接测试但影响低：
+
 - vocab 空行 fail-fast（G-06）：require 逻辑简单，标准 BERT vocab 无空行。
 - unchecked cast（G-03）/ 长度不一致（G-04）：需异常模型输出，测试用真实模型无法构造。
 - SessionOptions close（G-15）：finally 模式标准，onnxruntime API 保证。
 
 flaky test 放宽断言评估：
+
 - ObjectBox 5.4.2 对维度不匹配是未定义行为（实测不稳定），强断言哨兵值 2.0 导致 flaky。
 - 放宽为"不抛未捕获异常/不崩溃"合理，维度校验责任在 US-017 调用方（注释说明）。
 - **放宽合理，不掩盖真实缺陷**（N-02 无效断言形式需改进，但不影响测试意图）。
@@ -140,6 +143,7 @@ flaky test 放宽断言评估：
 ### 2.1 输入与边界审计（Stage 1）
 
 #### 2.1.1 数值与类型边界
+
 - `maxLength`：`require(maxLength >= 2)`（[BertWordPieceTokenizer.kt:83](../../../app/src/main/java/io/prism/embedding/BertWordPieceTokenizer.kt)）显式下界校验，符合。
 - `maxInputCharsPerWord`：超长直接 `[UNK]`（[:184](../../../app/src/main/java/io/prism/embedding/BertWordPieceTokenizer.kt)），符合。
 - `embeddingDim`：`require(hiddenStates[0].size == embeddingDim)`（[OnnxEmbedder.kt:221-223](../../../app/src/main/java/io/prism/embedding/OnnxEmbedder.kt)），符合。
@@ -149,10 +153,12 @@ flaky test 放宽断言评估：
 - 算术溢出：mean pooling 用 Float 累加，384 维 x seq<=512，无溢出风险。
 
 #### 2.1.2 集合与缓冲边界
+
 - 三张量等长不变式：同一 `full.size` 构造（[BertWordPieceTokenizer.kt:97-99](../../../app/src/main/java/io/prism/embedding/BertWordPieceTokenizer.kt)），符合。
 - `names` 按位置取用：`INPUT_IDS_IDX=0`/`ATTENTION_MASK_IDX=1` 由 `validateInputNames`（require size>=2）保护；`TOKEN_TYPE_IDS_IDX=2` 由 `if (names.size > TOKEN_TYPE_IDS_IDX)` 保护（[OnnxEmbedder.kt:93-97](../../../app/src/main/java/io/prism/embedding/OnnxEmbedder.kt)），符合。
 
 #### 2.1.3 业务状态机约束
+
 - session 生命周期：`null -> loaded -> unloaded(null) -> loaded...`，`close()` 永久 `closed=true`。
 - G-01 修复后所有状态转换在 lock 下串行化，无并发窗口。
 - G-02 修复后异常路径状态一致（先置 null 再 close）。
@@ -162,6 +168,7 @@ flaky test 放宽断言评估：
 ### 2.2 执行安全审计（Stage 2）
 
 #### 2.2.1 注入防护
+
 - **SQL/NoSQL 注入**：本模块无数据库交互，无风险。
 - **OS 命令注入**：无 `Runtime.exec`/`ProcessBuilder`，无风险。
 - **代码/表达式注入**：无 `eval`/`ScriptEngine`/反射执行用户字符串，无风险。
@@ -169,17 +176,20 @@ flaky test 放宽断言评估：
 - **ONNX 反序列化**：`env.createSession(modelBytes, options)` 反序列化模型字节。模型来自 `assets/`（随 APK 分发，受 APK 签名保护），属受信来源。攻击者需篡改 APK 才能替换模型，属 APK 完整性威胁而非代码漏洞。**信任边界内，不报告**。
 
 #### 2.2.2 并发安全（本轮重点复核）
+
 - **死锁/活锁风险**：单 `ReentrantLock`，所有公开方法在同一锁下串行化。无嵌套锁获取（embed 持锁后不再获取其他锁）。`ensureLoadedLocked` 不自加锁（调用方持锁）。`session.run` 在锁内执行但不涉及其他锁。**无死锁/活锁风险**。
 - **@Volatile 可见性**：`session`/`lastUsedAt`/`closed`/`inputNames` 均标注 `@Volatile`（[OnnxEmbedder.kt:65-77](../../../app/src/main/java/io/prism/embedding/OnnxEmbedder.kt)）。所有读写都在 `lock.withLock` 内，lock 已提供 happens-before 保证，@Volatile 冗余但无害，提供额外防御。**可见性充足**。
 - **ReentrantLock 可重入性**：`embed` 持锁后调用 `ensureLoadedLocked`（私有方法，不再加锁），不存在重入问题。**符合**。
 
 #### 2.2.3 最小权限
+
 - 数据库/服务账号：本模块不涉及。
 - OS 权限：仅文件 I/O（读 assets），无多余权限。
 - 容器化：Android 应用，无容器 securityContext。
 - **符合**。
 
 #### 2.2.4 输出编码
+
 - 嵌入向量输出为 `FloatArray`，不涉及 HTML/JS/URL 上下文，无需转义。
 - 异常 message：见 §3 S-01（G-12 低风险）。
 

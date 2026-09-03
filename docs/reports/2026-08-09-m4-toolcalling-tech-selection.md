@@ -85,6 +85,7 @@ Prism 项目 M4 Skills 系统需要引入 LLM tool_calling 能力，使 Skill �
 | **结论** | **推荐** | 排除（C5 违反：服务端框架过重） | 已集成，不替代 |
 
 **langchain4j 排除理由**：
+
 - 面向 JVM 服务端，核心依赖 `dev.langchain4j:langchain4j-core` 引入大量传递依赖（OkHttp、Jackson/Jackson-databind 等），与项目现有 Ktor + kotlinx.serialization 技术栈冲突
 - `langchain4j-kotlin` 扩展依赖 Java 21+ virtual threads，Android 不支持
 - `AiServices` 抽象体系（@Tool 注解、ToolProvider、ToolExecutor）面向 Java 接口代理模式，与 Prism 的 `Flow<StreamEvent>` 响应式架构不匹配
@@ -106,11 +107,13 @@ Prism 项目 M4 Skills 系统需要引入 LLM tool_calling 能力，使 Skill �
 | **结论** | 排除 (C: 已归档) | 备选 | **推荐** | 排除 (C: alpha) | 排除 (C: 不可靠) |
 
 **charleskorn/kaml 排除理由**：
+
 - 仓库已标记为 "Public archive"，README 明确声明 "kaml is no longer maintained"
 - kotlinx.serialization 官方 Issue [#3122](https://github.com/Kotlin/kotlinx.serialization/issues/3122) 确认 "charleskorn/kaml is archived. We don't have a well-maintained yaml implementation for production for now."
 - 归档后 bug 无人修复，存在供应链安全风险
 
 **snakeyaml-engine-kmp 推荐理由**：
+
 - 唯一活跃维护的 KMP YAML 库（最后提交 2026-08-08，renovate[bot] 自动依赖更新）
 - kaml 底层就是使用 snakeyaml-engine-kmp，直接使用减少中间层
 - KMP 原生支持，未来若项目迁移到 KMP 无需更换
@@ -166,6 +169,7 @@ Chat Completions API 的 tool 定义采用嵌套格式：
 > 来源：[OpenAI Function Calling Guide](https://developers.openai.com/api/docs/guides/function-calling)
 
 关键点：
+
 - `tools` 字段是 `{"type": "function", "function": {...}}` 嵌套结构
 - `strict: true` 保证 arguments 严格遵循 JSON Schema（需 `additionalProperties: false` + 所有字段在 `required` 中）
 - `tool_choice` 可选值：`"auto"`（默认）/ `"required"` / `{"type": "function", "name": "xxx"}` / `"none"`
@@ -193,6 +197,7 @@ for chunk in stream:
 > 来源：[OpenAI Function Calling - Streaming](https://docs.apiyi.com/en/api-capabilities/openai/function-calling#function-calls-in-streaming)
 
 关键发现：
+
 1. **arguments 是 JSON string 增量片段**，需要跨 chunk 拼接，流结束后才能 `JSON.parse`
 2. **第一个 chunk 携带 `function.name`**，后续 chunk 只携带 `function.arguments` 片段
 3. **`index` 字段区分并行 tool_call**，同一 index 的 fragments 属于同一 tool_call
@@ -210,6 +215,7 @@ for chunk in stream:
 ```
 
 关键点：
+
 - `role` 必须为 `"tool"`，`tool_call_id` 必须与 LLM 返回的 `tool_call.id` 一一对应
 - `content` 是 JSON string（不是对象）
 - 并行 tool_call 的所有结果必须**一次性全部回灌**，每个结果对应一个 `tool_call_id`
@@ -267,6 +273,7 @@ data: {"type":"message_stop"}
 ```
 
 关键发现：
+
 1. Anthropic **没有 `[DONE]` 终止符**，以 `message_stop` 事件结束
 2. `input_json_delta` 的 `partial_json` 同样需要增量拼接，与 OpenAI 的 `function.arguments` 机制类似
 3. 工具名在 `content_block_start` 事件中一次性给出，不需要从 delta 中累积
@@ -277,6 +284,7 @@ data: {"type":"message_stop"}
 #### 4.3.1 核心矛盾
 
 OpenAI 和 Anthropic 的 tool_calling 协议在**传输模型**层面就不同：
+
 - OpenAI：`choices[0].delta.tool_calls[]`（flat array with index）
 - Anthropic：`content_block_start/delta/stop`（typed content blocks with index）
 
@@ -315,6 +323,7 @@ sealed class StreamEvent {
 ```
 
 设计理由：
+
 - `ToolCallStart` / `ToolCallDelta` / `ToolCallComplete` 命名与语义不绑定任何 Provider 协议
 - `arguments` 在 `ToolCallComplete` 中已解析为 `Map`，调用方无需处理 JSON string
 - `ToolCallDelta` 是可选的（调用方可忽略，只关注 `ToolCallComplete`）

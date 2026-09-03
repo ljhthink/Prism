@@ -257,6 +257,7 @@ description: 一个输出问候语的简单技能。
 ```bash
 echo "来自你的自定义技能的问候！"
 ```
+
 ```
 
 #### 2.1.2 Frontmatter 字段完整参考
@@ -697,6 +698,7 @@ NullClaw 是**vtable 接口抽象 + 单体静态二进制**架构。所有子系
 **职责与边界**：Skills 是教智能体如何及何时使用工具的 Markdown 指令文件。每个 Skill 是一个目录，含 SKILL.md（YAML frontmatter + Markdown 正文）。Skills 不是工具本身，而是工具的使用说明书。
 
 **关键接口/抽象**：
+
 - `SKILL.md` frontmatter：name（必填）、description（必填）、metadata.openclaw（门控）、os（平台筛选）等
 - 加载优先级 6 层（工作区 > 项目 > 个人 > 托管 > 内置 > 额外）
 - 智能体允许列表（可见性控制，非授权边界）
@@ -707,6 +709,7 @@ NullClaw 是**vtable 接口抽象 + 单体静态二进制**架构。所有子系
 **设计模式**：渐进式披露（节省上下文预算）、配置驱动门控、目录扫描发现。
 
 **高认知负荷区域**：
+
 - 智能体允许列表规则（非空列表是最终集合不合并默认值）需仔细理解
 - 节点托管 Skills 的名称冲突处理（本地保留名称，节点 Skill 获带前缀名称）
 - Skill 位置（优先级）与 Skill 可见性（允许列表）是独立控制项
@@ -783,10 +786,12 @@ NullClaw 是**vtable 接口抽象 + 单体静态二进制**架构。所有子系
 | H5: NullClaw vtable 模式可 Kotlin 复用 | 接口抽象验证 | **可行** | Kotlin interface + DI 等价 |
 
 **未验证假设**：
+
 - NullClaw 实际交叉编译 PoC（需 Zig 0.15.2 + NDK 环境 + NullClaw 源码，本考古环境未执行编译验证）
 - ObjectBox + FTS5 混合检索性能（需 Android 实测）
 
 **下一步验证建议**：
+
 1. 若坚持评估 NullClaw，需搭建 Zig 0.15.2 + Android NDK 环境，尝试 `zig build -Dtarget=aarch64-linux-android -Doptimize=ReleaseSmall`，验证 SQLite C 依赖能否通过 NDK clang fallback 链接
 2. ObjectBox 向量 + SQLite FTS5 混合检索 PoC，验证检索延迟与召回率
 3. SKILL.md Kotlin 解析器 PoC，验证 frontmatter 解析 + 目录扫描 + 门控逻辑

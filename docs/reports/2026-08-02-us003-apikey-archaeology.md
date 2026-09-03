@@ -187,6 +187,7 @@ cryptoService = CryptoService.Builder()
 ```
 
 > **时序约束**：
+>
 > 1. Tink KMS 注册必须在任何 `Aead` 原语创建之前完成。
 > 2. `CryptoService` 单例应在 `boxStore` 之后构建——ObjectBox 不涉及 Keystore，无竞争；先后顺序仅为代码可读性。
 > 3. 主线程同步初始化可接受（Keystore master key 首次生成 < 50ms，DataStore 文件创建 < 10ms），无需异步。
@@ -205,6 +206,7 @@ cryptoService = CryptoService.Builder()
 | `datastore-preferences` | `androidx.datastore` | `includeGroupByRegex("androidx.*")` 匹配阿里云 google 镜像 + 官方 google；`excludeGroupByRegex("androidx.*")` 排除阿里云 public 镜像 | ① 阿里云 google 镜像 → ② 官方 google → ③ mavenCentral |
 
 > **关键观察**：
+>
 > - `datastore-preferences` 的 `androidx.datastore` groupId 与现有所有 AndroidX 依赖走相同路径，已被验证可解析（M0 脚手架已成功使用 androidx.core / androidx.compose / androidx.lifecycle）。
 > - `tink-android` 的 `com.google.crypto.tink` groupId 会被 `com.google.*` 规则匹配到 google 镜像，但 google() 仓库本身**不托管 Tink**（Tink 在 Maven Central 发布）。Gradle 会在 google 仓库查询失败后按声明顺序继续尝试 mavenCentral，**最终能解析成功**，但每次首次拉取会有 4 次仓库查询失败的重试开销（约 +2-5s 首次构建延迟）。详见 RISK-001。
 

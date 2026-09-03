@@ -321,6 +321,7 @@ flowchart TD
 ```
 
 关键测试用例（G-01 实证）：
+
 - `remove_cascade_deletes_chunks_with_hnsw_embedding_without_error`：3 个 384 维 one-hot 向量 chunk 级联删除，未抛 `IllegalStateException` ✅
 - `remove_cascade_deletes_mixed_embedding_and_non_embedding_chunks`：混合 embedding/null chunk 级联删除 ✅
 
@@ -349,6 +350,7 @@ flowchart TD
 3. **提交信息**：在 body 说明 G-01~G-05 修复内容 + HNSW 删除策略变更（`Query.remove` → `findIds+Box.remove`）+ ADR-008 5.4 更新。
 
 **下一步**：主 Agent 可启动 `ac-verifier` 子 Agent 执行验收测试与分层验证（CLAUDE.md 第十一节）。建议 ac-verifier 重点关注：
+
 - 大规模 chunk 删除路径（验证 #1209 在生产规模的不确定性）
 - 性能基线对比（`findIds+Box.remove` 相对 `Query.remove` 的性能差异）
 - 回归测试（全量 410 测试套件）

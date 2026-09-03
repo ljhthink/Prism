@@ -66,6 +66,7 @@ INT8 支持、与 ADR-001 的 ONNX 技术栈一致。
 ### 5.3 文档解析：PDFBox（PDF）+ Apache POI poi-ooxml 5.5.1（DOCX/XLSX）+ 自研（MD/TXT）
 
 **决策**：
+
 - **PDF**：`org.apache.pdfbox:pdfbox`（Apache 2.0，`PDFTextStripper` 文本抽取）。
   **修正**：原决策「Android PdfRenderer」无法抽取文本（`android.graphics.pdf.PdfRenderer`
   仅渲染位图，无文本 API），经用户确认改用 PDFBox 满足 RAG 文本摄入，规避 pymupdf AGPL。

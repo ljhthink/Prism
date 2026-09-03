@@ -67,6 +67,7 @@
 | `consecutive sends assign increasing ids` | 失败 | 同上 |
 
 **3 个失败的根因归类（与本次变更无关）：**
+
 - 异常：`IllegalStateException: Module with the Main dispatcher had failed to initialize`，`Caused by: Method getMainLooper in android.os.Looper not mocked`。
 - 触发点：[ConversationViewModel.sendMessage L54](app/src/main/java/io/prism/ui/chat/ConversationViewModel.kt#L54) 的 `viewModelScope.launch { ... }`。`viewModelScope` 依赖 `Dispatchers.Main`，而该测试为纯 JUnit（无 Robolectric、未调用 `Dispatchers.setMain`），故 Main dispatcher 无法初始化。
 - 与本次变更关系：本次变更为纯 Compose UI 配置弹层，**未修改 ConversationViewModel 任何逻辑**；失败源于测试环境缺 Main dispatcher 设置（`kotlinx-coroutines-test` 已引入但未 setMain），属**既有环境性失败**。判定为**与本次变更无关**。
@@ -82,6 +83,7 @@
 ### 2.4 E2E 测试
 
 **compose-ui-test 环境不支持**，降级为静态 + 编译验证。原因：
+
 - `app/build.gradle.kts` 未声明 `androidx.compose.ui:ui-test-junit4` / `ui-test-manifest` 依赖；
 - 无 `androidTest` 源集（`Glob app/src/androidTest/**` 无文件）；
 - 无设备/模拟器可运行 instrumented 测试。

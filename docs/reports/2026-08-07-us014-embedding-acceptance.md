@@ -242,6 +242,7 @@ guardrail R2 §7 建议两条规则 proposed → active，本验收确认：
 ### 9.3 README.md 文档索引
 
 若未包含，建议追加引用：
+
 - 验收报告：`docs/reports/2026-08-07-us014-embedding-acceptance.md`
 - 性能基线：`docs/reports/perf/2026-08-07-us014-embedding-baseline.md`
 - guardrail R2 报告：`docs/reports/2026-08-07-us014-embedding-guardrail-round2.md`

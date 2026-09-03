@@ -15,6 +15,7 @@
 ## 背景（Context）
 
 PRD US-005 要求：App 记住用户偏好和跨会话历史，越用越懂我，且不让旧上下文污染新对话。验收标准包括：
+
 - L1 会话内：滑动窗口 + 每 N 轮摘要压缩（可配置 N，默认 10）
 - L2 跨会话：对话历史向量化存入 ObjectBox，新会话按当前话题 top-k 检索（默认 k=3）
 - L3 用户画像：显式偏好（用户设定）+ 隐式偏好（从对话抽取），结构化存储
@@ -22,6 +23,7 @@ PRD US-005 要求：App 记住用户偏好和跨会话历史，越用越懂我�
 - 用户可查看/编辑/删除记忆，可一键清除
 
 业界调研（mem0/CALMem/Agent-Memory）证实三层记忆架构是业界共识：
+
 - mem0：Conversation → Session → User → Org 四层
 - CALMem（arXiv:2605.20724）：Episodic Memory（滑动窗口向量）+ Semantic Memory（结构化事实）
 - Agent-Memory：STM（FIFO）→ MTM（主题分段）→ LTM（画像+知识）

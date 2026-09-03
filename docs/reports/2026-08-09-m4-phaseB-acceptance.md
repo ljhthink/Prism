@@ -292,6 +292,7 @@ Phase B 无既有性能基线。依 CLAUDE.md 第十一节 11.4，对涉及函�
 **独立验证方法**：运行 `./gradlew :app:testDebugUnitTest`，读取 `app/build/test-results/testDebugUnitTest/*.xml` 逐文件汇总 tests/failures/errors/skipped。
 
 **跳过项说明**（25 个，与 Phase A 完全一致，无新增跳过）：
+
 - 7 个性能基准（默认跳过，`Assume.assumeTrue` + `prism.runPerformanceTests` 系统属性）
 - 18 个需真实 MCP 服务器的集成测试（环境限制）
 
@@ -340,6 +341,7 @@ Phase B 无既有性能基线。依 CLAUDE.md 第十一节 11.4，对涉及函�
 **BR-security-004 状态：proposed → active**
 
 理由：
+
 1. 规则文本已修订，纠正全部 3 处事实错误（API 形式 / 默认值 / 方法名），并补充 toJsonElement 深度限制要求
 2. 代码实现完全符合规则正例（显式 LoadSettings 命名参数 + toJsonElement 深度限制）
 3. 4 个测试用例验证规则要求（2 个防护 + 1 个正常路径 + 1 个别名限制）
@@ -388,6 +390,7 @@ Phase B 无既有性能基线。依 CLAUDE.md 第十一节 11.4，对涉及函�
 ### 10.1 结论依据
 
 **US-021（SKILL.md 解析器）**：5/5 AC 通过。
+
 - AC-1 版本偏差（3.1→4.0.1）可接受（向上修订，ADR 已修订）
 - AC-2 API 名称偏差（Yaml→Load）可接受（意图达成，ADR 已修订）
 - AC-3 校验实现完整（slug 格式 + description 长度 + maxRounds 范围），异常类型区分（IllegalArgumentException vs SkillParseException）为设计意图
@@ -395,6 +398,7 @@ Phase B 无既有性能基线。依 CLAUDE.md 第十一节 11.4，对涉及函�
 - AC-5 Typecheck 通过
 
 **US-022（SkillRegistry）**：5/6 AC 通过 + 1 受限通过。
+
 - AC-1~AC-4 + AC-6 通过（SkillRegistry 实现完整、5 内置 Skill 就位、PrismApplication DI 就位、IO 协程 + 缺失标记逻辑实现、Typecheck 通过）
 - AC-5 受限通过：SkillRegistryTest.kt 不存在，受限根因为 Android Context 构造期依赖 + 无 Robolectric/Mockito 测试基础设施。代码逻辑经 guardrail 两轮逐行核实正确，589 全量回归 0 失败。附带 3 项 Phase C 强制条件。
 

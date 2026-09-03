@@ -113,6 +113,7 @@
 **备选：Flutter**（若团队 Dart 经验远强于 Kotlin，且能接受上述性能开销）
 
 **否决方案与理由**：
+
 - **React Native**：Bridge 开销比 Flutter 的 Platform Channel 更大，仅 Android 场景无任何优势。
 - **KMP**：逻辑层跨平台框架，但 Prism 仅 Android 不需要跨平台，增加 KMP/Native GC 冷启动 80-120ms 开销（[netguru 对比](https://www.netguru.com/blog/kotlin-multiplatform-vs-flutter)）无意义。
 
@@ -164,6 +165,7 @@
 **备选：mcp_client Dart 包**（若选 Flutter 路线）
 
 **否决方案与理由**：
+
 - **完全自实现**：MCP 协议仍在快速迭代（2024-11-05 / 2025-03-26 / 2025-06-18 / 2025-11-25 多个版本），自实现需持续跟进协议变更，维护成本高且合规风险大。
 
 #### 3.2.4 风险与缓解
@@ -220,6 +222,7 @@
 **备选：Zvec Dart SDK**（若选 Flutter 路线，0.4.0 支持混合检索 + 融合排序）
 
 **否决方案与理由**：
+
 - **HNSWLib**：需自行封装 JNI binding，维护成本高；无持久化、无混合检索。
 - **sqlite-vec**：Android 集成需编译 SQLite 扩展，复杂度高；无 HNSW 算法，大数据量性能差。
 - **FAISS-mobile**：FAISS 为服务端设计，移动端内存占用大；需 JNI binding。
@@ -276,6 +279,7 @@
 **备选：bge-small-zh**（若中文检索质量优先，需额外转换 ONNX 并在 Android 上实测性能）
 
 **否决方案与理由**：
+
 - **bge-m3**：568M 参数，~2GB 模型大小，移动端内存不可行（违反 C7 约束）。
 - **nomic-embed-text**：137M 参数偏大，ONNX 量化版信息不足，无法确认移动端可行性。
 
@@ -372,11 +376,13 @@
 4. **降级策略完备**——Deep Link 失败时降级到 Share Sheet 或引导用户手动操作。
 
 **AI Agent 自动化调用规则**：
+
 - Deep Link 自动触发需**用户确认**（防误操作打开支付类 App）。
 - ContentProvider 读取需**运行时权限授权**。
 - Share Sheet / 系统 Picker 需**用户手动选择**（无法全自动）。
 
 **否决方案与理由**：
+
 - **无障碍服务**：Google Play 审核极严（C2 约束已确认不走 Google Play，但无障碍服务在国产 ROM 上也受限制），且用户体验差（全 UI 自动化不可控）。
 
 #### 3.5.6 风险与缓解
@@ -406,11 +412,13 @@
 **重大发现**：`EncryptedSharedPreferences` 已于 **2024 年初被官方废弃**（[IIETA 论文](https://iieta.org/download/file/fid/192318)、[doonprogramming 分析](https://doonprogramming.com/encryptedsharedpreferences-is-deprecated-what-to-use-instead-in-android/)）。
 
 废弃原因：
+
 1. 性能限制（频繁读写慢）
 2. 不适应现代安全需求
 3. 算法选择和扩展性有局限
 
 Google 推荐替代方案：
+
 - `EncryptedFile`（[Jetpack Security Crypto v1.1.0+](https://doonprogramming.com/encryptedsharedpreferences-is-deprecated-what-to-use-instead-in-android/)）
 - DataStore 1.3.0-alpha07 引入 `datastore-tink` 制品，支持 [Google Tink](https://www.codegenes.net/blog/android-benefits-of-datastore-over-sharedpreferences/) AEAD 加密
 
@@ -463,6 +471,7 @@ DataStore（Preferences）持久化加密后的数据
 **备选：Keystore + Cipher + DataStore（手动实现）**（若 datastore-tink 仍不稳定，参考 [KINTO 实践](https://blog.kinto-technologies.com/posts/2026-04-17-keystore-cipher-datastore-encryption/) 手动实现）
 
 **否决方案与理由**：
+
 - **EncryptedSharedPreferences**：2024 年初已废弃，性能差、扩展性差（[IIETA 论文](https://iieta.org/download/file/fid/192318)）。
 - **明文 SharedPreferences**：无加密，API Key 可被 root 设备直接读取，不满足 C8 约束。
 
@@ -638,6 +647,7 @@ DataStore（Preferences）持久化加密后的数据
 ### 7.3 关键引用链接索引
 
 #### MCP 相关
+
 - [MCP 官方 SDK 列表](https://modelcontextprotocol.io/docs/sdk.md)
 - [MCP Kotlin SDK GitHub](https://github.com/modelcontextprotocol/kotlin-sdk)
 - [MCP Kotlin SDK 文档](https://kotlin.sdk.modelcontextprotocol.io/)
@@ -647,6 +657,7 @@ DataStore（Preferences）持久化加密后的数据
 - [mcp_client Dart 包](https://pub.dev/packages/mcp_client)
 
 #### 向量库相关
+
 - [ObjectBox 官方](https://objectbox.io/vector-database-for-ondevice-ai/)
 - [ObjectBox Java/Kotlin GitHub](https://www.webkkk.net/objectbox/objectbox-java)
 - [ObjectBox 性能基准](https://greenrobot.org/news/objectbox-android-database-java-kotlin-performance/)
@@ -654,17 +665,20 @@ DataStore（Preferences）持久化加密后的数据
 - [On-device vector databases 2026](https://objectbox.io/262454-2/)
 
 #### 嵌入模型相关
+
 - [all-MiniLM-L6-v2 选型指南](https://blog.csdn.net/gitblog_02869/article/details/149625971)
 - [ONNX Runtime 教程](https://www.datacamp.com/tutorial/onnx)
 - [Arm + Microsoft KleidiAI](http://microsoft.github.io/onnxruntime/blogs/arm-microsoft-kleidiai)
 - [ONNX Android Benchmark](https://learn.arm.com/learning-paths/smartphones-and-mobile/build-android-chat-app-using-onnxruntime/4-run-benchmark-on-android/)
 
 #### 框架对比相关
+
 - [Flutter vs Native Android 2026](https://androiddocs.com/the-complete-guide-to-should-you-choose-flutter-or-native-android-in-2026/)
 - [Flutter vs Compose 8 张表对比](https://blog.csdn.net/vitaviva/article/details/148652211)
 - [KMP vs Flutter](https://www.netguru.com/blog/kotlin-multiplatform-vs-flutter)
 
 #### 跨 App 调用相关
+
 - [Android URL Scheme 指南](https://blog.51cto.com/u_16213589/14219992)
 - [H5 跳转 App 3 种方法](https://blog.51cto.com/u_9849794/14405617)
 - [支付宝 Deep Link 问题分析](https://ask.csdn.net/questions/8974481)
@@ -672,6 +686,7 @@ DataStore（Preferences）持久化加密后的数据
 - [抖音 Deep Link 跳转](https://ask.csdn.net/questions/8674153)
 
 #### Key 存储相关
+
 - [EncryptedSharedPreferences 废弃分析](https://doonprogramming.com/encryptedsharedpreferences-is-deprecated-what-to-use-instead-in-android/)
 - [EncryptedDataStore 论文](https://iieta.org/download/file/fid/192318)
 - [DataStore 加密支持](https://www.codegenes.net/blog/android-benefits-of-datastore-over-sharedpreferences/)

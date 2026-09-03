@@ -46,6 +46,7 @@
 **测试框架**：JUnit4 + kotlinx-coroutines-test（runBlocking）+ 纯 JVM ObjectBox（MyObjectBox.builder().directory(tempDir)）。
 
 **测试策略**（ADR-009 + BR-testing-001）：
+
 - 真实 `DocumentParserRegistry` + 真实 `Chunker` + 真实 `KnowledgeBaseRepository`（+ 真实 ObjectBox）
 - `FakeEmbedder` 替身注入可控嵌入成功/失败，返回 384 维 one-hot 向量（L2 范数=1，复现归一化语义，符合 BR-testing-001）
 
@@ -74,6 +75,7 @@
 | 性能基线（ac-verifier 补充） | perf_baseline_ingestion_pipeline_orchestration_and_objectbox_write | 1 |
 
 **覆盖率说明**：本项目未配置 JaCoCo/Kover 等覆盖率工具（与 US-002~015 一致）。基于测试方法对源码分支的映射分析：
+
 - [IngestionPipeline.kt](../../app/src/main/java/io/prism/ingestion/IngestionPipeline.kt) 主要分支（happy path / 空文档 / 嵌入降级 / 解析失败 / IOException / 协程取消 / 负 kbId / 并发）全部覆盖。
 - `defaultTitle` 辅助函数 3 测试覆盖（含路径分隔符边界）。
 - `IngestionResult.init` 一致性校验 1 测试覆盖。

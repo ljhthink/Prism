@@ -17,6 +17,7 @@
 **测量内容**：`TierManager.initialize()` 在不同覆盖场景下的延迟（RAM 映射 + 覆盖读取 + resolveTier 逻辑开销）。
 
 **关键局限**：
+
 - 使用 `FakePreferenceDataStore`（纯内存），**不反映真实 Android DataStore I/O 延迟**（ADR-017 4.4 预期真实 DataStore 首次读取 <50ms）。本基线仅测量 initialize() 纯逻辑开销。
 - 使用 fake `TierDetector`（直接返回内存值），不反映 `ActivityManager.MemoryInfo` 调用开销（API 16+，<1ms）。
 - 纯 JVM 测试（非 Android 设备），**生产基线需在 Android 设备补测**。

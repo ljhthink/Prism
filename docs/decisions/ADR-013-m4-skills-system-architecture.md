@@ -18,6 +18,7 @@
 PRD US-004 要求：Skill 格式遵循 SKILL.md 规范（frontmatter + 正文 + 资源目录）、支持本地与远程 Skill、manifest 注册与启动扫描加载、AI 根据 Skill 描述自动选择调用（用户可手动指定）、Skill 执行结果可观测、Skill 失败不影响主对话。
 
 用户决策（2026-08-09）：
+
 1. **策略 C：引入 tool_calling** —— M4 同步扩展 ChatStreamProvider 接口，Skill 可真正调用 MCP 工具执行动作（非纯 prompt 注入）
 2. **标准校验** —— 远程 Skill 下载安全策略：URL 协议白名单（https）+ 内容大小限制（≤10MB）+ YAML 沙箱解析 + 必填字段校验 + slug 格式校验
 

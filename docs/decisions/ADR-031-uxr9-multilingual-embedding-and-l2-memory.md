@@ -30,7 +30,7 @@ L2 跨会话记忆同样存在结构缺陷：`saveSessionMemories` 无条件全�
 ### 子决策 B：L2 跨会话记忆选择性记忆（Bug 4）
 
 - `isImportantTurnPair` 重要性过滤（纯函数可测）：寒暄/确认/继续整句归一化精确匹配跳过（与 RAG 预判 BR-interface-017 同源）；偏好/身份/任务信号词或实质问题（≥8 字或含疑问词）保留。
-- `saveSessionMemories` 注入 `ConversationSummarizer`（复用 L1）做 LLM 摘要（`[摘要] ` 前缀单条记录入库），失败降级为规则抽取（逐对存储重要轮次）。摘要入库再失败 → 落入逐对存储（guardrail M-2 CWE-754 修复，不丢记忆）。
+- `saveSessionMemories` 注入 `ConversationSummarizer`（复用 L1）做 LLM 摘要（`[摘要]` 前缀单条记录入库），失败降级为规则抽取（逐对存储重要轮次）。摘要入库再失败 → 落入逐对存储（guardrail M-2 CWE-754 修复，不丢记忆）。
 - 检索侧 `retrievalThreshold=0.4`（可构造注入，测试可禁用）；会话隔离天然成立（新会话 sessionId 全新）。
 - `filterKeyMessages` 排除 `isSystemNotice`（guardrail M-3 CWE-20，系统提示不流入记忆库）。
 
@@ -43,11 +43,13 @@ L2 跨会话记忆同样存在结构缺陷：`saveSessionMemories` 无条件全�
 ## 后果（Consequences）
 
 **正面**：
+
 - RAG 污染根治：多语言模型相关/无关中文片段干净分隔（实测），阈值 0.5 稳定。
 - L2 记忆质量提升：只存有价值内容（偏好/事实/结论），寒暄/系统提示不入库。
 - 文档上传/工具反馈体验补全。
 
 **负面/需注意**：
+
 - APK 增大 ~90-120MB（多语言模型 113MB + tokenizer 9MB vs 旧 22MB）。
 - 旧知识库索引需重建（M-1，已披露）。
 - 首次加载 113MB 模型内存/耗时增加（OnnxEmbedder 按需加载 + 闲置卸载缓解）。
