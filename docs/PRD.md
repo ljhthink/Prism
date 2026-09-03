@@ -43,7 +43,7 @@ Prism 定位为**手机端个人 AI Agent 平台**，通过 MCP + Skills + 端�
 
 ## 3. 用户故事与验收标准
 
-> **编号体系说明**：本文档（PRD.md）的 US 编号为**产品功能模块**层级，与 [`prd.json`](prd.json)（Ralph 格式）中的**迭代开发任务**编号相互独立、不一一对应。例如 PRD 的 US-001「BYOK 多端点聊天」在 prd.json 中拆解为 US-004（Provider 数据模型）/ US-006（流式请求）/ US-007（Provider 切换）等多个开发故事。开发进度以 prd.json 为准，本文档提供产品级验收全貌。截至 2026-08-06，prd.json 的 US-001~US-007 已完成并通过 guardrail/ac-verifier 闭环。
+> **编号体系说明**：本文档（PRD.md）的 US 编号为**产品功能模块**层级，与 [`prd.json`](../prd.json)（Ralph 格式）中的**迭代开发任务**编号相互独立、不一一对应。例如 PRD 的 US-001「BYOK 多端点聊天」在 prd.json 中拆解为 US-004（Provider 数据模型）/ US-006（流式请求）/ US-007（Provider 切换）等多个开发故事。开发进度以 prd.json 为准，本文档提供产品级验收全貌。截至 2026-08-06，prd.json 的 US-001~US-007 已完成并通过 guardrail/ac-verifier 闭环。
 
 ### US-001: BYOK 多端点聊天
 
