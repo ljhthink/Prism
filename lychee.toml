@@ -12,12 +12,22 @@ exclude = [
 ]
 
 # 排除路径（文件系统）
+# - docs/decisions / docs/reports / docs/templates / docs/design / app：
+#   历史 ADR/报告含大量指向「已重构源码路径」的锚点链接（目录迁移后腐烂），
+#   不作为门禁；文档索引一致性由 scripts/consistency-check.js 覆盖（offline 模式下
+#   仍检查 README/AGENTS/PRD 层的内部链接）
 exclude_path = [
   "node_modules",
   ".git",
   "tmp",
   "build",
   ".gradle",
+  "docs/decisions",
+  "docs/reports",
+  "docs/templates",
+  "docs/design",
+  "app",
+  "gradle",
 ]
 
 # 超时（秒）

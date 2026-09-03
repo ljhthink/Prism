@@ -63,6 +63,9 @@
 - 负面/已知限制：① 人工 review 不强制，代码质量依赖 guardrail-enforcer/ac-verifier 代理闭环；
   ② 单测/安全扫描 CI 缺位，后续需补 `.github/workflows/android-ci.yml` 并加入必需检查；
   ③ enforce_admins 不启用（保留 solo 紧急处置通道），管理员仍可直推 main——以纪律约束；
+  ④ lychee 检查范围收窄至根目录核心文档（README/AGENTS/PRD 层）：历史 ADR/报告含大量指向
+  已重构源码路径的锚点链接（目录迁移腐烂），不作为门禁；文档索引一致性由
+  `scripts/consistency-check.js` 覆盖。
 - 中性：历史 feat/m0-scaffold 分支保留，旧 PR/引用不断链。
 
 ## 验证（Verification）
