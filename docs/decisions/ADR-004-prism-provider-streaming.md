@@ -5,7 +5,7 @@
 | 状态 | Accepted |
 | 日期 | 2026-08-05（决策）/ 2026-08-06（验收闭环） |
 | 决策者 | 主 Agent（基于 tech-selection-researcher 选型报告） |
-| 关联文档 | [ADR-001](ADR-001-prism-tech-stack.md) / [ADR-003](ADR-003-prism-provider-config-settings.md) / [prd.json](../prd.json) |
+| 关联文档 | [ADR-001](ADR-001-prism-tech-stack.md) / [ADR-003](ADR-003-prism-provider-config-settings.md) / [prd.json](../../prd.json) |
 | 上游调研 | [US-006 流式请求技术选型报告](../reports/2026-08-05-us006-provider-streaming-tech-selection.md) |
 | 验收报告 | [US-006 验收报告](../reports/2026-08-06-us006-acceptance.md)（TKN-NETWORK-US006-AC-001，通过） |
 | 风险等级 | P3 重大（引入新网络框架 Ktor + 接口扩展 ApiKeyRepository + INTERNET 权限） |

@@ -5,7 +5,7 @@
 | 版本 | v0.1 |
 | 日期 | 2026-08-02 |
 | 作者 | 主 Agent + 用户 |
-| 关联文档 | [ADR-001](decisions/ADR-001-prism-tech-stack.md) / [可行性调研汇报](reports/2026-08-02-prism-feasibility-research.md) / [技术选型对比](reports/2026-08-02-prism-tech-selection.md) / [Continuous-learning 考古](reports/2026-08-02-continuous-learning-archaeology.md) |
+| 关联文档 | [ADR-001](../decisions/ADR-001-prism-tech-stack.md) / [可行性调研汇报](reports/2026-08-02-prism-feasibility-research.md) / [技术选型对比](reports/2026-08-02-prism-tech-selection.md) / [Continuous-learning 考古](reports/2026-08-02-continuous-learning-archaeology.md) |
 | 风险等级 | P3 重大 |
 
 ## 1. 背景

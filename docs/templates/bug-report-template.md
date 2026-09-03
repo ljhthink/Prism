@@ -8,7 +8,7 @@ related_adr: ADR-001
 # Bug 报告模板
 
 > 用于项目后期用户手动测试发现 Bug 后的结构化报告。复制本模板填写后提交。
-> 关联流程见 [solution-report](../reports/2026-08-02-bugfix-ops-workflow-solution.md) 第 5.1 节。
+> 关联流程见 [CLAUDE.md 第二十一~二十三节](../../CLAUDE.md) 第 5.1 节。
 
 ## 1. 元信息
 

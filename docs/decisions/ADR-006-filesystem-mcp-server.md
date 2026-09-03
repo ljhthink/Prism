@@ -5,7 +5,7 @@
 | 状态 | Accepted |
 | 日期 | 2026-08-06 |
 | 决策者 | 主 Agent（基于 SDK 字节码复核 + SAF 调研 + 用户确认进程内桥接方案） |
-| 关联文档 | [ADR-001](ADR-001-prism-tech-stack.md) / [ADR-005](ADR-005-mcp-client-integration.md) / [prd.json](../prd.json) |
+| 关联文档 | [ADR-001](ADR-001-prism-tech-stack.md) / [ADR-005](ADR-005-mcp-client-integration.md) / [prd.json](../../prd.json) |
 | 上游调研 | [US-009 Filesystem MCP Server 源码考古](../reports/2026-08-06-us009-filesystem-mcp-archaeology.md) |
 | 风险等级 | P3 重大（引入 mcp-kotlin-sdk-server 生产依赖 + 新增进程内 Transport / SAF 访问层 / 用户确认机制） |
 

@@ -8,7 +8,7 @@
 | 状态 | Accepted |
 | 日期 | 2026-08-06（Proposed → Accepted 2026-08-09，M3 里程碑审计 TKN-M3-MILESTONE-AUDIT-001 同步） |
 | 决策者 | 主 Agent（基于 tech-selection-researcher 调研 + 用户确认） |
-| 关联文档 | [ADR-001](ADR-001-prism-tech-stack.md) / [PRD.md](../PRD.md) US-003 / [prd.json](../prd.json) |
+| 关联文档 | [ADR-001](ADR-001-prism-tech-stack.md) / [PRD.md](../PRD.md) US-003 / [prd.json](../../prd.json) |
 | 上游调研 | [M3 RAG 技术选型对比分析报告](../reports/2026-08-06-m3-rag-tech-selection.md) |
 | 风险等级 | P3 重大（引入 onnxruntime-android / poi-ooxml 生产依赖 + 端侧向量索引 + 嵌入推理） |
 

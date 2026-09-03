@@ -5,7 +5,7 @@
 | 状态 | Accepted |
 | 日期 | 2026-08-06 |
 | 决策者 | 主 Agent（基于 code-archaeologist 考古 + 用户确认 Kotlin 升级至 2.3.x） |
-| 关联文档 | [ADR-001](ADR-001-prism-tech-stack.md) / [ADR-004](ADR-004-prism-provider-streaming.md) / [prd.json](../prd.json) |
+| 关联文档 | [ADR-001](ADR-001-prism-tech-stack.md) / [ADR-004](ADR-004-prism-provider-streaming.md) / [prd.json](../../prd.json) |
 | 上游调研 | [US-008 MCP Client 集成源码考古](../reports/2026-08-06-us008-mcp-client-archaeology.md) |
 | 风险等级 | P3 重大（引入新框架 MCP Kotlin SDK + Kotlin 升级 + 新增数据层/连接层/UI 层模块） |
 
