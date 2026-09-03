@@ -9,7 +9,7 @@
 | 版本 | v0.1 |
 | 日期 | 2026-08-20 |
 | 作者 | 主 Agent（方案待用户确认后执行） |
-| 关联文档 | [调研报告](reports/2026-08-20-mcp-search-api-alternatives-research.md)、ADR-029（O2/O3/O5 MCP 模板）、[ADR-001](../decisions/ADR-001-prism-tech-stack.md) |
+| 关联文档 | 调研报告 docs/reports/2026-08-20-mcp-search-api-alternatives-research.md（一次性工件，不入库）、ADR-029（O2/O3/O5 MCP 模板）、[ADR-001](decisions/ADR-001-prism-tech-stack.md) |
 | 风险等级 | P2（跨模块：新增本地工具 + MCP 模板 + 网络能力） |
 
 ## 1. 背景
