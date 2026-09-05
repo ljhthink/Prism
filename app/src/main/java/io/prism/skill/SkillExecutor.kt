@@ -177,7 +177,9 @@ open class SkillExecutor(
             ?: return@withContext formatNoServer(toolCall.toolName)
 
         // 4. 调用工具（超时防护 + 命名空间剥离）
-        val physicalName = stripNamespace(toolCall.toolName)
+        // v1 批次19：剥离与路由同源——按选中 Server 的前缀精确剥离（含下划线/空格/中文名
+        // 的 Server 名在旧 substringAfter("__") 反解下会剥出错误工具名）
+        val physicalName = stripNamespace(toolCall.toolName, mcpServer.name)
         try {
             withTimeout(maxTimeoutMs) {
                 mcpToolProvider.callTool(mcpServer, physicalName, toolCall.arguments)
@@ -262,7 +264,11 @@ open class SkillExecutor(
         var errorMessage: String? = null
 
         try {
-            var currentMessages = messages
+            // v1 批次17（真机 RCA 2026-09-03）：入口净化 tool 配对——调用方传入的 history
+            // 可能经 L1 滑窗切片 / 会话恢复 / 编辑重发截断，存在「tool_calls 缺 tool 结果」
+            // 或「孤儿 TOOL」→ DeepSeek 400 "insufficient tool messages"。净化后保证整条
+            // 回路所有轮次请求的协议不变量（幂等，对已配对序列零变化）。
+            var currentMessages = sanitizeToolCallPairing(messages, idGenerator)
             var rounds = 0
             var lastRoundHadToolCall = false
             // UXR8 N2 Phase 2（ADR-030）：反问/澄清触发标记 —— 检测到 ask_user 结果标记
@@ -272,8 +278,14 @@ open class SkillExecutor(
             // - effectiveTools：可被熔断置空（熔断后 LLM 无工具可用，只能纯文本回答）
             // - effectiveSystemPrompt：熔断时追加"不要再调用工具"提示
             // - consecutiveToolFailures：同一工具连续失败计数（键 = toolName）
+            // v1 批次18（真机 RCA 2026-09-03）：熔断改为**外科式单工具禁用**——
+            // 旧语义（清空全部工具）在长任务中 2 次网络抓取失败即终止整个任务（TODO 清单
+            // 仍在进行中却被强制中断），且 phone_control 软失败（输入未生效）2 次即触发。
+            // 新语义：连续失败达分类别阈值（resolveToolFailureThreshold）→ 仅禁用该工具，
+            // 其余工具（其他搜索引擎/本地兜底）继续可用。
             var effectiveTools = tools
-            var effectiveSystemPrompt = systemPrompt
+            val disabledTools = mutableSetOf<String>()
+            var effectiveSystemPrompt: String? = systemPrompt
             val consecutiveToolFailures = mutableMapOf<String, Int>()
 
             // UXR11 U2（ADR-033）：429 限流自动重试剩余次数（RPM 限流在重试耗尽前不中断工具回路）。
@@ -445,6 +457,25 @@ open class SkillExecutor(
                         // v1 批次13（B）：文本路径的截图图片（如有）挂到本轮回灌的 user 消息上
                         var pendingScreenshotImage: String? = null
                         textCalls.forEachIndexed { index, tc ->
+                            // v1 批次18（guardrail P2-2）：已熔断禁用的文本工具被幻觉重调时，
+                            // 直接回灌禁用文案（与原生路径 disabledTools 防护同语义），不再真实执行
+                            if (tc.name in disabledTools) {
+                                val disabledResult =
+                                    "错误：工具「${tc.name}」已因连续多次调用失败被禁用。" +
+                                        "请改用其他可用工具或基于已有信息回答。"
+                                Log.w(TAG, "disabled text tool recall blocked: ${tc.name}")
+                                results.append("[工具执行结果 ${tc.name}] ").append(disabledResult).append('\n')
+                                toolCallRecords.add(
+                                    ToolCallRecord(
+                                        toolName = tc.name,
+                                        arguments = encodeArguments(tc.arguments),
+                                        result = disabledResult.take(MAX_RESULT_PREVIEW_LEN),
+                                        durationMs = 0L,
+                                        status = ExecutionStatus.FAIL
+                                    )
+                                )
+                                return@forEachIndexed
+                            }
                             val synthetic = StreamEvent.ToolCallComplete(
                                 "textcall_${rounds}_$index",
                                 tc.name,
@@ -459,7 +490,11 @@ open class SkillExecutor(
                                 formatToolError(tc.name, e)
                             }
                             // v1 批次13（A/B）：提取截图图片标记，base64 从回灌文本剥离（防 ANR/膨胀）
-                            val (resultText, screenshotImageUrl) = extractScreenshotImage(result, tc.name)
+                            // v1 批次17（guardrail P1-1）：结果截断与原生路径同口径——glm 等文本工具
+                            // 模型调用 crawl4ai 抓大页面时 275KB 结果同样会撑爆请求体（RCA 同型根因），
+                            // 且该 USER 回灌消息会持久化进会话 JSON。
+                            val (rawResultText, screenshotImageUrl) = extractScreenshotImage(result, tc.name)
+                            val resultText = truncateToolResult(rawResultText)
                             if (screenshotImageUrl != null) pendingScreenshotImage = screenshotImageUrl
                             // 可观测：记录 ToolCallRecord（与原生路径一致）
                             toolCallRecords.add(
@@ -511,15 +546,19 @@ open class SkillExecutor(
                         )
                         // guardrail P2（TKN-V1B12-GUARDRAIL-001）：文本路径 continue 前补重复工具熔断
                         // 检查（与原生路径一致）——否则文本工具连续失败永不熔断，只能靠 maxRounds=50 硬顶。
+                        // v1 批次18：外科式单工具禁用（与原生路径同语义，分类别阈值）。
                         val failedTextTool = consecutiveToolFailures.entries
-                            .firstOrNull { it.value >= MAX_CONSECUTIVE_TOOL_FAILURES }
+                            .firstOrNull { it.value >= resolveToolFailureThreshold(it.key) }
                             ?.key
                         if (failedTextTool != null) {
-                            Log.w(TAG, "text tool circuit breaker: $failedTextTool failed $MAX_CONSECUTIVE_TOOL_FAILURES times consecutively")
-                            effectiveTools = emptyList()
+                            val textThreshold = resolveToolFailureThreshold(failedTextTool)
+                            Log.w(TAG, "text tool circuit breaker: $failedTextTool failed $textThreshold times consecutively, disabling this tool only")
+                            disabledTools.add(failedTextTool)
+                            effectiveTools = effectiveTools.filter { it.function.name != failedTextTool }
                             effectiveSystemPrompt = (effectiveSystemPrompt ?: "") +
-                                "\n\n注意：工具「$failedTextTool」连续多次调用失败。请直接基于已有信息回答用户问题，不要再调用任何工具。"
-                            consecutiveToolFailures.clear()
+                                "\n\n注意：工具「$failedTextTool」连续 $textThreshold 次调用失败，已被禁用。" +
+                                "请改用其他可用工具完成剩余任务，或基于已有信息回答用户问题；不要再尝试调用该工具。"
+                            consecutiveToolFailures.remove(failedTextTool)
                             lastRoundHadToolCall = false
                         }
                         if (askUserPending) break else continue
@@ -559,6 +598,30 @@ open class SkillExecutor(
                 for (toolCall in uniqueToolCalls) {
                     val toolStart = System.currentTimeMillis()
                     var toolStatus = ExecutionStatus.SUCCESS
+                    // v1 批次18：已熔断禁用的工具被 LLM 幻觉重调时，直接回灌禁用文案（不执行）
+                    if (toolCall.toolName in disabledTools) {
+                        val disabledResult =
+                            "错误：工具「${toolCall.toolName}」已因连续多次调用失败被禁用。" +
+                                "请改用其他可用工具或基于已有信息回答。"
+                        Log.w(TAG, "disabled tool recall blocked: ${toolCall.toolName}")
+                        executedToolCallIds.add(toolCall.toolCallId)
+                        toolCallRecords.add(
+                            ToolCallRecord(
+                                toolName = toolCall.toolName,
+                                arguments = encodeArguments(toolCall.arguments),
+                                result = disabledResult.take(MAX_RESULT_PREVIEW_LEN),
+                                durationMs = 0L,
+                                status = ExecutionStatus.FAIL
+                            )
+                        )
+                        currentMessages = currentMessages + buildToolResultMessage(
+                            toolCallId = toolCall.toolCallId,
+                            toolName = toolCall.toolName,
+                            result = disabledResult,
+                            idGenerator = idGenerator
+                        )
+                        continue
+                    }
                     val result: String = try {
                         executeToolCall(toolCall, mcpServers)
                     } catch (e: CancellationException) {
@@ -582,7 +645,9 @@ open class SkillExecutor(
                     // 从结果文本推断状态（executeToolCall 内部降级文案以特定前缀标识失败）
                     // v1 批次13（A/B）：截图图片标记提取——视觉模型截图结果含【手机截图图片】+dataUrl，
                     // 提取后图片以 image_url 注入会话（模型看真图），base64 从持久化结果剥离（防 ANR）。
-                    val (resultText, screenshotImageUrl) = extractScreenshotImage(result, toolCall.toolName)
+                    // v1 批次17：超长结果截断（crawl4ai 275KB 完整 Markdown 曾撑爆请求体 → 400 打断）
+                    val (rawResultText, screenshotImageUrl) = extractScreenshotImage(result, toolCall.toolName)
+                    val resultText = truncateToolResult(rawResultText)
                     if (isFailureResult(resultText)) {
                         toolStatus = ExecutionStatus.FAIL
                     }
@@ -683,21 +748,32 @@ open class SkillExecutor(
                 // 5. 重复工具熔断（UXR6 问题 1）：同一工具连续失败达阈值时，
                 //    置空工具 + 追加提示，让 LLM 直接基于已有信息回答，
                 //    避免"失败文案诱导重试 → maxRounds=10 硬终止 → 用户无答案"的死循环。
+                // v1 批次18：**外科式单工具禁用**——仅禁用连续失败的该工具（分类别阈值），
+                // 其余工具继续可用；TODO 清单任务不再因单个工具 2 次失败被整体终止。
                 val failedToolName = consecutiveToolFailures.entries
-                    .firstOrNull { it.value >= MAX_CONSECUTIVE_TOOL_FAILURES }
+                    .firstOrNull { it.value >= resolveToolFailureThreshold(it.key) }
                     ?.key
                 if (failedToolName != null) {
-                    Log.w(TAG, "tool circuit breaker: $failedToolName failed $MAX_CONSECUTIVE_TOOL_FAILURES times consecutively")
-                    effectiveTools = emptyList()
+                    val threshold = resolveToolFailureThreshold(failedToolName)
+                    Log.w(TAG, "tool circuit breaker: $failedToolName failed $threshold times consecutively, disabling this tool only")
+                    disabledTools.add(failedToolName)
+                    effectiveTools = effectiveTools.filter { it.function.name != failedToolName }
                     effectiveSystemPrompt = (effectiveSystemPrompt ?: "") +
-                        "\n\n注意：工具「$failedToolName」连续多次调用失败。请直接基于已有信息回答用户问题，不要再调用任何工具。"
-                    consecutiveToolFailures.clear()
+                        "\n\n注意：工具「$failedToolName」连续 $threshold 次调用失败，已被禁用。" +
+                        "请改用其他可用工具完成剩余任务，或基于已有信息回答用户问题；不要再尝试调用该工具。"
+                    consecutiveToolFailures.remove(failedToolName)
                     // guardrail Low-3（TKN-UXR6-GUARDRAIL-001）：熔断在最后一轮（round==maxRounds）
                     // 触发时 continue 后 while 立即退出，lastRoundHadToolCall 仍为 true →
                     // shouldEmitMaxRoundsError 误发"循环达上限"。熔断即主动终止工具循环，
                     // 置 false 使 shouldEmitMaxRoundsError 不触发（熔断目标是给用户答案而非报错）。
                     lastRoundHadToolCall = false
-                    continue // 用空工具再跑一轮：LLM 无工具可用，只能纯文本回答，回路自然结束
+                    // 仅当禁用后已无任何可用工具时才强制纯文本收尾；否则继续用剩余工具执行
+                    if (effectiveTools.isEmpty()) {
+                        lastRoundHadToolCall = false
+                        continue
+                    }
+                    // 仍有剩余工具：不额外跑一轮，直接进入下一轮请求（LLM 基于禁用提示换工具）
+                    continue
                 }
                 // 6. 继续下一轮（LLM 基于 tool result 继续生成）
             }
@@ -768,6 +844,32 @@ open class SkillExecutor(
         internal const val MAX_CONSECUTIVE_TOOL_FAILURES = 2
 
         /**
+         * v1 批次18（真机 RCA 2026-09-03）：工具熔断**分类别阈值**——只针对单个工具禁用，
+         * 不再清空全部工具（旧语义在长任务中 2 次网络失败即杀掉整个任务）。
+         *
+         * - phone_control__*（UI 操作类）：4 次——软失败（输入未生效/屏幕无变化）在真机 UI
+         *   差异下常见，2 次即熔断导致操控任务中途中断（真机 19:37 type 连续 2 次软失败 →
+         *   全部工具被清 → 任务终止）
+         * - 其余（fetch/search 等网络类）：3 次——抓取失败（反爬）在长任务中属预期波动，
+         *   3 次连续失败才禁用该工具；其余工具（其他引擎/本地搜索）继续可用
+         */
+        internal const val PHONE_CONTROL_TOOL_FAILURE_THRESHOLD = 4
+        internal const val DEFAULT_TOOL_FAILURE_THRESHOLD = 3
+
+        /**
+         * 解析指定工具的熔断阈值（纯函数，v1 批次18）。
+         *
+         * @param toolName 工具名（含命名空间前缀）
+         * @return 连续失败达到该次数即禁用该工具
+         */
+        internal fun resolveToolFailureThreshold(toolName: String): Int =
+            if (toolName.startsWith("phone_control__")) {
+                PHONE_CONTROL_TOOL_FAILURE_THRESHOLD
+            } else {
+                DEFAULT_TOOL_FAILURE_THRESHOLD
+            }
+
+        /**
          * UXR11 U2（ADR-033）：工具回路轮间最小间隔（毫秒）。
          *
          * 背景：LLM 端点（如 Moonshot Kimi 组织级 RPM=3）对连续请求限流严格，工具回路
@@ -832,6 +934,129 @@ open class SkillExecutor(
         internal const val MAX_REASONING_LEN = 2000
 
         /**
+         * v1 批次17（真机 RCA 2026-09-03）：单条 TOOL 结果消息内容长度上限（字符）。
+         *
+         * **根因（真机日志 + ObjectBox 取证）**：crawl4ai__md 抓取 moegirl.org.cn 返回
+         * **275,661 字符**完整 Markdown，原样进会话历史 → 后续每轮请求携带 500KB+ 工具内容
+         *（token 爆炸 + 请求体过大），是「调用异常打断（DeepSeek 400）」的诱因之一。
+         * 截断上限取 20,000 字符（约 1~2 万 token，兼顾抓取类工具的可用性与请求体积）。
+         */
+        internal const val MAX_TOOL_RESULT_CHARS = 20_000
+
+        /**
+         * 截断尾注稳定标记（v1 批次17 guardrail P3-1）：含该标记的内容视为已截断，
+         * 重复应用 [truncateToolResult] 时直接原样返回——保证严格幂等
+         *（否则尾注本身超限导致二次截断、「原文 N 字符」数字逐轮失真）。
+         */
+        private const val TRUNCATION_NOTICE_MARKER = "…（工具结果过长，已截断"
+
+        /**
+         * 工具结果截断（v1 批次17）：超 [MAX_TOOL_RESULT_CHARS] 的 TOOL 结果截断并附标注，
+         * 防止单条抓取结果（如完整网页 Markdown）撑爆请求体 / 会话 JSON。
+         *
+         * @param raw 工具执行原始结果文本
+         * @return 原文本（未超限或已截断过）或截断文本（附截断标注尾注）
+         */
+        internal fun truncateToolResult(raw: String): String {
+            if (raw.length <= MAX_TOOL_RESULT_CHARS) return raw
+            if (raw.contains(TRUNCATION_NOTICE_MARKER)) return raw // 幂等：已截断内容不重复处理
+            Log.w(TAG, "tool result truncated: ${raw.length} chars -> $MAX_TOOL_RESULT_CHARS")
+            return raw.take(MAX_TOOL_RESULT_CHARS) +
+                "\n\n$TRUNCATION_NOTICE_MARKER：原文 ${raw.length} 字符，仅保留前 $MAX_TOOL_RESULT_CHARS 字符）"
+        }
+
+        /**
+         * 工具调用配对净化器（v1 批次17，真机 RCA 2026-09-03）：**双向**保证 OpenAI tool 协议
+         * 配对不变量，替代单向的孤儿 TOOL 过滤（原 [ConversationViewModel.dropOrphanToolMessages]
+         * 仅丢弃「无前置 tool_calls 的 TOOL」，未处理反向「tool_calls 缺 tool 结果」——DeepSeek 400
+         * "insufficient tool messages following tool_calls message"）。
+         *
+         * **不变量**：请求消息序列中，每条 assistant(tool_calls=[K 个]) 之后、下一条非 TOOL 消息
+         * 之前，必须恰好有 K 条 TOOL 消息，且每条 TOOL 的 tool_call_id 能与某个 call id 关联。
+         *
+         * **规则**（按序遍历，维护待配对 id 队列）：
+         * - ASSISTANT 且 toolCalls 非空 → 先为上一组未配对完的 id 补合成 TOOL 消息，再设新待配对队列
+         * - ASSISTANT 无 toolCalls / USER → 先补合成再清空队列（USER 为对话边界）
+         * - TOOL → 队列空 = 孤儿，丢弃；toolCallId 命中队列 = 保留并移除该 id；
+         *   toolCallId 空白或未命中 = 保留内容但**重写** toolCallId 为队首 id（内容保留、协议对齐）
+         * - 序列结束 → 为剩余 id 补合成 TOOL 消息
+         *
+         * 合成 TOOL 内容为可诊断中文提示（LLM 可据此得知该调用结果缺失，按已有信息继续）。
+         * 同时对 TOOL content 超限者应用 [truncateToolResult]（净化历史中已存在的超长结果）。
+         *
+         * 纯函数（id 生成器注入），幂等：对已净化的序列重复应用不产生变化。
+         *
+         * **应用位置**（纵深防御，两处幂等）：
+         * 1. ConversationViewModel.sendMessage：L1 窗口切片**之后**定形为 sanitizedHistory
+         *    （调用契约：传入 [executeLoop] 的 history 必须已净化——syncToolMessages 以
+         *    history.size 切片回灌新增消息，入口净化若再改变长度会错位）
+         * 2. [executeLoop] 入口：幂等复验兜底其余调用入口（对已净化序列恒 no-op，
+         *    不改变列表长度，故不影响 syncToolMessages 切片契约）
+         *
+         * @param msgs 待净化消息序列
+         * @param idGenerator ChatMessage id 生成器（合成 TOOL 消息用）
+         * @return 配对不变的净化序列
+         */
+        internal fun sanitizeToolCallPairing(
+            msgs: List<ChatMessage>,
+            idGenerator: () -> Long
+        ): List<ChatMessage> {
+            val out = mutableListOf<ChatMessage>()
+            val pendingIds = ArrayDeque<String>()
+
+            fun flushMissing() {
+                for (missingId in pendingIds) {
+                    out.add(
+                        ChatMessage(
+                            id = idGenerator(),
+                            role = Role.TOOL,
+                            content = "（工具结果缺失：该调用的结果因历史截断或执行中断丢失，请基于已有信息继续）",
+                            timestamp = System.currentTimeMillis(),
+                            toolCallId = missingId
+                        )
+                    )
+                }
+                pendingIds.clear()
+            }
+
+            for (msg in msgs) {
+                when (msg.role) {
+                    Role.ASSISTANT -> {
+                        flushMissing()
+                        out.add(msg)
+                        for (call in msg.toolCalls) pendingIds.addLast(call.id)
+                    }
+                    Role.TOOL -> {
+                        val tid = msg.toolCallId
+                        val kept: ChatMessage? = when {
+                            pendingIds.isEmpty() -> null
+                                // 孤儿 TOOL（无前置 tool_calls）：丢弃（沿用 UXR5 问题 4 语义）
+                            !tid.isNullOrBlank() && pendingIds.contains(tid) -> {
+                                pendingIds.remove(tid)
+                                msg
+                            }
+                            else -> {
+                                // toolCallId 空白或未命中待配对队列：保留内容，重写为队首 id（协议对齐）
+                                val realigned = pendingIds.removeFirst()
+                                if (tid == realigned) msg else msg.copy(toolCallId = realigned)
+                            }
+                        }
+                        if (kept != null) {
+                            // 超长结果截断（净化历史中已存在的超长消息，幂等）
+                            out.add(kept.copy(content = truncateToolResult(kept.content)))
+                        }
+                    }
+                    Role.USER -> {
+                        flushMissing()
+                        out.add(msg)
+                    }
+                }
+            }
+            flushMissing()
+            return out
+        }
+
+        /**
          * 文件路径正则（M3 脱敏）：匹配以 `/` 或 `\` 开头的路径片段，
          * 替换为 `<path>` 占位符，避免内部路径泄露给 LLM 再间接暴露给用户。
          */
@@ -891,14 +1116,25 @@ open class SkillExecutor(
         internal val NON_ALNUM_PATTERN = Regex("""[^a-zA-Z0-9]""")
 
         /**
-         * 剥离工具名命名空间前缀（DEF-008，Bug-3 扩展）。
+         * 剥离工具名命名空间前缀（DEF-008，Bug-3 扩展；v1 批次19 与路由同源）。
          *
          * - MCP 工具（`mcp_<serverName>__<toolName>`）：剥离 `mcp_<serverName>__`，剩 `<toolName>`
          * - Skill 工具（`skillName__toolName`）：剥离 `skillName__`，剩 `<toolName>`
          *
+         * v1 批次19（真机 RCA：含下划线 Server 名反解歧义）：提供 [serverName] 时按
+         * [mcpToolPrefix] 精确剥离（removePrefix）；前缀不匹配时回退旧反解逻辑并告警
+         * （兼容历史调用点未传 serverName 的场景）。
+         *
          * MCP Server 不感知 Prism 层命名空间，调用前必须剥离。
          */
-        internal fun stripNamespace(toolName: String): String {
+        internal fun stripNamespace(toolName: String, serverName: String? = null): String {
+            if (serverName != null) {
+                val prefix = mcpToolPrefix(serverName)
+                if (toolName.startsWith(prefix, ignoreCase = true)) {
+                    return toolName.substring(prefix.length)
+                }
+                Log.w(TAG, "stripNamespace: tool '$toolName' does not match prefix of server '$serverName', fallback to legacy parse")
+            }
             if (toolName.startsWith(MCP_NAMESPACE_PREFIX)) {
                 return toolName.substringAfter(MCP_NAMESPACE_PREFIX).substringAfter(NAMESPACE_SEPARATOR)
             }
@@ -906,28 +1142,44 @@ open class SkillExecutor(
         }
 
         /**
+         * Server 的全局工具名前缀（v1 批次19）：`mcp_<规范化名>__`。
+         *
+         * 路由与剥离共用此函数，保证二者永远同源（消除 substringBefore/After("__")
+         * 对含下划线 Server 名的反解歧义——`mcp____Web_Search__webSearchPro` 曾被
+         * 反解出命名空间 `_` 而静默回退到第一个启用 Server）。
+         */
+        internal fun mcpToolPrefix(serverName: String): String =
+            MCP_NAMESPACE_PREFIX + toMcpNamespace(serverName) + NAMESPACE_SEPARATOR
+
+        /**
          * 选择 MCP Server（DEF-008，Bug-3：支持按工具名精确路由）。
          *
-         * - 工具名带 MCP 前缀（`mcp_<serverName>__...`）：匹配名称一致的启用 Server；
-         *   匹配不到回退第一个启用 Server（向后兼容）
-         * - 无 MCP 前缀（Skill/跨 App 工具）：取第一个启用的 Server（原逻辑）
+         * - 工具名带 MCP 前缀（`mcp_<serverName>__...`）：按 **[mcpToolPrefix] 前缀精确匹配**
+         *   （最长前缀优先，防嵌套歧义），匹配不到返回 **null**（调用方报"无可用 MCP Server"）。
+         *   **v1 批次19 语义收紧**：不再静默回退到第一个启用 Server——旧反解
+         *   `substringBefore("__")` 对含下划线的 Server 名（如规范化后 `___Web_Search`）
+         *   会解析出错误命名空间并幻影路由（真机 RCA：webSearchSogou/Quark/Pro 全部
+         *   路由到 Time Server 报"暂未实现"），回退只会放大错误。
+         * - 无 MCP 前缀（Skill/跨 App 工具）：取第一个启用的 Server（原逻辑不变）
          *
-         * @return 匹配的 Server；无启用 Server 则 null
+         * @return 匹配的 Server；无启用 Server 或命名空间无匹配则 null
          */
         internal fun selectMcpServer(
             mcpServers: List<McpServerConfig>,
             toolName: String? = null
         ): McpServerConfig? {
             if (toolName != null && toolName.startsWith(MCP_NAMESPACE_PREFIX)) {
-                // UX-001 问题 5/6（ADR-022 二次修复）：工具名中的 serverName 是经 [toMcpNamespace]
-                // 规范化后的命名空间（含空格/中文的原始名会被替换为 `_`），反查时必须对每个
-                // server.name 做同样规范化后再比较，否则含空格/中文的 Server 永远匹配不上。
-                val serverNamespace = toolName
-                    .substringAfter(MCP_NAMESPACE_PREFIX)
-                    .substringBefore(NAMESPACE_SEPARATOR)
-                mcpServers.firstOrNull {
-                    it.isEnabled && toMcpNamespace(it.name).equals(serverNamespace, ignoreCase = true)
-                }?.let { return it }
+                var best: McpServerConfig? = null
+                var bestPrefixLen = -1
+                for (server in mcpServers) {
+                    if (!server.isEnabled) continue
+                    val prefix = mcpToolPrefix(server.name)
+                    if (toolName.startsWith(prefix, ignoreCase = true) && prefix.length > bestPrefixLen) {
+                        best = server
+                        bestPrefixLen = prefix.length
+                    }
+                }
+                return best
             }
             return mcpServers.firstOrNull { it.isEnabled }
         }

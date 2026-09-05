@@ -5,6 +5,7 @@ import io.prism.data.McpServerConfig
 import io.prism.data.McpServerPresets
 import io.prism.data.McpServerRepository
 import io.prism.data.MyObjectBox
+import io.prism.network.McpConnectionDiagnostic
 import io.prism.network.McpToolProvider
 import io.prism.security.ApiKeyRepository
 import io.prism.security.FakePreferenceDataStore
@@ -305,6 +306,12 @@ class CapabilitiesViewModelTest {
         override suspend fun listTools(config: McpServerConfig): List<String> {
             failure?.let { throw it }
             return tools
+        }
+
+        /** v1 批次16（US-1602）：fake 恒连接成功（listTools 不抛 = 连接成功），空列表 = 0 工具。 */
+        override suspend fun diagnose(config: McpServerConfig): McpConnectionDiagnostic {
+            failure?.let { throw it }
+            return McpConnectionDiagnostic(success = true, toolCount = tools.size)
         }
 
         override suspend fun callTool(config: McpServerConfig, name: String, arguments: Map<String, Any?>): String =

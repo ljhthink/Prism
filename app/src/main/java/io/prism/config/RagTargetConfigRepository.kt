@@ -20,16 +20,18 @@ import kotlinx.coroutines.flow.map
  * 自动检索又被静默打开。
  *
  * **修复**：新增本仓库持久化 [RagTarget]，`startNewConversation` 不再强制重置为全库，
- * 而是恢复用户上次持久化的模式（首次使用默认 [RagTarget.AllLibraries]，对齐
- * ADR-012 5.2「默认开启」）。
+ * 而是恢复用户上次持久化的模式。**v1 批次18 语义变更**（真机 RCA：用户未请求知识库
+ * 却被注入——设备上 `prism_rag_config.preferences_pb` 缺失，缺失回退 AllLibraries 即
+ * "首次默认开启"违背用户预期）：首次使用/缺失/未知 mode 默认 [RagTarget.Off]，
+ * 用户需在输入区上方 RagModeChip 显式开启（opt-in）。
  *
  * **设计**：DataStore<Preferences> 存储，与 [ThinkingConfigRepository] 同模式。
  * 独立 DataStore 文件（`prism_rag_config`），避免耦合。序列化三态：
  * - `RagTarget.Off` → mode = "off"
  * - `RagTarget.AllLibraries` → mode = "all"（kbId 忽略）
  * - `RagTarget.SpecificLibrary(kbId)` → mode = "specific" + kbId = kbId
- * 未知 mode / 非法 kbId（<=0）→ 容错回退 [RagTarget.AllLibraries]（fail-safe，
- * 防外部写入脏数据导致下游检索异常，对齐 BR-security-005 纵深防御）。
+ * 缺失/未知 mode / 非法 kbId（<=0）→ 容错回退 [RagTarget.Off]（fail-safe：
+ * 防外部写入脏数据导致下游检索异常 + 防未请求的知识库注入，对齐 BR-security-005）。
  *
  * @param dataStore RAG 配置专用 DataStore（`prism_rag_config`）
  */
@@ -84,8 +86,11 @@ class RagTargetConfigRepository(
         /**
          * 解码持久化值 → [RagTarget]（容错 fail-safe，对齐 BR-security-005）。
          *
-         * 未知 mode / kbId <= 0 → 回退 [RagTarget.AllLibraries]（默认开启语义，
-         * 与 ADR-012 5.2 一致；同时避免损坏的 specific 数据导致下游检索异常）。
+         * **v1 批次18（真机 RCA 2026-09-03）**：缺失/未知 mode 的回退语义由
+         * AllLibraries 改为 [RagTarget.Off]——用户未明确开启知识库时**不得自动注入**
+         * KB 内容到对话上下文（真机投诉：未请求知识库却被注入；旧默认"首次即全库注入"
+         * 违背用户预期）。用户显式设置的 "off"/"all"/"specific" 均原样保留。
+         * 非法 specific 数据（kbId<=0/损坏）→ Off（避免下游检索异常 + 注入意外）。
          */
         internal fun decode(mode: String?, kbId: Long?): RagTarget = when (mode) {
             MODE_OFF -> RagTarget.Off
@@ -94,12 +99,13 @@ class RagTargetConfigRepository(
                     RagTarget.SpecificLibrary(kbId)
                 } catch (e: IllegalArgumentException) {
                     // RagTarget init 防御：理论上 kbId>0 已满足，此处兜底
-                    RagTarget.AllLibraries
+                    RagTarget.Off
                 }
             } else {
-                RagTarget.AllLibraries
+                RagTarget.Off
             }
-            else -> RagTarget.AllLibraries // MODE_ALL 或未知/缺失
+            MODE_ALL -> RagTarget.AllLibraries
+            else -> RagTarget.Off // 缺失（首次安装/未切换过）或未知值 → 默认关闭
         }
     }
 }

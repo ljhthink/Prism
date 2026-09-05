@@ -81,6 +81,24 @@ class CrossSessionMemoryManagerUxr9Test {
     }
 
     @Test
+    fun `isImportantTurnPair explicit remember instruction passes through`() {
+        // v1 批次19（open-webui-memory / Mem0 模式）：显式记忆指令直通——
+        // "记住 X" 是最强记忆信号，绕过寒暄/一次性查询过滤写入 L2
+        assertTrue("记住 声明 应直通", manager.isImportantTurnPair("记住我常用的编程语言是 Kotlin"))
+        assertTrue("记住 + 寒暄形式 应直通", manager.isImportantTurnPair("记住，你好"))
+        assertTrue("英文 remember 应直通", manager.isImportantTurnPair("Remember that I prefer dark mode"))
+    }
+
+    @Test
+    fun `isImportantTurnPair identity questions are blacklisted from write-back`() {
+        // v1 批次19（open-webui-memory 2b）：身份类提问（含"我"信号词）不得回写 L2——
+        // 助手的身份总结若被回写，再被检索注入会造成回音污染
+        assertFalse("身份类提问 应黑名单", manager.isImportantTurnPair("我是一个什么样的人？"))
+        assertFalse("你知道我什么 应黑名单", manager.isImportantTurnPair("你知道我什么？"))
+        assertFalse("了解我多少 应黑名单", manager.isImportantTurnPair("你了解我多少？"))
+    }
+
+    @Test
     fun `isImportantTurnPair ignores content length without self-referential atom keyword`() {
         // 长度本身不再判定重要：无自我指涉偏好/身份/记忆诉求时，无论多长都非持久记忆
         val seven = "一二三四五六七"   // 7 字

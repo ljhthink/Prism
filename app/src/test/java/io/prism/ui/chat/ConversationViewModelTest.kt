@@ -394,7 +394,7 @@ class ConversationViewModelTest {
     }
 
     /**
-     * US-019 AC：RAG 模式切换器三态正确切换 + 默认值为 AllLibraries。
+     * US-019 AC：RAG 模式切换器三态正确切换 + 默认值为 Off（v1 批次18 知识库 opt-in）。
      */
     @Test
     fun `setRagTarget switches between three states`() = runTest(mainDispatcher) {
@@ -406,7 +406,7 @@ class ConversationViewModelTest {
             DefaultStubEmbedder,
             KnowledgeBaseRepository(boxStore)
         )
-        assertEquals("默认应为 AllLibraries", RagTarget.AllLibraries, vm.ragTarget.value)
+        assertEquals("默认应为 Off（v1 批次18：知识库 opt-in，未开启不注入）", RagTarget.Off, vm.ragTarget.value)
 
         vm.setRagTarget(RagTarget.Off)
         assertEquals(RagTarget.Off, vm.ragTarget.value)

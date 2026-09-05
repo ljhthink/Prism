@@ -53,7 +53,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -174,6 +177,13 @@ fun ConversationScreen(
     val webSearchEnabled by viewModel.webSearchEnabledFlow.collectAsState()
     // UXR8 N2 Phase 2（ADR-030）：LLM 反问/澄清待答问题（null = 无待答问题，不显示卡片）
     val pendingAskUser by viewModel.pendingAskUser.collectAsState()
+    // v1 批次17（US-1703）：TODO 任务清单卡片状态（todo_write 更新，空清单不渲染卡片）
+    val todoListState by viewModel.todoList.collectAsState()
+    // v1 批次17（US-1704）：AI 消息编辑弹层（非 null 时展示「思维链 + 正文」双编辑框）
+    var editingAiMessage by remember { mutableStateOf<ChatMessage?>(null) }
+    // v1 批次17（US-1706）：回退确认对话框目标消息 id 与将删除条数（非 null 时展示确认）
+    var rollbackTargetId by remember { mutableStateOf<Long?>(null) }
+    var rollbackDeleteCount by remember { mutableStateOf(0) }
     var providerSelectorVisible by remember { mutableStateOf(false) }
     var ragSelectorVisible by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("") }
@@ -374,6 +384,15 @@ fun ConversationScreen(
                             editingMessageId = id
                             input = original
                         },
+                        // v1 批次17（US-1704/1706/1708）：AI 编辑覆写 / 用户消息回退 / 重试 / 变体切换
+                        onEditAi = { editingAiMessage = message },
+                        onRollback = { id ->
+                            rollbackTargetId = id
+                            rollbackDeleteCount = messages.size - messages.indexOfFirst { it.id == id } - 1
+                        },
+                        onRegenerate = { viewModel.regenerateLastAiMessage() },
+                        onSwitchVariant = { id, index -> viewModel.switchVariant(id, index) },
+                        isLastMessage = message.id == messages.lastOrNull()?.id,
                         // UXR4 问题 1/4/6（ADR-024）：思考区展示受深度思考开关控制
                         //（协议层 reasoning_content 回传不受此影响，见 ADR-024 子决策 A）
                         showThinking = thinkingEnabled,
@@ -407,6 +426,8 @@ fun ConversationScreen(
             // 自然收缩、输入区贴合 NavBar 上缘。若此处再加 imePadding 会与 NavBar
             // 的 imePadding 叠加，导致输入框被顶得过高（MIUI 真机复现的问题）。
             Column(modifier = Modifier) {
+                // v1 批次17（US-1703）：TODO 任务清单卡片（todo_write 维护，空清单不渲染）
+                TodoCard(state = todoListState)
                 // UX-001 问题 5（ADR-021）：能力开关行置于输入框上方（联网搜索 / 深度思考）
                 CapabilityToggleRow(
                     thinkingEnabled = thinkingEnabled,
@@ -497,6 +518,52 @@ fun ConversationScreen(
                 current = ragTarget,
                 onSelect = { viewModel.setRagTarget(it); ragSelectorVisible = false },
                 onClose = { ragSelectorVisible = false }
+            )
+        }
+
+        // v1 批次17（US-1704/1705）：AI 消息编辑弹层 —— 思维链 + 正文双编辑框覆写（原地修正，不重新生成）
+        editingAiMessage?.let { target ->
+            PrismSheetHost(visible = true, onDismiss = { editingAiMessage = null }) {
+                EditAiMessageSheet(
+                    original = target,
+                    onSave = { newContent, newThinking ->
+                        viewModel.editAiMessage(target.id, newContent, newThinking)
+                        editingAiMessage = null
+                    },
+                    onClose = { editingAiMessage = null }
+                )
+            }
+        }
+
+        // v1 批次17（US-1706）：回退确认对话框 —— 防误删 + 数据安全（可先另存为新会话）
+        rollbackTargetId?.let { targetId ->
+            AlertDialog(
+                onDismissRequest = { rollbackTargetId = null },
+                title = { Text("从这里重新开始？", color = PrismText, fontSize = 16.sp, fontWeight = FontWeight.SemiBold) },
+                text = {
+                    Text(
+                        text = "将删除此消息之后的 $rollbackDeleteCount 条消息，并重新生成回答。" +
+                            if (rollbackDeleteCount > 0) "可先另存当前完整对话为新会话。" else "",
+                        color = PrismTextDim,
+                        fontSize = 13.sp
+                    )
+                },
+                confirmButton = {
+                    if (rollbackDeleteCount > 0) {
+                        ActionText("另存并回退", onClick = {
+                            rollbackTargetId = null
+                            viewModel.rollbackFromUserMessage(targetId, saveCopyFirst = true)
+                        })
+                    }
+                    ActionText("直接回退", onClick = {
+                        rollbackTargetId = null
+                        viewModel.rollbackFromUserMessage(targetId, saveCopyFirst = false)
+                    })
+                },
+                dismissButton = {
+                    ActionText("取消", onClick = { rollbackTargetId = null })
+                },
+                containerColor = PrismPanel
             )
         }
 
@@ -799,6 +866,16 @@ private fun MessageBubble(
     message: ChatMessage,
     onCopy: () -> Unit,
     onEdit: (Long, String) -> Unit,
+    /** v1 批次17（US-1704）：AI 消息「编辑回复」回调（思维链+正文覆写弹层）。 */
+    onEditAi: (ChatMessage) -> Unit = {},
+    /** v1 批次17（US-1706）：user 消息「从这里重新开始」回调。 */
+    onRollback: (Long) -> Unit = {},
+    /** v1 批次17（US-1708）：「重新生成」回调（仅最后一条 AI 消息展示）。 */
+    onRegenerate: () -> Unit = {},
+    /** v1 批次17（US-1708）：变体切换回调。 */
+    onSwitchVariant: (Long, Int) -> Unit = { _, _ -> },
+    /** v1 批次17（US-1708）：是否为会话最后一条消息（重试/切换器仅末条可用）。 */
+    isLastMessage: Boolean = false,
     /** UXR4 问题 1/4/6（ADR-024）：是否展示「深度思考」折叠区。协议层仍回传 reasoning_content，UI 展示由开关控制。 */
     showThinking: Boolean,
     /** UXR5 问题 1（ADR-024 遗留）：该消息是否为当前正在流式生成的 AI 回复（流式期间用纯文本渲染）。 */
@@ -808,6 +885,7 @@ private fun MessageBubble(
 ) {
     val isUser = message.role == Role.USER
     val isTool = message.role == Role.TOOL
+    val isAi = message.role == Role.ASSISTANT
 
     AnimatedVisibility(
         visible = true,
@@ -832,13 +910,28 @@ private fun MessageBubble(
                     isTool -> SkillCallCard(message, toolArgsById)
                     else -> AiBubble(message, showThinking, isStreaming)
                 }
-                // UXR3 问题 13（ADR-023）：消息操作行（复制 / 编辑）
-                // 仅对 USER / ASSISTANT 非空内容消息展示；TOOL 占位消息不展示
-                if (!isTool && message.content.isNotBlank()) {
+                // v1 批次17（US-1708）：变体切换器 —— 最后一条 AI 消息且存在多版本时展示（‹ 2/3 ›）
+                if (isAi && isLastMessage && !isStreaming && message.variants.size > 1) {
+                    VariantSwitcher(
+                        activeIndex = message.activeVariantIndex,
+                        count = message.variants.size,
+                        onSwitch = { index -> onSwitchVariant(message.id, index) }
+                    )
+                }
+                // UXR3 问题 13（ADR-023）+ v1 批次17：消息操作行
+                // （复制 / 编辑 / 编辑回复 / 重试 / 回退；TOOL 占位与系统提示消息不展示——
+                // guardrail R2 残留①：系统提示不可作为回退/重试锚点）
+                if (!isTool && !message.isSystemNotice && message.content.isNotBlank()) {
                     MessageActionRow(
                         canEdit = isUser,
+                        canEditAi = isAi && !isStreaming,
+                        canRollback = isUser,
+                        canRegenerate = isAi && isLastMessage && !isStreaming,
                         onCopy = onCopy,
-                        onEdit = { onEdit(message.id, message.content) }
+                        onEdit = { onEdit(message.id, message.content) },
+                        onEditAi = { onEditAi(message) },
+                        onRollback = { onRollback(message.id) },
+                        onRegenerate = onRegenerate
                     )
                 }
             }
@@ -847,16 +940,26 @@ private fun MessageBubble(
 }
 
 /**
- * 消息操作行（UXR3 问题 13，ADR-023）—— 复制 / 编辑 小号文字按钮。
+ * 消息操作行（UXR3 问题 13，ADR-023 + v1 批次17 扩展）—— 复制 / 编辑 / 编辑回复 / 重试 / 回退
+ * 小号文字按钮。置于消息气泡下方右侧（对齐用户/AI 消息的侧向），与正文视觉区分。
  *
- * 置于消息气泡下方右侧（对齐用户/AI 消息的侧向），与正文视觉区分。
- * 复制：所有消息可用；编辑：仅用户消息可用（回填输入框 + 标记待编辑 id）。
+ * - 复制：所有非 TOOL 消息可用
+ * - 编辑：仅用户消息可用（回填输入框 + 标记待编辑 id）
+ * - 编辑回复：仅 AI 消息可用（思维链 + 正文覆写弹层，US-1704）
+ * - 重试：仅最后一条 AI 消息可用（重新生成，US-1708）
+ * - 回退：仅用户消息可用（从这里重新开始，US-1706，触发确认对话框）
  */
 @Composable
 private fun MessageActionRow(
     canEdit: Boolean,
+    canEditAi: Boolean = false,
+    canRollback: Boolean = false,
+    canRegenerate: Boolean = false,
     onCopy: () -> Unit,
-    onEdit: () -> Unit
+    onEdit: () -> Unit,
+    onEditAi: () -> Unit = {},
+    onRollback: () -> Unit = {},
+    onRegenerate: () -> Unit = {}
 ) {
     Row(
         modifier = Modifier
@@ -865,34 +968,68 @@ private fun MessageActionRow(
         horizontalArrangement = Arrangement.End,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            text = "复制",
-            color = PrismTextFaint,
-            fontSize = 10.sp,
-            modifier = Modifier
-                .clip(RoundedCornerShape(6.dp))
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onCopy
-                )
-                .padding(horizontal = 8.dp, vertical = 4.dp)
-        )
+        ActionText("复制", onClick = onCopy)
         if (canEdit) {
-            Text(
-                text = "编辑",
-                color = PrismTextFaint,
-                fontSize = 10.sp,
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = onEdit
-                    )
-                    .padding(horizontal = 8.dp, vertical = 4.dp)
-            )
+            ActionText("编辑", onClick = onEdit)
         }
+        if (canEditAi) {
+            ActionText("编辑回复", onClick = onEditAi)
+        }
+        if (canRegenerate) {
+            ActionText("重试", onClick = onRegenerate)
+        }
+        if (canRollback) {
+            ActionText("回退", onClick = onRollback)
+        }
+    }
+}
+
+/** 操作行小号文字按钮（v1 批次17 抽取：消除五处重复样式）。 */
+@Composable
+private fun ActionText(text: String, onClick: () -> Unit) {
+    Text(
+        text = text,
+        color = PrismTextFaint,
+        fontSize = 10.sp,
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
+            .padding(horizontal = 8.dp, vertical = 4.dp)
+    )
+}
+
+/**
+ * 变体切换器（v1 批次17 US-1708，ADR-043 D4，SillyTavern swipes 交互）——
+ * ‹ 2/3 › 左右切换 AI 回复的历史版本；始终线性展示（不做切换隐藏后续）。
+ */
+@Composable
+private fun VariantSwitcher(
+    activeIndex: Int,
+    count: Int,
+    onSwitch: (Int) -> Unit
+) {
+    Row(
+        modifier = Modifier.padding(horizontal = 2.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        ActionText(
+            "‹",
+            onClick = { if (activeIndex > 0) onSwitch(activeIndex - 1) }
+        )
+        Text(
+            text = "${activeIndex + 1}/$count",
+            color = PrismTextFaint,
+            fontSize = 10.sp
+        )
+        ActionText(
+            "›",
+            onClick = { if (activeIndex < count - 1) onSwitch(activeIndex + 1) }
+        )
     }
 }
 
@@ -2336,4 +2473,99 @@ internal fun convertTableToLines(tableRows: List<String>): List<String> {
 internal fun splitTableCells(raw: String): List<String> {
     val protected = raw.trim().trim('|').replace("\\|", "\u0000")
     return protected.split('|').map { it.trim().replace("\u0000", "|") }
+}
+
+
+/**
+ * AI 消息编辑弹层（v1 批次17 US-1704/1705，ADR-043 D2）—— 思维链 + 正文双编辑框覆写。
+ *
+ * 预填充原消息内容，保存调用 [ConversationViewModel.editAiMessage]（原地修正，
+ * 不重新生成、不截断后续）；正文空白时保存忽略（VM 层校验）。
+ * PrismSheet footer 放置保存按钮（BR-ui-003：关键操作固定底部）。
+ */
+@Composable
+private fun EditAiMessageSheet(
+    original: ChatMessage,
+    onSave: (newContent: String, newThinkingChain: String?) -> Unit,
+    onClose: () -> Unit
+) {
+    // 按消息 id 重新初始化编辑框（打开不同消息时不残留上一次草稿）
+    var content by remember(original.id) { mutableStateOf(original.content) }
+    var thinking by remember(original.id) { mutableStateOf(original.thinkingChain ?: "") }
+
+    PrismSheet(
+        title = "编辑回复",
+        subtitle = "覆写后保存进对话；思维链在工具回路中回传给模型",
+        footer = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                PrismButton(
+                    text = "取消",
+                    variant = PrismButtonVariant.Ghost,
+                    onClick = onClose,
+                    modifier = Modifier.weight(1f)
+                )
+                PrismButton(
+                    text = "保存",
+                    variant = PrismButtonVariant.Primary,
+                    onClick = { onSave(content, thinking.takeIf { it.isNotBlank() }) },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+    ) {
+        Text(
+            text = "深度思考",
+            color = PrismTextDim,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(Modifier.height(4.dp))
+        OutlinedTextField(
+            value = thinking,
+            onValueChange = { thinking = it },
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 3,
+            maxLines = 8,
+            textStyle = androidx.compose.ui.text.TextStyle(
+                color = PrismTextDim,
+                fontSize = 12.sp
+            ),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = PrismIndigo,
+                unfocusedBorderColor = PrismLine,
+                cursorColor = PrismIndigo,
+                focusedContainerColor = Color.Transparent,
+                unfocusedContainerColor = Color.Transparent
+            )
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = "输出内容",
+            color = PrismTextDim,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(Modifier.height(4.dp))
+        OutlinedTextField(
+            value = content,
+            onValueChange = { content = it },
+            modifier = Modifier.fillMaxWidth(),
+            minLines = 5,
+            maxLines = 14,
+            textStyle = androidx.compose.ui.text.TextStyle(
+                color = PrismText,
+                fontSize = 13.sp
+            ),
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = PrismIndigo,
+                unfocusedBorderColor = PrismLine,
+                cursorColor = PrismIndigo,
+                focusedContainerColor = Color.Transparent,
+                unfocusedContainerColor = Color.Transparent
+            )
+        )
+    }
 }

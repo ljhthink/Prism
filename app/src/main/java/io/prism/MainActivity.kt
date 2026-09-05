@@ -19,6 +19,18 @@ import io.prism.ui.theme.PrismTheme
  * 依 ADR-002，使用 M3 动态主题 [PrismTheme]。
  */
 class MainActivity : ComponentActivity() {
+
+    companion object {
+        /**
+         * App 前后台判定（v1 批次16 US-1605）：手机操控任务完成回报通知仅在前台时抑制——
+         * App 在前台用户看得到聊天流，无需通知打扰；后台时发通知引导回 App。
+         * 轻量实现（onResume/onPause 维护静态标志），不引入 lifecycle-process 依赖。
+         */
+        @Volatile
+        var isForeground: Boolean = false
+            private set
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -35,5 +47,15 @@ class MainActivity : ComponentActivity() {
                 PrismApp()
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        isForeground = true
+    }
+
+    override fun onPause() {
+        super.onPause()
+        isForeground = false
     }
 }

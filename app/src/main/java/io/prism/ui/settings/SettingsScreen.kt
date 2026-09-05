@@ -49,7 +49,6 @@ import io.prism.ui.components.PrismSheetHost
 import io.prism.ui.components.PrismSegmented
 import io.prism.ui.components.PrismSwitch
 import io.prism.ui.components.PrismTopBar
-import io.prism.ui.theme.PrismCyan
 import io.prism.ui.theme.PrismDanger
 import io.prism.ui.theme.PrismPanel2
 import io.prism.ui.theme.PrismIndigo
@@ -67,7 +66,7 @@ private const val PHONE_CONTROL_POLL_MS = 1_000L
 /**
  * 设置屏幕 —— 深空玻璃肌理（设计规范 v0.4 第 8.4 节）。
  *
- * 分组：模型与端点 / 隐私与安全 / 设备档位 / 关于。
+ * 分组：模型与端点 / 设备档位 / 手机操控（LLM 操控手机）/ 识图 / 搜索增强 / 关于。
  * Provider 配置与 API Key 两行接入 [SettingsViewModel] 数据层：
  * - Provider 配置 → 已配置列表弹层 + 详情编辑弹层（Base URL / 模型 / 激活 / 删除 / 从预设添加）
  * - API Key → 各 Provider 的 Key 加密读写（掩码 + Keystore 加密）
@@ -76,10 +75,7 @@ private const val PHONE_CONTROL_POLL_MS = 1_000L
 fun SettingsScreen(
     viewModel: SettingsViewModel = viewModel(factory = SettingsViewModel.Factory)
 ) {
-    // 生物识别解锁：M0 起 UI 占位（仅本地 state，未接入 BiometricPrompt）。
-    // 默认值改为 false 避免误导用户以为已启用保护（BR-ui-001）。
-    // 完整实现需新 ADR + PRD（BiometricManager + DataStore 持久化 + App 启动锁）。
-    var biometric by remember { mutableStateOf(false) }
+    // v1 批次16（US-1603）：「生物识别解锁」M0 起 UI 占位从未实现，已整行移除（连同本地 state）。
     var tierSheetVisible by remember { mutableStateOf(false) }
     var providerListVisible by remember { mutableStateOf(false) }
     var apiKeyVisible by remember { mutableStateOf(false) }
@@ -195,17 +191,10 @@ fun SettingsScreen(
                     onClick = { userRulesSheetVisible = true }
                 )
             }
-            item { SetSection("隐私与安全") }
-            item {
-                SetRow(
-                    icon = "◐",
-                    iconColor = PrismCyan,
-                    title = "生物识别解锁",
-                    subtitle = "即将支持 · 可选二次解锁",
-                    trailing = { PrismSwitch(checked = biometric, onCheckedChange = { biometric = it }) }
-                )
-            }
-            // v1 US-301（方案 B 识图）：纯文本模型识图 —— 视觉旁路授权 + 自动开关
+            // v1 批次16（US-1603）：移除「生物识别解锁」占位（从未实现，M0 起 UI 占位造成
+            // 「功能存在但无效」的误导）；「隐私与安全」区块仅此一项，一并移除。
+            // v1 批次16（US-1604）：安全拦截提示并入「高危操作」行（同属安全拦截功能，
+            // 拆成两行造成认知割裂——见下方手机操控区块）。
             item { SetSection("识图（纯文本模型）") }
             item {
                 SetRow(
@@ -255,21 +244,15 @@ fun SettingsScreen(
                     }
                 )
             }
+            // v1 批次16（US-1604）：安全拦截提示并入高危操作行——两者同属安全拦截功能：
+            // 支付/密码/验证码为不可绕过硬拦截（固定行为），发送/删除/拨号策略由本行循环切换。
             item {
                 SetRow(
-                    icon = "⛔",
+                    icon = "🛡",
                     iconColor = Color(0xFFFF7A6B),
-                    title = "安全拦截",
-                    subtitle = "支付/密码/验证码硬拦截；发送/删除/拨号需你确认"
-                )
-            }
-            // v1 真机二次修复（Issue 4b）：高危动作（发送/删除/拨号/短信）确认策略三态选择
-            item {
-                SetRow(
-                    icon = "🖊",
-                    iconColor = Color(0xFFFFB84D),
-                    title = "高危操作",
-                    subtitle = highRiskApprovalSubtitle(highRiskApprovalMode),
+                    title = "高危操作拦截",
+                    subtitle = "支付/密码/验证码一律硬拦截 · 发送/删除/拨号：" +
+                        highRiskApprovalSubtitle(highRiskApprovalMode),
                     onClick = { viewModel.setHighRiskApprovalMode(nextHighRiskApprovalMode(highRiskApprovalMode)) }
                 )
             }

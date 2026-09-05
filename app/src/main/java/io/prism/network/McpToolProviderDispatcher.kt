@@ -35,4 +35,10 @@ class McpToolProviderDispatcher(
     ): String =
         if (config.serverType == McpServerType.LOCAL) localProvider.callTool(config, name, arguments)
         else remoteProvider.callTool(config, name, arguments)
+
+    // v1 批次16（US-1602）：连接诊断按 serverType 分发——远程透出错误分类，
+    // 本地（内置 Filesystem 等）恒成功（listTools 已验证）。
+    override suspend fun diagnose(config: McpServerConfig): McpConnectionDiagnostic =
+        if (config.serverType == McpServerType.LOCAL) localProvider.diagnose(config)
+        else remoteProvider.diagnose(config)
 }

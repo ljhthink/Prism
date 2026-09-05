@@ -70,6 +70,14 @@ class LocalMcpToolProvider(
         }
     }
 
+    /**
+     * 连接诊断（v1 批次16 US-1602）：本地内置 Server 无网络连接，恒成功。
+     * 「listTools 空 = 该本地 Server 未实现工具」→ success=true + toolCount=0
+     *（语义：连接成功但无工具，由上层判定为 Fail）。
+     */
+    override suspend fun diagnose(config: McpServerConfig): McpConnectionDiagnostic =
+        McpConnectionDiagnostic(success = true, toolCount = listTools(config).size)
+
     override suspend fun describeTools(config: McpServerConfig): List<ToolDefinition> = withContext(Dispatchers.IO) {
         when {
             config.name.equals(NAME_FILESYSTEM, ignoreCase = true) -> filesystemTools().map { it.toToolDefinition() }

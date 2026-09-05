@@ -11,13 +11,13 @@ import org.junit.Before
 import org.junit.Test
 
 /**
- * RagTargetConfigRepository 单元测试（UXR8 Bug1，ADR-028）。
+ * RagTargetConfigRepository 单元测试（UXR8 Bug1，ADR-028 + v1 批次18 语义变更）。
  *
  * 验证 RagTarget 三态（Off / AllLibraries / SpecificLibrary）的 DataStore 持久化：
- * - 默认值 AllLibraries（对齐 ADR-012 5.2「默认开启」）
+ * - **默认值 Off（v1 批次18 语义变更，真机 RCA）**：用户未明确开启知识库时不得自动注入
+ *   KB 内容（opt-in 语义；缺失/未知 mode / kbId<=0 → Off，fail-safe，BR-security-005）
  * - 三态设置/读取往返
  * - Flow 响应新值
- * - decode 容错（未知 mode / kbId<=0 → 回退 AllLibraries，fail-safe，BR-security-005）
  *
  * 背景（UXR8 Bug1，考古 TKN-UXR8-ARCHAEOLOGY-001）：修复"用户关闭 RAG 后
  * 新对话/重启又被重置为全库 → 知识库内容被系统主动注入"。
@@ -34,13 +34,17 @@ class RagTargetConfigRepositoryTest {
     }
 
     @Test
-    fun `default rag target is AllLibraries`() = runBlocking {
-        assertEquals("未配置时应默认全库（ADR-012 默认开启）", RagTarget.AllLibraries, repository.getRagTarget())
+    fun `default rag target is Off when never configured`() = runBlocking {
+        assertEquals(
+            "未配置时应默认关闭（v1 批次18：用户未开启知识库不得自动注入）",
+            RagTarget.Off,
+            repository.getRagTarget()
+        )
     }
 
     @Test
-    fun `flow emits default AllLibraries initially`() = runBlocking {
-        assertEquals("Flow 首次发射应为 AllLibraries", RagTarget.AllLibraries, repository.ragTarget().first())
+    fun `flow emits default Off initially`() = runBlocking {
+        assertEquals("Flow 首次发射应为 Off", RagTarget.Off, repository.ragTarget().first())
     }
 
     @Test
@@ -70,19 +74,19 @@ class RagTargetConfigRepositoryTest {
     }
 
     @Test
-    fun `decode unknown mode falls back to AllLibraries`() {
+    fun `decode unknown mode falls back to Off`() {
         assertEquals(
-            "未知 mode 应回退 AllLibraries（fail-safe）",
-            RagTarget.AllLibraries,
+            "未知 mode 应回退 Off（fail-safe + 防未请求注入）",
+            RagTarget.Off,
             RagTargetConfigRepository.decode("unknown", null)
         )
     }
 
     @Test
-    fun `decode missing mode falls back to AllLibraries`() {
+    fun `decode missing mode falls back to Off`() {
         assertEquals(
-            "缺失 mode 应回退 AllLibraries",
-            RagTarget.AllLibraries,
+            "缺失 mode 应回退 Off（首次安装 opt-in）",
+            RagTarget.Off,
             RagTargetConfigRepository.decode(null, null)
         )
     }
@@ -93,11 +97,11 @@ class RagTargetConfigRepositoryTest {
     }
 
     @Test
-    fun `decode specific with invalid kbId falls back to AllLibraries`() {
-        // kbId <= 0（如被外部写入脏数据）→ 回退全库，避免下游检索异常（BR-security-005 纵深防御）
-        assertEquals(RagTarget.AllLibraries, RagTargetConfigRepository.decode("specific", 0L))
-        assertEquals(RagTarget.AllLibraries, RagTargetConfigRepository.decode("specific", -5L))
-        assertEquals(RagTarget.AllLibraries, RagTargetConfigRepository.decode("specific", null))
+    fun `decode specific with invalid kbId falls back to Off`() {
+        // kbId <= 0（如被外部写入脏数据）→ 关闭，避免下游检索异常 + 注入意外（BR-security-005）
+        assertEquals(RagTarget.Off, RagTargetConfigRepository.decode("specific", 0L))
+        assertEquals(RagTarget.Off, RagTargetConfigRepository.decode("specific", -5L))
+        assertEquals(RagTarget.Off, RagTargetConfigRepository.decode("specific", null))
     }
 
     @Test
