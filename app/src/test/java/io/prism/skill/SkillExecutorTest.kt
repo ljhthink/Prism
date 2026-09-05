@@ -146,13 +146,79 @@ class SkillExecutorTest {
     }
 
     @Test
-    fun `selectMcpServer falls back to first enabled when namespace unmatched`() {
-        val server = makeServer("Time", isEnabled = true)
+    fun `selectMcpServer returns null when namespaced tool matches no server`() {
+        // v1 批次19（真机 RCA）：命名空间匹配不到 Server 时返回 null（报"无可用 MCP Server"），
+        // 不再静默回退第一个启用 Server——旧语义曾把 mcp____Web_Search__* 幻影路由到 Time
+        val timeServer = makeServer("Time", isEnabled = true)
         val result = SkillExecutor.selectMcpServer(
-            listOf(server),
+            listOf(timeServer),
             toolName = "mcp_Unknown__get_current_time"
         )
-        assertEquals("Time", result?.name)
+        assertEquals("未匹配的命名空间不应回退", null, result)
+    }
+
+    @Test
+    fun `selectMcpServer routes underscore server name by prefix`() {
+        // v1 批次19（真机 RCA 核心用例）：含连续下划线的 Server 名——旧 substringBefore("__")
+        // 反解歧义导致 mcp____Web_Search__* 全部幻影路由到 Time。
+        // Server 名 ".  Web Search" 规范化 → "___Web_Search"（与真机一致），
+        // 工具全名 = mcp_ + ___Web_Search + __ + webSearchSogou = mcp____Web_Search__webSearchSogou
+        val timeServer = makeServer("Time", isEnabled = true)
+        val webSearchServer = makeServer(".  Web Search", isEnabled = true)
+        val result = SkillExecutor.selectMcpServer(
+            listOf(timeServer, webSearchServer),
+            toolName = "mcp____Web_Search__webSearchSogou"
+        )
+        assertEquals("含连续下划线命名空间应按前缀精确路由", ".  Web Search", result?.name)
+        // 剥离与路由同源：剥出物理工具名
+        assertEquals(
+            "webSearchSogou",
+            SkillExecutor.stripNamespace("mcp____Web_Search__webSearchSogou", ".  Web Search")
+        )
+        // 旧反解算法对照（证明歧义）：substringBefore("__") 会得到 ""（起始即命中分隔符）而非命名空间
+        assertEquals("", "___Web_Search__webSearchSogou".substringBefore("__"))
+    }
+
+    // ==================== ac-verifier 补充（TKN-V1B19-ACCEPTANCE-001） ====================
+
+    @Test
+    fun `selectMcpServer longest prefix wins for nested namespaces`() {
+        // v1 批次19 验收补充 a（guardrail P3-2 锚点）：嵌套名歧义下最长前缀优先。
+        // Server "a" 前缀 mcp_a__ 与 Server "a  b"（规范化 a__b）前缀 mcp_a__b__ 对
+        // 工具 mcp_a__b__t 双双命中 → 严格更长前缀胜出，路由到 "a  b"（旧反解算法会把
+        // 命名空间反解为 "a" 幻影路由到前者）。
+        val a = makeServer("a", isEnabled = true)
+        val aSpaceB = makeServer("a  b", isEnabled = true)
+        val result = SkillExecutor.selectMcpServer(listOf(a, aSpaceB), toolName = "mcp_a__b__t")
+        assertEquals("最长前缀优先应路由到 a  b", "a  b", result?.name)
+        // 剥离与路由同源：按命中 Server 前缀剥出物理工具名
+        assertEquals("t", SkillExecutor.stripNamespace("mcp_a__b__t", "a  b"))
+    }
+
+    @Test
+    fun `selectMcpServer routes underscore nested name to exact match`() {
+        // v1 批次19 验收补充 a（任务建议原例）：server "a" 与 "a_b"，工具 mcp_a_b__t——
+        // 仅 "a_b" 前缀（mcp_a_b__）命中（"mcp_a__" 在第 7 字符 'b'≠'_' 不匹配），
+        // 精确路由到 "a_b"，不回退 "a" 也不回退第一个启用 Server。
+        val a = makeServer("a", isEnabled = true)
+        val aB = makeServer("a_b", isEnabled = true)
+        val result = SkillExecutor.selectMcpServer(listOf(a, aB), toolName = "mcp_a_b__t")
+        assertEquals("a_b", result?.name)
+    }
+
+    @Test
+    fun `selectMcpServer skill tool without mcp prefix falls back to first enabled`() {
+        // v1 批次19 验收补充 b（回归锁）：无 mcp_ 前缀的工具（Skill/跨 App，如 skillName__tool）
+        // 不走命名空间路由分支，仍回退第一个启用 Server——批次19 语义收紧仅针对带命名空间的
+        // MCP 工具，Skill 工具行为不变（批准方案 §1.4 第 3 条）。
+        val disabled = makeServer("disabled", isEnabled = false)
+        val enabled1 = makeServer("enabled1", isEnabled = true)
+        val enabled2 = makeServer("enabled2", isEnabled = true)
+        val result = SkillExecutor.selectMcpServer(
+            listOf(disabled, enabled1, enabled2),
+            toolName = "mySkill__do_something"
+        )
+        assertEquals("Skill 工具仍应回退第一个启用 Server", "enabled1", result?.name)
     }
 
     // ==================== ac-verifier 补充：toMcpNamespace / selectMcpServer 边界（TKN-UXR2-ACCEPTANCE-001） ====================
@@ -414,10 +480,14 @@ class SkillExecutorTest {
     @Test
     fun `executeLoop text tool path trips circuit breaker after consecutive failures`() = runBlocking {
         // AC-S3 红线（guardrail P2，TKN-V1B12-GUARDRAIL-001）：文本路径 continue 前补重复工具熔断——
-        // 同一文本工具连续失败 ≥ MAX_CONSECUTIVE_TOOL_FAILURES(=2) 即置空工具+提示（与原生路径一致），
+        // 同一文本工具连续失败达阈值（v1 批次18：分类别阈值 3，外科式仅禁用该工具）即提示换工具，
         // 否则文本工具连续失败只能靠 maxRounds=50 硬顶浪费 token/轮次。
         val provider = FakeChatStreamProvider(
             rounds = listOf(
+                listOf(
+                    StreamEvent.Delta("<tool_call>skill__t\n<arg_key>v</arg_key>\n<arg_value>1</arg_value>\n</tool_call>"),
+                    StreamEvent.Done
+                ),
                 listOf(
                     StreamEvent.Delta("<tool_call>skill__t\n<arg_key>v</arg_key>\n<arg_value>1</arg_value>\n</tool_call>"),
                     StreamEvent.Done
@@ -439,10 +509,10 @@ class SkillExecutorTest {
             maxRounds = 10, idGenerator = { 1L }
         ) { }
 
-        // 第 1、2 轮连续失败 → 熔断 → 第 3 轮无工具 → 纯文本回答 → 回路自然结束
-        assertEquals("熔断后仅再跑 1 轮纯文本（共 3 轮）", 3, provider.roundsConsumed)
-        assertTrue("熔断后下轮工具列表应为空", provider.lastTools.isNullOrEmpty())
-        assertEquals("工具被调用 2 次后熔断，未无限重试", 2, mcpProvider.callCount)
+        // 第 1~3 轮连续失败 → 熔断（阈值 3）→ 第 4 轮无可用工具 → 纯文本回答 → 回路自然结束
+        assertEquals("熔断后仅再跑 1 轮纯文本（共 4 轮）", 4, provider.roundsConsumed)
+        assertTrue("熔断后下轮工具列表应为空（唯一工具被禁用）", provider.lastTools.isNullOrEmpty())
+        assertEquals("工具被调用 3 次后熔断，未无限重试", 3, mcpProvider.callCount)
         // 失败结果以 user 消息回灌
         assertTrue(
             "失败结果应以 user 消息回灌",

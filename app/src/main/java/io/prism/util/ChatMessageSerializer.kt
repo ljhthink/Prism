@@ -14,7 +14,8 @@ import kotlinx.serialization.json.Json
  *
  * **容错配置**：
  * - `ignoreUnknownKeys = true`：旧版 JSON 含未知字段时不崩溃，向前兼容（消息模型演进）
- * - `encodeDefaults = true`：显式编码默认值字段，保证新旧版本解码一致
+ * - `encodeDefaults = false`（v1 批次17）：默认值字段不写入，防 variants/activeVariantIndex
+ *   等新增字段逐条膨胀会话 JSON；反序列化缺失字段应用默认值，语义不变
  *
  * 纯函数、无 Android Context 依赖（BR-testing-004 可测性），可在纯 JVM 测试中直接验证。
  */
@@ -22,7 +23,11 @@ object ChatMessageSerializer {
 
     private val json = Json {
         ignoreUnknownKeys = true
-        encodeDefaults = true
+        // v1 批次17（US-1707，guardrail 防膨胀）：改为 encodeDefaults=false ——
+        // 默认值字段（variants=空 / activeVariantIndex=0 / transientImage=false /
+        // isSystemNotice=false / sources=空 等）不再逐条写入会话 JSON。
+        // 反序列化时缺失字段应用默认值，语义不变（roundtrip 单测覆盖）。
+        encodeDefaults = false
     }
 
     /**

@@ -77,8 +77,9 @@ class SkillExecutorApprovalModeLoopTest {
 
     @Test
     fun `executeLoop DISABLED mode triggers circuit breaker rather than maxRounds error`() = runBlocking {
-        // DISABLED 模式每轮都返回 tool_call → 连续失败 2 次后触发重复工具熔断
-        //（UXR6 问题 1 修复：熔断后置空工具 + 提示 LLM 直接回答，不再发射 maxRounds Error）
+        // DISABLED 模式每轮都返回 tool_call → 连续失败达分类别阈值（v1 批次18：默认 3）后
+        // 触发重复工具熔断（UXR6 问题 1 修复：熔断后禁用该工具 + 提示 LLM 直接回答，
+        // 不再发射 maxRounds Error）
         val provider = FakeChatStreamProvider(
             rounds = listOf(listOf(StreamEvent.ToolCallComplete("c1", "skill__t", emptyMap()))),
             repeatLastRound = true
@@ -94,7 +95,7 @@ class SkillExecutorApprovalModeLoopTest {
             systemPrompt = null, ragContext = null,
             tools = listOf(makeToolDefinition("skill__t")),
             mcpServers = listOf(makeServer("fs", true)),
-            maxRounds = 2, idGenerator = { idCounter++ }
+            maxRounds = 3, idGenerator = { idCounter++ }
         ) { events.add(it) }
 
         // 熔断后不再发射 maxRounds Error（回路因工具为空自然结束，LLM 纯文本回答）

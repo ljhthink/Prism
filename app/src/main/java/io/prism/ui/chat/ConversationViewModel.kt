@@ -257,6 +257,15 @@ class ConversationViewModel(
      */
     private val askUserLocalToolExecutor: io.prism.skill.AskUserLocalToolExecutor? = null,
     /**
+     * v1 批次17（US-1701，ADR-043 D1）：TODO 任务规划工具执行器（`todo_write`）。
+     *
+     * 非 null 时注入 `todo_write` 工具定义到 [buildTools]，并将 [state][io.prism.skill.TodoLocalToolExecutor.state]
+     * 暴露为 [todoList] 供 TodoCard 渲染；会话切换时调用 `reset()` 清空（会话级清单）。
+     * null 时降级为不注册 TODO 工具（向后兼容既有测试）。
+     * 生产环境由 [Factory] 从 [PrismApplication.todoLocalToolExecutor] 注入。
+     */
+    private val todoLocalToolExecutor: io.prism.skill.TodoLocalToolExecutor? = null,
+    /**
      * v1 US-301/302（方案 B 纯文本模型识图）：视觉旁路编排器。
      *
      * 主 Provider 为纯文本模型（图片直传 400 + 视觉不支持信号）时，编排「云端视觉旁路
@@ -289,8 +298,29 @@ class ConversationViewModel(
      * null 时降级为仅提问卡片作答（向后兼容既有测试）。
      * 生产环境由 [Factory] 从 [PrismApplication.phoneControlAskUserNotifier] 注入。
      */
-    private val phoneControlAskUserNotifier: io.prism.phonecontrol.PhoneControlAskUserNotifier? = null
+    private val phoneControlAskUserNotifier: io.prism.phonecontrol.PhoneControlAskUserNotifier? = null,
+    /**
+     * 手机操控完成回报通知器（v1 批次16 US-1605）：本条消息的工具调用含 `phone_control__*`
+     * 且回复完成时，若 App 在后台发「任务完成」通知（点击回 Prism 查看汇报）。
+     *
+     * null 时降级为不发完成通知（向后兼容既有测试）。
+     * 生产环境由 [Factory] 从 [PrismApplication.phoneControlCompletionNotifier] 注入。
+     */
+    private val phoneControlCompletionNotifier: io.prism.phonecontrol.PhoneControlCompletionNotifier? = null
 ) : ViewModel() {
+
+    /**
+     * v1 批次16（US-1605）：本条消息是否使用过手机操控工具（[StreamEvent.ToolCallStart] 时
+     * 检测 `phone_control__` 前缀置位；回复完成/取消后复位）。VM 内部状态（L-5 修复：
+     * 不经构造 var 注入）。
+     */
+    private var phoneControlUsedThisTurn = false
+
+    /**
+     * v1 批次16（US-1605）：本轮是否被用户取消或异常终止——失败/取消不发「任务完成」通知，
+     * 改发「异常结束」通知（M-1 修复：失败误报已完成）。
+     */
+    private var phoneControlTurnFailed = false
 
     /**
      * 消息 id 生成器（M4 Phase D R-3 修复：AtomicLong 保证跨线程可见性）。
@@ -301,6 +331,33 @@ class ConversationViewModel(
      * `getAndIncrement()` 提供原子读改写 + happens-before 保证。
      */
     private val nextId = AtomicLong(0L)
+
+    /**
+     * v1 批次17（US-1703）：TODO 清单状态流（TodoCard 渲染源）。
+     *
+     * executor 为 null（既有测试/未接线）时暴露恒空 fallback，UI 不渲染卡片。
+     * 会话切换（startNewConversation/loadSession）由 [resetTodoList] 清空。
+     */
+    private val fallbackTodoState = MutableStateFlow(io.prism.skill.TodoListState())
+    val todoList: kotlinx.coroutines.flow.StateFlow<io.prism.skill.TodoListState> =
+        todoLocalToolExecutor?.state ?: fallbackTodoState
+
+    /** v1 批次17（US-1703）：会话切换时清空 TODO 清单（会话级，不跨会话残留）。 */
+    private fun resetTodoList() {
+        todoLocalToolExecutor?.reset()
+    }
+
+    /**
+     * v1 批次17（US-1708，ADR-043 D4）：待继承的历史版本（重试生成用）。
+     *
+     * [regenerateLastAiMessage] 把被重试消息的既有 variants 存入本字段，
+     * [launchAnswer] 创建占位消息后消费并置 [regenTargetId]，生成完成时
+     * [markCompleted] 把本轮内容追加为新变体。非重试路径恒为 null。
+     */
+    private var pendingRegenVariants: List<io.prism.ui.model.MessageVariant>? = null
+
+    /** v1 批次17（US-1708）：本轮重试目标消息 id（markCompleted 捕获变体用），-1 = 非重试。 */
+    private var regenTargetId = -1L
 
     /**
      * v1 US-301：视觉旁路进行中标志（guardrail M-1 并发修复）。
@@ -536,10 +593,11 @@ class ConversationViewModel(
     /**
      * RAG 检索目标模式（US-019，ADR-012 5.2）。
      *
-     * 默认 [RagTarget.AllLibraries]（全库检索 + 默认开启）。
+     * 默认 [RagTarget.Off]（v1 批次18，guardrail P2-1：内存初始值与持久化 decode 缺省语义
+     * 对齐——用户未明确开启知识库时不自动注入；init 异步读取持久化值恢复用户上次选择）。
      * 用户可在对话页通过 [setRagTarget] 切换三态：全库 / 指定库 / 关闭。
      */
-    private val _ragTarget = MutableStateFlow<RagTarget>(RagTarget.AllLibraries)
+    private val _ragTarget = MutableStateFlow<RagTarget>(RagTarget.Off)
     val ragTarget: StateFlow<RagTarget> = _ragTarget.asStateFlow()
 
     /**
@@ -809,6 +867,205 @@ class ConversationViewModel(
     }
 
     /**
+     * v1 批次17（US-1704，ADR-043 D2）：覆写 AI 消息的思维链与输出内容（思维链透明化）。
+     *
+     * CAS 原子更新指定 ASSISTANT 消息的 content/thinkingChain，**不截断后续消息**
+     *（与 [editUserMessageAndResend] 的编辑重发语义区分：覆写是原地修正，不重新生成）。
+     * 消息携带 variants（重试生成过）时同步更新 active 变体，保持
+     * 「消息字段 ≡ variants[activeVariantIndex]」不变量。
+     *
+     * **边界**：非 ASSISTANT 角色忽略；新内容空白忽略；isTyping（生成中）忽略。
+     *
+     * @param messageId 目标 AI 消息 id
+     * @param newContent 覆写后的正文（trim 后非空才生效）
+     * @param newThinkingChain 覆写后的思维链（null/空白 = 清空思维链）
+     * @return 是否生效
+     */
+    fun editAiMessage(messageId: Long, newContent: String, newThinkingChain: String?): Boolean {
+        val trimmed = newContent.trim()
+        if (trimmed.isEmpty()) return false
+        if (_isTyping.value) return false
+        var applied = false
+        _messages.update { msgs ->
+            val index = msgs.indexOfFirst { it.id == messageId && it.role == Role.ASSISTANT }
+            if (index < 0) return@update msgs
+            // guardrail P3-4：协议层 assistant(toolCalls) 占位消息（content=""）不可编辑——
+            // 编辑会使占位携带正文，破坏「空 content + toolCalls」的请求回放契约
+            if (msgs[index].toolCalls.isNotEmpty()) return@update msgs
+            applied = true
+            val updated = msgs.toMutableList()
+            val old = updated[index]
+            val edited = old.copy(
+                content = trimmed,
+                thinkingChain = newThinkingChain?.trim()?.takeIf { it.isNotEmpty() }
+            )
+            // 不变量维护：有 variants 时把编辑结果同步进 active 变体
+            updated[index] = if (edited.variants.isNotEmpty() &&
+                edited.activeVariantIndex in edited.variants.indices
+            ) {
+                edited.copy(
+                    variants = edited.variants.toMutableList().also {
+                        it[edited.activeVariantIndex] = io.prism.ui.model.MessageVariant(
+                            content = edited.content,
+                            thinkingChain = edited.thinkingChain,
+                            searchResults = edited.searchResults,
+                            sources = edited.sources,
+                            createdAt = System.currentTimeMillis()
+                        )
+                    }
+                )
+            } else {
+                edited
+            }
+            updated
+        }
+        if (applied) messagesDirty = true
+        return applied
+    }
+
+    /**
+     * v1 批次17（US-1706）：把当前会话完整复制保存为新会话（回退前的数据安全兜底）。
+     *
+     * 语义对齐 LibreChat fork / SillyTavern checkpoint（ADR-043 D3）：一行 JSON 拷贝，
+     * 原会话不动。隐私边界与 [persistSession] 一致（深度思考关闭时剥离 thinkingChain）。
+     *
+     * @return 是否保存成功（repo 缺失 / 空消息 / 序列化失败返回 false）
+     */
+    fun saveCopyAsNewSession(): Boolean {
+        val repo = sessionRepository ?: return false
+        val msgs = _messages.value
+        if (msgs.isEmpty()) return false
+        val baseTitle = msgs.firstOrNull { it.role == Role.USER }?.content?.take(50)?.trim()
+            ?: "新会话"
+        val toPersist = if (_thinkingEnabled.value) msgs else stripThinkingChain(msgs)
+        val json = try {
+            io.prism.util.ChatMessageSerializer.encodeList(toPersist)
+        } catch (e: Exception) {
+            Log.w(TAG, "saveCopyAsNewSession serialize failed: ${e::class.simpleName}")
+            return false
+        }
+        repo.save(
+            io.prism.data.Session(
+                title = "$baseTitle（副本）",
+                messagesJson = json,
+                updatedAt = System.currentTimeMillis()
+            )
+        )
+        return true
+    }
+
+    /**
+     * v1 批次17（US-1706，ADR-043 D3）：从指定 user 消息回退——保留该消息、删除其后全部，
+     * 并自动以该消息重新发起回答（修正方向重来）。
+     *
+     * **数据安全**（考古 F 风险：persistSession 会以截断后内容覆盖写回原会话行）：
+     * saveCopyFirst=true 时先 [saveCopyAsNewSession] 备份完整对话，备份失败则放弃回退
+     *（防数据丢失）；sessionRepository 为 null（无持久化）时无可失数据，直接回退。
+     *
+     * **边界**：目标非 USER 角色忽略；isTyping（生成中）忽略；目标不存在忽略。
+     *
+     * @param messageId 目标 user 消息 id
+     * @param saveCopyFirst 是否先另存完整对话为新会话（UI 确认对话框选项）
+     * @return 是否已发起回退重答
+     */
+    fun rollbackFromUserMessage(messageId: Long, saveCopyFirst: Boolean): Boolean {
+        if (_isTyping.value) return false
+        val msgs = _messages.value
+        val index = msgs.indexOfFirst { it.id == messageId && it.role == Role.USER }
+        if (index < 0) return false
+        val target = msgs[index]
+        // guardrail R2 残留①：系统提示消息（appendSystemNotice 恒为 USER 角色）不可作为回退锚点
+        if (target.isSystemNotice || target.content.isBlank()) return false
+        if (saveCopyFirst && sessionRepository != null && !saveCopyAsNewSession()) {
+            return false // 备份失败 → 放弃回退（防数据丢失，goal-lock 防护）
+        }
+        _messages.update { it.subList(0, index + 1).toList() } // toList：guardrail P3-3，防子视图入 StateFlow
+        messagesDirty = true
+        launchAnswer(target.content)
+        return true
+    }
+
+    /**
+     * v1 批次17（US-1708，ADR-043 D4）：重新生成最后一条 AI 回复（SillyTavern swipes 语义）。
+     *
+     * - 首次重试：把当前内容迁移为 variants[0]（全部版本保留可切换）；
+     * - 后续重试：在既有 variants 基础上继续追加；
+     * - 生成经 [launchAnswer] 重跑（继承 variants → 生成完成 [markCompleted] 追加新变体并置 active）；
+     * - 重试期间旧版本不丢失、可随时切换回去。
+     *
+     * **边界**：仅最后一条消息为非空 ASSISTANT 时可用；isTyping 忽略；无前置 user 消息忽略。
+     *
+     * @return 是否已发起重新生成
+     */
+    fun regenerateLastAiMessage(): Boolean {
+        if (_isTyping.value) return false
+        val msgs = _messages.value
+        val last = msgs.lastOrNull() ?: return false
+        // guardrail P3-1：系统提示消息（不进 LLM 历史的占位）不可作为重试锚点
+        if (last.role != Role.ASSISTANT || last.content.isBlank() || last.isSystemNotice) return false
+        val userMsg = msgs.lastOrNull {
+            it.role == Role.USER && it.content.isNotBlank() && !it.isSystemNotice
+        } ?: return false
+        // 首次重试：当前内容迁移为 variants[0]；后续重试：保留全部既有版本
+        pendingRegenVariants = last.variants.ifEmpty {
+            listOf(
+                io.prism.ui.model.MessageVariant(
+                    content = last.content,
+                    thinkingChain = last.thinkingChain,
+                    searchResults = last.searchResults,
+                    sources = last.sources,
+                    createdAt = last.timestamp
+                )
+            )
+        }
+        _messages.update { list ->
+            if (list.isNotEmpty() && list.last().id == last.id) list.dropLast(1) else list
+        }
+        messagesDirty = true
+        launchAnswer(userMsg.content)
+        return true
+    }
+
+    /**
+     * v1 批次17（US-1708）：切换 AI 消息的历史版本（‹ 2/3 › 切换器）。
+     *
+     * 切换 = 把目标变体字段拷回消息本体（消息 content 恒等于 active 变体内容，
+     * 保证后续请求历史使用所选版本）；variants 本身不进 LLM 请求。
+     *
+     * **边界**：无 variants / 索引越界 / 索引未变化 / isTyping 时忽略。
+     *
+     * @param messageId 目标 AI 消息 id
+     * @param index 目标变体索引
+     * @return 是否切换成功
+     */
+    fun switchVariant(messageId: Long, index: Int): Boolean {
+        if (_isTyping.value) return false
+        var switched = false
+        _messages.update { msgs ->
+            val msgIndex = msgs.indexOfFirst { it.id == messageId && it.role == Role.ASSISTANT }
+            if (msgIndex < 0) return@update msgs
+            val msg = msgs[msgIndex]
+            val variants = msg.variants
+            if (variants.isEmpty() || index !in variants.indices || index == msg.activeVariantIndex) {
+                return@update msgs
+            }
+            switched = true
+            val v = variants[index]
+            val updated = msg.copy(
+                content = v.content,
+                thinkingChain = v.thinkingChain,
+                searchResults = v.searchResults,
+                sources = v.sources,
+                variants = variants,
+                activeVariantIndex = index
+            )
+            msgs.toMutableList().also { it[msgIndex] = updated }
+        }
+        if (switched) messagesDirty = true
+        return switched
+    }
+
+    /**
      * 发送一条消息（US-019 RAG + US-026 Skill 工具执行回路 + US-035 三层记忆集成）。
      *
      * **流程**：
@@ -874,6 +1131,8 @@ class ConversationViewModel(
         _isTyping.value = false
         sessionId = null
         sessionObjId = 0L
+        // v1 批次17（US-1703）：会话切换清空 TODO 清单
+        resetTodoList()
         // UXR4 问题 8/9（ADR-024）：新会话无未落库变更，清脏标记
         messagesDirty = false
         l2MemoryContext = null
@@ -882,7 +1141,7 @@ class ConversationViewModel(
         // 原逻辑（UX-001 问题 4）每次新对话重置为 AllLibraries，导致用户关闭 RAG 后
         // 开新会话又静默打开 → 知识库内容被"系统主动注入"（考古 TKN-UXR8-ARCHAEOLOGY-001）。
         // 现保留用户当前（已持久化）的 RAG 模式：Off 保持 Off、指定库保持指定库。
-        // 首次使用默认 AllLibraries（init 读取持久化值，见 RagTargetConfigRepository）。
+        // 首次使用默认 Off（v1 批次18：知识库 opt-in，init 读取持久化值，见 RagTargetConfigRepository）。
     }
 
     /**
@@ -909,6 +1168,16 @@ class ConversationViewModel(
         }
         _messages.value = msgs
         sessionObjId = sessionId
+        // v1 批次18（真机 RCA 2026-09-03，崩溃修复）：恢复的会话消息 id 来自 JSON（可能远大于
+        // 当前 nextId 计数器）——不推进 nextId 会导致后续新消息/占位 id 与恢复消息**重复**，
+        // LazyColumn `key = { it.id }` 抛 IllegalArgumentException("Key N was already used")
+        // 直接崩溃（真机 16:50 FATAL 实证）。推进计数器到恢复最大 id 之上保证全局唯一。
+        val maxRestoredId = msgs.maxOfOrNull { it.id } ?: -1L
+        if (maxRestoredId >= nextId.get()) {
+            nextId.set(maxRestoredId + 1)
+        }
+        // v1 批次17（US-1703）：会话切换清空 TODO 清单
+        resetTodoList()
         // UXR4 问题 8/9（ADR-024）：加载的会话是"只读查看"，清脏标记 ——
         // 退出时不刷新 updatedAt（避免打开即顶到「刚刚」）。
         messagesDirty = false
@@ -984,7 +1253,24 @@ class ConversationViewModel(
      * @return 剥离 thinkingChain 后的消息列表
      */
     private fun stripThinkingChain(msgs: List<ChatMessage>): List<ChatMessage> =
-        msgs.map { if (it.thinkingChain != null) it.copy(thinkingChain = null) else it }
+        msgs.map { msg ->
+            // v1 批次17（guardrail P2-1）：variants 内历史版本的 thinkingChain 一并剥离——
+            // 仅剥顶层会绕过 S1 隐私闸门（重试生成后的历史版本思维链仍落盘）。
+            val hasTopThinking = msg.thinkingChain != null
+            val hasVariantThinking = msg.variants.any { it.thinkingChain != null }
+            if (!hasTopThinking && !hasVariantThinking) {
+                msg
+            } else {
+                msg.copy(
+                    thinkingChain = null,
+                    variants = if (hasVariantThinking) {
+                        msg.variants.map { it.copy(thinkingChain = null) }
+                    } else {
+                        msg.variants
+                    }
+                )
+            }
+        }
 
     /**
      * v1 批次11（终止输出）：取消当前 AI 生成 / 工具回路。
@@ -1078,6 +1364,22 @@ class ConversationViewModel(
             // UXR6 问题 2：创建占位即标记为流式生成中（流式期间 UI 渲染纯文本，完成后再切 Markdown）
             markStreaming(aiId)
             _messages.update { it + ChatMessage(aiId, Role.ASSISTANT, "", System.currentTimeMillis()) }
+            // v1 批次17（US-1708，ADR-043 D4）：重试生成 —— 把被重试消息的既有 variants
+            // 迁移到新占位消息（swipes 语义：旧版本保留、本轮完成后追加为新版本）。
+            // 非重试路径 pendingRegenVariants == null，零影响。
+            pendingRegenVariants?.let { inherited ->
+                pendingRegenVariants = null
+                regenTargetId = aiId
+                _messages.update { msgs ->
+                    msgs.map {
+                        if (it.id == aiId) {
+                            it.copy(variants = inherited, activeVariantIndex = inherited.size)
+                        } else {
+                            it
+                        }
+                    }
+                }
+            }
 
             val active = providerRepository.activeProviderFlow.value
             if (active == null) {
@@ -1112,6 +1414,17 @@ class ConversationViewModel(
             // G-02 修复：按 RagBuildResult 三态差异化处理用户感知
             val ragPlan: RagPlan? = when (ragResult) {
                 is RagBuildResult.Success -> {
+                    // v1 批次18（可观测性）：RAG 注入成功补结构化日志——此前注入无任何日志，
+                    // 真机 RCA「未请求知识库却被注入」时无法确认注入发生与注入规模。
+                    // guardrail P3：target 用可读文本（避免 data object toString 噪音）
+                    val targetDesc = when (val t = _ragTarget.value) {
+                        is RagTarget.SpecificLibrary -> "SpecificLibrary(kbId=${t.kbId})"
+                        else -> t::class.simpleName ?: "unknown"
+                    }
+                    Log.i(
+                        TAG,
+                        "RAG injected: target=$targetDesc citations=${ragResult.plan.citations.size}"
+                    )
                     // 引用来源在检索阶段就附在 AI 占位消息上（用户更早看到引用，无需等 Done，ADR-012 5.3）
                     if (ragResult.plan.citations.isNotEmpty()) {
                         _messages.update { msgs ->
@@ -1146,7 +1459,9 @@ class ConversationViewModel(
                 // （guardrail I-1 修复：此前漏传导致工具实际未暴露给 LLM）
                 phoneControlEnabled = phoneControlEnabled,
                 // PRD MCP/API 增强（US-002）：今日热榜工具（hotlist__get，按 VM 开关注入）
-                hotListEnabled = hotListEnabled
+                hotListEnabled = hotListEnabled,
+                // v1 批次17（US-1702）：TODO 任务规划工具（todo_write，恒启用，纯本地能力）
+                todoWriteEnabled = todoLocalToolExecutor != null
             )
             // UXR4 问题 2/3（ADR-024）：知识库工具在 **RAG 开启 + 嵌入可用** 时注入
             //（LLM 可主动枚举/检索/读取知识库，解决 RAG 仅自动注入、LLM 无知识库感知能力的问题）。
@@ -1237,17 +1552,24 @@ class ConversationViewModel(
                     it.isSystemNotice ||
                     (it.role == Role.ASSISTANT && it.content.isEmpty() && it.toolCalls.isEmpty())
             }
-            // UXR5 问题 4（tool_calls 完整性保护，候选 3 防御）：会话恢复/旧数据可能丢失
-            // assistant(tool_calls) 占位的 toolCalls 字段（ChatMessageSerializer 反序列化），
-            // 导致 history 中出现无前置 tool_calls 的孤儿 TOOL 消息 → DeepSeek 400
-            // "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"。
-            // 防御：丢弃所有无法配对到前置 assistant(tool_calls) 的 TOOL 消息。
-            val filteredHistory = Companion.dropOrphanToolMessages(baseHistory)
+            // UXR5 问题 4 + v1 批次17：tool 配对净化已移至 L1 窗口切片之后统一执行
+            //（见下方 sanitizedHistory）——L1 按条数切片本身可能切断 tool 配对，净化必须在
+            // 切片后作为进入请求前的最后一道；executeLoop 入口的幂等复验兜底其余入口。
 
             // M5 Phase E（US-035）：构建三层记忆上下文（L1 每轮处理 + L2/L3 缓存复用）
             // L1 processMessages 返回 summary + recentMessages；recentMessages 替换原始 history
             // 降级策略：L1 失败降级为 null summary + 原始 history（不阻断对话）
-            val memoryContext = buildMemoryContext(filteredHistory, active)
+            val memoryContext = buildMemoryContext(baseHistory, active)
+
+            // v1 批次17（真机 RCA 2026-09-03）：tool 配对双向净化 —— 在 L1 窗口切片之后、
+            // 进入请求分支之前执行（切片本身可能切断 tool_calls 与 tool result 的配对）。
+            // 双向保证：孤儿 TOOL 丢弃 / 缺失结果补合成 / toolCallId 错位重写 / 超长截断。
+            // 传入两条分支的 history 即净化结果——syncToolMessages 以 history.size 切片，
+            // 净化必须在此处定形（executeLoop 入口的复验幂等，不再改变长度）。
+            // （原单向 dropOrphanToolMessages 在 L1 之前执行，无法防护切片后的配对破坏。）
+            val sanitizedHistory = SkillExecutor.sanitizeToolCallPairing(memoryContext.recentHistory) {
+                nextId.getAndIncrement()
+            }
 
             // UXR8 N1（ADR-030）：用户显式规则（「关于我」+「如何回答」）—— 除安全限制外
             // 最高优先级层（persona 之后、RAG 之前）。读取失败/未配置 → null 跳过注入（降级）。
@@ -1274,6 +1596,8 @@ class ConversationViewModel(
                 phoneControlGuidance = if (phoneControlEnabled) Companion.PHONE_CONTROL_GUIDANCE else null,
                 // v1 批次9（US-904）：热榜启用时注入能力声明（LLM 感知 hotlist__get）
                 hotListGuidance = if (hotListEnabled) Companion.HOTLIST_GUIDANCE else null,
+                // v1 批次17（US-1702）：TODO 任务规划指引（todo_write 接线时注入）
+                todoGuidance = if (todoLocalToolExecutor != null) Companion.TODO_GUIDANCE else null,
                 enabledSkills = enabledSkills
             )
 
@@ -1285,7 +1609,7 @@ class ConversationViewModel(
                 executeWithToolLoop(
                     aiId = aiId,
                     active = active,
-                    history = memoryContext.recentHistory,
+                    history = sanitizedHistory,
                     mergedSystemPrompt = mergedSystemPrompt,
                     ragContext = ragPlan?.ragContext,
                     tools = tools,
@@ -1297,7 +1621,7 @@ class ConversationViewModel(
                 executePlainStream(
                     aiId = aiId,
                     active = active,
-                    history = memoryContext.recentHistory,
+                    history = sanitizedHistory,
                     systemPrompt = mergedSystemPrompt,
                     ragContext = ragPlan?.ragContext,
                     thinkingEnabled = thinkingEnabled,
@@ -1591,8 +1915,11 @@ class ConversationViewModel(
             // R-2：同步 executeLoop 返回的新增消息（assistant 占位 + tool result）到 _messages
             syncToolMessages(updatedMessages, history.size, aiId)
         } catch (e: CancellationException) {
+            // US-1605：取消不发完成通知（M-1 修复：由 failed 标志统一区分，通知改「异常结束」）
+            phoneControlTurnFailed = true
             throw e // BR-error-handling-007：协程取消必须重抛
         } catch (e: Exception) {
+            phoneControlTurnFailed = true // US-1605：异常结束非「已完成」（M-1 修复）
             // M4 Phase D：结构化日志（BR-error-handling-004），便于定位 executeLoop 异常根因
             Log.w(TAG, "executeLoop failed: ${e::class.simpleName}", e)
             appendDelta(aiId, "\n\n⚠️ 工具执行回路异常: ${e::class.simpleName}")
@@ -1611,7 +1938,28 @@ class ConversationViewModel(
             // UXR4 问题 8/9（ADR-024）：工具回路结束（含最终文本回答完成）落库，
             // updatedAt=最后消息结束时刻；脏标记检查由 persistSession 内部处理。
             persistSession()
+            // v1 批次16（US-1605）：本轮用过手机操控工具且 App 在后台 → 发完成回报通知，
+            // 让用户在其它 App 也能知道任务已结束（点通知回 Prism 查看完整汇报）。
+            notifyPhoneControlCompletion(aiId)
         }
+    }
+
+    /**
+     * 手机操控任务完成回报（v1 批次16 US-1605）。
+     *
+     * 触发条件（全部满足）：本轮调用过 `phone_control__*` 工具 + 未被用户取消 + App 处于后台 +
+     * 注入了通知器。通知点击回到 [io.prism.MainActivity] 查看完整汇报；前台不发（聊天流可见）。
+     */
+    private fun notifyPhoneControlCompletion(aiId: Long) {
+        if (!phoneControlUsedThisTurn) return
+        phoneControlUsedThisTurn = false
+        val failed = phoneControlTurnFailed
+        phoneControlTurnFailed = false
+        val notifier = phoneControlCompletionNotifier ?: return
+        if (io.prism.MainActivity.isForeground) return
+        val summary = _messages.value.lastOrNull { it.id == aiId }?.content.orEmpty()
+            .ifBlank { if (failed) "任务异常结束，点击查看详情" else "任务已结束，点击查看详情" }
+        notifier.notifyCompleted(summary, failed)
     }
 
     /**
@@ -1775,6 +2123,9 @@ class ConversationViewModel(
                 // UI 展示「正在调用工具: xxx」（对齐 Claude Code 工具进度模型）。
                 // 工具名去命名空间前缀展示（如 web_search__search → search）。
                 _activeTool.value = event.toolName.substringAfterLast(SkillExecutor.NAMESPACE_SEPARATOR)
+                // v1 批次16（US-1605）：记录本轮使用过手机操控工具——回复完成后
+                // App 在后台时发完成回报通知（用户在其它 App 也能知道任务结束）。
+                if (event.toolName.startsWith("phone_control__")) phoneControlUsedThisTurn = true
             }
             is StreamEvent.ToolCallDelta -> Unit  // no-op：参数增量片段，UI 实时展示为可选优化
             is StreamEvent.ToolCallComplete -> {
@@ -2152,9 +2503,44 @@ class ConversationViewModel(
 
     /**
      * UXR6 问题 2：标记指定 AI 消息为「生成完成」（UI 切换 Markdown 完整渲染）。
+     *
+     * v1 批次17（US-1708，ADR-043 D4）：重试生成完成时把本轮最终内容追加为新变体
+     *（swipes 语义：全部版本保留可切换）；regenTargetId 置位保证幂等（markCompleted
+     * 会被 finally 兜底多次调用，仅首次追加）。
      */
     private fun markCompleted(aiId: Long) {
         _streamingIds.update { it - aiId }
+        if (regenTargetId == aiId) {
+            regenTargetId = -1L
+            _messages.update { msgs ->
+                msgs.map { m ->
+                    if (m.id == aiId && m.role == Role.ASSISTANT && m.content.isNotBlank()) {
+                        // v1 批次17（guardrail P3-2）：变体数量上限（滑动淘汰最旧版本，防无界膨胀）
+                        // v1 批次17（guardrail P2-1 同点）：变体 thinkingChain 截断对齐 MAX_REASONING_LEN
+                        var vs = m.variants + io.prism.ui.model.MessageVariant(
+                            content = m.content,
+                            thinkingChain = m.thinkingChain?.take(io.prism.skill.SkillExecutor.MAX_REASONING_LEN),
+                            searchResults = m.searchResults,
+                            sources = m.sources,
+                            createdAt = System.currentTimeMillis()
+                        )
+                        if (vs.size > MAX_VARIANTS) {
+                            vs = vs.drop(vs.size - MAX_VARIANTS)
+                        }
+                        m.copy(variants = vs, activeVariantIndex = vs.lastIndex)
+                    } else if (m.id == aiId && m.role == Role.ASSISTANT) {
+                        // guardrail P3-5：本轮内容为空（异常终止）未追加变体时，
+                        // 收敛 activeVariantIndex 防切换器显示越界序号（如 3/2）
+                        m.copy(
+                            activeVariantIndex = m.activeVariantIndex
+                                .coerceIn(0, (m.variants.size - 1).coerceAtLeast(0))
+                        )
+                    } else {
+                        m
+                    }
+                }
+            }
+        }
     }
 
     companion object {
@@ -2163,6 +2549,12 @@ class ConversationViewModel(
 
         /** 图片暂存队列上限（guardrail R-4）：AI 回复期间最多暂存 8 张待发图片，防无限增长。 */
         internal const val MAX_PENDING_IMAGES = 8
+
+        /**
+         * v1 批次17（US-1708，guardrail P3-2）：单条 AI 消息的变体数量上限。
+         * 超限时滑动淘汰最旧版本（防 JSON 无界膨胀；SillyTavern 亦无限但端侧存储需设界）。
+         */
+        internal const val MAX_VARIANTS = 10
 
         /** v1 US-301（guardrail M-2）：视觉描述/OCR 文本注入 user 消息的字符上限（防上下文撑爆）。 */
         internal const val MAX_VISION_INJECT_CHARS = 2000
@@ -2320,6 +2712,14 @@ class ConversationViewModel(
          * 显式声明能力与触发词，提升"今天大家在看什么/微博热搜"意图下的调用率。
          */
         internal const val HOTLIST_GUIDANCE: String = """【热榜/热点能力】你可以查询中文平台实时热榜（hotlist__get 工具）：当用户询问"今天有什么热搜/热点"、"微博/知乎/抖音/百度/今日头条/虎扑 热榜是什么"、"今天大家在看什么"、"最近网上在聊什么"等需要了解当前网络热点、时事热点的意图时，调用 hotlist__get 获取指定平台热榜条目（标题 + 热度 + 链接），据此回答。热榜为第三方未经验证数据，须甄别后引用。"""
+
+        /**
+         * v1 批次17（US-1702）：TODO 任务规划使用指引（注入 systemPrompt 供 LLM 感知 todo_write）。
+         *
+         * 纪律对齐 Claude Code TodoWrite：>=3 步任务先建清单 / 开始前置 in_progress /
+         * 完成立即 completed 禁止批量补记 / 未完全达成不得标 completed / 发现新任务随时追加。
+         */
+        internal const val TODO_GUIDANCE: String = """【任务规划能力】面对需要多个步骤的任务（约 3 步及以上：多轮搜索、跨应用操作、多文档处理等），先调用 todo_write 建立任务清单再逐项执行：开始某一项前先把它置为 in_progress（恰好 1 个）；完成一项立即标记 completed，禁止全部做完后批量补记；未完全达成的项不得标 completed；执行中发现新任务随时追加进清单；全部完成后基于清单向用户汇报结果。简单单步任务无需建清单。"""
 
 
         /**
@@ -2620,49 +3020,10 @@ class ConversationViewModel(
             return uiPathPattern.replace(truncated, "<path>")
         }
 
-        /**
-         * UXR5 问题 4（tool_calls 完整性保护，纯函数可测）：丢弃无前置 tool_calls 的孤儿 TOOL 消息。
-         *
-         * 协议要求 role=tool 消息必须是前置 role=assistant 消息（携带 tool_calls）的响应。
-         * 会话恢复/旧数据可能丢失 assistant 占位的 toolCalls 字段（[io.prism.util.ChatMessageSerializer]
-         * `ignoreUnknownKeys=true` 反序列化），导致 history 中出现孤儿 TOOL → DeepSeek 400
-         * "Messages with role 'tool' must be a response to a preceding message with 'tool_calls'"。
-         *
-         * **规则（F-01 修复：计数器而非布尔，支持并行工具调用）**：遍历 history，
-         * 维护"待配对的 tool_calls 数量"：
-         * - 遇 assistant 且 toolCalls 非空 → 待配对数量 = toolCalls.size（一轮可含多个并行工具）
-         * - 遇 TOOL 且待配对 > 0 → 保留并递减（配对成功一个工具结果）
-         * - 遇 TOOL 且待配对 = 0 → 丢弃（孤儿，防御 400）
-         * - 遇 user 消息 → 重置待配对数量（新一轮对话边界）
-         *
-         * @param msgs 完整历史
-         * @return 过滤掉孤儿 TOOL 后的消息列表
-         */
-        internal fun dropOrphanToolMessages(msgs: List<ChatMessage>): List<ChatMessage> {
-            // 计数器而非布尔：支持一轮内多个工具并行调用（assistant(toolCalls=[c1,c2]) → tool(c1) → tool(c2)）。
-            // 参见 SkillExecutor 并行工具调用（SkillExecutorTest 并行用例验证）。
-            var pendingToolCalls = 0
-            return msgs.filter { msg ->
-                when (msg.role) {
-                    Role.ASSISTANT -> {
-                        if (msg.toolCalls.isNotEmpty()) pendingToolCalls = msg.toolCalls.size
-                        true
-                    }
-                    Role.TOOL -> {
-                        if (pendingToolCalls > 0) {
-                            pendingToolCalls--
-                            true
-                        } else {
-                            false // 孤儿 TOOL（无前置 tool_calls），丢弃
-                        }
-                    }
-                    Role.USER -> {
-                        pendingToolCalls = 0 // 新对话边界，重置
-                        true
-                    }
-                }
-            }
-        }
+        // v1 批次17：原 dropOrphanToolMessages（UXR5 问题 4，单向孤儿 TOOL 过滤）已由
+        // [SkillExecutor.sanitizeToolCallPairing] 双向配对净化器取代（补充「tool_calls 缺
+        // tool 结果」合成与 toolCallId 错位重写，根治 DeepSeek 400 "insufficient tool
+        // messages following tool_calls message"，真机 RCA 2026-09-03）。
 
         /**
          * 从已启用的 Skill 列表构建 [ToolDefinition]（M4 Phase D，命名空间隔离）。
@@ -2694,7 +3055,9 @@ class ConversationViewModel(
             documentToolsEnabled: Boolean = false,
             askUserExecutor: AskUserLocalToolExecutor? = null,
             phoneControlEnabled: Boolean = false,
-            hotListEnabled: Boolean = false
+            hotListEnabled: Boolean = false,
+            // v1 批次17（US-1702）：TODO 任务规划工具（默认 false 向后兼容既有测试）
+            todoWriteEnabled: Boolean = false
         ): List<ToolDefinition> {
             val skillTools = enabledSkills.flatMap { entry ->
                 (entry.manifest.tools ?: emptyList()).map { toolDecl ->
@@ -2742,7 +3105,13 @@ class ConversationViewModel(
             } else {
                 emptyList()
             }
-            return skillTools + crossAppTools + webSearchTools + documentTools + askUserTools + phoneControlTools + hotListTools
+            // v1 批次17（US-1702）：TODO 任务规划工具（todo_write，单工具全量替换，ADR-043 D1）
+            val todoTools = if (todoWriteEnabled) {
+                listOf(io.prism.skill.TodoLocalToolExecutor.buildToolDefinition())
+            } else {
+                emptyList()
+            }
+            return skillTools + crossAppTools + webSearchTools + documentTools + askUserTools + phoneControlTools + hotListTools + todoTools
         }
 
         /**
@@ -2786,6 +3155,8 @@ class ConversationViewModel(
             userRules: String? = null,
             phoneControlGuidance: String? = null,
             hotListGuidance: String? = null,
+            // v1 批次17（US-1702）：TODO 任务规划使用指引（默认 null 向后兼容既有测试）
+            todoGuidance: String? = null,
             enabledSkills: List<SkillRegistry.SkillEntry>
         ): String {
             val hasUserRules = !userRules.isNullOrBlank()
@@ -2795,6 +3166,7 @@ class ConversationViewModel(
             val hasL3 = !l3Profiles.isNullOrBlank()
             val hasPhoneGuidance = !phoneControlGuidance.isNullOrBlank()
             val hasHotListGuidance = !hotListGuidance.isNullOrBlank()
+            val hasTodoGuidance = !todoGuidance.isNullOrBlank()
             // ADR-018：轻量 Skill 索引（name + description），不注入完整 systemPrompt。
             // description 缺失时回退为 name（仍可感知能力存在）。
             val skillIndex = enabledSkills.mapNotNull { entry ->
@@ -2824,6 +3196,11 @@ class ConversationViewModel(
                 if (hasHotListGuidance) {
                     append("\n\n")
                     append(hotListGuidance)
+                }
+                // v1 批次17（US-1702）：TODO 任务规划指引（todo_write 使用纪律，紧随热榜之后）
+                if (hasTodoGuidance) {
+                    append("\n\n")
+                    append(todoGuidance)
                 }
                 // ADR-015 决策4 合并顺序：RAG → L1 摘要 → L2 跨会话 → L3 画像 → Skill 索引
                 if (hasRag) {
@@ -2885,6 +3262,8 @@ class ConversationViewModel(
                     appLauncherBridge = app.appLauncherBridge,
                     crossAppLauncher = app.crossAppLauncher,
                     mcpToolProvider = app.mcpToolProviderDispatcher,
+                    // v1 批次17（US-1701）：TODO 任务规划工具执行器（todo_write）
+                    todoLocalToolExecutor = app.todoLocalToolExecutor,
                     ragTopK = tier.ragTopK,
                     // 问题 8（ADR-020）：深度思考配置 + 联网搜索工具（默认启用）
                     thinkingConfigRepository = app.thinkingConfigRepository,
@@ -2910,7 +3289,8 @@ class ConversationViewModel(
                     // 依赖 tophubdata Key，未配置时工具返回引导文案）
                     hotListEnabled = true,
                     // v1 真机二次修复（Issue 5）：手机操控高危确认通知（后台作答消费）
-                    phoneControlAskUserNotifier = app.phoneControlAskUserNotifier
+                    phoneControlAskUserNotifier = app.phoneControlAskUserNotifier,
+                    phoneControlCompletionNotifier = app.phoneControlCompletionNotifier
                 )
             }
         }

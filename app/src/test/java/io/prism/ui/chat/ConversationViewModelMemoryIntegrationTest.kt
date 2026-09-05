@@ -283,7 +283,8 @@ class ConversationViewModelMemoryIntegrationTest {
 
         val systemPrompt = provider.receivedSystemPrompts.first()
         assertNotNull(systemPrompt)
-        assertTrue("应含 L3 用户偏好 section", systemPrompt!!.contains("用户偏好"))
+        // v1 批次19：L3 section 记忆化改造——「用户偏好：」→「关于用户的长期记忆」
+        assertTrue("应含 L3 长期记忆 section", systemPrompt!!.contains("关于用户的长期记忆"))
         assertTrue("应含显式偏好内容", systemPrompt.contains("简洁"))
         assertTrue("应标注显式类别", systemPrompt.contains("显式"))
     }
@@ -297,7 +298,7 @@ class ConversationViewModelMemoryIntegrationTest {
         advanceUntilIdle()
 
         val systemPrompt = provider.receivedSystemPrompts.first()
-        assertFalse("无画像时不应注入 L3 偏好", systemPrompt?.contains("用户偏好") == true)
+        assertFalse("无画像时不应注入 L3 长期记忆 section", systemPrompt?.contains("关于用户的长期记忆") == true)
     }
 
     // ==================== AC-4：防污染验证 ====================

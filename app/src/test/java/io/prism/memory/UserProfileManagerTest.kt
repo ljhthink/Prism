@@ -244,7 +244,9 @@ class UserProfileManagerTest {
 
         val result = manager.formatProfilesAsContext()
         assertNotNull("应返回格式化文本", result)
-        assertTrue("应包含前缀", result!!.startsWith("用户偏好："))
+        // v1 批次19：L3 section 记忆化改造——前缀改为「关于用户的长期记忆」+ 引用指令
+        assertTrue("应以记忆化前缀开头", result!!.startsWith("关于用户的长期记忆"))
+        assertTrue("前缀应含身份类问题引用指令", result.contains("不要声称没有记忆"))
         assertTrue("显式偏好应注入原句", result.contains("请用中文回答（显式）"))
         assertTrue("显式偏好应注入原句", result.contains("我喜欢简洁的回复（显式）"))
     }

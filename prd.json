@@ -1,775 +1,889 @@
 {
-  "project": "Prism",
-  "branchName": "ralph/prism-m4-skills",
-  "description": "Prism 手机端 AI 聊天 Agent 应用 —— M0 脚手架 + M1 BYOK 聊天核心 + M2 MCP Client + M3 个人知识库 RAG 已完成（US-001~019 passes=true）；M4 Skills 系统（US-020~029）进行中。依 ADR-001/ADR-013/ADR-014 技术栈：原生 Kotlin + Jetpack Compose + MCP Kotlin SDK 0.12.0 + ObjectBox 5.4.2 + snakeyaml-engine-kmp 3.1（SKILL.md 解析）+ OpenAI tool_calling 流式协议。用户决策策略 C：Skill 可真正调用 MCP 工具。每个故事可在单次迭代完成。",
-  "userStories": [
-    {
-      "id": "US-001",
-      "title": "初始化 Android 项目骨架",
-      "description": "作为开发者，我需要创建 Android 项目骨架，以便后续模块有统一构建基础。",
-      "acceptanceCriteria": [
-        "Gradle Kotlin DSL 项目，AGP 8.13+，minSdk 26，targetSdk 最新",
-        "Jetpack Compose BOM 已配置，MainActivity 使用 Compose 空白界面",
-        "应用可编译并运行显示 'Prism' 标题",
-        "Typecheck passes"
-      ],
-      "priority": 1,
-      "passes": true,
-      "notes": "M0 脚手架。依 ADR-001 最低 Android 8.0 (API 26)。已通过 guardrail-enforcer 三轮审查 + ac-verifier 验收（2026-08-02）。"
-    },
-    {
-      "id": "US-002",
-      "title": "配置 ObjectBox 数据库基础",
-      "description": "作为开发者，我需要集成 ObjectBox 5.4.2，以便持久化知识库/记忆/配置数据。",
-      "acceptanceCriteria": [
-        "build.gradle.kts 应用 io.objectbox 插件 version 5.4.2",
-        "定义 @Entity 数据类 KnowledgeChunk（id/title/content/embedding 字段）",
-        "MyObjectBox.builder().androidContext(context).build() 初始化成功",
-        "box.put/box.get/box.remove CRUD 单元测试通过",
-        "Typecheck passes"
-      ],
-      "priority": 2,
-      "passes": true,
-      "notes": "Context7 验证 ObjectBox 5.4.2 API。AGP 8.13- 用 kotlin.android + kotlin.kapt。已通过 guardrail-enforcer 审查（TKN-PRISM-GUARDRAIL-004）+ ac-verifier 验收（TKN-PRISM-ACCEPTANCE-001，2026-08-02）。AC-003 因无模拟器受限通过（JVM 间接验证 + APK 静态检查）。"
-    },
-    {
-      "id": "US-003",
-      "title": "实现 API Key 加密存储",
-      "description": "作为用户，我希望 API Key 加密存储，以便密钥安全不泄露。",
-      "acceptanceCriteria": [
-        "Android Keystore 生成主密钥（AES-256-GCM，StrongBox 可用时启用）",
-        "DataStore + Tink AEAD 加密 API Key，不落明文",
-        "保存/读取 API Key 单元测试通过（明文不出 Keystore）",
-        "日志中不输出 API Key（安全扫描通过）",
-        "Typecheck passes"
-      ],
-      "priority": 3,
-      "passes": true,
-      "notes": "依 ADR-001 Key 存储：Keystore + DataStore(Tink) + 生物识别。已通过 guardrail-enforcer 审查（TKN-PRISM-GUARDRAIL-005，G-01 中风险已修复）+ ac-verifier 验收（TKN-PRISM-ACCEPTANCE-002，2026-08-02）。AC-001 因无模拟器受限通过（JVM 间接验证 + APK 静态检查，与 US-002 同模式）。34 测试通过（14 基础 + 16 边界 + 4 性能基准 @Ignore）。性能基线已建立。"
-    },
-    {
-      "id": "US-004",
-      "title": "定义 BYOK Provider 配置数据模型",
-      "description": "作为用户，我希望配置多个 AI Provider 端点，以便灵活切换模型。",
-      "acceptanceCriteria": [
-        "ProviderConfig 数据类含 name/baseUrl/apiKeyRef/models/headers 字段",
-        "支持预设 5 种 Provider：OpenAI 兼容/Anthropic/Ollama/Moonshot/OpenRouter",
-        "Provider 配置持久化到 ObjectBox",
-        "配置列表可增删改查单元测试通过",
-        "Typecheck passes"
-      ],
-      "priority": 4,
-      "passes": true,
-      "notes": "US-001 验收标准 1。已通过 guardrail-enforcer 审查（TKN-PRISM-GUARDRAIL-006，G-01 setActive 事务原子性 + G-02 StringListConverter 换行转义已修复，BR-concurrency-001 + BR-data-001 固化）+ ac-verifier 验收（TKN-PRISM-ACCEPTANCE-003，2026-08-02）。52 测试通过（35 基础 + 17 边缘），性能基线已建立。AC-3 真实设备持久化因无模拟器受限通过（与 US-002/003 同模式）。"
-    },
-    {
-      "id": "US-005",
-      "title": "实现聊天 UI 骨架",
-      "description": "作为用户，我希望有聊天界面，以便与 AI 对话。",
-      "acceptanceCriteria": [
-        "NavHost 配置主路由（会话列表/聊天/设置）",
-        "ConversationScreen 显示消息列表 + 输入框",
-        "ConversationViewModel 用 StateFlow 暴露消息列表",
-        "输入消息点击发送可更新 UI（暂不接 AI）",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 5,
-      "passes": true,
-      "notes": "聊天 UI 骨架已完成（2026-08-05）：PrismApp 用 NavHost 配置 4 Tab 主路由（会话/知识库/能力/设置），ConversationScreen 显示消息列表 + 输入框，ConversationViewModel 用 StateFlow 暴露 messages/isTyping，发送可更新 UI（暂不接 AI）。guardrail-enforcer + ac-verifier 验收通过（TKN-PRISM-ACCEPTANCE-004，4 测试通过）。AC-6 浏览器验证为原生 Android 应用不适用，与 US-002/003/004 同模式跳过。"
-    },
-    {
-      "id": "US-006",
-      "title": "实现 OpenAI 兼容 Provider 流式请求",
-      "description": "作为用户，我希望 AI 回复流式显示，以便体验流畅。",
-      "acceptanceCriteria": [
-        "OpenAICompatibleProvider 实现 SSE 流式 /v1/chat/completions 请求",
-        "首字延迟 <1s（取决于端点）",
-        "流式 token 实时更新 UI",
-        "端点不可达时显示错误不崩溃",
-        "Typecheck passes"
-      ],
-      "priority": 6,
-      "passes": true,
-      "notes": "US-001 验收标准 4-6。用 Ktor HttpClient SSE。已通过 guardrail-enforcer 审查（TKN-NETWORK-US006-002，CR-01~CR-05 闭合）+ ac-verifier 验收（TKN-NETWORK-US006-AC-001，2026-08-06，AC-2 公网首字延迟受限通过待 US-007 真机补测）。SSE 首字延迟 JVM 基线 p99≈4ms。单元+集成 23 用例，全量 167 用例 0 失败。"
-    },
-    {
-      "id": "US-007",
-      "title": "实现 Provider 切换",
-      "description": "作为用户，我希望会话中切换 Provider，以便对比不同模型。",
-      "acceptanceCriteria": [
-        "聊天界面提供 Provider 选择器",
-        "切换 Provider 后保留对话历史",
-        "切换后新消息走新 Provider",
-        "Typecheck passes",
-        "Verify in browser using dev-browser skill"
-      ],
-      "priority": 7,
-      "passes": true,
-      "notes": "US-001 验收标准 3。Provider 切换已完成（2026-08-06）：Provider 选择器胶囊 + 底部切换弹层（保留历史、新消息走新 Provider），自定义 headers 编辑界面，名称/BaseURL 输入校验，3 项 guardrail LOW 修复（401 文案区分 / 头名大小写 / apiKeyRef 空回退自定义 Authorization 头）。guardrail 两轮审查（TKN-US007-GUARDRAIL-001/002）+ ac-verifier 验收（TKN-US007-ACCEPTANCE-001）通过。AC-5 浏览器验证为原生 Android 不适用，与 US-002/003/004/005/006 同模式受限通过。"
-    },
-    {
-      "id": "US-008",
-      "title": "集成 MCP Kotlin SDK Client",
-      "description": "作为开发者，我需要集成 MCP Client，以便 AI 能调用工具。",
-      "acceptanceCriteria": [
-        "引入 MCP Kotlin SDK 0.12.0 依赖",
-        "Client + StreamableHttpClientTransport 可连接远程 MCP Server",
-        "client.listTools() 返回工具列表",
-        "client.callTool(name, arguments) 可调用并返回结果",
-        "Typecheck passes"
-      ],
-      "priority": 8,
-      "passes": true,
-      "notes": "Context7 验证 API。OAuth 2.1 后续故事处理。MCP Kotlin SDK 0.12.0 集成完成（2026-08-06）：McpServerConfig/McpServerRepository/McpServerPresets 数据层 + McpClientManager/McpToolProvider 连接层（StreamableHttpClientTransport）+ CapabilitiesViewModel/CapabilitiesScreen UI 层。guardrail 四轮主代码审查（TKN-MCP-CLIENT-004）+ 集成测试审查（TKN-MCP-CLIENT-GUARDRAIL-005）+ ac-verifier 复验（TKN-MCP-CLIENT-AC-002）全部通过。GAP-001 真实 MCP Server 集成测试（嵌入式 Ktor Netty + mcpStreamableHttp，5 用例）+ GAP-002 CapabilitiesViewModelTest（9 用例）+ DEF-001 lint 门禁（FlowOperatorInvokedInComposition 禁用）全部闭合。全量 214 用例 0 失败无回归。"
-    },
-    {
-      "id": "US-009",
-      "title": "实现内置 Filesystem MCP Server",
-      "description": "作为用户，我希望 AI 能读取本地文件，以便处理文档。",
-      "acceptanceCriteria": [
-        "Kotlin 实现 Filesystem MCP Server（基于 SAF/DocumentPicker）",
-        "注册为本地 MCP Server，零配置可用",
-        "AI 调用前需用户确认（防误操作）",
-        "Typecheck passes"
-      ],
-      "priority": 9,
-      "passes": true,
-      "notes": "ADR-001 形态 B 内置 Server 之一。"
-    },
-    {
-      "id": "US-010",
-      "title": "实现预设远程 MCP Server 模板加载",
-      "description": "作为用户，我希望一键添加常用远程 MCP Server，以便快速扩展能力。",
-      "acceptanceCriteria": [
-        "预设 9 个远程模板（GitHub/Notion/Slack/Sentry/Stripe/Asana/Brave/Exa/Context7）",
-        "用户填 API Key 后一键添加",
-        "Server 连接状态可观测（连接中/已连接/错误）",
-        "Typecheck passes"
-      ],
-      "priority": 10,
-      "passes": true,
-      "notes": "ADR-001 形态 A 预设模板。验收通过：docs/reports/2026-08-06-us010-remote-templates-acceptance.md。"
-    },
-    {
-      "id": "US-011",
-      "title": "依赖落地 + KnowledgeChunk 向量索引",
-      "description": "作为开发者，我需要为 M3 RAG 落地技术栈依赖并建立向量索引，以便后续检索。",
-      "acceptanceCriteria": [
-        "libs.versions.toml 新增 onnxruntime-android 1.27.0 与 poi-ooxml 5.5.1",
-        "app/build.gradle.kts 引入依赖并启用 multiDexEnabled",
-        "KnowledgeChunk.embedding 加 @HnswIndex(dimensions=384, distanceType=COSINE) 注解",
-        "nearestNeighbors 近邻查询单元测试通过（含 embedding=null 不参与检索）",
-        "Typecheck passes"
-      ],
-      "priority": 11,
-      "passes": true,
-      "notes": "ADR-007 5.1/5.2/5.3 依赖落地。向量存储复用 ObjectBox 5.4.2 原生 HNSW。验收通过：docs/reports/2026-08-06-us011-deps-vectorindex-acceptance.md。ac-verifier 提示：US-017 检索模块需对 query 维度做显式校验（==384）。"
-    },
-    {
-      "id": "US-012",
-      "title": "实现文档解析器",
-      "description": "作为用户，我希望导入的 PDF/DOCX/XLSX/MD/TXT 文档能被解析为纯文本，以便进入知识库。",
-      "acceptanceCriteria": [
-        "DocumentParser 接口 + 按格式分发实现",
-        "PDF 用 Apache PDFBox pdfbox:3.0.8 抽取文本（PDFTextStripper）",
-        "DOCX/XLSX 用 Apache POI poi-ooxml 5.5.1 抽取文本",
-        "MD/TXT 用自研解析器",
-        "解析单元测试通过（各格式文本抽取正确）",
-        "Typecheck passes"
-      ],
-      "priority": 12,
-      "passes": true,
-      "notes": "ADR-007 5.3。PDF 用 PDFBox 3.0.8（PdfTextStripper）替代 PdfRenderer（PdfRenderer 仅渲染位图无文本 API），规避 pymupdf AGPL。验收通过：docs/reports/2026-08-06-us012-document-parser-acceptance.md（6/6 AC，27+14 用例）。guardrail 有条件通过（G-01 FORMULA 缓存值已修复）。硬门禁：G-03 单文件上限(≤20MB)+流式读取须在 US-016 摄入管线强制落地。"
-    },
-    {
-      "id": "US-013",
-      "title": "实现文本切片器",
-      "description": "作为用户，我希望长文档被切分为可检索的片段，以便精确检索。",
-      "acceptanceCriteria": [
-        "Chunker 支持可配置 chunkSize 与 overlap",
-        "切片保持段落边界优先，避免在句子中间截断",
-        "切片单元测试通过（边界、空输入、超长输入）",
-        "Typecheck passes"
-      ],
-      "priority": 13,
-      "passes": true,
-      "notes": "PRD US-003 验收 2：切片（可配置 chunk size/overlap）。段落边界优先+句子/词边界回退+overlap 跨段落衔接（guardrail G-1 决策）。G-2 句号孤儿/G-3 词边界已修复。验收通过：docs/reports/2026-08-06-us013-chunker-acceptance.md（4/4 AC，15+10 用例，O(n) 性能基线）。"
-    },
-    {
-      "id": "US-014",
-      "title": "实现端侧嵌入引擎",
-      "description": "作为用户，我希望文档片段能在设备本地被嵌入为向量，以便语义检索。",
-      "acceptanceCriteria": [
-        "onnxruntime-android 加载 assets 中的 all-MiniLM-L6-v2 ONNX INT8 模型",
-        "embed(text) 将文本编码为 384 维向量",
-        "模型按需加载，闲置 5 分钟后卸载释放内存",
-        "嵌入单元测试通过（维度正确、向量一致）",
-        "Typecheck passes"
-      ],
-      "priority": 14,
-      "passes": true,
-      "notes": "ADR-007 5.2。模型打包入 APK（用户已确认）。guardrial-enforcer 两轮审查（TKN-US014-EMBEDDING-001 阻断 → TKN-US014-EMBEDDING-002 通过，G-01 并发竞态阻断级已修复：embed 全程持锁 BR-concurrency-002）+ ac-verifier 验收（TKN-US014-EMBEDDING-AC-001，5/5 AC 通过，29 嵌入测试 + 4 perf 基准，全量 379 测试 0 失败）。AC-1 真机 AssetManager / AC-3 native 内存释放因无模拟器受限通过（与 US-002~008 同模式），待 US-018 真机补测。验收报告：docs/reports/2026-08-07-us014-embedding-acceptance.md。性能基线：docs/reports/perf/2026-08-07-us014-embedding-baseline.md（embed p99 短文本 2ms / 长文本 14ms）。"
-    },
-    {
-      "id": "US-015",
-      "title": "实现知识库分库数据模型",
-      "description": "作为用户，我希望知识库支持分库管理（如工作/学习），以便按库组织文档。",
-      "acceptanceCriteria": [
-        "KnowledgeBase 实体（id/name/createdAt）关联 KnowledgeChunk",
-        "KnowledgeBaseRepository 分库 CRUD",
-        "KnowledgeChunk 关联所属库字段",
-        "分库 CRUD 单元测试通过",
-        "Typecheck passes"
-      ],
-      "priority": 15,
-      "passes": true,
-      "notes": "PRD US-003 验收 5：分库管理。ADR-008 5.1~5.4。guardrail-enforcer 两轮审查（TKN-US015-GUARDRAIL-001 有条件通过 G-01 HNSW Query.remove bug #1209 + G-02 Query 未 close → TKN-US015-GUARDRAIL-002 通过 G-01~G-05 全修复）+ ac-verifier 验收（TKN-US015-AC-001，5/5 AC 通过，31 单元测试 + 6 极端场景 + 全量 410 回归 0 失败，性能基线 remove p99 42ms）。HNSW 删除策略：findIds() + Box.remove(*ids) 规避 #1209。验收报告：docs/reports/2026-08-07-us015-knowledgebase-model-acceptance.md。"
-    },
-    {
-      "id": "US-016",
-      "title": "实现摄入管线",
-      "description": "作为用户，我希望导入文档后自动完成解析→切片→嵌入→入库，以便生成可检索知识库。",
-      "acceptanceCriteria": [
-        "IngestionPipeline：解析→切片→嵌入→写入指定库",
-        "摄入进度与错误可观察",
-        "嵌入为 null 的片段不建索引并提示",
-        "摄入管线集成测试通过",
-        "Typecheck passes"
-      ],
-      "priority": 16,
-      "passes": true,
-      "notes": "PRD US-003 验收 2：摄入→切片→嵌入→入库全链路。ADR-009 7 项决策（组件串联/写入路径/Flow 进度观察/嵌入失败降级/chunk 级事务/ensureActive 取消/input.use 关闭）。guardrail-enforcer 两轮审查（TKN-US016-GUARDRAIL-001 有条件通过 M1 InputStream 泄漏阻断 → TKN-US016-GUARDRAIL-002 通过 M1 修复有效 + 新增 catch(IllegalArgumentException) 设计合理）+ ac-verifier 验收（TKN-US016-AC-001，5/5 AC 通过，28 测试 + 438 全量回归 0 失败，BR-error-handling-006 proposed→active）。验收报告：docs/reports/2026-08-07-us016-ingestion-pipeline-acceptance.md。性能基线：docs/reports/perf/2026-08-07-us016-ingestion-pipeline-baseline.md（FakeEmbedder 100 chunk p99 735ms，生产预估 +N×100ms ONNX）。遗留：L1 ADR 5.7 描述同步、L2 US-018 Failed.throwable 安全映射、L3 chunk title 重复策略、L4 ObjectBox 写入失败测试受限。"
-    },
-    {
-      "id": "US-017",
-      "title": "实现向量检索",
-      "description": "作为用户，我希望对话时能检索到最相关的文档片段，以便 AI 回答有依据。",
-      "acceptanceCriteria": [
-        "top-k 检索（默认 k=5，可配置）基于 nearestNeighbors",
-        "支持指定库或全库检索",
-        "检索结果含相似度分数与来源（文件/片段位置）",
-        "检索单元测试通过（含空库、无匹配）",
-        "Typecheck passes"
-      ],
-      "priority": 17,
-      "passes": true,
-      "notes": "PRD US-003 验收 3/5。4GB 低端机小批次 top-k=3。实现：KnowledgeBaseRepository.search + RetrievalResult 数据类（ADR-010 9 项决策）。验收：guardrail-enforcer 第一轮 Pass（5 低危建议 L1~L5 已全部处理）+ ac-verifier 通过（48 测试 0 失败，4/4 AC + 性能基线 p50<200us + 安全门禁 + 全量回归 0 失败）。性能基线 docs/reports/perf/2026-08-07-us017-retrieval-baseline.md。"
-    },
-    {
-      "id": "US-018",
-      "title": "实现知识库管理 UI",
-      "description": "作为用户，我希望在 App 内管理知识库、导入文档并查看进度，以便使用 RAG。",
-      "acceptanceCriteria": [
-        "知识库列表页显示分库",
-        "支持创建/删除分库",
-        "支持导入文档（解析→摄入进度展示）",
-        "摄入失败与未建索引提示",
-        "Typecheck passes"
-      ],
-      "priority": 18,
-      "passes": true,
-      "notes": "PRD US-003 验收 5/7。4GB 低端机小批次模式。ADR-011 7 项决策（保留一级 Tab 改造 Mock→真实 / PrismApplication 暴露 5 个 lazy 依赖 / UiState 单一聚合 + IngestionEvent 收集 / SAF OpenDocument + ContentResolver / Failed.throwable 安全映射 / 默认库独立入口 / StateFlow conflate 节流）。code-archaeologist 考古（TKN-US018-ARCH-001，12 项风险清单 R-1~R-12）。guardrail-enforcer 两轮审查（TKN-US018-GUARDRAIL-001 有条件通过 G-01~G-04 中危须修复 → TKN-US018-GUARDRAIL-002 通过 G-01~G-05 全部修复有效：状态原子性 _uiState.update CAS / Failed 日志 BR-error-handling-004 / catch 不静默吞 / createLibrary+deleteLibrary 统一 try-catch 兜底）+ ac-verifier 验收（TKN-US018-AC-001，5/5 AC 通过，35 单元测试 + 524 全量回归 0 失败，R2-1 日志措辞 simpleName 修复有效）。验收报告：docs/reports/2026-08-07-us018-kb-ui-acceptance.md。遗留：G-06 测试调度器 / G-07 文件名 fallback / G-08 Factory KDoc 措辞（低危可延后）。"
-    },
-    {
-      "id": "US-019",
-      "title": "实现 RAG 对话集成",
-      "description": "作为用户，我希望对话时 AI 检索知识库并标注引用来源，以便降低幻觉。",
-      "acceptanceCriteria": [
-        "对话时检索 top-k 片段注入 prompt",
-        "可指定库或全库检索",
-        "AI 回答标注引用来源（文件名+片段位置）",
-        "无引用时主动说明",
-        "集成测试通过",
-        "Typecheck passes"
-      ],
-      "priority": 19,
-      "passes": true,
-      "notes": "PRD US-003 验收 4/4。M3 个人知识库 RAG 全链路收尾。强制引用来源防幻觉。ADR-012 八项决策（RagContextBuilder 独立组件 / RagTarget 三态默认全库 / Citation 多引用 inline 标注 / ChatStreamProvider 接口扩展 systemPrompt+ragContext / 三级降级 EmbedFailed+NormalChat+Success / IO 线程 top-k=3 阈值 0.3 / _messages 原子 CAS / UI 文案修正）。code-archaeologist 考古（TKN-US019-ARCH-001，7 项风险清单 R-1~R-7 + 9 文件接口契约分析）。guardrail-enforcer 两轮审查（TKN-US019-RAG-GUARDRAIL-001 有条件通过 1 HIGH+4 MEDIUM → TKN-US019-RAG-GUARDRAIL-002 通过 G-01~G-05 全部修复有效：显式 try-catch 重抛 CancellationException BR-error-handling-007 / RagBuildResult sealed 三态 / Log.w 替代 simpleName appendDelta / SpecificLibrary init 校验 kbId>0 / 4 新测试补齐正向快乐路径 + 阈值过滤空 + SpecificLibrary 校验/检索 + 历史过滤器排除 aiId BR-interface-004）+ ac-verifier 验收（TKN-US019-RAG-ACCEPTANCE-001，5/6 AC 完全通过 AC-1/3/4/5/6，AC-2 数据层通过但 UI 入口 RagModeSelectorSheet「指定库」标「暂未开放」为已知 GAP 不阻断延后至后续 US，57 单元测试 + 519 全量回归 0 失败）。验收报告：docs/reports/2026-08-07-us019-rag-integration-acceptance.md。遗留：G-06 TypingIndicator 未区分检索/流式阶段 / G-07 SpecificLibrary kbId<=0 隐式容错测试已补齐 / R2-1 外层 runCatching 可改 try-catch 仅 catch Exception / R2-3 ADR-012 5.5 Toast→appendDelta 过渡方案待 Toast 基建（低危可延后）。"
-    },
-    {
-      "id": "US-020",
-      "title": "Skill 数据模型与 Repository",
-      "description": "作为开发者，我需要 Skill 持久化数据模型与 CRUD 仓库，以便管理本地/远程 Skill 的启用状态与来源元数据。",
-      "acceptanceCriteria": [
-        "定义 SkillConfig @Entity（id/name/displayName/source/sourceUri/skillDir/isEnabled/isInstalled/version/dependsOnMcpServers/createdAt/updatedAt），仿 McpServerConfig 模式",
-        "定义 SkillSource 常量（LOCAL_BUILTIN/LOCAL_USER/REMOTE）",
-        "定义 SkillManifest 内存数据类（name/description/version/userInvocable/disableModelInvocation/homepage/os/tools/systemPrompt/maxRounds/body）+ SkillToolDecl",
-        "SkillRepository CRUD（save/get/getAll/findByName/remove/removeAll/setEnabled）仿 McpServerRepository，dependsOnMcpServers 复用 StringListConverter",
-        "SkillRepository 单元测试通过（CRUD + setEnabled + findByName + removeAll）",
-        "Typecheck passes"
-      ],
-      "priority": 20,
-      "passes": true,
-      "notes": "M4 数据层基础。ADR-013 5.1 双层模型（SkillConfig 持久化 + SkillManifest 内存）。考古报告集成点 2 确认照搬 McpServerRepository 模式。P1 常规风险。Phase A 验收通过（TKN-M4-PHASEA-ACCEPTANCE-001，6/6 AC，12 单元测试）。"
-    },
-    {
-      "id": "US-021",
-      "title": "SKILL.md 解析器（snakeyaml-engine-kmp）",
-      "description": "作为开发者，我需要解析 SKILL.md 文件（YAML frontmatter + Markdown body），以便从 Skill 目录加载 manifest。",
-      "acceptanceCriteria": [
-        "libs.versions.toml + app/build.gradle.kts 引入 snakeyaml-engine-kmp 3.1 依赖",
-        "实现 SkillManifestParser（splitFrontmatter + yaml 解析 + mapNodeToManifest + validate），frontmatter 用 Yaml 解析为 YamlMap 再映射",
-        "校验 name slug 格式 ^[a-z0-9-]{1,64}$ + description 非空 ≤160 字符，失败抛 SkillParseException",
-        "解析器单元测试通过（标准 frontmatter / 缺失 frontmatter / body 提取 / slug 校验失败 / description 超长 / 嵌套 metadata）",
-        "Typecheck passes"
-      ],
-      "priority": 21,
-      "passes": true,
-      "notes": "M4 解析层。ADR-013 5.2。charleskorn/kaml 已归档，改用 snakeyaml-engine-kmp（活跃维护，KMP 原生）。tech-selection-researcher TKN-M4-TOOLCALLING-RESEARCH-001 选型。P2 跨模块（新依赖）。Phase B 验收通过（TKN-M4-PHASEB-ACCEPTANCE-002，guardrail 三轮通过）。"
-    },
-    {
-      "id": "US-022",
-      "title": "Skill 注册中心与内置预设",
-      "description": "作为用户，我希望启动时自动扫描加载内置与已安装 Skill，以便 AI 能根据 Skill 描述自动选择调用。",
-      "acceptanceCriteria": [
-        "实现 SkillRegistry（scanAndSync 启动扫描 + scanBuiltin assets + scanDirectory user/remote + syncToRepository + enabledSkills + StateFlow 暴露）",
-        "在 assets/skills/builtin/ 下放置 5 个内置 Skill（translator/code-reviewer/meeting-notes/summarizer/rewriter），每个含 SKILL.md",
-        "PrismApplication 新增 skillRepository + skillRegistry by lazy 依赖",
-        "启动扫描在 IO 协程执行不阻塞 UI，扫描结果同步 SkillConfig 表（新增入库/缺失标记 isInstalled=false）",
-        "SkillRegistry 单元测试通过（扫描 + 同步 + enabledSkills 过滤）",
-        "Typecheck passes"
-      ],
-      "priority": 22,
-      "passes": true,
-      "notes": "M4 注册层。ADR-013 5.3/5.8。3 纯 prompt Skill + 2 工具调用 Skill 验证两条路径。考古报告集成点 1 确认 by lazy DI 模式。P2 跨模块。Phase B 验收通过（TKN-M4-PHASEB-ACCEPTANCE-002，guardrail 三轮通过）。"
-    },
-    {
-      "id": "US-023",
-      "title": "StreamEvent 与 ChatStreamProvider 接口扩展（tool_calling）",
-      "description": "作为开发者，我需要扩展流式接口支持 tool_calling，以便 Skill 可声明工具供 LLM 调用。",
-      "acceptanceCriteria": [
-        "StreamEvent 新增 ToolCallStart/ToolCallDelta/ToolCallComplete 三个子类（Provider 中立，arguments 已解析为 Map）",
-        "定义 ToolDefinition（type+function{name,description,parameters}）+ ToolChoice sealed（Auto/Required/Specific/None）",
-        "ChatStreamProvider.streamChat 新增 tools + toolChoice 可选参数（默认 null 向后兼容）",
-        "ChatMessage 新增 Role.TOOL + toolCallId + toolName + toolCalls 字段，Role.toRequestRole 扩展 TOOL→tool",
-        "现有调用零改动（向后兼容），全量回归测试通过",
-        "Typecheck passes"
-      ],
-      "priority": 23,
-      "passes": true,
-      "notes": "M4 接口层。ADR-014 5.1/5.2/5.6。Provider 中立设计，未来 Anthropic 适配无需改 StreamEvent。BR-interface-004 历史过滤器需扩展保留 tool 消息。P2 跨模块。Phase A 验收通过（TKN-M4-PHASEA-ACCEPTANCE-001，5/6 AC + AC-4 有条件通过：Role.TOOL Fail Fast 裁定为 ADR-014 5.6 分阶段决策，Phase C US-024 补完整 TOOL→tool 映射）。"
-    },
-    {
-      "id": "US-024",
-      "title": "OpenAICompatibleProvider tool_calling 协议实现",
-      "description": "作为开发者，我需要实现 OpenAI tool_calls 流式协议，以便 LLM 返回的工具调用能被解析执行。",
-      "acceptanceCriteria": [
-        "ChatCompletionRequest 扩展 tools/toolChoice/parallelToolCalls 字段，MessageBody 扩展 toolCallId/toolCalls",
-        "buildRequestBody 扩展：注入 tools + tool result 回灌（role=tool 消息携带 toolCallId）",
-        "delta 状态机：pendingToolCalls Map<index,Accumulator> 跨 chunk 拼接 arguments，finish_reason=tool_calls 时 JSON.parse 发射 ToolCallComplete",
-        "JSON 解析失败降级为 Error 事件不崩溃，CancellationException 重抛（BR-error-handling-007）",
-        "单元测试通过（单 tool_call delta 拼接 / 多并行 tool_call / finish_reason 触发 / 不完整 JSON 降级 / tool result 回灌请求体）",
-        "Typecheck passes"
-      ],
-      "priority": 24,
-      "passes": true,
-      "notes": "M4 协议层。ADR-014 5.3。OpenAI arguments 是 JSON string 增量片段需跨 chunk 按 index 拼接。strict mode + parallel_tool_calls=false。P2 跨模块。Phase C 验收通过（TKN-M4-PHASEC-ACCEPTANCE-001，6/6 AC，guardrail 二次审查通过 TKN-M4-PHASEC-GUARDRAIL-002）。M2 修复：completeToolCalls 防御 tool_call id 缺失。"
-    },
-    {
-      "id": "US-025",
-      "title": "SkillExecutor 工具执行回路",
-      "description": "作为用户，我希望 Skill 调用工具时经用户确认并执行，工具结果回灌给 LLM 继续生成。",
-      "acceptanceCriteria": [
-        "实现 SkillExecutor（executeToolCall 单次执行 + executeLoop 回路编排 maxRounds 默认 10）",
-        "executeToolCall：用户确认（复用 UiConfirmationGate）→ 查找 MCP Server → callTool 超时 30s → 命名空间隔离去前缀 skillName__toolName",
-        "executeLoop：循环 streamChat → ToolCallComplete 触发执行 → tool result 回灌 → 继续生成，maxRounds 超限强制终止",
-        "CancellationException 重抛（BR-error-handling-007），失败/超时/拒绝信息回灌给 LLM 降级",
-        "SkillExecutor 单元测试通过（确认通过执行 / 拒绝回灌 / 超时回灌 / maxRounds 终止 / 命名空间去前缀）",
-        "Typecheck passes"
-      ],
-      "priority": 25,
-      "passes": true,
-      "notes": "M4 执行层。ADR-014 5.4/5.5。复用 McpToolProviderDispatcher + UiConfirmationGate。考古报告集成点 5 确认 MCP 基建已完整未接入对话流。P2 跨模块。Phase C 验收通过（TKN-M4-PHASEC-ACCEPTANCE-001，6/6 AC，guardrail 二次审查通过）。M3 修复：sanitizeErrorMessage 信息脱敏（CWE-209）。M4 修复：6 处 catch 块添加 Log.w 结构化日志（BR-error-handling-004）。"
-    },
-    {
-      "id": "US-026",
-      "title": "ConversationViewModel Skill 注入与工具执行回路集成",
-      "description": "作为用户，我希望对话时 AI 能根据启用的 Skill 自动调用工具并基于结果继续生成，Skill 失败不影响主对话。",
-      "acceptanceCriteria": [
-        "systemPrompt 合并：RAG grounding rules + Skill systemPrompt + Skill 索引（description），避免 prompt 膨胀",
-        "tools 构建：enabledSkills.flatMap → ToolDefinition，命名空间隔离 skillName__toolName",
-        "工具执行回路集成：有 tools 时调用 SkillExecutor.executeLoop，无 tools 时普通 streamChat",
-        "降级策略：tool_calling 失败（400 不支持/执行异常）退化为普通对话，用户始终能得到 AI 回复",
-        "_messages.update 原子 CAS（BR-concurrency-004），历史过滤器保留 tool 消息（BR-interface-004）",
-        "集成测试通过（Skill 注入 / 工具调用回路 / 降级 / 历史过滤）",
-        "Typecheck passes"
-      ],
-      "priority": 26,
-      "passes": true,
-      "notes": "M4 集成层。ADR-013 5.4 + ADR-014 5.7。ConversationViewModel Factory 扩展注入 skillRegistry + skillExecutor。考古报告集成点 4 RAG 双通道合并策略。P2 跨模块。Phase D 验收通过（TKN-M4-PHASED-ACCEPTANCE-001，7/7 AC，guardrail 两轮通过，M-1/M-3 修复有效，M-2 异常路径补 3 测试验证通过，757 回归 0 失败，BR-error-handling-008 转 active）。AC-4 受限通过：R-5 已知限制（StreamEvent.Error 不携带 statusCode，400 精确降级推迟 Phase E）。"
-    },
-    {
-      "id": "US-027",
-      "title": "Skills 管理 UI 重构",
-      "description": "作为用户，我希望在能力页管理 Skill（启用/禁用/查看详情），而非看到静态硬编码列表。",
-      "acceptanceCriteria": [
-        "新建 SkillsViewModel（skills StateFlow + selectedSkill + executionState sealed），仿 CapabilitiesViewModel",
-        "CapabilitiesScreen Skills 段重构：删除硬编码 skills 列表，改为 viewModel.skills.collectAsState() 动态渲染",
-        "SkillRow enabled 开关调用 viewModel.setEnabled(id, enabled) 落库，SectionHeader 动态计数",
-        "点击 Skill 打开 PrismSheet 详情弹层（展示 manifest + body 摘要）",
-        "SkillsViewModel + UI 单元测试通过（启用切换 / 详情展示 / 动态计数）",
-        "Typecheck passes"
-      ],
-      "priority": 27,
-      "passes": true,
-      "notes": "M4 UI 层。ADR-013 5.5。考古报告集成点 3 R-1 静态硬编码须从零重建。无需新增路由（CAPABILITIES Tab 内 CapSegment.SKILLS）。P1 常规。Phase E 验收通过（TKN-M4-PHASEE-US027-ACCEPTANCE-001，guardrail 两轮通过）。"
-    },
-    {
-      "id": "US-028",
-      "title": "远程 Skill 下载（标准校验）",
-      "description": "作为用户，我希望通过 URL 下载远程 Skill，并通过安全校验后安装。",
-      "acceptanceCriteria": [
-        "实现 SkillDownloader：URL 校验（仅 https + 主机非空 + .skill.md/.zip 扩展）+ HTTP 下载（Content-Length ≤10MB + Content-Type 校验 + 30s 超时）",
-        "内容校验：.zip 解压含 SKILL.md + zip slip 防护（解压路径不超出目标目录），.skill.md 直接解析",
-        "SkillManifestParser 沙箱解析（snakeyaml 默认禁用任意类构造）+ 必填字段 + slug 校验",
-        "入库：复制到 filesDir/skills/remote/{name}/ + SkillConfig 写入 source=REMOTE + scanAndSync 刷新",
-        "SkillDownloader 单元测试通过（合法 URL / http 拒绝 / 超大拒绝 / zip slip 拦截 / 解析失败拒绝）",
-        "Typecheck passes"
-      ],
-      "priority": 28,
-      "passes": true,
-      "notes": "M4 远程层。ADR-013 5.6 用户决策标准校验。不要求签名验证（零后端体验差）。BR-security-003 CRLF 防御。P2 跨模块。Phase E 验收通过（TKN-M4-PHASEE-US028-ACCEPTANCE-001，guardrail 两轮通过，6/6 AC，39 MockEngine 集成测试）。"
-    },
-    {
-      "id": "US-029",
-      "title": "Skill 执行可观测",
-      "description": "作为用户，我希望查看 Skill 执行记录（耗时/状态/工具调用链），以便调试与审计。",
-      "acceptanceCriteria": [
-        "定义 SkillExecutionRecord @Entity（id/skillConfigId/skillName/startedAt/finishedAt/durationMs/status/toolCalls/errorMessage/outputPreview）+ ToolCallRecord + ExecutionStatus",
-        "SkillExecutionRepository CRUD（save/getBySkill/最近 10 条）",
-        "SkillExecutor 执行时记录 SkillExecutionRecord（成功/失败/取消）",
-        "Skill 详情页展示最近 10 次执行记录（开始时间/耗时/状态/工具调用链可展开）",
-        "SkillExecutionRepository + UI 单元测试通过（记录写入 / 按技能查询 / 状态映射）",
-        "Typecheck passes"
-      ],
-      "priority": 29,
-      "passes": true,
-      "notes": "M4 可观测层。ADR-013 5.7。执行记录持久化到 ObjectBox 跨会话审计。P1 常规。Phase E 验收通过（TKN-M4-PHASEE-US029-ACCEPTANCE-001，guardrail 两轮通过，6/6 AC，39 US-029 专项测试 + 10 边缘场景，912 回归 0 失败）。已知 GAP（M-3）：生产路径 ConversationViewModel 未传入 skillConfigId/skillName，端到端验证待 Phase D 接入。"
-    },
-    {
-      "id": "US-030",
-      "title": "MemoryRecord 实体 + MemoryRepository CRUD（L2 跨会话记忆存储）",
-      "description": "作为系统，我需要将对话历史向量化存入 ObjectBox，以便新会话能按话题检索相关历史。",
-      "acceptanceCriteria": [
-        "定义 MemoryRecord @Entity（id/sessionId/content/embedding[float[]]/timestamp/turnCount）+ MemoryRecordConverter（List<Float> ↔ float[]）",
-        "MemoryRepository CRUD：save / getBySession / searchByVector(queryEmbedding, topK) / deleteBySession / deleteAll",
-        "searchByVector 复用 M3 ObjectBox 向量搜索（nearVector），返回按相似度排序的 top-k 结果",
-        "MemoryRepository 单元测试通过（save / getBySession / searchByVector top-k / deleteBySession / deleteAll）",
-        "Typecheck passes"
-      ],
-      "priority": 30,
-      "passes": true,
-      "notes": "M5 数据层。ADR-015 5.1。复用 M3 ObjectBox 向量搜索基建（KnowledgeChunk 模式）。P1 常规。Phase A 验收通过（TKN-M5-PHASEA-ACCEPTANCE-001，5/5 AC，59 专项测试 + 971 全量回归 0 失败）。"
-    },
-    {
-      "id": "US-031",
-      "title": "UserProfile 实体 + UserProfileRepository CRUD（L3 用户画像存储）",
-      "description": "作为系统，我需要结构化存储用户偏好（显式+隐式），以便 AI 跨会话理解用户。",
-      "acceptanceCriteria": [
-        "定义 UserProfile @Entity（id/key/value/category[EXPLICIT/IMPLICIT]/updatedAt）+ ProfileCategory 枚举",
-        "UserProfileRepository CRUD：save / get(key) / getAll / getByCategory / update / delete(key) / deleteAll",
-        "单用户单 key 唯一约束（相同 key upsert 而非 insert）",
-        "UserProfileRepository 单元测试通过（save / get / getAll / getByCategory / upsert / delete / deleteAll）",
-        "Typecheck passes"
-      ],
-      "priority": 31,
-      "passes": true,
-      "notes": "M5 数据层。ADR-015 5.2。显式偏好=用户设定，隐式偏好=LLM 抽取。P1 常规。Phase A 验收通过（TKN-M5-PHASEA-ACCEPTANCE-001，5/5 AC，BR-security-001-amendment 转 active）。"
-    },
-    {
-      "id": "US-032",
-      "title": "ConversationSummarizer + SlidingWindowMemoryManager（L1 会话内记忆）",
-      "description": "作为用户，我希望长对话不会因为上下文窗口限制而丢失关键信息，通过滑动窗口+摘要压缩保留要点。",
-      "acceptanceCriteria": [
-        "ConversationSummarizer：使用 OpenAICompatibleProvider 对旧消息生成摘要（非流式单次请求），失败降级为截断",
-        "SlidingWindowMemoryManager：保留最近 N 轮原始消息（默认 10，可配置），超出 N 轮时触发摘要压缩",
-        "摘要压缩：将 N 轮之前的消息压缩为 summary message 注入上下文，保留关键信息",
-        "可配置 N（通过 DataStore 持久化，默认 10），运行时动态生效",
-        "ConversationSummarizer + SlidingWindowMemoryManager 单元测试通过（滑动窗口边界 / 摘要触发 / 摘要注入 / N 可配置 / 摘要失败降级）",
-        "Typecheck passes"
-      ],
-      "priority": 32,
-      "passes": true,
-      "notes": "M5 L1 会话内。ADR-015 5.3。复用 OpenAICompatibleProvider 非流式请求。摘要 prompt 参考 mem0/CALMem 最佳实践。P2 跨模块。Phase B 完成 2026-08-11：49 主 Agent 测试 + 12 ac-verifier 补充 = 61 专项测试通过，1035 全量回归 0 失败。BR-security-005 转 active。"
-    },
-    {
-      "id": "US-033",
-      "title": "CrossSessionMemoryManager（L2 跨会话检索 + 防污染）",
-      "description": "作为用户，我希望新会话能检索到与当前话题相关的历史对话片段，但不被旧会话全文污染。",
-      "acceptanceCriteria": [
-        "对话结束时：将本会话关键消息向量化（复用 Embedder）存入 MemoryRecord",
-        "新会话开始时：将用户首条消息向量化，searchByVector top-k 检索（默认 k=3）相关历史",
-        "防污染：仅注入检索到的 MemoryRecord.content 作为 context，不加载旧会话全文",
-        "检索结果注入 systemPrompt（格式：'相关历史对话：...'），与 RAG 上下文合并",
-        "CrossSessionMemoryManager 单元测试通过（向量化存储 / top-k 检索 / 防污染验证 / 空结果处理 / 注入格式）",
-        "Typecheck passes"
-      ],
-      "priority": 33,
-      "passes": true,
-      "notes": "M5 L2 跨会话。ADR-015 5.4。复用 M3 Embedder + US-030 MemoryRepository。防污染=核心设计约束。P2 跨模块。2026-08-11 验收通过（TKN-M5-PHASEC-ACCEPTANCE-001）：6/6 AC 通过，58 专项测试 + 1105 全量回归 0 失败。"
-    },
-    {
-      "id": "US-034",
-      "title": "UserProfileManager（L3 用户画像管理 + 隐式偏好抽取）",
-      "description": "作为用户，我希望 AI 记住我的偏好（显式设定+隐式抽取），以便越用越懂我。",
-      "acceptanceCriteria": [
-        "显式偏好：用户通过 UI 设定（如'我喜欢简洁的回复'），存入 UserProfile category=EXPLICIT",
-        "隐式偏好：对话结束时，LLM 从近期对话抽取偏好（如'用户常用 Python'），存入 category=IMPLICIT",
-        "隐式抽取使用 OpenAICompatibleProvider 非流式请求，抽取 prompt 返回结构化 JSON（key-value pairs）",
-        "画像注入 systemPrompt（格式：'用户偏好：...'），影响 AI 回复风格",
-        "抽取失败降级为跳过（不阻断对话），upsert 已有 key",
-        "UserProfileManager 单元测试通过（显式设定 / 隐式抽取 / 画像注入 / upsert / 抽取失败降级）",
-        "Typecheck passes"
-      ],
-      "priority": 34,
-      "passes": true,
-      "notes": "M5 L3 用户画像。ADR-015 5.5。复用 OpenAICompatibleProvider + US-031 UserProfileRepository。P2 跨模块。2026-08-11 验收通过（TKN-M5-PHASED-ACCEPTANCE-001）：7/7 AC 通过，80 专项测试 + 1185 全量回归 0 失败。"
-    },
-    {
-      "id": "US-035",
-      "title": "ConversationViewModel 记忆系统集成（L1+L2+L3 上下文注入）",
-      "description": "作为用户，我希望对话时 AI 能利用三层记忆（滑动窗口+跨会话检索+用户画像）提供更连贯的回复。",
-      "acceptanceCriteria": [
-        "L1 集成：sendMessage 时使用 SlidingWindowMemoryManager 管理上下文（滑动窗口+摘要压缩）",
-        "L2 集成：新会话首条消息时触发 CrossSessionMemoryManager 检索，注入相关历史",
-        "L3 集成：systemPrompt 合并用户画像（显式+隐式偏好）",
-        "防污染验证：新会话不加载旧会话全文，仅注入检索结果+画像",
-        "上下文合并：systemPrompt = base + RAG context + 跨会话记忆 + 用户画像（顺序明确）",
-        "集成测试通过（L1 摘要触发 / L2 检索注入 / L3 画像注入 / 防污染 / 上下文合并顺序）",
-        "Typecheck passes"
-      ],
-      "priority": 35,
-      "passes": true,
-      "notes": "M5 集成层。ADR-015 5.6。ConversationViewModel Factory 扩展注入三层记忆组件。P2 跨模块。Phase E 验收通过（TKN-M5-PHASEE-ACCEPTANCE-001，6/6 AC，17 集成测试 + 1237 全量回归 0 失败）。"
-    },
-    {
-      "id": "US-036",
-      "title": "记忆管理 UI（查看/编辑/删除/一键清除）",
-      "description": "作为用户，我希望能查看、编辑、删除 AI 对我的记忆，或一键清除所有记忆。",
-      "acceptanceCriteria": [
-        "新建 MemoryManagementScreen（CapSegment.MEMORY 或设置页二级页面）",
-        "L2 记忆列表：展示 MemoryRecord（会话ID/内容摘要/时间），支持单条删除",
-        "L3 画像列表：展示 UserProfile（key/value/category），支持编辑和删除",
-        "一键清除按钮：删除所有 MemoryRecord + UserProfile（二次确认对话框）",
-        "MemoryManagementViewModel + UI 单元测试通过（列表加载 / 单条删除 / 画像编辑 / 一键清除 / 确认对话框）",
-        "Typecheck passes"
-      ],
-      "priority": 36,
-      "passes": true,
-      "notes": "M5 UI 层。ADR-015 5.7。用户对记忆有完全控制权（GDPR 式）。P1 常规。Phase E 验收通过（TKN-M5-PHASEE-ACCEPTANCE-001，5/5 AC（AC-1 受限通过 Compose UI 需 instrumented test），29 纯函数单元测试 + 6 deleteById 测试）。"
-    },
-    {
-      "id": "US-037",
-      "title": "M6 Phase A: CrossAppLauncher 核心模块（scheme 清单 + Deep Link + Share Sheet + Picker + Bridge）",
-      "description": "作为开发者，我需要实现跨 App 调用的底层能力模块，以便 AI Agent 后续通过 tool_calling 触发跨 App 操作。",
-      "acceptanceCriteria": [
-        "新增 assets/cross-app/app_schemes.json：7 个 App scheme 配置（微信/支付宝/淘宝/抖音/QQ/微博/百度地图），含 appId/displayName/packageName/scheme/defaultAction/actions/fallbackUrl/queryScheme 字段",
-        "新增 AppSchemeEntry 数据类 + SchemeRegistry（从 assets 加载 JSON 配置，kotlinx.serialization 解析）",
-        "新增 AppAvailabilityChecker（PackageManager.getPackageInfo 检测 App 安装状态，未安装返回 false 不抛异常）",
-        "新增 DeepLinkLauncher（Intent.ACTION_VIEW + Uri.parse(scheme) 跳转，FLAG_ACTIVITY_NEW_TASK，ActivityNotFoundException 捕获返回 false）",
-        "新增 ShareSheetLauncher（ACTION_SEND + Intent.createChooser，支持 text/plain 和 image/* MIME）",
-        "新增 MediaPicker（封装 ActivityResultContracts.PickVisualMedia + GetMultipleContents 契约，通过 AppLauncherBridge 桥接）",
-        "新增 AppLauncherBridge（MutableSharedFlow<PendingIntentRequest> + ConcurrentHashMap<Long, CompletableDeferred<String>> + withTimeoutOrNull 30s，仿 UiConfirmationGate 桥接模式）",
-        "新增 CrossAppLauncher 核心入口（组合 SchemeRegistry + AppAvailabilityChecker + DeepLinkLauncher + ShareSheetLauncher + MediaPicker + AppLauncherBridge）",
-        "新增 CrossAppConfirmationRequest 数据类（appDisplayName/actionType/contentPreview/targetScheme/isAppInstalled）",
-        "SchemeRegistry + AppAvailabilityChecker 纯函数单元测试通过（JSON 解析 / App 状态检测 / 异常路径）",
-        "Typecheck passes"
-      ],
-      "priority": 37,
-      "passes": true,
-      "notes": "M6 底层能力层。ADR-016 方案 A（纯 Android 原生，2026-08-11 转 Accepted）。P2 跨模块。零新增第三方依赖。复用 UiConfirmationGate 桥接模式（SharedFlow + CompletableDeferred）。源码考古 TKN-M6-ARCH-001 + 技术选型 TKN-M6-TECH-SELECTION-001。Phase A 验收通过（TKN-M6-PHASE-A-ACCEPTANCE-001，10/10 AC，SchemeRegistryTest 14 + CrossAppLauncherTemplateTest 12 + DeepLink resolveAction 7 + AppAvailabilityCheckerTest 9 全部通过）。"
-    },
-    {
-      "id": "US-038",
-      "title": "M6 Phase B: LocalToolExecutor AI 集成层（接口 + CrossAppLocalToolExecutor + SkillExecutor 扩展）",
-      "description": "作为开发者，我需要将跨 App 调用能力注册为 AI 可触发的本地工具，以便 LLM 通过 tool_calling 自主决策调用跨 App 操作。",
-      "acceptanceCriteria": [
-        "新增 LocalToolExecutor 接口（handles(toolName): Boolean + suspend execute(toolName, args): String），与 McpToolProvider 平行",
-        "新增 CrossAppLocalToolExecutor 实现 LocalToolExecutor：注册 cross_app__open_app / cross_app__share_content / cross_app__pick_media 三个工具，handles 通过 toolName.startsWith(\"cross_app__\") 判断",
-        "CrossAppLocalToolExecutor.execute 内部通过 AppLauncherBridge 桥接 ActivityResult，返回结果文本（成功/失败描述回灌 LLM）",
-        "CrossAppLocalToolExecutor 通过 intentLauncher: (Intent) -> String? 注入解耦 Android 框架（复用 KnowledgeBaseViewModel inputStreamProvider 模式），纯 JVM 可测",
-        "SkillExecutor 扩展：新增 localToolExecutor 构造器参数（默认 null 向后兼容），executeToolCall 增加本地工具分支（localToolExecutor.handles(toolName) → 走本地 execute，否则走 MCP callTool）",
-        "SkillExecutor 现有 M4 全量回归测试 0 失败（localToolExecutor=null 时行为完全一致）",
-        "PrismApplication 新增 CrossAppLauncher + CrossAppLocalToolExecutor by lazy 依赖注入，SkillExecutor 构造增加 localToolExecutor 参数",
-        "CrossAppLocalToolExecutor 单元测试通过（handles 判断 / open_app / share_content / pick_media / 未安装降级 / 超时降级 / 异常路径）",
-        "SkillExecutor 本地工具分支单元测试通过（localToolExecutor 注入 / handles=true 走本地 / handles=false 走 MCP / localToolExecutor=null 向后兼容）",
-        "Typecheck passes"
-      ],
-      "priority": 38,
-      "passes": true,
-      "notes": "M6 AI 集成层。ADR-016 LocalToolExecutor 路径（否决 IntentToolProvider 路径，语义清晰 + 测试性好 + 扩展性强，2026-08-11 转 Accepted）。P2 跨模块。复用 M4 SkillExecutor 回路（用户确认 + 超时 + 错误回灌 + 可观测 + 命名空间隔离）。sequential-thinking 6 步推演决策。Phase B 验收通过（TKN-M6-PHASE-B-ACCEPTANCE-001，10/10 AC，DEF-01 B2 严重缺陷由 Phase C 闭合：PrismApplication.kt 注入 localToolExecutor 到 SkillExecutor）。CrossAppLocalToolExecutorTest 24 + SkillExecutorLocalToolTest 11 + M6PhaseBAcceptanceSupplementTest 26 用例全部通过。"
-    },
-    {
-      "id": "US-039",
-      "title": "M6 Phase C: UI 集成层（AndroidManifest queries + ConversationViewModel 工具注册 + ConversationScreen launcher + 用户确认 UI）",
-      "description": "作为用户，我希望 AI 能在对话中调用其他 App 的功能（如打开微信、分享内容、选取照片），且调用前需我确认以防误操作。",
-      "acceptanceCriteria": [
-        "AndroidManifest.xml 新增 <queries> 声明：7 个目标 App 包名 + 7 个 scheme intent 过滤器 + 2 个 ACTION_SEND intent 过滤器（text/plain 和 image/*），不声明 QUERY_ALL_PACKAGES",
-        "ConversationViewModel.buildTools 合并跨 App 本地工具（cross_app__open_app / cross_app__share_content / cross_app__pick_media 的 ToolDefinition，含 JSON Schema parameters）",
-        "ConversationViewModel.Factory 注入 CrossAppLauncher + CrossAppLocalToolExecutor（通过 PrismApplication）",
-        "ConversationScreen 注册 ActivityResultContracts.StartActivityForResult launcher，收集 AppLauncherBridge 请求流发起跳转，回调结果回灌 bridge",
-        "ConversationScreen 收集 UiConfirmationGate.requests 流，展示跨 App 确认对话框（App 名称 + 操作类型 + 内容预览 + 确认/取消按钮）",
-        "目标 App 未安装时降级提示（fallbackUrl 网页跳转或提示用户手动打开）",
-        "AI 触发跨 App 调用前必须用户确认（复用 ToolConfirmationGate，确认后才执行跳转）",
-        "集成测试通过（ConversationViewModel 工具执行回路 + 跨 App 工具 handles 判断 + 确认门禁 + 降级路径）",
-        "Typecheck passes"
-      ],
-      "priority": 39,
-      "passes": true,
-      "notes": "M6 UI 集成层 + 里程碑收尾。ADR-016（2026-08-11 转 Accepted）。P2 跨模块。对应 PRD.md US-006 跨 App 调用（产品级）。复用 KnowledgeBaseScreen ActivityResultContracts 先例 + UiConfirmationGate 桥接模式。Phase C 验收通过（TKN-M6-PHASEC-ACCEPTANCE-001，10/10 AC，DEF-01 闭合 + M-1 双重超时竞态修复 BR-concurrency-005 转 active）。M6 里程碑审计通过（TKN-M6-MILESTONE-AUDIT-001，1380 全量回归 0 失败）。已知受限：UNC-1 真机 E2E 7 App Deep Link 兼容性待补测。"
-    },
-    {
-      "id": "US-040",
-      "title": "M7 Phase A: 设备档位核心适配层（PerformanceTier + TierManager + TierConfigRepository + NullEmbedder）",
-      "description": "作为开发者，我需要构建设备档位检测与降级的底层基建，以便后续组件能按 RAM 容量差异化加载功能。",
-      "acceptanceCriteria": [
-        "PerformanceTier 枚举定义四档（FULL/STANDARD/MINIMAL/CHAT_ONLY），含 isRagEnabled/isMemoryL2Enabled/isEmbedderEnabled/ragTopK/embedderIdleThresholdMs/checkIntervalMs 属性 + fromRamBytes(totalRamBytes) 静态映射",
-        "PerformanceTier RAM 阈值：FULL≥6GB, STANDARD≥4GB, MINIMAL≥3GB, CHAT_ONLY<3GB（保守阈值应对 totalMem 报告偏差）",
-        "TierManager 通过 TierDetector + OverrideReader 接口注入（解耦 Android Context 与 runBlocking，可测），initialize() 同步检测 RAM + 读取覆盖 + 解析最终档位",
-        "TierManager 暴露 detectedTier/currentTier/totalRamBytes/currentOverride 只读属性 + isInitialized 防御检查",
-        "TierManager.resolveTier 覆盖优先于检测：OVERRIDE_AUTO 用检测值，否则用覆盖值（无效值降级为检测并 Log.w）",
-        "TierConfigRepository 仿 MemoryConfigRepository 模式：独立 DataStore（prism_tier_config）+ Flow 暴露 + suspend getOverride/setOverride + clearOverride",
-        "TierConfigRepository.VALID_VALUES 包含 AUTO + 四档枚举名，setOverride 拒绝非法值（require throw IllegalArgumentException）",
-        "NullEmbedder 实现 Embedder 接口：embed 返回空 FloatArray，embedBatch 返回空 List，isLoaded 返回 false，checkAndUnload 返回 false",
-        "PerformanceTierTest 36 用例 + TierManagerTest 22 用例 + TierConfigRepositoryTest 20 用例 + NullEmbedderTest 17 用例全部通过（共 95 测试）",
-        "Typecheck passes"
-      ],
-      "priority": 40,
-      "passes": true,
-      "notes": "M7 核心适配层。ADR-017 Accepted（guardrail TKN-M7-GUARDRAIL-001/002 通过 + ac-verifier TKN-M7-ACCEPTANCE-001 通过）。P2 跨模块。复用 MemoryConfigRepository DataStore 模式（ADR-015）+ Embedder 接口（M3 ADR-007）。TierManager 接口注入设计避免 Android Context 依赖，纯 JVM 可测。RAM 阈值保守策略（3GB 设备报告 2.8GB 归 CHAT_ONLY）符合 PRD「低端机优先保稳定」语义。H-01 修复（guardrail round1）：DefaultOverrideReader.read() 加 try-catch 兜底 DataStore 异常降级 AUTO，避免 onCreate 崩溃。实际测试 36+23+20+17=96 用例（H-01 新增 1 用例）。"
-    },
-    {
-      "id": "US-041",
-      "title": "M7 Phase B: 集成层（PrismApplication 注入 + ConversationViewModel 降级 + OnnxEmbedder 调度）",
-      "description": "作为系统，我需要在 App 启动时初始化档位管理器，并按档位动态注入 embedder 与记忆管理器，以实现低端设备降级。",
-      "acceptanceCriteria": [
-        "PrismApplication.onCreate 同步初始化 TierManager（DefaultTierDetector + DefaultOverrideReader），在所有 by lazy 注入访问 currentTier 之前完成",
-        "PrismApplication.tierConfigRepository by lazy 暴露（独立 DataStore prism_tier_config）",
-        "PrismApplication.tierManager lateinit var 暴露（onCreate 中 initialize）",
-        "PrismApplication.embedder by lazy 按 tierManager.currentTier.isEmbedderEnabled 返回 EmbedderFactory.create 或 NullEmbedder",
-        "PrismApplication 启动 startEmbedderUnloadScheduler 协程：按 tier.checkIntervalMs 间隔调用 OnnxEmbedder.checkAndUnload(idleThresholdMs)，MINIMAL/CHAT_ONLY 因 checkIntervalMs=0 跳过",
-        "ConversationViewModel 新增 ragTopK 构造参数（默认 DEFAULT_RAG_TOP_K=3 向后兼容），buildRagPlan 用 ragTopK 替代硬编码 RAG_TOP_K",
-        "ConversationViewModel.Factory 按 tier 传入 ragTopK = tier.ragTopK，crossSessionMemoryManager = if tier.isMemoryL2Enabled app.crossSessionMemoryManager else null",
-        "PrismApplication 集成不破坏既有 ConversationViewModelTest（默认参数向后兼容）",
-        "全量单元测试通过（无回归）",
-        "Typecheck passes"
-      ],
-      "priority": 41,
-      "passes": true,
-      "notes": "M7 集成层。ADR-017 4.5/4.6/4.7 Accepted。P2 跨模块。复用 M5 Phase E 已验证的 null 降级基建（crossSessionMemoryManager=null 时 mergeSystemPrompt 自动跳过 L2）。OnnxEmbedder.checkAndUnload 闲置卸载机制激活（M3 实现但未调用，本 Phase 接入调度协程）。ragTopK 动态化替代 M3 硬编码 RAG_TOP_K=3。M-02 修复（guardrail round1）：buildRagPlan 在 ragTopK<=0 时短路返回 NormalChat + search catch 块补 Log.w，避免 NullEmbedder 空向量导致 IllegalArgumentException 异常路径成为热路径。"
-    },
-    {
-      "id": "US-042",
-      "title": "M7 Phase C: UI 层（TierViewModel + SettingsScreen 档位 UI 改造 + TierSheet 弹层）",
-      "description": "作为用户，我希望在设置中看到当前设备档位，并能手动覆盖档位（需重启生效）。",
-      "acceptanceCriteria": [
-        "TierViewModel 注入 TierConfigRepository + TierManager，暴露 override: StateFlow<String> + detectedTier/currentTier/totalRamBytes 只读属性",
-        "TierViewModel.setOverride(value) 持久化覆盖到 DataStore（runCatching 兜底，非法值不崩溃仅 Log.w）",
-        "TierViewModel.clearOverride() 恢复 AUTO",
-        "TierViewModel.Factory 从 PrismApplication 注入 tierConfigRepository + tierManager",
-        "SettingsScreen 删除本地 PerfTier mock enum + 本地 tier state，改用 TierViewModel 驱动",
-        "SettingsScreen 档位行 subtitle 动态显示：AUTO 时「自动检测 · {RAM}GB · {tier}」，覆盖时「手动覆盖 · {tier}」",
-        "SettingsScreen 档位行点击弹出 TierSheet（PrismSheet 容器）",
-        "TierSheet 列出 5 选项（自动 + 四档），每选项显示档位名 + RAM 范围 + 功能简述 + 选中标记",
-        "TierSheet 底部固定提示「修改后需重启 App 生效」",
-        "TierViewModelTest 20 用例通过（override 默认值/setOverride 持久化/clearOverride/非法值兜底/TierManager 快照读取/覆盖优先于检测）",
-        "全量单元测试通过（无回归）",
-        "Typecheck passes"
-      ],
-      "priority": 42,
-      "passes": true,
-      "notes": "M7 UI 层。ADR-017 4.6 Accepted。P2 跨模块。替代原 SettingsScreen PerfTier 三档 mock（本地 state，无持久化）。RAM 格式化用 Locale.US 确保小数点为点号（避免部分地区逗号）。覆盖生效语义：UI 修改仅持久化，currentTier 运行中不变，需重启 App（TierManager.initialize 读取新值）。M-01 修复（guardrail round1）：setOverride/clearOverride 由 runCatching 改为显式 try-catch + 重抛 CancellationException（BR-error-handling-007），行为等价（非法值不崩溃 + Log.w）但协程取消语义正确。"
-    },
-    {
-      "id": "US-043",
-      "title": "M7 Phase D: 构建层（build.gradle.kts abiFilters + APK 体积优化）",
-      "description": "作为开发者，我需要限制 APK 仅打包生产用 ABI，以减小体积并避免模拟器专用 native 库进入发布包。",
-      "acceptanceCriteria": [
-        "app/build.gradle.kts defaultConfig 新增 ndk { abiFilters += listOf(\"arm64-v8a\", \"armeabi-v7a\") }",
-        "排除 x86 / x86_64 ABI（仅模拟器用，生产无用）",
-        "ONNX Runtime Android AAR + ObjectBox + DataStore 的 native 库均含这两个 ABI",
-        "assembleDebug 成功，APK lib/ 目录仅含 arm64-v8a + armeabi-v7a 两个子目录",
-        "APK 内 lib/ 条目验证：libonnxruntime.so / libobjectbox-jni.so / libdatastore_shared_counter.so / libonnxruntime4j_jni.so 仅在 arm64-v8a + armeabi-v7a 下出现",
-        "不启用 largeHeap（ADR-017 4.9：通过档位降级控制内存更符合 PRD 语义）",
-        "不添加前台服务（ADR-017 4.10：嵌入加载 ~200ms，摄入在前台 UI 触发，无需后台长任务）",
-        "Typecheck passes"
-      ],
-      "priority": 43,
-      "passes": true,
-      "notes": "M7 构建层。ADR-017 4.8/4.9/4.10 Accepted。P2 构建配置变更。abiFilters 减小 APK 体积约 40%（排除 x86/x86_64 native 库）。开发者如需 x86 模拟器调试可用 arm64 模拟器或覆盖 abiFilters。assembleDebug 验证通过（APK lib/ 仅含 2 个 ABI 目录）。AC4-5 APK 拆包条目验证待真机环境执行（编译层已通过，ac-verifier 标注为低优先级后续项）。"
-    },
-    {
-      "id": "US-044",
-      "title": "M8 Phase A: 生成 release keystore + 配置 Gradle 签名 + 启用 R8 + ProGuard 规则",
-      "description": "作为开发者，我需要为 release 构建配置签名密钥与 R8 全量混淆，以便产出可公开发布的 signed release APK。",
-      "acceptanceCriteria": [
-        "keystore/prism-release.jks 已生成（RSA 2048，SHA256withRSA，有效期至 2053-12-28，PKCS12）",
-        "keystore/keystore.properties 已创建（storeFile/storePassword/keyAlias/keyPassword），.gitignore 排除 keystore/",
-        "keystore/prism-release-credentials.txt 已创建（完整凭据 + 备份说明）",
-        "app/build.gradle.kts 读取 keystore.properties，存在时创建 signingConfigs.release",
-        "app/build.gradle.kts release buildType 启用 isMinifyEnabled + isShrinkResources + signingConfig",
-        "app/build.gradle.kts release buildType 配置 proguardFiles（proguard-android-optimize.txt + proguard-rules.pro）",
-        "app/proguard-rules.pro 包含 15 章节 keep 规则（Kotlin Metadata / ObjectBox / ONNX Runtime / POI / PDFBox / Tink / MCP SDK / SnakeYAML / Ktor / OkHttp / Prism 入口 / ServiceLoader / 调试支持 / 缺失类警告 / 安全力）",
-        "assembleRelease 构建成功（无 R8 阻断错误）",
-        "Typecheck passes"
-      ],
-      "priority": 44,
-      "passes": true,
-      "notes": "M8 发布工程 Phase A。ADR-018 Accepted。P3 重大（首次 R8 全量 + 签名密钥）。keystore/ 目录 .gitignore 第 10-12 行已排除。keystore.properties 缺失时降级无签名（CI 可用）。proguard-rules.pro 15 章节 keep 规则覆盖所有第三方依赖 + Prism 入口点 + ServiceLoader + 调试支持 + R8 missing class 警告。assembleRelease BUILD SUCCESSFUL（78.4MB）。"
-    },
-    {
-      "id": "US-045",
-      "title": "M8 Phase B: assembleRelease 签名验证 + 全量回归（R8 不剥离关键类）+ APK 体积分析",
-      "description": "作为开发者，我需要验证 release APK 签名正确、全量回归测试在 R8 混淆后仍通过、APK 体积符合预期，以便确保发布质量。",
-      "acceptanceCriteria": [
-        "apksigner verify 验证 app-release.apk 签名有效（v2 scheme，覆盖 Prism minSdk 26 / Android 8.0+ 全部目标设备）",
-        "./gradlew test 全量单元测试通过（1497+ 测试，0 失败，0 回归）",
-        "全量测试在 release 构建配置下亦通过（如适用，否则说明理由）",
-        "APK 体积 <80MB（实测 78.4MB）",
-        "APK 体积分析报告记录（含 R8 前后对比、ABI 过滤前后对比、依赖占比）",
-        "mapping.txt 已生成并归档（用于崩溃日志反混淆）",
-        "missing_rules.txt 为空或仅含可选依赖警告（无关键类缺失）",
-        "Typecheck passes"
-      ],
-      "priority": 45,
-      "passes": true,
-      "notes": "M8 发布工程 Phase B。ADR-018 Accepted。P3 重大。任务令牌 TKN-M8-RELEASE-002（R1 有条件通过）+ TKN-M8-RELEASE-002-R2（通过）+ TKN-M8-ACCEPTANCE-002（通过，17/17 AC 全部 PASS）。apksigner v2 scheme 通过 + 1497+1497 测试 0 失败 + APK 78.44MB + mapping.txt 96.86MB 归档 + missing_rules.txt 不存在（所有缺失类已被 -dontwarn 覆盖）。DEF-001 文档修复（ADR-018 4.3 '等 11 条' → '等 15 条'）。真机烟囱测试（ONNX + ObjectBox + Tink + POI 四条路径）留待 Phase D functional-validation-auditor。"
-    },
-    {
-      "id": "US-046",
-      "title": "M8 Phase C: git tag v0.1.0 + GitHub Release 创建 + APK 上传",
-      "description": "作为发布者，我需要打 v0.1.0 tag 并在 GitHub 创建 Release 上传 signed APK + mapping.txt，以便用户可下载安装。",
-      "acceptanceCriteria": [
-        "git tag v0.1.0 已创建并推送（annotated tag，含版本说明）",
-        "GitHub Release v0.1.0 已创建（title + release notes 引用 ADR-018 + 验收报告）",
-        "app-release.apk 已上传至 Release 资产",
-        "mapping.txt 已上传至 Release 资产（供用户反混淆崩溃日志）",
-        "Release notes 包含安装说明 + 最低系统要求（Android 8.0+）+ 已知限制",
-        "Release notes 明确声明不上 Google Play（PRD 非目标）",
-        "Typecheck passes"
-      ],
-      "priority": 46,
-      "passes": true,
-      "notes": "M8 发布工程 Phase C。ADR-018 Accepted。P3 重大。任务令牌 TKN-M8-RELEASE-003。git tag v0.1.0 annotated + 推送 + GitHub Release 创建 + APK 78.44MB + mapping.txt 92.4MB 上传。Release URL: https://github.com/ljhthink/Prism/releases/tag/v0.1.0。Release notes 含安装说明 + Android 8.0+ 最低要求 + 已知限制 + 不上 Google Play 声明。"
-    },
-    {
-      "id": "US-047",
-      "title": "M8 Phase D: functional-validation-auditor 全面审计 + 最终一致性检查 + README 收尾",
-      "description": "作为发布者，我需要 functional-validation-auditor 对整个项目做最终交付审计，确认所有 PRD 验收标准满足、文档与实现一致、已知缺陷受控，并完成 README 文档索引收尾。",
-      "acceptanceCriteria": [
-        "functional-validation-auditor 输出最终交付审计报告（含交付/上线建议）",
-        "PRD 7. 验收标准汇总表逐项验证（BYOK/MCP/RAG/Skills/Memory/CrossApp/DeviceTier/Memory/AGPL/ApiKeyLeak）",
-        "docs/decisions/ ADR 索引与文件一致（ADR-001~018）",
-        "docs/reports/README.md 与实际报告一致（除 perf 子目录外不提交远程）",
-        "README.md 文档索引完整且链接可达",
-        "docs/behavioral-rules.md 健康检查（去重/合并/deprecated 标注）",
-        "M8 里程碑审计报告存档（docs/reports/2026-08-11-m8-milestone-audit.md，本地不入库）",
-        "Typecheck passes"
-      ],
-      "priority": 47,
-      "passes": true,
-      "notes": "M8 发布工程 Phase D。ADR-018 Accepted。P3 重大。任务令牌 TKN-M8-RELEASE-004 + TKN-M8-MILESTONE-AUDIT-001。functional-validation-auditor 9 步审计结论：有条件交付（CONDITIONAL GO），9 通过 + 2 受限通过 + 0 不通过。PRD 11 项验收标准：9 通过 + 2 受限通过（跨 App 真机 E2E + 设备分档真机内存峰值）。AUDIT-001 修复（ADR-002 状态 Proposed → Accepted）。一致性检查通过。README 文档索引完整（160 链接 0 失效）。behavioral-rules.md 32 条规则 9 类别 0 deprecated 健康。v0.1.1 改进清单已建立（P0 真机烟囱测试 + P0 分支模型治理 + P1 跨 App E2E + P1 内存峰值 + P1 APK 拆包验证 + P2 CI license 扫描 + P2 Compose instrumented test）。已知受限：真机烟囱测试（ONNX/ObjectBox/Tink/POI 四条 JNI 反射路径）+ 远程无 main 分支（AUDIT-002，历史遗留）。"
-    }
-  ]
+    "project":  "Prism",
+    "branchName":  "ralph/prism-m4-skills",
+    "description":  "Prism 手机端 AI 聊天 Agent 应用 —— M0 脚手架 + M1 BYOK 聊天核心 + M2 MCP Client + M3 个人知识库 RAG 已完成（US-001~019 passes=true）；M4 Skills 系统（US-020~029）进行中。依 ADR-001/ADR-013/ADR-014 技术栈：原生 Kotlin + Jetpack Compose + MCP Kotlin SDK 0.12.0 + ObjectBox 5.4.2 + snakeyaml-engine-kmp 3.1（SKILL.md 解析）+ OpenAI tool_calling 流式协议。用户决策策略 C：Skill 可真正调用 MCP 工具。每个故事可在单次迭代完成。",
+    "userStories":  [
+                        {
+                            "id":  "US-001",
+                            "title":  "初始化 Android 项目骨架",
+                            "description":  "作为开发者，我需要创建 Android 项目骨架，以便后续模块有统一构建基础。",
+                            "acceptanceCriteria":  [
+                                                       "Gradle Kotlin DSL 项目，AGP 8.13+，minSdk 26，targetSdk 最新",
+                                                       "Jetpack Compose BOM 已配置，MainActivity 使用 Compose 空白界面",
+                                                       "应用可编译并运行显示 \u0027Prism\u0027 标题",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  1,
+                            "passes":  true,
+                            "notes":  "M0 脚手架。依 ADR-001 最低 Android 8.0 (API 26)。已通过 guardrail-enforcer 三轮审查 + ac-verifier 验收（2026-08-02）。"
+                        },
+                        {
+                            "id":  "US-002",
+                            "title":  "配置 ObjectBox 数据库基础",
+                            "description":  "作为开发者，我需要集成 ObjectBox 5.4.2，以便持久化知识库/记忆/配置数据。",
+                            "acceptanceCriteria":  [
+                                                       "build.gradle.kts 应用 io.objectbox 插件 version 5.4.2",
+                                                       "定义 @Entity 数据类 KnowledgeChunk（id/title/content/embedding 字段）",
+                                                       "MyObjectBox.builder().androidContext(context).build() 初始化成功",
+                                                       "box.put/box.get/box.remove CRUD 单元测试通过",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  2,
+                            "passes":  true,
+                            "notes":  "Context7 验证 ObjectBox 5.4.2 API。AGP 8.13- 用 kotlin.android + kotlin.kapt。已通过 guardrail-enforcer 审查（TKN-PRISM-GUARDRAIL-004）+ ac-verifier 验收（TKN-PRISM-ACCEPTANCE-001，2026-08-02）。AC-003 因无模拟器受限通过（JVM 间接验证 + APK 静态检查）。"
+                        },
+                        {
+                            "id":  "US-003",
+                            "title":  "实现 API Key 加密存储",
+                            "description":  "作为用户，我希望 API Key 加密存储，以便密钥安全不泄露。",
+                            "acceptanceCriteria":  [
+                                                       "Android Keystore 生成主密钥（AES-256-GCM，StrongBox 可用时启用）",
+                                                       "DataStore + Tink AEAD 加密 API Key，不落明文",
+                                                       "保存/读取 API Key 单元测试通过（明文不出 Keystore）",
+                                                       "日志中不输出 API Key（安全扫描通过）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  3,
+                            "passes":  true,
+                            "notes":  "依 ADR-001 Key 存储：Keystore + DataStore(Tink) + 生物识别。已通过 guardrail-enforcer 审查（TKN-PRISM-GUARDRAIL-005，G-01 中风险已修复）+ ac-verifier 验收（TKN-PRISM-ACCEPTANCE-002，2026-08-02）。AC-001 因无模拟器受限通过（JVM 间接验证 + APK 静态检查，与 US-002 同模式）。34 测试通过（14 基础 + 16 边界 + 4 性能基准 @Ignore）。性能基线已建立。"
+                        },
+                        {
+                            "id":  "US-004",
+                            "title":  "定义 BYOK Provider 配置数据模型",
+                            "description":  "作为用户，我希望配置多个 AI Provider 端点，以便灵活切换模型。",
+                            "acceptanceCriteria":  [
+                                                       "ProviderConfig 数据类含 name/baseUrl/apiKeyRef/models/headers 字段",
+                                                       "支持预设 5 种 Provider：OpenAI 兼容/Anthropic/Ollama/Moonshot/OpenRouter",
+                                                       "Provider 配置持久化到 ObjectBox",
+                                                       "配置列表可增删改查单元测试通过",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  4,
+                            "passes":  true,
+                            "notes":  "US-001 验收标准 1。已通过 guardrail-enforcer 审查（TKN-PRISM-GUARDRAIL-006，G-01 setActive 事务原子性 + G-02 StringListConverter 换行转义已修复，BR-concurrency-001 + BR-data-001 固化）+ ac-verifier 验收（TKN-PRISM-ACCEPTANCE-003，2026-08-02）。52 测试通过（35 基础 + 17 边缘），性能基线已建立。AC-3 真实设备持久化因无模拟器受限通过（与 US-002/003 同模式）。"
+                        },
+                        {
+                            "id":  "US-005",
+                            "title":  "实现聊天 UI 骨架",
+                            "description":  "作为用户，我希望有聊天界面，以便与 AI 对话。",
+                            "acceptanceCriteria":  [
+                                                       "NavHost 配置主路由（会话列表/聊天/设置）",
+                                                       "ConversationScreen 显示消息列表 + 输入框",
+                                                       "ConversationViewModel 用 StateFlow 暴露消息列表",
+                                                       "输入消息点击发送可更新 UI（暂不接 AI）",
+                                                       "Typecheck passes",
+                                                       "Verify in browser using dev-browser skill"
+                                                   ],
+                            "priority":  5,
+                            "passes":  true,
+                            "notes":  "聊天 UI 骨架已完成（2026-08-05）：PrismApp 用 NavHost 配置 4 Tab 主路由（会话/知识库/能力/设置），ConversationScreen 显示消息列表 + 输入框，ConversationViewModel 用 StateFlow 暴露 messages/isTyping，发送可更新 UI（暂不接 AI）。guardrail-enforcer + ac-verifier 验收通过（TKN-PRISM-ACCEPTANCE-004，4 测试通过）。AC-6 浏览器验证为原生 Android 应用不适用，与 US-002/003/004 同模式跳过。"
+                        },
+                        {
+                            "id":  "US-006",
+                            "title":  "实现 OpenAI 兼容 Provider 流式请求",
+                            "description":  "作为用户，我希望 AI 回复流式显示，以便体验流畅。",
+                            "acceptanceCriteria":  [
+                                                       "OpenAICompatibleProvider 实现 SSE 流式 /v1/chat/completions 请求",
+                                                       "首字延迟 \u003c1s（取决于端点）",
+                                                       "流式 token 实时更新 UI",
+                                                       "端点不可达时显示错误不崩溃",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  6,
+                            "passes":  true,
+                            "notes":  "US-001 验收标准 4-6。用 Ktor HttpClient SSE。已通过 guardrail-enforcer 审查（TKN-NETWORK-US006-002，CR-01~CR-05 闭合）+ ac-verifier 验收（TKN-NETWORK-US006-AC-001，2026-08-06，AC-2 公网首字延迟受限通过待 US-007 真机补测）。SSE 首字延迟 JVM 基线 p99≈4ms。单元+集成 23 用例，全量 167 用例 0 失败。"
+                        },
+                        {
+                            "id":  "US-007",
+                            "title":  "实现 Provider 切换",
+                            "description":  "作为用户，我希望会话中切换 Provider，以便对比不同模型。",
+                            "acceptanceCriteria":  [
+                                                       "聊天界面提供 Provider 选择器",
+                                                       "切换 Provider 后保留对话历史",
+                                                       "切换后新消息走新 Provider",
+                                                       "Typecheck passes",
+                                                       "Verify in browser using dev-browser skill"
+                                                   ],
+                            "priority":  7,
+                            "passes":  true,
+                            "notes":  "US-001 验收标准 3。Provider 切换已完成（2026-08-06）：Provider 选择器胶囊 + 底部切换弹层（保留历史、新消息走新 Provider），自定义 headers 编辑界面，名称/BaseURL 输入校验，3 项 guardrail LOW 修复（401 文案区分 / 头名大小写 / apiKeyRef 空回退自定义 Authorization 头）。guardrail 两轮审查（TKN-US007-GUARDRAIL-001/002）+ ac-verifier 验收（TKN-US007-ACCEPTANCE-001）通过。AC-5 浏览器验证为原生 Android 不适用，与 US-002/003/004/005/006 同模式受限通过。"
+                        },
+                        {
+                            "id":  "US-008",
+                            "title":  "集成 MCP Kotlin SDK Client",
+                            "description":  "作为开发者，我需要集成 MCP Client，以便 AI 能调用工具。",
+                            "acceptanceCriteria":  [
+                                                       "引入 MCP Kotlin SDK 0.12.0 依赖",
+                                                       "Client + StreamableHttpClientTransport 可连接远程 MCP Server",
+                                                       "client.listTools() 返回工具列表",
+                                                       "client.callTool(name, arguments) 可调用并返回结果",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  8,
+                            "passes":  true,
+                            "notes":  "Context7 验证 API。OAuth 2.1 后续故事处理。MCP Kotlin SDK 0.12.0 集成完成（2026-08-06）：McpServerConfig/McpServerRepository/McpServerPresets 数据层 + McpClientManager/McpToolProvider 连接层（StreamableHttpClientTransport）+ CapabilitiesViewModel/CapabilitiesScreen UI 层。guardrail 四轮主代码审查（TKN-MCP-CLIENT-004）+ 集成测试审查（TKN-MCP-CLIENT-GUARDRAIL-005）+ ac-verifier 复验（TKN-MCP-CLIENT-AC-002）全部通过。GAP-001 真实 MCP Server 集成测试（嵌入式 Ktor Netty + mcpStreamableHttp，5 用例）+ GAP-002 CapabilitiesViewModelTest（9 用例）+ DEF-001 lint 门禁（FlowOperatorInvokedInComposition 禁用）全部闭合。全量 214 用例 0 失败无回归。"
+                        },
+                        {
+                            "id":  "US-009",
+                            "title":  "实现内置 Filesystem MCP Server",
+                            "description":  "作为用户，我希望 AI 能读取本地文件，以便处理文档。",
+                            "acceptanceCriteria":  [
+                                                       "Kotlin 实现 Filesystem MCP Server（基于 SAF/DocumentPicker）",
+                                                       "注册为本地 MCP Server，零配置可用",
+                                                       "AI 调用前需用户确认（防误操作）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  9,
+                            "passes":  true,
+                            "notes":  "ADR-001 形态 B 内置 Server 之一。"
+                        },
+                        {
+                            "id":  "US-010",
+                            "title":  "实现预设远程 MCP Server 模板加载",
+                            "description":  "作为用户，我希望一键添加常用远程 MCP Server，以便快速扩展能力。",
+                            "acceptanceCriteria":  [
+                                                       "预设 9 个远程模板（GitHub/Notion/Slack/Sentry/Stripe/Asana/Brave/Exa/Context7）",
+                                                       "用户填 API Key 后一键添加",
+                                                       "Server 连接状态可观测（连接中/已连接/错误）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  10,
+                            "passes":  true,
+                            "notes":  "ADR-001 形态 A 预设模板。验收通过：docs/reports/2026-08-06-us010-remote-templates-acceptance.md。"
+                        },
+                        {
+                            "id":  "US-011",
+                            "title":  "依赖落地 + KnowledgeChunk 向量索引",
+                            "description":  "作为开发者，我需要为 M3 RAG 落地技术栈依赖并建立向量索引，以便后续检索。",
+                            "acceptanceCriteria":  [
+                                                       "libs.versions.toml 新增 onnxruntime-android 1.27.0 与 poi-ooxml 5.5.1",
+                                                       "app/build.gradle.kts 引入依赖并启用 multiDexEnabled",
+                                                       "KnowledgeChunk.embedding 加 @HnswIndex(dimensions=384, distanceType=COSINE) 注解",
+                                                       "nearestNeighbors 近邻查询单元测试通过（含 embedding=null 不参与检索）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  11,
+                            "passes":  true,
+                            "notes":  "ADR-007 5.1/5.2/5.3 依赖落地。向量存储复用 ObjectBox 5.4.2 原生 HNSW。验收通过：docs/reports/2026-08-06-us011-deps-vectorindex-acceptance.md。ac-verifier 提示：US-017 检索模块需对 query 维度做显式校验（==384）。"
+                        },
+                        {
+                            "id":  "US-012",
+                            "title":  "实现文档解析器",
+                            "description":  "作为用户，我希望导入的 PDF/DOCX/XLSX/MD/TXT 文档能被解析为纯文本，以便进入知识库。",
+                            "acceptanceCriteria":  [
+                                                       "DocumentParser 接口 + 按格式分发实现",
+                                                       "PDF 用 Apache PDFBox pdfbox:3.0.8 抽取文本（PDFTextStripper）",
+                                                       "DOCX/XLSX 用 Apache POI poi-ooxml 5.5.1 抽取文本",
+                                                       "MD/TXT 用自研解析器",
+                                                       "解析单元测试通过（各格式文本抽取正确）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  12,
+                            "passes":  true,
+                            "notes":  "ADR-007 5.3。PDF 用 PDFBox 3.0.8（PdfTextStripper）替代 PdfRenderer（PdfRenderer 仅渲染位图无文本 API），规避 pymupdf AGPL。验收通过：docs/reports/2026-08-06-us012-document-parser-acceptance.md（6/6 AC，27+14 用例）。guardrail 有条件通过（G-01 FORMULA 缓存值已修复）。硬门禁：G-03 单文件上限(≤20MB)+流式读取须在 US-016 摄入管线强制落地。"
+                        },
+                        {
+                            "id":  "US-013",
+                            "title":  "实现文本切片器",
+                            "description":  "作为用户，我希望长文档被切分为可检索的片段，以便精确检索。",
+                            "acceptanceCriteria":  [
+                                                       "Chunker 支持可配置 chunkSize 与 overlap",
+                                                       "切片保持段落边界优先，避免在句子中间截断",
+                                                       "切片单元测试通过（边界、空输入、超长输入）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  13,
+                            "passes":  true,
+                            "notes":  "PRD US-003 验收 2：切片（可配置 chunk size/overlap）。段落边界优先+句子/词边界回退+overlap 跨段落衔接（guardrail G-1 决策）。G-2 句号孤儿/G-3 词边界已修复。验收通过：docs/reports/2026-08-06-us013-chunker-acceptance.md（4/4 AC，15+10 用例，O(n) 性能基线）。"
+                        },
+                        {
+                            "id":  "US-014",
+                            "title":  "实现端侧嵌入引擎",
+                            "description":  "作为用户，我希望文档片段能在设备本地被嵌入为向量，以便语义检索。",
+                            "acceptanceCriteria":  [
+                                                       "onnxruntime-android 加载 assets 中的 all-MiniLM-L6-v2 ONNX INT8 模型",
+                                                       "embed(text) 将文本编码为 384 维向量",
+                                                       "模型按需加载，闲置 5 分钟后卸载释放内存",
+                                                       "嵌入单元测试通过（维度正确、向量一致）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  14,
+                            "passes":  true,
+                            "notes":  "ADR-007 5.2。模型打包入 APK（用户已确认）。guardrial-enforcer 两轮审查（TKN-US014-EMBEDDING-001 阻断 → TKN-US014-EMBEDDING-002 通过，G-01 并发竞态阻断级已修复：embed 全程持锁 BR-concurrency-002）+ ac-verifier 验收（TKN-US014-EMBEDDING-AC-001，5/5 AC 通过，29 嵌入测试 + 4 perf 基准，全量 379 测试 0 失败）。AC-1 真机 AssetManager / AC-3 native 内存释放因无模拟器受限通过（与 US-002~008 同模式），待 US-018 真机补测。验收报告：docs/reports/2026-08-07-us014-embedding-acceptance.md。性能基线：docs/reports/perf/2026-08-07-us014-embedding-baseline.md（embed p99 短文本 2ms / 长文本 14ms）。"
+                        },
+                        {
+                            "id":  "US-015",
+                            "title":  "实现知识库分库数据模型",
+                            "description":  "作为用户，我希望知识库支持分库管理（如工作/学习），以便按库组织文档。",
+                            "acceptanceCriteria":  [
+                                                       "KnowledgeBase 实体（id/name/createdAt）关联 KnowledgeChunk",
+                                                       "KnowledgeBaseRepository 分库 CRUD",
+                                                       "KnowledgeChunk 关联所属库字段",
+                                                       "分库 CRUD 单元测试通过",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  15,
+                            "passes":  true,
+                            "notes":  "PRD US-003 验收 5：分库管理。ADR-008 5.1~5.4。guardrail-enforcer 两轮审查（TKN-US015-GUARDRAIL-001 有条件通过 G-01 HNSW Query.remove bug #1209 + G-02 Query 未 close → TKN-US015-GUARDRAIL-002 通过 G-01~G-05 全修复）+ ac-verifier 验收（TKN-US015-AC-001，5/5 AC 通过，31 单元测试 + 6 极端场景 + 全量 410 回归 0 失败，性能基线 remove p99 42ms）。HNSW 删除策略：findIds() + Box.remove(*ids) 规避 #1209。验收报告：docs/reports/2026-08-07-us015-knowledgebase-model-acceptance.md。"
+                        },
+                        {
+                            "id":  "US-016",
+                            "title":  "实现摄入管线",
+                            "description":  "作为用户，我希望导入文档后自动完成解析→切片→嵌入→入库，以便生成可检索知识库。",
+                            "acceptanceCriteria":  [
+                                                       "IngestionPipeline：解析→切片→嵌入→写入指定库",
+                                                       "摄入进度与错误可观察",
+                                                       "嵌入为 null 的片段不建索引并提示",
+                                                       "摄入管线集成测试通过",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  16,
+                            "passes":  true,
+                            "notes":  "PRD US-003 验收 2：摄入→切片→嵌入→入库全链路。ADR-009 7 项决策（组件串联/写入路径/Flow 进度观察/嵌入失败降级/chunk 级事务/ensureActive 取消/input.use 关闭）。guardrail-enforcer 两轮审查（TKN-US016-GUARDRAIL-001 有条件通过 M1 InputStream 泄漏阻断 → TKN-US016-GUARDRAIL-002 通过 M1 修复有效 + 新增 catch(IllegalArgumentException) 设计合理）+ ac-verifier 验收（TKN-US016-AC-001，5/5 AC 通过，28 测试 + 438 全量回归 0 失败，BR-error-handling-006 proposed→active）。验收报告：docs/reports/2026-08-07-us016-ingestion-pipeline-acceptance.md。性能基线：docs/reports/perf/2026-08-07-us016-ingestion-pipeline-baseline.md（FakeEmbedder 100 chunk p99 735ms，生产预估 +N×100ms ONNX）。遗留：L1 ADR 5.7 描述同步、L2 US-018 Failed.throwable 安全映射、L3 chunk title 重复策略、L4 ObjectBox 写入失败测试受限。"
+                        },
+                        {
+                            "id":  "US-017",
+                            "title":  "实现向量检索",
+                            "description":  "作为用户，我希望对话时能检索到最相关的文档片段，以便 AI 回答有依据。",
+                            "acceptanceCriteria":  [
+                                                       "top-k 检索（默认 k=5，可配置）基于 nearestNeighbors",
+                                                       "支持指定库或全库检索",
+                                                       "检索结果含相似度分数与来源（文件/片段位置）",
+                                                       "检索单元测试通过（含空库、无匹配）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  17,
+                            "passes":  true,
+                            "notes":  "PRD US-003 验收 3/5。4GB 低端机小批次 top-k=3。实现：KnowledgeBaseRepository.search + RetrievalResult 数据类（ADR-010 9 项决策）。验收：guardrail-enforcer 第一轮 Pass（5 低危建议 L1~L5 已全部处理）+ ac-verifier 通过（48 测试 0 失败，4/4 AC + 性能基线 p50\u003c200us + 安全门禁 + 全量回归 0 失败）。性能基线 docs/reports/perf/2026-08-07-us017-retrieval-baseline.md。"
+                        },
+                        {
+                            "id":  "US-018",
+                            "title":  "实现知识库管理 UI",
+                            "description":  "作为用户，我希望在 App 内管理知识库、导入文档并查看进度，以便使用 RAG。",
+                            "acceptanceCriteria":  [
+                                                       "知识库列表页显示分库",
+                                                       "支持创建/删除分库",
+                                                       "支持导入文档（解析→摄入进度展示）",
+                                                       "摄入失败与未建索引提示",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  18,
+                            "passes":  true,
+                            "notes":  "PRD US-003 验收 5/7。4GB 低端机小批次模式。ADR-011 7 项决策（保留一级 Tab 改造 Mock→真实 / PrismApplication 暴露 5 个 lazy 依赖 / UiState 单一聚合 + IngestionEvent 收集 / SAF OpenDocument + ContentResolver / Failed.throwable 安全映射 / 默认库独立入口 / StateFlow conflate 节流）。code-archaeologist 考古（TKN-US018-ARCH-001，12 项风险清单 R-1~R-12）。guardrail-enforcer 两轮审查（TKN-US018-GUARDRAIL-001 有条件通过 G-01~G-04 中危须修复 → TKN-US018-GUARDRAIL-002 通过 G-01~G-05 全部修复有效：状态原子性 _uiState.update CAS / Failed 日志 BR-error-handling-004 / catch 不静默吞 / createLibrary+deleteLibrary 统一 try-catch 兜底）+ ac-verifier 验收（TKN-US018-AC-001，5/5 AC 通过，35 单元测试 + 524 全量回归 0 失败，R2-1 日志措辞 simpleName 修复有效）。验收报告：docs/reports/2026-08-07-us018-kb-ui-acceptance.md。遗留：G-06 测试调度器 / G-07 文件名 fallback / G-08 Factory KDoc 措辞（低危可延后）。"
+                        },
+                        {
+                            "id":  "US-019",
+                            "title":  "实现 RAG 对话集成",
+                            "description":  "作为用户，我希望对话时 AI 检索知识库并标注引用来源，以便降低幻觉。",
+                            "acceptanceCriteria":  [
+                                                       "对话时检索 top-k 片段注入 prompt",
+                                                       "可指定库或全库检索",
+                                                       "AI 回答标注引用来源（文件名+片段位置）",
+                                                       "无引用时主动说明",
+                                                       "集成测试通过",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  19,
+                            "passes":  true,
+                            "notes":  "PRD US-003 验收 4/4。M3 个人知识库 RAG 全链路收尾。强制引用来源防幻觉。ADR-012 八项决策（RagContextBuilder 独立组件 / RagTarget 三态默认全库 / Citation 多引用 inline 标注 / ChatStreamProvider 接口扩展 systemPrompt+ragContext / 三级降级 EmbedFailed+NormalChat+Success / IO 线程 top-k=3 阈值 0.3 / _messages 原子 CAS / UI 文案修正）。code-archaeologist 考古（TKN-US019-ARCH-001，7 项风险清单 R-1~R-7 + 9 文件接口契约分析）。guardrail-enforcer 两轮审查（TKN-US019-RAG-GUARDRAIL-001 有条件通过 1 HIGH+4 MEDIUM → TKN-US019-RAG-GUARDRAIL-002 通过 G-01~G-05 全部修复有效：显式 try-catch 重抛 CancellationException BR-error-handling-007 / RagBuildResult sealed 三态 / Log.w 替代 simpleName appendDelta / SpecificLibrary init 校验 kbId\u003e0 / 4 新测试补齐正向快乐路径 + 阈值过滤空 + SpecificLibrary 校验/检索 + 历史过滤器排除 aiId BR-interface-004）+ ac-verifier 验收（TKN-US019-RAG-ACCEPTANCE-001，5/6 AC 完全通过 AC-1/3/4/5/6，AC-2 数据层通过但 UI 入口 RagModeSelectorSheet「指定库」标「暂未开放」为已知 GAP 不阻断延后至后续 US，57 单元测试 + 519 全量回归 0 失败）。验收报告：docs/reports/2026-08-07-us019-rag-integration-acceptance.md。遗留：G-06 TypingIndicator 未区分检索/流式阶段 / G-07 SpecificLibrary kbId\u003c=0 隐式容错测试已补齐 / R2-1 外层 runCatching 可改 try-catch 仅 catch Exception / R2-3 ADR-012 5.5 Toast→appendDelta 过渡方案待 Toast 基建（低危可延后）。"
+                        },
+                        {
+                            "id":  "US-020",
+                            "title":  "Skill 数据模型与 Repository",
+                            "description":  "作为开发者，我需要 Skill 持久化数据模型与 CRUD 仓库，以便管理本地/远程 Skill 的启用状态与来源元数据。",
+                            "acceptanceCriteria":  [
+                                                       "定义 SkillConfig @Entity（id/name/displayName/source/sourceUri/skillDir/isEnabled/isInstalled/version/dependsOnMcpServers/createdAt/updatedAt），仿 McpServerConfig 模式",
+                                                       "定义 SkillSource 常量（LOCAL_BUILTIN/LOCAL_USER/REMOTE）",
+                                                       "定义 SkillManifest 内存数据类（name/description/version/userInvocable/disableModelInvocation/homepage/os/tools/systemPrompt/maxRounds/body）+ SkillToolDecl",
+                                                       "SkillRepository CRUD（save/get/getAll/findByName/remove/removeAll/setEnabled）仿 McpServerRepository，dependsOnMcpServers 复用 StringListConverter",
+                                                       "SkillRepository 单元测试通过（CRUD + setEnabled + findByName + removeAll）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  20,
+                            "passes":  true,
+                            "notes":  "M4 数据层基础。ADR-013 5.1 双层模型（SkillConfig 持久化 + SkillManifest 内存）。考古报告集成点 2 确认照搬 McpServerRepository 模式。P1 常规风险。Phase A 验收通过（TKN-M4-PHASEA-ACCEPTANCE-001，6/6 AC，12 单元测试）。"
+                        },
+                        {
+                            "id":  "US-021",
+                            "title":  "SKILL.md 解析器（snakeyaml-engine-kmp）",
+                            "description":  "作为开发者，我需要解析 SKILL.md 文件（YAML frontmatter + Markdown body），以便从 Skill 目录加载 manifest。",
+                            "acceptanceCriteria":  [
+                                                       "libs.versions.toml + app/build.gradle.kts 引入 snakeyaml-engine-kmp 3.1 依赖",
+                                                       "实现 SkillManifestParser（splitFrontmatter + yaml 解析 + mapNodeToManifest + validate），frontmatter 用 Yaml 解析为 YamlMap 再映射",
+                                                       "校验 name slug 格式 ^[a-z0-9-]{1,64}$ + description 非空 ≤160 字符，失败抛 SkillParseException",
+                                                       "解析器单元测试通过（标准 frontmatter / 缺失 frontmatter / body 提取 / slug 校验失败 / description 超长 / 嵌套 metadata）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  21,
+                            "passes":  true,
+                            "notes":  "M4 解析层。ADR-013 5.2。charleskorn/kaml 已归档，改用 snakeyaml-engine-kmp（活跃维护，KMP 原生）。tech-selection-researcher TKN-M4-TOOLCALLING-RESEARCH-001 选型。P2 跨模块（新依赖）。Phase B 验收通过（TKN-M4-PHASEB-ACCEPTANCE-002，guardrail 三轮通过）。"
+                        },
+                        {
+                            "id":  "US-022",
+                            "title":  "Skill 注册中心与内置预设",
+                            "description":  "作为用户，我希望启动时自动扫描加载内置与已安装 Skill，以便 AI 能根据 Skill 描述自动选择调用。",
+                            "acceptanceCriteria":  [
+                                                       "实现 SkillRegistry（scanAndSync 启动扫描 + scanBuiltin assets + scanDirectory user/remote + syncToRepository + enabledSkills + StateFlow 暴露）",
+                                                       "在 assets/skills/builtin/ 下放置 5 个内置 Skill（translator/code-reviewer/meeting-notes/summarizer/rewriter），每个含 SKILL.md",
+                                                       "PrismApplication 新增 skillRepository + skillRegistry by lazy 依赖",
+                                                       "启动扫描在 IO 协程执行不阻塞 UI，扫描结果同步 SkillConfig 表（新增入库/缺失标记 isInstalled=false）",
+                                                       "SkillRegistry 单元测试通过（扫描 + 同步 + enabledSkills 过滤）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  22,
+                            "passes":  true,
+                            "notes":  "M4 注册层。ADR-013 5.3/5.8。3 纯 prompt Skill + 2 工具调用 Skill 验证两条路径。考古报告集成点 1 确认 by lazy DI 模式。P2 跨模块。Phase B 验收通过（TKN-M4-PHASEB-ACCEPTANCE-002，guardrail 三轮通过）。"
+                        },
+                        {
+                            "id":  "US-023",
+                            "title":  "StreamEvent 与 ChatStreamProvider 接口扩展（tool_calling）",
+                            "description":  "作为开发者，我需要扩展流式接口支持 tool_calling，以便 Skill 可声明工具供 LLM 调用。",
+                            "acceptanceCriteria":  [
+                                                       "StreamEvent 新增 ToolCallStart/ToolCallDelta/ToolCallComplete 三个子类（Provider 中立，arguments 已解析为 Map）",
+                                                       "定义 ToolDefinition（type+function{name,description,parameters}）+ ToolChoice sealed（Auto/Required/Specific/None）",
+                                                       "ChatStreamProvider.streamChat 新增 tools + toolChoice 可选参数（默认 null 向后兼容）",
+                                                       "ChatMessage 新增 Role.TOOL + toolCallId + toolName + toolCalls 字段，Role.toRequestRole 扩展 TOOL→tool",
+                                                       "现有调用零改动（向后兼容），全量回归测试通过",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  23,
+                            "passes":  true,
+                            "notes":  "M4 接口层。ADR-014 5.1/5.2/5.6。Provider 中立设计，未来 Anthropic 适配无需改 StreamEvent。BR-interface-004 历史过滤器需扩展保留 tool 消息。P2 跨模块。Phase A 验收通过（TKN-M4-PHASEA-ACCEPTANCE-001，5/6 AC + AC-4 有条件通过：Role.TOOL Fail Fast 裁定为 ADR-014 5.6 分阶段决策，Phase C US-024 补完整 TOOL→tool 映射）。"
+                        },
+                        {
+                            "id":  "US-024",
+                            "title":  "OpenAICompatibleProvider tool_calling 协议实现",
+                            "description":  "作为开发者，我需要实现 OpenAI tool_calls 流式协议，以便 LLM 返回的工具调用能被解析执行。",
+                            "acceptanceCriteria":  [
+                                                       "ChatCompletionRequest 扩展 tools/toolChoice/parallelToolCalls 字段，MessageBody 扩展 toolCallId/toolCalls",
+                                                       "buildRequestBody 扩展：注入 tools + tool result 回灌（role=tool 消息携带 toolCallId）",
+                                                       "delta 状态机：pendingToolCalls Map\u003cindex,Accumulator\u003e 跨 chunk 拼接 arguments，finish_reason=tool_calls 时 JSON.parse 发射 ToolCallComplete",
+                                                       "JSON 解析失败降级为 Error 事件不崩溃，CancellationException 重抛（BR-error-handling-007）",
+                                                       "单元测试通过（单 tool_call delta 拼接 / 多并行 tool_call / finish_reason 触发 / 不完整 JSON 降级 / tool result 回灌请求体）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  24,
+                            "passes":  true,
+                            "notes":  "M4 协议层。ADR-014 5.3。OpenAI arguments 是 JSON string 增量片段需跨 chunk 按 index 拼接。strict mode + parallel_tool_calls=false。P2 跨模块。Phase C 验收通过（TKN-M4-PHASEC-ACCEPTANCE-001，6/6 AC，guardrail 二次审查通过 TKN-M4-PHASEC-GUARDRAIL-002）。M2 修复：completeToolCalls 防御 tool_call id 缺失。"
+                        },
+                        {
+                            "id":  "US-025",
+                            "title":  "SkillExecutor 工具执行回路",
+                            "description":  "作为用户，我希望 Skill 调用工具时经用户确认并执行，工具结果回灌给 LLM 继续生成。",
+                            "acceptanceCriteria":  [
+                                                       "实现 SkillExecutor（executeToolCall 单次执行 + executeLoop 回路编排 maxRounds 默认 10）",
+                                                       "executeToolCall：用户确认（复用 UiConfirmationGate）→ 查找 MCP Server → callTool 超时 30s → 命名空间隔离去前缀 skillName__toolName",
+                                                       "executeLoop：循环 streamChat → ToolCallComplete 触发执行 → tool result 回灌 → 继续生成，maxRounds 超限强制终止",
+                                                       "CancellationException 重抛（BR-error-handling-007），失败/超时/拒绝信息回灌给 LLM 降级",
+                                                       "SkillExecutor 单元测试通过（确认通过执行 / 拒绝回灌 / 超时回灌 / maxRounds 终止 / 命名空间去前缀）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  25,
+                            "passes":  true,
+                            "notes":  "M4 执行层。ADR-014 5.4/5.5。复用 McpToolProviderDispatcher + UiConfirmationGate。考古报告集成点 5 确认 MCP 基建已完整未接入对话流。P2 跨模块。Phase C 验收通过（TKN-M4-PHASEC-ACCEPTANCE-001，6/6 AC，guardrail 二次审查通过）。M3 修复：sanitizeErrorMessage 信息脱敏（CWE-209）。M4 修复：6 处 catch 块添加 Log.w 结构化日志（BR-error-handling-004）。"
+                        },
+                        {
+                            "id":  "US-026",
+                            "title":  "ConversationViewModel Skill 注入与工具执行回路集成",
+                            "description":  "作为用户，我希望对话时 AI 能根据启用的 Skill 自动调用工具并基于结果继续生成，Skill 失败不影响主对话。",
+                            "acceptanceCriteria":  [
+                                                       "systemPrompt 合并：RAG grounding rules + Skill systemPrompt + Skill 索引（description），避免 prompt 膨胀",
+                                                       "tools 构建：enabledSkills.flatMap → ToolDefinition，命名空间隔离 skillName__toolName",
+                                                       "工具执行回路集成：有 tools 时调用 SkillExecutor.executeLoop，无 tools 时普通 streamChat",
+                                                       "降级策略：tool_calling 失败（400 不支持/执行异常）退化为普通对话，用户始终能得到 AI 回复",
+                                                       "_messages.update 原子 CAS（BR-concurrency-004），历史过滤器保留 tool 消息（BR-interface-004）",
+                                                       "集成测试通过（Skill 注入 / 工具调用回路 / 降级 / 历史过滤）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  26,
+                            "passes":  true,
+                            "notes":  "M4 集成层。ADR-013 5.4 + ADR-014 5.7。ConversationViewModel Factory 扩展注入 skillRegistry + skillExecutor。考古报告集成点 4 RAG 双通道合并策略。P2 跨模块。Phase D 验收通过（TKN-M4-PHASED-ACCEPTANCE-001，7/7 AC，guardrail 两轮通过，M-1/M-3 修复有效，M-2 异常路径补 3 测试验证通过，757 回归 0 失败，BR-error-handling-008 转 active）。AC-4 受限通过：R-5 已知限制（StreamEvent.Error 不携带 statusCode，400 精确降级推迟 Phase E）。"
+                        },
+                        {
+                            "id":  "US-027",
+                            "title":  "Skills 管理 UI 重构",
+                            "description":  "作为用户，我希望在能力页管理 Skill（启用/禁用/查看详情），而非看到静态硬编码列表。",
+                            "acceptanceCriteria":  [
+                                                       "新建 SkillsViewModel（skills StateFlow + selectedSkill + executionState sealed），仿 CapabilitiesViewModel",
+                                                       "CapabilitiesScreen Skills 段重构：删除硬编码 skills 列表，改为 viewModel.skills.collectAsState() 动态渲染",
+                                                       "SkillRow enabled 开关调用 viewModel.setEnabled(id, enabled) 落库，SectionHeader 动态计数",
+                                                       "点击 Skill 打开 PrismSheet 详情弹层（展示 manifest + body 摘要）",
+                                                       "SkillsViewModel + UI 单元测试通过（启用切换 / 详情展示 / 动态计数）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  27,
+                            "passes":  true,
+                            "notes":  "M4 UI 层。ADR-013 5.5。考古报告集成点 3 R-1 静态硬编码须从零重建。无需新增路由（CAPABILITIES Tab 内 CapSegment.SKILLS）。P1 常规。Phase E 验收通过（TKN-M4-PHASEE-US027-ACCEPTANCE-001，guardrail 两轮通过）。"
+                        },
+                        {
+                            "id":  "US-028",
+                            "title":  "远程 Skill 下载（标准校验）",
+                            "description":  "作为用户，我希望通过 URL 下载远程 Skill，并通过安全校验后安装。",
+                            "acceptanceCriteria":  [
+                                                       "实现 SkillDownloader：URL 校验（仅 https + 主机非空 + .skill.md/.zip 扩展）+ HTTP 下载（Content-Length ≤10MB + Content-Type 校验 + 30s 超时）",
+                                                       "内容校验：.zip 解压含 SKILL.md + zip slip 防护（解压路径不超出目标目录），.skill.md 直接解析",
+                                                       "SkillManifestParser 沙箱解析（snakeyaml 默认禁用任意类构造）+ 必填字段 + slug 校验",
+                                                       "入库：复制到 filesDir/skills/remote/{name}/ + SkillConfig 写入 source=REMOTE + scanAndSync 刷新",
+                                                       "SkillDownloader 单元测试通过（合法 URL / http 拒绝 / 超大拒绝 / zip slip 拦截 / 解析失败拒绝）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  28,
+                            "passes":  true,
+                            "notes":  "M4 远程层。ADR-013 5.6 用户决策标准校验。不要求签名验证（零后端体验差）。BR-security-003 CRLF 防御。P2 跨模块。Phase E 验收通过（TKN-M4-PHASEE-US028-ACCEPTANCE-001，guardrail 两轮通过，6/6 AC，39 MockEngine 集成测试）。"
+                        },
+                        {
+                            "id":  "US-029",
+                            "title":  "Skill 执行可观测",
+                            "description":  "作为用户，我希望查看 Skill 执行记录（耗时/状态/工具调用链），以便调试与审计。",
+                            "acceptanceCriteria":  [
+                                                       "定义 SkillExecutionRecord @Entity（id/skillConfigId/skillName/startedAt/finishedAt/durationMs/status/toolCalls/errorMessage/outputPreview）+ ToolCallRecord + ExecutionStatus",
+                                                       "SkillExecutionRepository CRUD（save/getBySkill/最近 10 条）",
+                                                       "SkillExecutor 执行时记录 SkillExecutionRecord（成功/失败/取消）",
+                                                       "Skill 详情页展示最近 10 次执行记录（开始时间/耗时/状态/工具调用链可展开）",
+                                                       "SkillExecutionRepository + UI 单元测试通过（记录写入 / 按技能查询 / 状态映射）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  29,
+                            "passes":  true,
+                            "notes":  "M4 可观测层。ADR-013 5.7。执行记录持久化到 ObjectBox 跨会话审计。P1 常规。Phase E 验收通过（TKN-M4-PHASEE-US029-ACCEPTANCE-001，guardrail 两轮通过，6/6 AC，39 US-029 专项测试 + 10 边缘场景，912 回归 0 失败）。已知 GAP（M-3）：生产路径 ConversationViewModel 未传入 skillConfigId/skillName，端到端验证待 Phase D 接入。"
+                        },
+                        {
+                            "id":  "US-030",
+                            "title":  "MemoryRecord 实体 + MemoryRepository CRUD（L2 跨会话记忆存储）",
+                            "description":  "作为系统，我需要将对话历史向量化存入 ObjectBox，以便新会话能按话题检索相关历史。",
+                            "acceptanceCriteria":  [
+                                                       "定义 MemoryRecord @Entity（id/sessionId/content/embedding[float[]]/timestamp/turnCount）+ MemoryRecordConverter（List\u003cFloat\u003e ↔ float[]）",
+                                                       "MemoryRepository CRUD：save / getBySession / searchByVector(queryEmbedding, topK) / deleteBySession / deleteAll",
+                                                       "searchByVector 复用 M3 ObjectBox 向量搜索（nearVector），返回按相似度排序的 top-k 结果",
+                                                       "MemoryRepository 单元测试通过（save / getBySession / searchByVector top-k / deleteBySession / deleteAll）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  30,
+                            "passes":  true,
+                            "notes":  "M5 数据层。ADR-015 5.1。复用 M3 ObjectBox 向量搜索基建（KnowledgeChunk 模式）。P1 常规。Phase A 验收通过（TKN-M5-PHASEA-ACCEPTANCE-001，5/5 AC，59 专项测试 + 971 全量回归 0 失败）。"
+                        },
+                        {
+                            "id":  "US-031",
+                            "title":  "UserProfile 实体 + UserProfileRepository CRUD（L3 用户画像存储）",
+                            "description":  "作为系统，我需要结构化存储用户偏好（显式+隐式），以便 AI 跨会话理解用户。",
+                            "acceptanceCriteria":  [
+                                                       "定义 UserProfile @Entity（id/key/value/category[EXPLICIT/IMPLICIT]/updatedAt）+ ProfileCategory 枚举",
+                                                       "UserProfileRepository CRUD：save / get(key) / getAll / getByCategory / update / delete(key) / deleteAll",
+                                                       "单用户单 key 唯一约束（相同 key upsert 而非 insert）",
+                                                       "UserProfileRepository 单元测试通过（save / get / getAll / getByCategory / upsert / delete / deleteAll）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  31,
+                            "passes":  true,
+                            "notes":  "M5 数据层。ADR-015 5.2。显式偏好=用户设定，隐式偏好=LLM 抽取。P1 常规。Phase A 验收通过（TKN-M5-PHASEA-ACCEPTANCE-001，5/5 AC，BR-security-001-amendment 转 active）。"
+                        },
+                        {
+                            "id":  "US-032",
+                            "title":  "ConversationSummarizer + SlidingWindowMemoryManager（L1 会话内记忆）",
+                            "description":  "作为用户，我希望长对话不会因为上下文窗口限制而丢失关键信息，通过滑动窗口+摘要压缩保留要点。",
+                            "acceptanceCriteria":  [
+                                                       "ConversationSummarizer：使用 OpenAICompatibleProvider 对旧消息生成摘要（非流式单次请求），失败降级为截断",
+                                                       "SlidingWindowMemoryManager：保留最近 N 轮原始消息（默认 10，可配置），超出 N 轮时触发摘要压缩",
+                                                       "摘要压缩：将 N 轮之前的消息压缩为 summary message 注入上下文，保留关键信息",
+                                                       "可配置 N（通过 DataStore 持久化，默认 10），运行时动态生效",
+                                                       "ConversationSummarizer + SlidingWindowMemoryManager 单元测试通过（滑动窗口边界 / 摘要触发 / 摘要注入 / N 可配置 / 摘要失败降级）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  32,
+                            "passes":  true,
+                            "notes":  "M5 L1 会话内。ADR-015 5.3。复用 OpenAICompatibleProvider 非流式请求。摘要 prompt 参考 mem0/CALMem 最佳实践。P2 跨模块。Phase B 完成 2026-08-11：49 主 Agent 测试 + 12 ac-verifier 补充 = 61 专项测试通过，1035 全量回归 0 失败。BR-security-005 转 active。"
+                        },
+                        {
+                            "id":  "US-033",
+                            "title":  "CrossSessionMemoryManager（L2 跨会话检索 + 防污染）",
+                            "description":  "作为用户，我希望新会话能检索到与当前话题相关的历史对话片段，但不被旧会话全文污染。",
+                            "acceptanceCriteria":  [
+                                                       "对话结束时：将本会话关键消息向量化（复用 Embedder）存入 MemoryRecord",
+                                                       "新会话开始时：将用户首条消息向量化，searchByVector top-k 检索（默认 k=3）相关历史",
+                                                       "防污染：仅注入检索到的 MemoryRecord.content 作为 context，不加载旧会话全文",
+                                                       "检索结果注入 systemPrompt（格式：\u0027相关历史对话：...\u0027），与 RAG 上下文合并",
+                                                       "CrossSessionMemoryManager 单元测试通过（向量化存储 / top-k 检索 / 防污染验证 / 空结果处理 / 注入格式）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  33,
+                            "passes":  true,
+                            "notes":  "M5 L2 跨会话。ADR-015 5.4。复用 M3 Embedder + US-030 MemoryRepository。防污染=核心设计约束。P2 跨模块。2026-08-11 验收通过（TKN-M5-PHASEC-ACCEPTANCE-001）：6/6 AC 通过，58 专项测试 + 1105 全量回归 0 失败。"
+                        },
+                        {
+                            "id":  "US-034",
+                            "title":  "UserProfileManager（L3 用户画像管理 + 隐式偏好抽取）",
+                            "description":  "作为用户，我希望 AI 记住我的偏好（显式设定+隐式抽取），以便越用越懂我。",
+                            "acceptanceCriteria":  [
+                                                       "显式偏好：用户通过 UI 设定（如\u0027我喜欢简洁的回复\u0027），存入 UserProfile category=EXPLICIT",
+                                                       "隐式偏好：对话结束时，LLM 从近期对话抽取偏好（如\u0027用户常用 Python\u0027），存入 category=IMPLICIT",
+                                                       "隐式抽取使用 OpenAICompatibleProvider 非流式请求，抽取 prompt 返回结构化 JSON（key-value pairs）",
+                                                       "画像注入 systemPrompt（格式：\u0027用户偏好：...\u0027），影响 AI 回复风格",
+                                                       "抽取失败降级为跳过（不阻断对话），upsert 已有 key",
+                                                       "UserProfileManager 单元测试通过（显式设定 / 隐式抽取 / 画像注入 / upsert / 抽取失败降级）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  34,
+                            "passes":  true,
+                            "notes":  "M5 L3 用户画像。ADR-015 5.5。复用 OpenAICompatibleProvider + US-031 UserProfileRepository。P2 跨模块。2026-08-11 验收通过（TKN-M5-PHASED-ACCEPTANCE-001）：7/7 AC 通过，80 专项测试 + 1185 全量回归 0 失败。"
+                        },
+                        {
+                            "id":  "US-035",
+                            "title":  "ConversationViewModel 记忆系统集成（L1+L2+L3 上下文注入）",
+                            "description":  "作为用户，我希望对话时 AI 能利用三层记忆（滑动窗口+跨会话检索+用户画像）提供更连贯的回复。",
+                            "acceptanceCriteria":  [
+                                                       "L1 集成：sendMessage 时使用 SlidingWindowMemoryManager 管理上下文（滑动窗口+摘要压缩）",
+                                                       "L2 集成：新会话首条消息时触发 CrossSessionMemoryManager 检索，注入相关历史",
+                                                       "L3 集成：systemPrompt 合并用户画像（显式+隐式偏好）",
+                                                       "防污染验证：新会话不加载旧会话全文，仅注入检索结果+画像",
+                                                       "上下文合并：systemPrompt = base + RAG context + 跨会话记忆 + 用户画像（顺序明确）",
+                                                       "集成测试通过（L1 摘要触发 / L2 检索注入 / L3 画像注入 / 防污染 / 上下文合并顺序）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  35,
+                            "passes":  true,
+                            "notes":  "M5 集成层。ADR-015 5.6。ConversationViewModel Factory 扩展注入三层记忆组件。P2 跨模块。Phase E 验收通过（TKN-M5-PHASEE-ACCEPTANCE-001，6/6 AC，17 集成测试 + 1237 全量回归 0 失败）。"
+                        },
+                        {
+                            "id":  "US-036",
+                            "title":  "记忆管理 UI（查看/编辑/删除/一键清除）",
+                            "description":  "作为用户，我希望能查看、编辑、删除 AI 对我的记忆，或一键清除所有记忆。",
+                            "acceptanceCriteria":  [
+                                                       "新建 MemoryManagementScreen（CapSegment.MEMORY 或设置页二级页面）",
+                                                       "L2 记忆列表：展示 MemoryRecord（会话ID/内容摘要/时间），支持单条删除",
+                                                       "L3 画像列表：展示 UserProfile（key/value/category），支持编辑和删除",
+                                                       "一键清除按钮：删除所有 MemoryRecord + UserProfile（二次确认对话框）",
+                                                       "MemoryManagementViewModel + UI 单元测试通过（列表加载 / 单条删除 / 画像编辑 / 一键清除 / 确认对话框）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  36,
+                            "passes":  true,
+                            "notes":  "M5 UI 层。ADR-015 5.7。用户对记忆有完全控制权（GDPR 式）。P1 常规。Phase E 验收通过（TKN-M5-PHASEE-ACCEPTANCE-001，5/5 AC（AC-1 受限通过 Compose UI 需 instrumented test），29 纯函数单元测试 + 6 deleteById 测试）。"
+                        },
+                        {
+                            "id":  "US-037",
+                            "title":  "M6 Phase A: CrossAppLauncher 核心模块（scheme 清单 + Deep Link + Share Sheet + Picker + Bridge）",
+                            "description":  "作为开发者，我需要实现跨 App 调用的底层能力模块，以便 AI Agent 后续通过 tool_calling 触发跨 App 操作。",
+                            "acceptanceCriteria":  [
+                                                       "新增 assets/cross-app/app_schemes.json：7 个 App scheme 配置（微信/支付宝/淘宝/抖音/QQ/微博/百度地图），含 appId/displayName/packageName/scheme/defaultAction/actions/fallbackUrl/queryScheme 字段",
+                                                       "新增 AppSchemeEntry 数据类 + SchemeRegistry（从 assets 加载 JSON 配置，kotlinx.serialization 解析）",
+                                                       "新增 AppAvailabilityChecker（PackageManager.getPackageInfo 检测 App 安装状态，未安装返回 false 不抛异常）",
+                                                       "新增 DeepLinkLauncher（Intent.ACTION_VIEW + Uri.parse(scheme) 跳转，FLAG_ACTIVITY_NEW_TASK，ActivityNotFoundException 捕获返回 false）",
+                                                       "新增 ShareSheetLauncher（ACTION_SEND + Intent.createChooser，支持 text/plain 和 image/* MIME）",
+                                                       "新增 MediaPicker（封装 ActivityResultContracts.PickVisualMedia + GetMultipleContents 契约，通过 AppLauncherBridge 桥接）",
+                                                       "新增 AppLauncherBridge（MutableSharedFlow\u003cPendingIntentRequest\u003e + ConcurrentHashMap\u003cLong, CompletableDeferred\u003cString\u003e\u003e + withTimeoutOrNull 30s，仿 UiConfirmationGate 桥接模式）",
+                                                       "新增 CrossAppLauncher 核心入口（组合 SchemeRegistry + AppAvailabilityChecker + DeepLinkLauncher + ShareSheetLauncher + MediaPicker + AppLauncherBridge）",
+                                                       "新增 CrossAppConfirmationRequest 数据类（appDisplayName/actionType/contentPreview/targetScheme/isAppInstalled）",
+                                                       "SchemeRegistry + AppAvailabilityChecker 纯函数单元测试通过（JSON 解析 / App 状态检测 / 异常路径）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  37,
+                            "passes":  true,
+                            "notes":  "M6 底层能力层。ADR-016 方案 A（纯 Android 原生，2026-08-11 转 Accepted）。P2 跨模块。零新增第三方依赖。复用 UiConfirmationGate 桥接模式（SharedFlow + CompletableDeferred）。源码考古 TKN-M6-ARCH-001 + 技术选型 TKN-M6-TECH-SELECTION-001。Phase A 验收通过（TKN-M6-PHASE-A-ACCEPTANCE-001，10/10 AC，SchemeRegistryTest 14 + CrossAppLauncherTemplateTest 12 + DeepLink resolveAction 7 + AppAvailabilityCheckerTest 9 全部通过）。"
+                        },
+                        {
+                            "id":  "US-038",
+                            "title":  "M6 Phase B: LocalToolExecutor AI 集成层（接口 + CrossAppLocalToolExecutor + SkillExecutor 扩展）",
+                            "description":  "作为开发者，我需要将跨 App 调用能力注册为 AI 可触发的本地工具，以便 LLM 通过 tool_calling 自主决策调用跨 App 操作。",
+                            "acceptanceCriteria":  [
+                                                       "新增 LocalToolExecutor 接口（handles(toolName): Boolean + suspend execute(toolName, args): String），与 McpToolProvider 平行",
+                                                       "新增 CrossAppLocalToolExecutor 实现 LocalToolExecutor：注册 cross_app__open_app / cross_app__share_content / cross_app__pick_media 三个工具，handles 通过 toolName.startsWith(\"cross_app__\") 判断",
+                                                       "CrossAppLocalToolExecutor.execute 内部通过 AppLauncherBridge 桥接 ActivityResult，返回结果文本（成功/失败描述回灌 LLM）",
+                                                       "CrossAppLocalToolExecutor 通过 intentLauncher: (Intent) -\u003e String? 注入解耦 Android 框架（复用 KnowledgeBaseViewModel inputStreamProvider 模式），纯 JVM 可测",
+                                                       "SkillExecutor 扩展：新增 localToolExecutor 构造器参数（默认 null 向后兼容），executeToolCall 增加本地工具分支（localToolExecutor.handles(toolName) → 走本地 execute，否则走 MCP callTool）",
+                                                       "SkillExecutor 现有 M4 全量回归测试 0 失败（localToolExecutor=null 时行为完全一致）",
+                                                       "PrismApplication 新增 CrossAppLauncher + CrossAppLocalToolExecutor by lazy 依赖注入，SkillExecutor 构造增加 localToolExecutor 参数",
+                                                       "CrossAppLocalToolExecutor 单元测试通过（handles 判断 / open_app / share_content / pick_media / 未安装降级 / 超时降级 / 异常路径）",
+                                                       "SkillExecutor 本地工具分支单元测试通过（localToolExecutor 注入 / handles=true 走本地 / handles=false 走 MCP / localToolExecutor=null 向后兼容）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  38,
+                            "passes":  true,
+                            "notes":  "M6 AI 集成层。ADR-016 LocalToolExecutor 路径（否决 IntentToolProvider 路径，语义清晰 + 测试性好 + 扩展性强，2026-08-11 转 Accepted）。P2 跨模块。复用 M4 SkillExecutor 回路（用户确认 + 超时 + 错误回灌 + 可观测 + 命名空间隔离）。sequential-thinking 6 步推演决策。Phase B 验收通过（TKN-M6-PHASE-B-ACCEPTANCE-001，10/10 AC，DEF-01 B2 严重缺陷由 Phase C 闭合：PrismApplication.kt 注入 localToolExecutor 到 SkillExecutor）。CrossAppLocalToolExecutorTest 24 + SkillExecutorLocalToolTest 11 + M6PhaseBAcceptanceSupplementTest 26 用例全部通过。"
+                        },
+                        {
+                            "id":  "US-039",
+                            "title":  "M6 Phase C: UI 集成层（AndroidManifest queries + ConversationViewModel 工具注册 + ConversationScreen launcher + 用户确认 UI）",
+                            "description":  "作为用户，我希望 AI 能在对话中调用其他 App 的功能（如打开微信、分享内容、选取照片），且调用前需我确认以防误操作。",
+                            "acceptanceCriteria":  [
+                                                       "AndroidManifest.xml 新增 \u003cqueries\u003e 声明：7 个目标 App 包名 + 7 个 scheme intent 过滤器 + 2 个 ACTION_SEND intent 过滤器（text/plain 和 image/*），不声明 QUERY_ALL_PACKAGES",
+                                                       "ConversationViewModel.buildTools 合并跨 App 本地工具（cross_app__open_app / cross_app__share_content / cross_app__pick_media 的 ToolDefinition，含 JSON Schema parameters）",
+                                                       "ConversationViewModel.Factory 注入 CrossAppLauncher + CrossAppLocalToolExecutor（通过 PrismApplication）",
+                                                       "ConversationScreen 注册 ActivityResultContracts.StartActivityForResult launcher，收集 AppLauncherBridge 请求流发起跳转，回调结果回灌 bridge",
+                                                       "ConversationScreen 收集 UiConfirmationGate.requests 流，展示跨 App 确认对话框（App 名称 + 操作类型 + 内容预览 + 确认/取消按钮）",
+                                                       "目标 App 未安装时降级提示（fallbackUrl 网页跳转或提示用户手动打开）",
+                                                       "AI 触发跨 App 调用前必须用户确认（复用 ToolConfirmationGate，确认后才执行跳转）",
+                                                       "集成测试通过（ConversationViewModel 工具执行回路 + 跨 App 工具 handles 判断 + 确认门禁 + 降级路径）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  39,
+                            "passes":  true,
+                            "notes":  "M6 UI 集成层 + 里程碑收尾。ADR-016（2026-08-11 转 Accepted）。P2 跨模块。对应 PRD.md US-006 跨 App 调用（产品级）。复用 KnowledgeBaseScreen ActivityResultContracts 先例 + UiConfirmationGate 桥接模式。Phase C 验收通过（TKN-M6-PHASEC-ACCEPTANCE-001，10/10 AC，DEF-01 闭合 + M-1 双重超时竞态修复 BR-concurrency-005 转 active）。M6 里程碑审计通过（TKN-M6-MILESTONE-AUDIT-001，1380 全量回归 0 失败）。已知受限：UNC-1 真机 E2E 7 App Deep Link 兼容性待补测。"
+                        },
+                        {
+                            "id":  "US-040",
+                            "title":  "M7 Phase A: 设备档位核心适配层（PerformanceTier + TierManager + TierConfigRepository + NullEmbedder）",
+                            "description":  "作为开发者，我需要构建设备档位检测与降级的底层基建，以便后续组件能按 RAM 容量差异化加载功能。",
+                            "acceptanceCriteria":  [
+                                                       "PerformanceTier 枚举定义四档（FULL/STANDARD/MINIMAL/CHAT_ONLY），含 isRagEnabled/isMemoryL2Enabled/isEmbedderEnabled/ragTopK/embedderIdleThresholdMs/checkIntervalMs 属性 + fromRamBytes(totalRamBytes) 静态映射",
+                                                       "PerformanceTier RAM 阈值：FULL≥6GB, STANDARD≥4GB, MINIMAL≥3GB, CHAT_ONLY\u003c3GB（保守阈值应对 totalMem 报告偏差）",
+                                                       "TierManager 通过 TierDetector + OverrideReader 接口注入（解耦 Android Context 与 runBlocking，可测），initialize() 同步检测 RAM + 读取覆盖 + 解析最终档位",
+                                                       "TierManager 暴露 detectedTier/currentTier/totalRamBytes/currentOverride 只读属性 + isInitialized 防御检查",
+                                                       "TierManager.resolveTier 覆盖优先于检测：OVERRIDE_AUTO 用检测值，否则用覆盖值（无效值降级为检测并 Log.w）",
+                                                       "TierConfigRepository 仿 MemoryConfigRepository 模式：独立 DataStore（prism_tier_config）+ Flow 暴露 + suspend getOverride/setOverride + clearOverride",
+                                                       "TierConfigRepository.VALID_VALUES 包含 AUTO + 四档枚举名，setOverride 拒绝非法值（require throw IllegalArgumentException）",
+                                                       "NullEmbedder 实现 Embedder 接口：embed 返回空 FloatArray，embedBatch 返回空 List，isLoaded 返回 false，checkAndUnload 返回 false",
+                                                       "PerformanceTierTest 36 用例 + TierManagerTest 22 用例 + TierConfigRepositoryTest 20 用例 + NullEmbedderTest 17 用例全部通过（共 95 测试）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  40,
+                            "passes":  true,
+                            "notes":  "M7 核心适配层。ADR-017 Accepted（guardrail TKN-M7-GUARDRAIL-001/002 通过 + ac-verifier TKN-M7-ACCEPTANCE-001 通过）。P2 跨模块。复用 MemoryConfigRepository DataStore 模式（ADR-015）+ Embedder 接口（M3 ADR-007）。TierManager 接口注入设计避免 Android Context 依赖，纯 JVM 可测。RAM 阈值保守策略（3GB 设备报告 2.8GB 归 CHAT_ONLY）符合 PRD「低端机优先保稳定」语义。H-01 修复（guardrail round1）：DefaultOverrideReader.read() 加 try-catch 兜底 DataStore 异常降级 AUTO，避免 onCreate 崩溃。实际测试 36+23+20+17=96 用例（H-01 新增 1 用例）。"
+                        },
+                        {
+                            "id":  "US-041",
+                            "title":  "M7 Phase B: 集成层（PrismApplication 注入 + ConversationViewModel 降级 + OnnxEmbedder 调度）",
+                            "description":  "作为系统，我需要在 App 启动时初始化档位管理器，并按档位动态注入 embedder 与记忆管理器，以实现低端设备降级。",
+                            "acceptanceCriteria":  [
+                                                       "PrismApplication.onCreate 同步初始化 TierManager（DefaultTierDetector + DefaultOverrideReader），在所有 by lazy 注入访问 currentTier 之前完成",
+                                                       "PrismApplication.tierConfigRepository by lazy 暴露（独立 DataStore prism_tier_config）",
+                                                       "PrismApplication.tierManager lateinit var 暴露（onCreate 中 initialize）",
+                                                       "PrismApplication.embedder by lazy 按 tierManager.currentTier.isEmbedderEnabled 返回 EmbedderFactory.create 或 NullEmbedder",
+                                                       "PrismApplication 启动 startEmbedderUnloadScheduler 协程：按 tier.checkIntervalMs 间隔调用 OnnxEmbedder.checkAndUnload(idleThresholdMs)，MINIMAL/CHAT_ONLY 因 checkIntervalMs=0 跳过",
+                                                       "ConversationViewModel 新增 ragTopK 构造参数（默认 DEFAULT_RAG_TOP_K=3 向后兼容），buildRagPlan 用 ragTopK 替代硬编码 RAG_TOP_K",
+                                                       "ConversationViewModel.Factory 按 tier 传入 ragTopK = tier.ragTopK，crossSessionMemoryManager = if tier.isMemoryL2Enabled app.crossSessionMemoryManager else null",
+                                                       "PrismApplication 集成不破坏既有 ConversationViewModelTest（默认参数向后兼容）",
+                                                       "全量单元测试通过（无回归）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  41,
+                            "passes":  true,
+                            "notes":  "M7 集成层。ADR-017 4.5/4.6/4.7 Accepted。P2 跨模块。复用 M5 Phase E 已验证的 null 降级基建（crossSessionMemoryManager=null 时 mergeSystemPrompt 自动跳过 L2）。OnnxEmbedder.checkAndUnload 闲置卸载机制激活（M3 实现但未调用，本 Phase 接入调度协程）。ragTopK 动态化替代 M3 硬编码 RAG_TOP_K=3。M-02 修复（guardrail round1）：buildRagPlan 在 ragTopK\u003c=0 时短路返回 NormalChat + search catch 块补 Log.w，避免 NullEmbedder 空向量导致 IllegalArgumentException 异常路径成为热路径。"
+                        },
+                        {
+                            "id":  "US-042",
+                            "title":  "M7 Phase C: UI 层（TierViewModel + SettingsScreen 档位 UI 改造 + TierSheet 弹层）",
+                            "description":  "作为用户，我希望在设置中看到当前设备档位，并能手动覆盖档位（需重启生效）。",
+                            "acceptanceCriteria":  [
+                                                       "TierViewModel 注入 TierConfigRepository + TierManager，暴露 override: StateFlow\u003cString\u003e + detectedTier/currentTier/totalRamBytes 只读属性",
+                                                       "TierViewModel.setOverride(value) 持久化覆盖到 DataStore（runCatching 兜底，非法值不崩溃仅 Log.w）",
+                                                       "TierViewModel.clearOverride() 恢复 AUTO",
+                                                       "TierViewModel.Factory 从 PrismApplication 注入 tierConfigRepository + tierManager",
+                                                       "SettingsScreen 删除本地 PerfTier mock enum + 本地 tier state，改用 TierViewModel 驱动",
+                                                       "SettingsScreen 档位行 subtitle 动态显示：AUTO 时「自动检测 · {RAM}GB · {tier}」，覆盖时「手动覆盖 · {tier}」",
+                                                       "SettingsScreen 档位行点击弹出 TierSheet（PrismSheet 容器）",
+                                                       "TierSheet 列出 5 选项（自动 + 四档），每选项显示档位名 + RAM 范围 + 功能简述 + 选中标记",
+                                                       "TierSheet 底部固定提示「修改后需重启 App 生效」",
+                                                       "TierViewModelTest 20 用例通过（override 默认值/setOverride 持久化/clearOverride/非法值兜底/TierManager 快照读取/覆盖优先于检测）",
+                                                       "全量单元测试通过（无回归）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  42,
+                            "passes":  true,
+                            "notes":  "M7 UI 层。ADR-017 4.6 Accepted。P2 跨模块。替代原 SettingsScreen PerfTier 三档 mock（本地 state，无持久化）。RAM 格式化用 Locale.US 确保小数点为点号（避免部分地区逗号）。覆盖生效语义：UI 修改仅持久化，currentTier 运行中不变，需重启 App（TierManager.initialize 读取新值）。M-01 修复（guardrail round1）：setOverride/clearOverride 由 runCatching 改为显式 try-catch + 重抛 CancellationException（BR-error-handling-007），行为等价（非法值不崩溃 + Log.w）但协程取消语义正确。"
+                        },
+                        {
+                            "id":  "US-043",
+                            "title":  "M7 Phase D: 构建层（build.gradle.kts abiFilters + APK 体积优化）",
+                            "description":  "作为开发者，我需要限制 APK 仅打包生产用 ABI，以减小体积并避免模拟器专用 native 库进入发布包。",
+                            "acceptanceCriteria":  [
+                                                       "app/build.gradle.kts defaultConfig 新增 ndk { abiFilters += listOf(\"arm64-v8a\", \"armeabi-v7a\") }",
+                                                       "排除 x86 / x86_64 ABI（仅模拟器用，生产无用）",
+                                                       "ONNX Runtime Android AAR + ObjectBox + DataStore 的 native 库均含这两个 ABI",
+                                                       "assembleDebug 成功，APK lib/ 目录仅含 arm64-v8a + armeabi-v7a 两个子目录",
+                                                       "APK 内 lib/ 条目验证：libonnxruntime.so / libobjectbox-jni.so / libdatastore_shared_counter.so / libonnxruntime4j_jni.so 仅在 arm64-v8a + armeabi-v7a 下出现",
+                                                       "不启用 largeHeap（ADR-017 4.9：通过档位降级控制内存更符合 PRD 语义）",
+                                                       "不添加前台服务（ADR-017 4.10：嵌入加载 ~200ms，摄入在前台 UI 触发，无需后台长任务）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  43,
+                            "passes":  true,
+                            "notes":  "M7 构建层。ADR-017 4.8/4.9/4.10 Accepted。P2 构建配置变更。abiFilters 减小 APK 体积约 40%（排除 x86/x86_64 native 库）。开发者如需 x86 模拟器调试可用 arm64 模拟器或覆盖 abiFilters。assembleDebug 验证通过（APK lib/ 仅含 2 个 ABI 目录）。AC4-5 APK 拆包条目验证待真机环境执行（编译层已通过，ac-verifier 标注为低优先级后续项）。"
+                        },
+                        {
+                            "id":  "US-044",
+                            "title":  "M8 Phase A: 生成 release keystore + 配置 Gradle 签名 + 启用 R8 + ProGuard 规则",
+                            "description":  "作为开发者，我需要为 release 构建配置签名密钥与 R8 全量混淆，以便产出可公开发布的 signed release APK。",
+                            "acceptanceCriteria":  [
+                                                       "keystore/prism-release.jks 已生成（RSA 2048，SHA256withRSA，有效期至 2053-12-28，PKCS12）",
+                                                       "keystore/keystore.properties 已创建（storeFile/storePassword/keyAlias/keyPassword），.gitignore 排除 keystore/",
+                                                       "keystore/prism-release-credentials.txt 已创建（完整凭据 + 备份说明）",
+                                                       "app/build.gradle.kts 读取 keystore.properties，存在时创建 signingConfigs.release",
+                                                       "app/build.gradle.kts release buildType 启用 isMinifyEnabled + isShrinkResources + signingConfig",
+                                                       "app/build.gradle.kts release buildType 配置 proguardFiles（proguard-android-optimize.txt + proguard-rules.pro）",
+                                                       "app/proguard-rules.pro 包含 15 章节 keep 规则（Kotlin Metadata / ObjectBox / ONNX Runtime / POI / PDFBox / Tink / MCP SDK / SnakeYAML / Ktor / OkHttp / Prism 入口 / ServiceLoader / 调试支持 / 缺失类警告 / 安全力）",
+                                                       "assembleRelease 构建成功（无 R8 阻断错误）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  44,
+                            "passes":  true,
+                            "notes":  "M8 发布工程 Phase A。ADR-018 Accepted。P3 重大（首次 R8 全量 + 签名密钥）。keystore/ 目录 .gitignore 第 10-12 行已排除。keystore.properties 缺失时降级无签名（CI 可用）。proguard-rules.pro 15 章节 keep 规则覆盖所有第三方依赖 + Prism 入口点 + ServiceLoader + 调试支持 + R8 missing class 警告。assembleRelease BUILD SUCCESSFUL（78.4MB）。"
+                        },
+                        {
+                            "id":  "US-045",
+                            "title":  "M8 Phase B: assembleRelease 签名验证 + 全量回归（R8 不剥离关键类）+ APK 体积分析",
+                            "description":  "作为开发者，我需要验证 release APK 签名正确、全量回归测试在 R8 混淆后仍通过、APK 体积符合预期，以便确保发布质量。",
+                            "acceptanceCriteria":  [
+                                                       "apksigner verify 验证 app-release.apk 签名有效（v2 scheme，覆盖 Prism minSdk 26 / Android 8.0+ 全部目标设备）",
+                                                       "./gradlew test 全量单元测试通过（1497+ 测试，0 失败，0 回归）",
+                                                       "全量测试在 release 构建配置下亦通过（如适用，否则说明理由）",
+                                                       "APK 体积 \u003c80MB（实测 78.4MB）",
+                                                       "APK 体积分析报告记录（含 R8 前后对比、ABI 过滤前后对比、依赖占比）",
+                                                       "mapping.txt 已生成并归档（用于崩溃日志反混淆）",
+                                                       "missing_rules.txt 为空或仅含可选依赖警告（无关键类缺失）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  45,
+                            "passes":  true,
+                            "notes":  "M8 发布工程 Phase B。ADR-018 Accepted。P3 重大。任务令牌 TKN-M8-RELEASE-002（R1 有条件通过）+ TKN-M8-RELEASE-002-R2（通过）+ TKN-M8-ACCEPTANCE-002（通过，17/17 AC 全部 PASS）。apksigner v2 scheme 通过 + 1497+1497 测试 0 失败 + APK 78.44MB + mapping.txt 96.86MB 归档 + missing_rules.txt 不存在（所有缺失类已被 -dontwarn 覆盖）。DEF-001 文档修复（ADR-018 4.3 \u0027等 11 条\u0027 → \u0027等 15 条\u0027）。真机烟囱测试（ONNX + ObjectBox + Tink + POI 四条路径）留待 Phase D functional-validation-auditor。"
+                        },
+                        {
+                            "id":  "US-046",
+                            "title":  "M8 Phase C: git tag v0.1.0 + GitHub Release 创建 + APK 上传",
+                            "description":  "作为发布者，我需要打 v0.1.0 tag 并在 GitHub 创建 Release 上传 signed APK + mapping.txt，以便用户可下载安装。",
+                            "acceptanceCriteria":  [
+                                                       "git tag v0.1.0 已创建并推送（annotated tag，含版本说明）",
+                                                       "GitHub Release v0.1.0 已创建（title + release notes 引用 ADR-018 + 验收报告）",
+                                                       "app-release.apk 已上传至 Release 资产",
+                                                       "mapping.txt 已上传至 Release 资产（供用户反混淆崩溃日志）",
+                                                       "Release notes 包含安装说明 + 最低系统要求（Android 8.0+）+ 已知限制",
+                                                       "Release notes 明确声明不上 Google Play（PRD 非目标）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  46,
+                            "passes":  true,
+                            "notes":  "M8 发布工程 Phase C。ADR-018 Accepted。P3 重大。任务令牌 TKN-M8-RELEASE-003。git tag v0.1.0 annotated + 推送 + GitHub Release 创建 + APK 78.44MB + mapping.txt 92.4MB 上传。Release URL: https://github.com/ljhthink/Prism/releases/tag/v0.1.0。Release notes 含安装说明 + Android 8.0+ 最低要求 + 已知限制 + 不上 Google Play 声明。"
+                        },
+                        {
+                            "id":  "US-047",
+                            "title":  "M8 Phase D: functional-validation-auditor 全面审计 + 最终一致性检查 + README 收尾",
+                            "description":  "作为发布者，我需要 functional-validation-auditor 对整个项目做最终交付审计，确认所有 PRD 验收标准满足、文档与实现一致、已知缺陷受控，并完成 README 文档索引收尾。",
+                            "acceptanceCriteria":  [
+                                                       "functional-validation-auditor 输出最终交付审计报告（含交付/上线建议）",
+                                                       "PRD 7. 验收标准汇总表逐项验证（BYOK/MCP/RAG/Skills/Memory/CrossApp/DeviceTier/Memory/AGPL/ApiKeyLeak）",
+                                                       "docs/decisions/ ADR 索引与文件一致（ADR-001~018）",
+                                                       "docs/reports/README.md 与实际报告一致（除 perf 子目录外不提交远程）",
+                                                       "README.md 文档索引完整且链接可达",
+                                                       "docs/behavioral-rules.md 健康检查（去重/合并/deprecated 标注）",
+                                                       "M8 里程碑审计报告存档（docs/reports/2026-08-11-m8-milestone-audit.md，本地不入库）",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  47,
+                            "passes":  true,
+                            "notes":  "M8 发布工程 Phase D。ADR-018 Accepted。P3 重大。任务令牌 TKN-M8-RELEASE-004 + TKN-M8-MILESTONE-AUDIT-001。functional-validation-auditor 9 步审计结论：有条件交付（CONDITIONAL GO），9 通过 + 2 受限通过 + 0 不通过。PRD 11 项验收标准：9 通过 + 2 受限通过（跨 App 真机 E2E + 设备分档真机内存峰值）。AUDIT-001 修复（ADR-002 状态 Proposed → Accepted）。一致性检查通过。README 文档索引完整（160 链接 0 失效）。behavioral-rules.md 32 条规则 9 类别 0 deprecated 健康。v0.1.1 改进清单已建立（P0 真机烟囱测试 + P0 分支模型治理 + P1 跨 App E2E + P1 内存峰值 + P1 APK 拆包验证 + P2 CI license 扫描 + P2 Compose instrumented test）。已知受限：真机烟囱测试（ONNX/ObjectBox/Tink/POI 四条 JNI 反射路径）+ 远程无 main 分支（AUDIT-002，历史遗留）。"
+                        },
+                        {
+                            "id":  "US-1701",
+                            "title":  "TODO 数据模型与 todo_write 工具执行器",
+                            "description":  "作为用户，我希望 LLM 对多步任务先建清单并实时更新，以便监督任务进度。",
+                            "acceptanceCriteria":  [
+                                                       "TodoItem(content, activeForm, status) + TodoListState(items, version) 会话级内存模型",
+                                                       "TodoLocalToolExecutor 实现 todo_write：maxItems=8、恰好 1 个 in_progress、违规回灌错误提示",
+                                                       "成功后回灌清单快照（1.[x] … 2.[→] …）+ StreamEvent.TodoUpdate 推 UI",
+                                                       "单元测试：合法更新/超 8 项拒绝/多 in_progress 拒绝/空清单清空/快照格式",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  1,
+                            "passes":  false,
+                            "notes":  "TODO list（ADR-043 D1，单工具全量替换 + Claude Code TodoWrite 同构）"
+                        },
+                        {
+                            "id":  "US-1702",
+                            "title":  "todo_write 工具注册与 systemPrompt 指引",
+                            "description":  "作为 LLM，我需要感知 todo_write 工具并被引导正确使用。",
+                            "acceptanceCriteria":  [
+                                                       "buildTools 合并 todo_write（JSON Schema: type:array + items:object，防 400）",
+                                                       "TODO_GUIDANCE 注入 mergeSystemPrompt（\u003e=3 步先建清单/完成立即 completed 禁止批量补记）",
+                                                       "buildTools 集成测试覆盖开关组合",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  2,
+                            "passes":  false,
+                            "notes":  "依赖 US-1701"
+                        },
+                        {
+                            "id":  "US-1703",
+                            "title":  "TodoCard 聊天流卡片",
+                            "description":  "作为用户，我希望在聊天流中实时看到任务清单卡片。",
+                            "acceptanceCriteria":  [
+                                                       "TodoCard 组件：标题「任务计划 (n/m)」+ 三态图标 + activeForm 高亮",
+                                                       "按 version 原地更新不新增气泡；会话切换清空",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  3,
+                            "passes":  false,
+                            "notes":  "依赖 US-1701 StreamEvent.TodoUpdate"
+                        },
+                        {
+                            "id":  "US-1704",
+                            "title":  "AI 消息编辑（思维链+输出覆写）VM 层",
+                            "description":  "作为用户，我希望覆写 LLM 思维链与输出内容并保存进对话。",
+                            "acceptanceCriteria":  [
+                                                       "editAiMessage(messageId, newContent, newThinkingChain)：CAS 原子更新不截断后续，置落库脏标记",
+                                                       "仅 ASSISTANT 角色；isTyping 时忽略",
+                                                       "单元测试：更新生效/非 ASSISTANT 忽略/isTyping 忽略/后续消息不受影响",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  4,
+                            "passes":  false,
+                            "notes":  "思维链覆写（ADR-043 D2，独立字段编辑）"
+                        },
+                        {
+                            "id":  "US-1705",
+                            "title":  "AI 消息编辑 UI",
+                            "description":  "作为用户，我希望通过菜单打开双编辑框（思维链+输出）。",
+                            "acceptanceCriteria":  [
+                                                       "AI 消息菜单「编辑回复」→ PrismSheet 双编辑框预填充",
+                                                       "保存调用 editAiMessage；空内容忽略",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  5,
+                            "passes":  false,
+                            "notes":  "依赖 US-1704"
+                        },
+                        {
+                            "id":  "US-1706",
+                            "title":  "单次对话回退",
+                            "description":  "作为用户，我希望从某条 user 消息回退并可选另存新会话。",
+                            "acceptanceCriteria":  [
+                                                       "rollbackFromUserMessage(messageId)：CAS 删除该消息及其后全部",
+                                                       "UI：「从这里重新开始」+ 确认对话框 + 自动重发",
+                                                       "另存为新会话：回退前复制会话快照",
+                                                       "单元测试：截断正确/非 USER 忽略/isTyping 忽略/另存完整",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  6,
+                            "passes":  false,
+                            "notes":  "对话回退（ADR-043 D3，线性硬截断）"
+                        },
+                        {
+                            "id":  "US-1707",
+                            "title":  "ChatMessage 变体数据模型（swipes）",
+                            "description":  "作为用户，我希望重试时保留全部历史版本。",
+                            "acceptanceCriteria":  [
+                                                       "ChatMessage 新增 variants: List\u003cMessageVariant\u003e? + activeVariantIndex: Int",
+                                                       "MessageVariant(content, thinkingChain, searchResults, sources, createdAt)",
+                                                       "ChatMessageSerializer：空 variants 不落盘；旧 JSON 向后兼容",
+                                                       "单元测试：roundtrip/旧 JSON 兼容/空不产生字段",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  7,
+                            "passes":  false,
+                            "notes":  "对话重试数据层（ADR-043 D4，SillyTavern swipes 同构）"
+                        },
+                        {
+                            "id":  "US-1708",
+                            "title":  "重新生成与变体切换",
+                            "description":  "作为用户，我希望对最后一条 AI 回复重新生成并切换版本。",
+                            "acceptanceCriteria":  [
+                                                       "regenerateLastAiMessage()：原内容迁移 variants[0]（仅首次）→ 追加新 variant 置 active → 重发",
+                                                       "switchVariant(messageId, index)：切换 active，仅改展示与请求所用内容；variants 不进请求",
+                                                       "UI：AI 消息底部变体切换器（仅最后一条且 variants 非空显示）",
+                                                       "单元测试：首重试迁移/二次追加/切换生效/isTyping 忽略",
+                                                       "Typecheck passes"
+                                                   ],
+                            "priority":  8,
+                            "passes":  false,
+                            "notes":  "依赖 US-1707"
+                        }
+                    ]
 }

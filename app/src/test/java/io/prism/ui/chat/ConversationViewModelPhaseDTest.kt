@@ -1330,23 +1330,29 @@ class ConversationViewModelPhaseDTest {
         assertFalse("第二轮历史不应含过期 assistant 占位 toolCalls", secondRoundHistory.any { it.toolCalls.isNotEmpty() })
     }
 
-    // ==================== UXR5 问题 4：孤儿 tool 防御（tool_calls 完整性） ====================
+    // ============ UXR5 问题 4 + v1 批次17：tool 配对双向净化（sanitizeToolCallPairing） ============
+
+    /** 净化器测试用 id 生成器（自增，合成 TOOL 消息用）。 */
+    private fun newIdGen(): () -> Long {
+        val counter = longArrayOf(10_000L)
+        return { counter[0]++ }
+    }
 
     @Test
-    fun `dropOrphanToolMessages keeps paired tool results`() {
+    fun `sanitizeToolCallPairing keeps paired tool results`() {
         // 配对正常：assistant(tool_calls) → tool → assistant(文本)，全部保留
         val msgs = listOf(
             ChatMessage(1, Role.USER, "q", 1000L),
             ChatMessage(2, Role.ASSISTANT, "", 2000L, toolCalls = listOf(ToolCallRef("c1", "function", "skill__t", "{}"))),
-            ChatMessage(3, Role.TOOL, "result", 3000L),
+            ChatMessage(3, Role.TOOL, "result", 3000L, toolCallId = "c1"),
             ChatMessage(4, Role.ASSISTANT, "final answer", 4000L)
         )
-        val result = ConversationViewModel.dropOrphanToolMessages(msgs)
+        val result = SkillExecutor.sanitizeToolCallPairing(msgs, newIdGen())
         assertEquals("配对正常的消息应全部保留", 4, result.size)
     }
 
     @Test
-    fun `dropOrphanToolMessages removes orphan tool without preceding tool_calls`() {
+    fun `sanitizeToolCallPairing removes orphan tool without preceding tool_calls`() {
         // 孤儿 TOOL：前置 assistant 无 toolCalls（会话恢复丢失），应被丢弃
         val msgs = listOf(
             ChatMessage(1, Role.USER, "q", 1000L),
@@ -1354,29 +1360,29 @@ class ConversationViewModelPhaseDTest {
             ChatMessage(3, Role.TOOL, "orphan result", 3000L),
             ChatMessage(4, Role.ASSISTANT, "final", 4000L)
         )
-        val result = ConversationViewModel.dropOrphanToolMessages(msgs)
+        val result = SkillExecutor.sanitizeToolCallPairing(msgs, newIdGen())
         assertEquals("孤儿 TOOL 应被丢弃，剩 3 条", 3, result.size)
         assertFalse("不应含孤儿 TOOL", result.any { it.role == Role.TOOL })
     }
 
     @Test
-    fun `dropOrphanToolMessages resets pairing state at user boundary`() {
+    fun `sanitizeToolCallPairing resets pairing state at user boundary`() {
         // user 消息重置待配对状态：上一轮的 tool_calls 对不应跨 user 匹配
         val msgs = listOf(
             ChatMessage(1, Role.USER, "q1", 1000L),
             ChatMessage(2, Role.ASSISTANT, "", 2000L, toolCalls = listOf(ToolCallRef("c1", "function", "skill__t", "{}"))),
-            ChatMessage(3, Role.TOOL, "result1", 3000L),
+            ChatMessage(3, Role.TOOL, "result1", 3000L, toolCallId = "c1"),
             ChatMessage(4, Role.USER, "q2", 4000L),
             ChatMessage(5, Role.TOOL, "orphan after user", 5000L),
             ChatMessage(6, Role.ASSISTANT, "final", 6000L)
         )
-        val result = ConversationViewModel.dropOrphanToolMessages(msgs)
+        val result = SkillExecutor.sanitizeToolCallPairing(msgs, newIdGen())
         assertFalse("user 边界后的孤儿 TOOL 应被丢弃", result.any { it.id == 5L })
         assertTrue("配对的 tool result 应保留", result.any { it.id == 3L })
     }
 
     @Test
-    fun `dropOrphanToolMessages keeps parallel tool calls pairing`() {
+    fun `sanitizeToolCallPairing keeps parallel tool calls pairing`() {
         // F-01（guardrail TKN-UXR5-GUARDRAIL-001）：一轮内多个并行工具调用——
         // assistant(toolCalls=[c1,c2]) → tool(c1) → tool(c2)，两条 TOOL 都必须保留。
         val msgs = listOf(
@@ -1392,16 +1398,17 @@ class ConversationViewModelPhaseDTest {
             ChatMessage(4, Role.TOOL, "result-b", 4000L, toolCallId = "c2"),
             ChatMessage(5, Role.ASSISTANT, "final", 5000L)
         )
-        val result = ConversationViewModel.dropOrphanToolMessages(msgs)
+        val result = SkillExecutor.sanitizeToolCallPairing(msgs, newIdGen())
         assertEquals("并行配对的消息应全部保留", 5, result.size)
         assertTrue("第一个 tool result 应保留", result.any { it.id == 3L })
         assertTrue("第二个 tool result 应保留（并行配对）", result.any { it.id == 4L })
     }
 
     @Test
-    fun `dropOrphanToolMessages drops only unmatched parallel tool`() {
-        // 并行配对不完整：assistant(toolCalls=[c1,c2]) → 仅 1 条 tool result → 无孤儿可丢
-        //（tool 数量 < toolCalls 数量是"缺失"而非"孤儿"，协议容忍；此处验证不误删）。
+    fun `sanitizeToolCallPairing synthesizes missing parallel tool result`() {
+        // v1 批次17（真机 RCA）：assistant(toolCalls=[c1,c2]) 仅 1 条 tool result →
+        // c2 结果缺失（DeepSeek 400 "insufficient tool messages"根因）→ 应在下一非 TOOL
+        // 消息前补合成 c2 的 TOOL 消息（可诊断提示）。
         val msgs = listOf(
             ChatMessage(1, Role.USER, "q", 1000L),
             ChatMessage(
@@ -1414,9 +1421,86 @@ class ConversationViewModelPhaseDTest {
             ChatMessage(3, Role.TOOL, "result-a", 3000L, toolCallId = "c1"),
             ChatMessage(4, Role.ASSISTANT, "final", 4000L)
         )
-        val result = ConversationViewModel.dropOrphanToolMessages(msgs)
-        // 已有 tool result 保留；未返回的 c2 结果缺失（非孤儿，不处理）
-        assertTrue("已返回的 tool result 应保留", result.any { it.id == 3L })
+        val result = SkillExecutor.sanitizeToolCallPairing(msgs, newIdGen())
+        assertEquals("缺失的 c2 结果应补合成，共 5 条", 5, result.size)
+        val synthetic = result.filter { it.role == Role.TOOL && it.toolCallId == "c2" }
+        assertEquals("应恰好合成 1 条 c2 TOOL 消息", 1, synthetic.size)
+        assertTrue("合成消息应含可诊断提示", synthetic[0].content.contains("工具结果缺失"))
+        assertEquals("合成消息应位于 final assistant 之前", 3, result.indexOfFirst { it.toolCallId == "c2" })
+    }
+
+    @Test
+    fun `sanitizeToolCallPairing synthesizes missing result before trailing end`() {
+        // 序列末尾残留未配对 tool_calls（中断切断结果回灌）→ 结尾补合成
+        val msgs = listOf(
+            ChatMessage(1, Role.USER, "q", 1000L),
+            ChatMessage(2, Role.ASSISTANT, "", 2000L, toolCalls = listOf(ToolCallRef("c1", "function", "t", "{}")))
+        )
+        val result = SkillExecutor.sanitizeToolCallPairing(msgs, newIdGen())
+        assertEquals("末尾应补合成 1 条 c1 TOOL 消息", 3, result.size)
+        assertEquals(Role.TOOL, result[2].role)
+        assertEquals("c1", result[2].toolCallId)
+    }
+
+    @Test
+    fun `sanitizeToolCallPairing realigns blank toolCallId to first pending`() {
+        // toolCallId 空白（流式分片重组丢失）：保留内容，重写为队首待配对 id
+        val msgs = listOf(
+            ChatMessage(1, Role.USER, "q", 1000L),
+            ChatMessage(
+                2, Role.ASSISTANT, "", 2000L,
+                toolCalls = listOf(
+                    ToolCallRef("c1", "function", "skill__a", "{}"),
+                    ToolCallRef("c2", "function", "skill__b", "{}")
+                )
+            ),
+            ChatMessage(3, Role.TOOL, "result-b", 3000L, toolCallId = "c2"),
+            ChatMessage(4, Role.TOOL, "result-blank", 4000L, toolCallId = ""),
+            ChatMessage(5, Role.ASSISTANT, "final", 5000L)
+        )
+        val result = SkillExecutor.sanitizeToolCallPairing(msgs, newIdGen())
+        assertEquals("全部保留（c2 命中 + 空白重写）", 5, result.size)
+        val realigned = result.first { it.id == 4L }
+        assertEquals("空白 toolCallId 应重写为队首 c1", "c1", realigned.toolCallId)
+        assertEquals("内容应原样保留", "result-blank", realigned.content)
+    }
+
+    @Test
+    fun `sanitizeToolCallPairing truncates overlong tool result`() {
+        // 超长 TOOL 结果（crawl4ai 275KB Markdown 同类）：截断并附标注
+        val longText = "x".repeat(SkillExecutor.MAX_TOOL_RESULT_CHARS + 1000)
+        val msgs = listOf(
+            ChatMessage(1, Role.USER, "q", 1000L),
+            ChatMessage(2, Role.ASSISTANT, "", 2000L, toolCalls = listOf(ToolCallRef("c1", "function", "t", "{}"))),
+            ChatMessage(3, Role.TOOL, longText, 3000L, toolCallId = "c1"),
+            ChatMessage(4, Role.ASSISTANT, "final", 4000L)
+        )
+        val result = SkillExecutor.sanitizeToolCallPairing(msgs, newIdGen())
+        val tool = result.first { it.role == Role.TOOL }
+        assertTrue("超长结果应被截断", tool.content.length < longText.length)
+        assertTrue("截断应附标注尾注", tool.content.contains("已截断"))
+    }
+
+    @Test
+    fun `sanitizeToolCallPairing is idempotent`() {
+        // 幂等：对已净化序列重复应用不产生变化（含合成消息不再重复生成 +
+        // guardrail P3-1：超长消息截断路径的幂等——尾注数字保持首次真实值）
+        val longText = "y".repeat(SkillExecutor.MAX_TOOL_RESULT_CHARS + 5000)
+        val msgs = listOf(
+            ChatMessage(1, Role.USER, "q", 1000L),
+            ChatMessage(
+                2, Role.ASSISTANT, "", 2000L,
+                toolCalls = listOf(ToolCallRef("c1", "function", "t", "{}"))
+            ),
+            ChatMessage(3, Role.TOOL, longText, 3000L, toolCallId = "c1"),
+            ChatMessage(4, Role.ASSISTANT, "final", 4000L)
+        )
+        val first = SkillExecutor.sanitizeToolCallPairing(msgs, newIdGen())
+        val second = SkillExecutor.sanitizeToolCallPairing(first, newIdGen())
+        assertEquals("二次净化应零变化（含截断尾注）", first, second)
+        // 首次截断的「原文 N 字符」应记录真实原始长度，二次应用不得改写
+        val tool = first.first { it.role == Role.TOOL }
+        assertTrue("尾注应含真实原始长度", tool.content.contains("原文 ${longText.length} 字符"))
     }
 
     // ==================== 辅助构造 ====================

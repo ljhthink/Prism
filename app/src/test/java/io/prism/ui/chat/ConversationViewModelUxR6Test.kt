@@ -58,7 +58,7 @@ import java.io.File
  * 3. **问题 2（每消息流式标记）**：流式期间 aiId 在 streamingIds 中、完成后移除，
  *    且工具回路中 Error 事件**不**提前清 streamingIds（Error 守卫 + finally 兜底）。
  * 4. **问题 3a（RAG 检索状态驱动指示）**：ragRetrieving 在 launchAnswer 期间短暂置位后复位。
- * 5. **问题 1（重复工具熔断常量）**：MAX_CONSECUTIVE_TOOL_FAILURES 存在且为 2。
+ * 5. **问题 1（重复工具熔断常量）**：熔断分类别阈值（v1 批次18）：网络类 3 / phone_control 4，外科式仅禁用失败工具。
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConversationViewModelUxR6Test {
@@ -292,16 +292,20 @@ class ConversationViewModelUxR6Test {
     }
 
     @Test
-    fun `circuit breaker constant is 2 consecutive failures`() {
-        assertEquals(2, SkillExecutor.MAX_CONSECUTIVE_TOOL_FAILURES)
+    fun `circuit breaker threshold is 3 for network tools and 4 for phone control`() {
+        // v1 批次18（真机 RCA 2026-09-03）：分类别阈值——网络类 3 次 / phone_control 4 次
+        assertEquals(3, SkillExecutor.resolveToolFailureThreshold("web_search__search"))
+        assertEquals(3, SkillExecutor.resolveToolFailureThreshold("mcp_Fetch__fetch"))
+        assertEquals(4, SkillExecutor.resolveToolFailureThreshold("phone_control__type"))
+        assertEquals(4, SkillExecutor.resolveToolFailureThreshold("phone_control__tap"))
     }
 
     @Test
-    fun `executeLoop circuit breaker empties tools after consecutive failures and gives answer`() =
+    fun `executeLoop circuit breaker disables only failing tool and keeps others available`() =
         runTest(mainDispatcher) {
-            // guardrail Medium-2（TKN-UXR6-GUARDRAIL-001）：真实 executeLoop 循环级集成测试。
-            // 场景：web_search 连续 2 次返回失败（"搜索失败"前缀）→ 熔断置空 tools →
-            // 第 3 轮 LLM 无工具可用 → 纯文本回答（Delta + Done）→ 无 maxRounds Error。
+            // v1 批次18（真机 RCA 2026-09-03）：熔断外科化——web_search 连续 3 次失败（阈值 3）
+            // → **仅禁用 web_search__search**，其他工具（本地搜索）继续可用 → LLM 换工具完成
+            // 剩余任务，而非旧语义的「清空全部工具 → 任务被异常打断」。
             val config = ProviderConfig(
                 name = "OpenAI", baseUrl = "https://api.openai.com/v1",
                 apiKeyRef = "openai", models = listOf("gpt-4o")
@@ -310,7 +314,12 @@ class ConversationViewModelUxR6Test {
             val mcpProvider = object : McpToolProvider {
                 override suspend fun listTools(config: McpServerConfig): List<String> = emptyList()
                 override suspend fun callTool(config: McpServerConfig, name: String, arguments: Map<String, Any?>): String =
-                    "搜索失败：联网搜索暂不可用，请基于已有信息回答"
+                    // 剥命名空间后：search = 联网搜索（连续失败触发熔断）；search_local = 本地兜底（成功）
+                    if (name == "search") {
+                        "搜索失败：联网搜索暂不可用，请基于已有信息回答"
+                    } else {
+                        "本地兜底结果：知识库与本地缓存中找到相关条目"
+                    }
             }
             val executor = SkillExecutor(
                 mcpToolProvider = mcpProvider,
@@ -334,6 +343,13 @@ class ConversationViewModelUxR6Test {
                             description = "search",
                             parameters = buildJsonObject { }
                         )
+                    ),
+                    ToolDefinition(
+                        function = ToolDefinition.FunctionDef(
+                            name = "web_search__search_local",
+                            description = "local fallback search",
+                            parameters = buildJsonObject { }
+                        )
                     )
                 ),
                 mcpServers = listOf(
@@ -343,27 +359,30 @@ class ConversationViewModelUxR6Test {
                 onEvent = { events.add(it) }
             )
 
-            // 第 1 轮 + 第 2 轮：LLM 调用工具（失败）→ 熔断
-            // 第 3 轮：tools 为空，LLM 纯文本回答 → 回路自然结束
-            assertEquals("应经历 3 轮（2 轮工具 + 1 轮纯文本）", 3, chatProvider.callCount)
-            assertTrue(
-                "第 3 轮应传入空 tools（熔断生效）",
-                chatProvider.calls[2].tools.isNullOrEmpty()
+            // 第 1~3 轮：LLM 调用 web_search（失败，阈值 3）→ 熔断（仅禁用该工具）
+            // 第 4 轮：LLM 收到禁用提示 + 其余工具仍在 → 调用本地兜底工具（成功）
+            // 第 5 轮：纯文本汇报 → 回路结束
+            assertEquals("应经历 5 轮（3 轮失败 + 1 轮换工具成功 + 1 轮汇报）", 5, chatProvider.callCount)
+            val round4Tools = chatProvider.calls[3].tools.orEmpty()
+            assertFalse(
+                "第 4 轮 tools 应已移除失败工具（外科式禁用）",
+                round4Tools.any { it.function.name == "web_search__search" }
             )
-            assertTrue("应注入不要再调用工具的提示", chatProvider.calls[2].systemPrompt.orEmpty().contains("不要再调用"))
+            assertTrue(
+                "第 4 轮应保留其他工具（其余工具不被牵连清空）",
+                round4Tools.any { it.function.name == "web_search__search_local" }
+            )
+            assertTrue(
+                "应注入单工具禁用提示（含阈值说明）",
+                chatProvider.calls[3].systemPrompt.orEmpty().contains("已被禁用")
+            )
             assertFalse(
                 "熔断后不应发射 maxRounds Error（用户应得到答案而非报错）",
                 events.any { it is StreamEvent.Error && it.message.contains("循环达上限") }
             )
             assertTrue(
-                "熔断后第 3 轮应产出最终文本回答（Delta 事件，即用户可见答案）",
-                events.any { it is StreamEvent.Delta && it.content.contains("根据已有信息回答") }
-            )
-            // executeLoop 返回的是协议消息（assistant 占位 + tool result），最终文本经 onEvent(Delta)
-            // 由 ConversationViewModel appendDelta 累积到 aiId（不在 executeLoop 返回值中）
-            assertTrue(
-                "返回消息应包含 web_search tool result（失败文案）",
-                result.any { it.role == Role.TOOL && it.content.contains("搜索失败") }
+                "第 4 轮换用本地兜底工具应成功执行",
+                result.any { it.role == Role.TOOL && it.content.contains("本地兜底结果") }
             )
         }
 
@@ -525,9 +544,11 @@ class ConversationViewModelUxR6Test {
             calls.add(Call(tools = tools, systemPrompt = systemPrompt))
             return flow {
                 when (calls.size) {
-                    // 前 2 轮：LLM 反复调用 web_search（结果失败 → 熔断）
-                    1, 2 -> emit(StreamEvent.ToolCallComplete("call_${calls.size}", "web_search__search", emptyMap()))
-                    // 第 3 轮（熔断后 tools 空）：LLM 纯文本回答
+                    // 前 3 轮：LLM 反复调用 web_search（结果失败 → 达阈值 3 熔断，仅禁用该工具）
+                    1, 2, 3 -> emit(StreamEvent.ToolCallComplete("call_${calls.size}", "web_search__search", emptyMap()))
+                    // 第 4 轮（web_search 已禁用但本地兜底工具仍在）：LLM 换用本地工具
+                    4 -> emit(StreamEvent.ToolCallComplete("call_4", "web_search__search_local", emptyMap()))
+                    // 第 5 轮：本地工具成功 → LLM 纯文本汇报
                     else -> {
                         emit(StreamEvent.Delta("根据已有信息回答：暂未找到「昔涟」的搜索结果"))
                         emit(StreamEvent.Done)

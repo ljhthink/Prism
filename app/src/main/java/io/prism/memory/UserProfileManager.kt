@@ -327,7 +327,16 @@ class UserProfileManager(
         private const val TAG = "UserProfileManager"
 
         /** 用户画像注入 systemPrompt 的前缀（US-034 AC-4）。 */
-        internal const val PROFILE_CONTEXT_PREFIX = "用户偏好：\n"
+        /**
+         * v1 批次19（真机 RCA：LLM 把「用户偏好：」当成"设备配置"而非记忆——9 条画像已注入
+         * 却回答"没有你的个人画像数据"）：L3 section 记忆化改造。措辞融合
+         * Letta（human 块持续感知）+ open-webui-memory（低存在感：无关时不主动罗列）+
+         * 业界缺失的差异化指令（身份类问题必须引用本节并如实回答）。
+         */
+        internal const val PROFILE_CONTEXT_PREFIX =
+            "关于用户的长期记忆（以下条目由系统在历史对话中自动维护，是关于这位用户的真实记忆，" +
+                "不是普通配置）：当用户询问「我是什么样的人」「我的偏好/习惯/背景」等关于用户自身的" +
+                "问题时，优先依据以下条目并如实引用回答，不要声称没有记忆；与当前问题无关时不必主动罗列。\n"
 
         /**
          * 偏好抽取 prompt 模板（参考 mem0 隐式记忆抽取最佳实践）。

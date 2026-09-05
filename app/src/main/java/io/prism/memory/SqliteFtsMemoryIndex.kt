@@ -34,6 +34,17 @@ class SqliteFtsMemoryIndex(
     /** 上次同步的版本号。 */
     private var lastVersion: Long = -1
 
+    /**
+     * v1 批次19（真机 RCA：FTS 影子表损坏后 reconcile/search 永久失败且无自愈——
+     * CREATE IF NOT EXISTS 不会修复缺失/损坏的 FTS5 影子表）：自愈重建计数。
+     *
+     * **风暴防护（guardrail P2-1）**：进程生命周期内最多 [MAX_REBUILD_ATTEMPTS] 次重建
+     * 尝试（reconcileOnce/searchOnce 成功即归零）——确定性失败稳态（磁盘满/FTS5 模块
+     * 缺失）下不会无限删库重建，超限后永久降级为纯向量检索。
+     */
+    internal var rebuildAttempts = 0
+        private set
+
     /** 懒加载数据库并建表（线程安全：double-check）。 */
     private fun database(): SQLiteDatabase? {
         db?.let { return it }
@@ -63,7 +74,23 @@ class SqliteFtsMemoryIndex(
 
     override fun reconcile(records: List<MemoryRecord>, version: Long) {
         if (version == lastVersion) return
-        val database = database() ?: return
+        val ok = reconcileOnce(records, version)
+        if (ok) {
+            rebuildAttempts = 0 // 成功归零（guardrail P2-1：仅确定性失败耗尽预算）
+            return
+        }
+        if (rebuildAttempts < MAX_REBUILD_ATTEMPTS) {
+            // v1 批次19：索引=派生物（真源 MemoryRecord 在 ObjectBox）——失败即删库重建
+            //（业界无现成实现，自研"派生索引自愈"模式，见调研报告 §2.2-c）
+            rebuildAttempts++
+            rebuildDatabase()
+            reconcileOnce(records, version)
+        }
+    }
+
+    /** 单次重建尝试（返回是否成功；失败日志带 exception message——旧版只打类名无法定位）。 */
+    private fun reconcileOnce(records: List<MemoryRecord>, version: Long): Boolean {
+        val database = database() ?: return false
         database.beginTransaction()
         try {
             database.execSQL("DELETE FROM $TABLE_NAME")
@@ -77,16 +104,57 @@ class SqliteFtsMemoryIndex(
             }
             database.setTransactionSuccessful()
             lastVersion = version
+            return true
         } catch (e: Exception) {
-            Log.w(TAG, "reconcile: 重建 FTS 索引失败（${e::class.simpleName}）")
+            Log.w(TAG, "reconcile: 重建 FTS 索引失败（${e::class.simpleName}）：${e.message}")
+            return false
         } finally {
             database.endTransaction()
+        }
+    }
+
+    /**
+     * 自愈：关闭并删除损坏的 FTS 数据库文件，下次访问时重建（真源数据不受影响）。
+     */
+    private fun rebuildDatabase() {
+        Log.w(TAG, "FTS index appears corrupted, rebuilding database $DB_NAME")
+        try {
+            db?.close()
+        } catch (e: Exception) {
+            Log.w(TAG, "rebuildDatabase: close failed（${e::class.simpleName}）：${e.message}")
+        }
+        db = null
+        lastVersion = -1
+        val deleted = try {
+            context.deleteDatabase(DB_NAME)
+        } catch (e: Exception) {
+            Log.w(TAG, "rebuildDatabase: delete failed（${e::class.simpleName}）：${e.message}")
+            false
+        }
+        if (!deleted) {
+            // guardrail P3：删除失败（文件被占用等）→ 下次 database() 打开的仍是旧库，
+            // 重建无效但已计入预算，不会风暴
+            Log.w(TAG, "rebuildDatabase: delete returned false, old database may persist")
         }
     }
 
     override fun search(query: String, topK: Int): List<MemoryKeywordHit> {
         if (topK <= 0 || MemoryFtsTokenizer.tokenize(query).isEmpty()) return emptyList()
         val database = database() ?: return emptyList()
+        val first = searchOnce(database, query, topK)
+        if (first != null) return first
+        // v1 批次19：检索失败（表损坏）→ 预算内自愈一次后重试（guardrail P2-1：预算防风暴）
+        if (rebuildAttempts < MAX_REBUILD_ATTEMPTS) {
+            rebuildAttempts++
+            rebuildDatabase()
+            val reopened = database() ?: return emptyList()
+            return searchOnce(reopened, query, topK) ?: emptyList()
+        }
+        return emptyList()
+    }
+
+    /** 单次检索尝试（返回 null 表示失败，可触发自愈重试）。 */
+    private fun searchOnce(database: SQLiteDatabase, query: String, topK: Int): List<MemoryKeywordHit>? {
         return try {
             val matchQuery = buildMatchQuery(query)
             if (matchQuery == null) return emptyList()
@@ -103,14 +171,21 @@ class SqliteFtsMemoryIndex(
                 hits
             }
         } catch (e: Exception) {
-            Log.w(TAG, "search: FTS 检索失败（${e::class.simpleName}），降级为空")
-            emptyList()
+            Log.w(TAG, "search: FTS 检索失败（${e::class.simpleName}）：${e.message}，降级为空")
+            null
         }
     }
 
     companion object {
         private const val TAG = "MemoryFts"
         private const val DB_NAME = "prism_memory_fts.db"
+
+        /**
+         * v1 批次19（guardrail P2-1）：进程生命周期内自愈重建尝试上限——
+         * 确定性失败稳态（磁盘满/FTS5 模块缺失）下最多尝试该次数后永久降级纯向量检索，
+         * 不会无限删库重建；任一次 reconcileOnce 成功即归零。
+         */
+        internal const val MAX_REBUILD_ATTEMPTS = 2
         private const val TABLE_NAME = "memory_fts"
 
         /**

@@ -71,3 +71,4 @@ Proposed → Accepted → Deprecated / Superseded
 5. 变更文档治理规则、版本管理策略或子 Agent 分工
 6. 选择一种实现方案而明确排除其他可行方案
 7. 任何可能对其他模块产生长期影响的决策
+| ADR-043 | 批次17 四项新功能方案选型（todo_write 单工具全量替换 / 思维链独立字段覆写 / 回退线性硬截断 / 重试 swipes 变体模型） | Accepted | 2026-09-03 | [ADR-043-batch17-features.md](ADR-043-batch17-features.md) |

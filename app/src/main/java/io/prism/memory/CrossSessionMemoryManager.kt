@@ -618,8 +618,14 @@ class CrossSessionMemoryManager(
         val text = userText.trim()
         if (text.isEmpty()) return false
         val normalized = text.lowercase().filter { it.isLetterOrDigit() }
+        // 0. v1 批次19（open-webui-memory 2b / Mem0 模式）：显式记忆指令直通——
+        //    用户说"记住 X"是最高优先级信号，绕过一切过滤（含寒暄整句匹配）
+        if (EXPLICIT_MEMORY_PATTERN.containsMatchIn(text)) return true
         // 1. 寒暄/确认/继续 → 不重要
         if (normalized in SKIP_PHRASES) return false
+        // 1b. v1 批次19：身份类提问黑名单（open-webui-memory 2b：助手总结/身份盘点
+        //     不得回写——"我是一个什么样的人？"含"我"信号词，若被存入会造成回音污染）
+        if (IDENTITY_QUESTION_KEYWORDS.any { text.contains(it) }) return false
         // 2. 自我指涉偏好/身份/记忆诉求（持久用户属性）→ 重要
         if (ATOM_KEYWORDS.any { text.contains(it) }) {
             if (isPureQuery(text)) return false
@@ -749,6 +755,25 @@ class CrossSessionMemoryManager(
             "帮我", "帮我查", "帮我搜", "介绍一下", "简单介绍", "查一下", "搜一下",
             "分析一下", "总结一下", "推荐一下", "介绍", "查询", "搜索", "解释一下",
             "比较一下", "讲讲", "说说", "写一个", "写一份", "翻译"
+        )
+
+        /**
+         * v1 批次19（open-webui-memory / Mem0 模式）：显式记忆指令直通模式——
+         * 用户说"记住 X"是最强记忆信号，绕过全部过滤写入 L2。
+         */
+        private val EXPLICIT_MEMORY_PATTERN = Regex(
+            """记住|記住|remember( that| this|:)""",
+            RegexOption.IGNORE_CASE
+        )
+
+        /**
+         * v1 批次19（open-webui-memory 2b）：身份类提问关键词黑名单——
+         * 此类提问（含 ATOM 信号词"我"）若被回写 L2，会造成"LLM 总结身份 → 再被检索注入"
+         * 的回音污染；助手对身份的总结不得作为记忆回写。
+         */
+        private val IDENTITY_QUESTION_KEYWORDS = listOf(
+            "什么样的人", "你知道我什么", "关于我的记忆", "我的记忆里",
+            "你记得我什么", "了解我多少", "介绍一下我", "说说我是谁"
         )
     }
 }

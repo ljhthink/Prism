@@ -638,9 +638,21 @@ class PrismApplication : Application() {
                 documentLocalToolExecutor,
                 askUserLocalToolExecutor,
                 // v1 US-201（LLM 操控手机）：phone_control__* 工具
-                phoneControlLocalToolExecutor
+                phoneControlLocalToolExecutor,
+                // v1 批次17（US-1701）：TODO 任务规划工具（todo_write，ADR-043 D1）
+                todoLocalToolExecutor
             )
         )
+    }
+
+    /**
+     * v1 批次17（US-1701，ADR-043 D1）：TODO 任务规划本地工具执行器。
+     *
+     * 单例承载会话级清单状态（StateFlow），ConversationViewModel 暴露给 TodoCard 渲染、
+     * 会话切换时调用 reset() 清空。
+     */
+    val todoLocalToolExecutor: io.prism.skill.TodoLocalToolExecutor by lazy {
+        io.prism.skill.TodoLocalToolExecutor()
     }
 
     /**
@@ -711,6 +723,15 @@ class PrismApplication : Application() {
             io.prism.phonecontrol.PhoneControlAskUserNotifier.ConfirmActionReceiver.holder = notifier
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                 io.prism.phonecontrol.PhoneControlAskUserNotifier.ensureChannel(this)
+            }
+        }
+    }
+
+    /** 手机操控完成回报通知器（v1 批次16 US-1605）：后台任务完成时发低打扰状态通知。 */
+    val phoneControlCompletionNotifier: io.prism.phonecontrol.PhoneControlCompletionNotifier by lazy {
+        io.prism.phonecontrol.PhoneControlCompletionNotifier(this).also {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                io.prism.phonecontrol.PhoneControlCompletionNotifier.ensureChannel(this)
             }
         }
     }

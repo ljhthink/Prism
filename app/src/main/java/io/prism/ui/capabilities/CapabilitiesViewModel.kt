@@ -160,12 +160,22 @@ class CapabilitiesViewModel(
         viewModelScope.launch {
             _testState.value = TestState.Testing
             _testState.value = try {
-                val tools = mcpToolProvider.listTools(config)
-                if (tools.isEmpty()) {
-                    TestState.Fail("连接成功但无可用工具（该 Server 未实现任何工具）")
-                } else {
-                    TestState.Success(tools.size)
+                // v1 批次16（US-1602）：改用 diagnose——失败时透出具体错误类别与原因
+                //（连接被拒/超时/明文拦截/认证失败等），替代旧版无差别「连接失败」。
+                val diagnostic = withTimeout(CONNECT_TIMEOUT_MS) { mcpToolProvider.diagnose(config) }
+                when {
+                    diagnostic.success && diagnostic.toolCount > 0 ->
+                        TestState.Success(diagnostic.toolCount)
+                    diagnostic.success ->
+                        TestState.Fail("连接成功但无可用工具（该 Server 未实现任何工具）")
+                    else -> TestState.Fail(
+                        diagnostic.errorMessage ?: "连接失败，请检查网络或 Server 配置"
+                    )
                 }
+            } catch (e: TimeoutCancellationException) {
+                // H-2 修复（guardrail 批次16）：TimeoutCancellationException 是 CancellationException
+                // 的子类，必须先于其捕获——否则超时分支为死代码，testState 永久卡 Testing。
+                TestState.Fail("连接超时（${CONNECT_TIMEOUT_MS / 1000}s 无响应）")
             } catch (e: CancellationException) {
                 // 结构化并发（CR-01）：协程取消必须重新抛出，不吞掉。
                 throw e
@@ -218,19 +228,21 @@ class CapabilitiesViewModel(
                 emit(ConnectionStatus.Connecting)
                 // 探测超时保护（guardrail L-03）：共享 httpClient 未配置 HttpTimeout，
                 // 网络挂起时协同超时避免「连接中」无限期；超时降级为连接超时，不崩溃收集器。
-                // Q-02 修复（guardrail TKN-UXR2-GUARDRAIL-001）：捕获所有非取消异常，
-                // 与 [testConnection] 的 catch Exception 语义一致——否则 listTools 抛其他异常
-                // （网络错误/Server 初始化失败）会传播取消 Flow，UI 徽章永久卡「连接中」。
+                // v1 批次16（US-1602）：改用 diagnose——Error 徽章携带具体失败原因（错误分类）。
                 try {
-                    val tools = withTimeout(CONNECT_TIMEOUT_MS) { mcpToolProvider.listTools(config) }
+                    val diagnostic = withTimeout(CONNECT_TIMEOUT_MS) { mcpToolProvider.diagnose(config) }
                     emit(
-                        if (tools.isEmpty()) ConnectionStatus.Error("连接失败")
-                        else ConnectionStatus.Connected(tools.size)
+                        if (diagnostic.success && diagnostic.toolCount > 0) {
+                            ConnectionStatus.Connected(diagnostic.toolCount)
+                        } else {
+                            ConnectionStatus.Error(diagnostic.errorMessage ?: "连接失败")
+                        }
                     )
+                } catch (e: TimeoutCancellationException) {
+                    // H-2 修复（guardrail 批次16）：子类异常必须先于 CancellationException 捕获
+                    emit(ConnectionStatus.Error("连接超时"))
                 } catch (e: CancellationException) {
                     throw e // 结构化并发：协程取消必须重抛
-                } catch (e: TimeoutCancellationException) {
-                    emit(ConnectionStatus.Error("连接超时"))
                 } catch (e: Exception) {
                     // BR-error-handling-004：记录日志（不含敏感信息），降级为连接失败
                     Log.w("CapabilitiesViewModel", "observeConnectionStatus failed: ${e::class.simpleName}")

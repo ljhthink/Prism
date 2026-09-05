@@ -122,5 +122,38 @@ data class ChatMessage(
      * 默认 false（向后兼容既有测试与持久化数据；kotlinx.serialization 对缺失字段
      * 应用默认值）。
      */
-    val isSystemNotice: Boolean = false
+    val isSystemNotice: Boolean = false,
+    /**
+     * v1 批次17（US-1707，ADR-043 D4）：历史版本列表（SillyTavern swipes 同构，仅 AI 消息使用）。
+     *
+     * 重新生成时：首次把当前内容迁移为 variants[0]，此后每次重试完成追加新版本；
+     * [activeVariantIndex] 指向当前展示/进请求的版本（消息 content 即该版本内容，
+     * **variants 本身不进 LLM 请求**——请求构建只用 content 字段，协议层零感知）。
+     * 序列化防膨胀：空列表为默认值，`ChatMessageSerializer` 以 `encodeDefaults=false`
+     * 省略该字段（旧 JSON 向后兼容）。
+     */
+    val variants: List<MessageVariant> = emptyList(),
+    /** v1 批次17（US-1707）：当前激活的变体索引（与 [variants] 配套，默认 0）。 */
+    val activeVariantIndex: Int = 0
+)
+
+/**
+ * AI 消息历史版本（v1 批次17 US-1707，ADR-043 D4）。
+ *
+ * 记录一次生成的完整可展示产物；切换变体时由调用方把字段拷回消息本体
+ *（消息 content/thinkingChain/searchResults/sources 恒等于 active 变体内容）。
+ *
+ * @property content 该版本回复正文
+ * @property thinkingChain 该版本思维链（可空）
+ * @property searchResults 该版本联网搜索结果（可空）
+ * @property sources 该版本引用来源
+ * @property createdAt 版本生成时间戳（毫秒）
+ */
+@Serializable
+data class MessageVariant(
+    val content: String,
+    val thinkingChain: String? = null,
+    val searchResults: List<SearchResult>? = null,
+    val sources: List<Citation> = emptyList(),
+    val createdAt: Long
 )
