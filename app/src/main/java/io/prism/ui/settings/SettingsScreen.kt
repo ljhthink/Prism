@@ -356,6 +356,8 @@ fun SettingsScreen(
             item { VoiceHotwordsEditor() }
             // 批次23-A（ADR-048，A4）：语音引擎（ASR/TTS 云端双轨手选 + Key 配置 + 连通性自检）
             item { VoiceEngineSection(viewModel) }
+            // 批次23-C（ADR-048）：角色包（导入 / 列表切换 / 删除——通用模板，不含具体角色内容）
+            item { RolePackSection(viewModel) }
             // v1 批次15（US-1501/1502/1507）：搜索增强（智谱 / Tavily / SearXNG）
             item { SetSection("搜索增强") }
             item {
@@ -1907,4 +1909,198 @@ private fun VoiceKeyField(
             }
         }
     )
+}
+
+/**
+ * 批次23-C（ADR-048）：角色包管理区（加在「语音通话」区内，通用模板——不含任何具体角色内容）。
+ *
+ * - **导入**：SAF [androidx.activity.result.contract.ActivityResultContracts.OpenDocument]
+ *   （mime 用通配符——.rolepack/.json 均可由内容识别）→ 复制到应用缓存再读文本（content URI
+ *   不保证可重复打开）→ [SettingsViewModel.importRolePack]（先解析校验再落盘，文件名以
+ *   包 id 规范化）；结果就地展示（成功/失败原因）；
+ * - **列表**：已导入角色包（按显示名排序），当前选中带「生效中」标记；点击切换
+ *   （loader.select，热切换——下次语音轮次 persona 覆盖与播报装配即生效）；行尾 ✕ 按钮
+ *   删除（loader.remove，删除选中包自动回落出厂默认助手）；
+ * - 装配语义在 ConversationViewModel（语音轮次 persona）与 VoiceSessionController
+ *   （voice.system / style 分段）内实现，本区只调 loader，无额外接线。
+ *
+ * 默认收缩态（与其他设置行形态一致），点击展开管理。
+ */
+@Composable
+private fun RolePackSection(viewModel: SettingsViewModel) {
+    val packs by viewModel.rolePacks.collectAsState()
+    val selectedId by viewModel.selectedRolePackId.collectAsState()
+    val context = LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var expanded by remember { mutableStateOf(false) }
+    var importOk by remember { mutableStateOf(false) }
+    var importMessage by remember { mutableStateOf<String?>(null) }
+
+    // 进入设置页即刷新（收缩态副标题也依赖列表/选中态；loader 自带 IO 调度）
+    LaunchedEffect(Unit) { viewModel.refreshRolePacks() }
+
+    // SAF 文件选择（批次23-C）：选中后复制到缓存再读文本，交 VM 解析导入
+    val importLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri: android.net.Uri? ->
+        if (uri != null) {
+            scope.launch {
+                val read = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    runCatching {
+                        val tmp = java.io.File(context.cacheDir, "rolepack_import.tmp")
+                        context.contentResolver.openInputStream(uri)?.use { input ->
+                            tmp.outputStream().use { output -> input.copyTo(output) }
+                        } ?: error("无法读取所选文件")
+                        val text = tmp.readText()
+                        tmp.delete()
+                        text
+                    }
+                }
+                read.fold(
+                    onSuccess = { text ->
+                        viewModel.importRolePack(text) { ok, message ->
+                            importOk = ok
+                            importMessage = message
+                        }
+                    },
+                    onFailure = { e ->
+                        importOk = false
+                        importMessage = "导入失败：${e.message ?: e::class.simpleName}"
+                    }
+                )
+            }
+        }
+    }
+
+    if (!expanded) {
+        val selectedName = packs.firstOrNull { it.id == selectedId }?.name
+        SetRow(
+            icon = "🎭",
+            iconColor = PrismIndigo,
+            title = "角色包",
+            subtitle = when {
+                packs.isEmpty() -> "未导入 · 导入角色包 JSON 可切换语音通话人格 · 点此管理"
+                selectedName != null -> "已导入 ${packs.size} 个 · 当前：$selectedName"
+                else -> "已导入 ${packs.size} 个 · 当前：默认助手"
+            },
+            onClick = { expanded = true }
+        )
+        return
+    }
+
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+        Text(
+            text = "已导入角色包（点击切换 · 下次语音轮次生效）",
+            color = PrismTextDim,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.4.sp
+        )
+        Spacer(Modifier.height(8.dp))
+        if (packs.isEmpty()) {
+            Text(text = "尚未导入角色包。", color = PrismTextFaint, fontSize = 11.sp)
+            Spacer(Modifier.height(8.dp))
+        }
+        packs.forEach { pack ->
+            RolePackRow(
+                pack = pack,
+                selected = pack.id == selectedId,
+                onSelect = { viewModel.selectRolePack(pack.id) },
+                onDelete = { viewModel.deleteRolePack(pack.id) }
+            )
+            Spacer(Modifier.height(8.dp))
+        }
+        PrismButton(
+            text = "导入角色包（.json）",
+            variant = PrismButtonVariant.Primary,
+            onClick = { importLauncher.launch(arrayOf("*/*")) }
+        )
+        importMessage?.let { message ->
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = message,
+                color = if (importOk) PrismMint else PrismWarning,
+                fontSize = 11.sp,
+                lineHeight = 16.sp
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "角色包为本地 JSON 文件（Schema prism-rolepack/1），存储于应用私有目录，随应用卸载清除；" +
+                "选中后作用于语音通话人设与播报风格，未选中时使用出厂默认助手。",
+            color = PrismTextFaint,
+            fontSize = 11.sp,
+            lineHeight = 16.sp
+        )
+        Spacer(Modifier.height(8.dp))
+        PrismButton(text = "收起", variant = PrismButtonVariant.Ghost, onClick = { expanded = false })
+    }
+}
+
+/** 角色包列表行（批次23-C）：点击切换选中，行尾 ✕ 按钮删除（复用引擎选项行视觉）。 */
+@Composable
+private fun RolePackRow(
+    pack: io.prism.voice.rolepack.RolePack,
+    selected: Boolean,
+    onSelect: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) PrismMint.copy(alpha = 0.08f) else PrismPanel2)
+            .border(
+                1.dp,
+                if (selected) PrismMint.copy(alpha = 0.4f) else PrismLine,
+                RoundedCornerShape(12.dp)
+            )
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onSelect
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .background(
+                    if (selected) PrismMint.copy(alpha = 0.12f) else PrismPanel2,
+                    RoundedCornerShape(10.dp)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = if (selected) "✓" else "🎭",
+                color = if (selected) PrismMint else PrismTextDim,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = pack.name, color = PrismText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(text = "v${pack.version} · ${pack.id}", color = PrismTextFaint, fontSize = 11.sp)
+        }
+        if (selected) {
+            Text(text = "生效中", color = PrismMint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+        }
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(PrismPanel2)
+                .border(1.dp, PrismLine, RoundedCornerShape(8.dp))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onDelete
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(text = "✕", color = PrismTextDim, fontSize = 12.sp)
+        }
+    }
 }

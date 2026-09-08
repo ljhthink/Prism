@@ -58,7 +58,9 @@ class SettingsViewModel(
     /** v1 批次15（US-1507）：搜索增强配置仓库（SearXNG 端点 + WebView 抓取开关）；null 时降级默认（向后兼容） */
     private val searchEnhancementRepository: io.prism.config.SearchEnhancementConfigRepository? = null,
     /** 批次23-A（ADR-048，A4）：语音引擎手选仓库；null 时引擎选择状态降级为默认端侧/系统（向后兼容） */
-    private val voiceEnginePrefs: io.prism.voice.VoiceEnginePrefs? = null
+    private val voiceEnginePrefs: io.prism.voice.VoiceEnginePrefs? = null,
+    /** 批次23-C（ADR-048）：角色包加载器；null 时角色包管理降级为不可用（向后兼容，保持 JVM 可测） */
+    private val rolePackLoader: io.prism.voice.rolepack.RolePackLoader? = null
 ) : ViewModel() {
 
     /** Provider 已配置列表。 */
@@ -464,6 +466,88 @@ class SettingsViewModel(
         }
     }
 
+    // ==================== 批次23-C（ADR-048）：角色包管理（导入/列表/切换/删除） ====================
+
+    private val _rolePacks = MutableStateFlow<List<io.prism.voice.rolepack.RolePack>>(emptyList())
+
+    /** 已导入角色包列表（按显示名排序；loader 单次读取，经 [refreshRolePacks] 刷新）。 */
+    val rolePacks: StateFlow<List<io.prism.voice.rolepack.RolePack>> = _rolePacks.asStateFlow()
+
+    private val _selectedRolePackId = MutableStateFlow<String?>(null)
+
+    /** 当前选中角色包 id（null = 未选中，出厂默认助手）。 */
+    val selectedRolePackId: StateFlow<String?> = _selectedRolePackId.asStateFlow()
+
+    /**
+     * 刷新角色包列表与选中态（进入设置页 / 导入 / 删除后调用）。
+     * loader 文件 IO 自带 Dispatchers.IO 调度，此处仅 viewModelScope 协程安全等待。
+     */
+    fun refreshRolePacks() {
+        viewModelScope.launch {
+            try {
+                _rolePacks.value = rolePackLoader?.list().orEmpty()
+                _selectedRolePackId.value = rolePackLoader?.selectedId()
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007：不吞 CancellationException
+            } catch (e: Exception) {
+                Log.w("SettingsViewModel", "刷新角色包列表失败: ${e.message}", e)
+            }
+        }
+    }
+
+    /**
+     * 导入角色包（批次23-C）：先经 [io.prism.voice.rolepack.RolePackParser] 解析校验，
+     * 成功后 loader.import 落盘（存储文件名以包 id 规范化）。onResult(ok, 可读消息) 主线程回调
+     * （解析异常消息面向角色作者，直接透出）。
+     */
+    fun importRolePack(json: String, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            try {
+                val loader = rolePackLoader ?: run {
+                    onResult(false, "角色包功能不可用")
+                    return@launch
+                }
+                val pack = io.prism.voice.rolepack.RolePackParser.parse(json)
+                loader.import(pack.id, json)
+                refreshRolePacks()
+                onResult(true, "导入成功：${pack.name}")
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007：不吞 CancellationException
+            } catch (e: Exception) {
+                Log.w("SettingsViewModel", "导入角色包失败: ${e.message}")
+                onResult(false, e.message?.let { "导入失败：$it" } ?: "导入失败")
+            }
+        }
+    }
+
+    /** 选中角色包（热切换：下次装配读 effectiveRolePack 即生效）。 */
+    fun selectRolePack(id: String) {
+        viewModelScope.launch {
+            try {
+                rolePackLoader?.select(id)
+                _selectedRolePackId.value = id
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007：不吞 CancellationException
+            } catch (e: Exception) {
+                Log.w("SettingsViewModel", "选中角色包失败: $id", e)
+            }
+        }
+    }
+
+    /** 删除角色包（若删除的是当前选中包，loader 自动清除选中回落出厂默认）。 */
+    fun deleteRolePack(id: String) {
+        viewModelScope.launch {
+            try {
+                rolePackLoader?.remove(id)
+                refreshRolePacks()
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007：不吞 CancellationException
+            } catch (e: Exception) {
+                Log.w("SettingsViewModel", "删除角色包失败: $id", e)
+            }
+        }
+    }
+
     /** 选择要编辑的 Provider。 */
     fun selectProvider(config: ProviderConfig?) {
         _selectedProvider.value = config
@@ -586,7 +670,9 @@ class SettingsViewModel(
                     // v1 批次15（US-1507）：搜索增强配置仓库（SearXNG 端点 + WebView 抓取开关）
                     searchEnhancementRepository = app.searchEnhancementConfigRepository,
                     // 批次23-A（ADR-048，A4）：语音引擎手选仓库（ASR/TTS 云端双轨）
-                    voiceEnginePrefs = app.voiceEnginePrefs
+                    voiceEnginePrefs = app.voiceEnginePrefs,
+                    // 批次23-C（ADR-048）：角色包加载器（导入/列表/切换/删除）
+                    rolePackLoader = app.rolePackLoader
                 )
             }
         }
