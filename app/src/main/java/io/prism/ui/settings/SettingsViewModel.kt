@@ -56,7 +56,9 @@ class SettingsViewModel(
     /** v1 真机二次修复（Issue 4b）：手机操控高危动作（发送/删除/拨号）确认策略仓库 */
     private val highRiskApprovalRepository: io.prism.config.HighRiskApprovalRepository? = null,
     /** v1 批次15（US-1507）：搜索增强配置仓库（SearXNG 端点 + WebView 抓取开关）；null 时降级默认（向后兼容） */
-    private val searchEnhancementRepository: io.prism.config.SearchEnhancementConfigRepository? = null
+    private val searchEnhancementRepository: io.prism.config.SearchEnhancementConfigRepository? = null,
+    /** 批次23-A（ADR-048，A4）：语音引擎手选仓库；null 时引擎选择状态降级为默认端侧/系统（向后兼容） */
+    private val voiceEnginePrefs: io.prism.voice.VoiceEnginePrefs? = null
 ) : ViewModel() {
 
     /** Provider 已配置列表。 */
@@ -346,6 +348,122 @@ class SettingsViewModel(
         }
     }
 
+    // ==================== 批次23-A（ADR-048，A4）：语音引擎（云端双轨） ====================
+
+    /** DashScope API Key（云端 ASR，apiKeyRef=cloud_asr_dashscope）是否已配置。 */
+    val dashScopeKeyConfigured: StateFlow<Boolean> =
+        apiKeyRepository.readApiKey(io.prism.voice.cloud.AliCloudAsrEngine.KEY_REF)
+            .map { !it.isNullOrBlank() }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /** MiniMax API Key（云端 TTS，apiKeyRef=cloud_tts_minimax）是否已配置。 */
+    val minimaxKeyConfigured: StateFlow<Boolean> =
+        apiKeyRepository.readApiKey(io.prism.voice.cloud.MiniMaxTtsConfig.KEY_API_KEY)
+            .map { !it.isNullOrBlank() }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /** MiniMax GroupId（apiKeyRef=cloud_tts_minimax_group）是否已配置。 */
+    val minimaxGroupConfigured: StateFlow<Boolean> =
+        apiKeyRepository.readApiKey(io.prism.voice.cloud.MiniMaxTtsConfig.KEY_GROUP_ID)
+            .map { !it.isNullOrBlank() }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    /** ASR 引擎手选（默认端侧；DataStore 首读前显示默认值）。 */
+    val voiceAsrEngine: StateFlow<io.prism.voice.AsrEngineChoice> =
+        (voiceEnginePrefs?.asrEngine() ?: flowOf(io.prism.voice.AsrEngineChoice.SYSTEM))
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), io.prism.voice.AsrEngineChoice.SYSTEM)
+
+    /** TTS 引擎手选（默认系统；DataStore 首读前显示默认值）。 */
+    val voiceTtsEngine: StateFlow<io.prism.voice.TtsEngineChoice> =
+        (voiceEnginePrefs?.ttsEngine() ?: flowOf(io.prism.voice.TtsEngineChoice.SYSTEM))
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), io.prism.voice.TtsEngineChoice.SYSTEM)
+
+    /** 保存 ASR 引擎手选（下次通话装配生效——VoiceEngineAssembly）。 */
+    fun setVoiceAsrEngine(choice: io.prism.voice.AsrEngineChoice) {
+        viewModelScope.launch {
+            try {
+                voiceEnginePrefs?.setAsrEngine(choice)
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007：不吞 CancellationException
+            } catch (e: Exception) {
+                Log.w("SettingsViewModel", "保存 ASR 引擎选择失败: $choice", e)
+            }
+        }
+    }
+
+    /** 保存 TTS 引擎手选（下次通话装配生效——VoiceEngineAssembly）。 */
+    fun setVoiceTtsEngine(choice: io.prism.voice.TtsEngineChoice) {
+        viewModelScope.launch {
+            try {
+                voiceEnginePrefs?.setTtsEngine(choice)
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007：不吞 CancellationException
+            } catch (e: Exception) {
+                Log.w("SettingsViewModel", "保存 TTS 引擎选择失败: $choice", e)
+            }
+        }
+    }
+
+    /** 连通性自检状态（running + 结果文案；null = 未开始）。 */
+    data class VoiceSelfCheckState(val running: Boolean, val message: String)
+
+    private val _asrSelfCheck = MutableStateFlow<VoiceSelfCheckState?>(null)
+
+    /** 云端 ASR 连通性自检状态（设置页展示）。 */
+    val asrSelfCheck: StateFlow<VoiceSelfCheckState?> = _asrSelfCheck.asStateFlow()
+
+    private val _ttsSelfCheck = MutableStateFlow<VoiceSelfCheckState?>(null)
+
+    /** 云端 TTS 连通性自检状态（设置页展示）。 */
+    val ttsSelfCheck: StateFlow<VoiceSelfCheckState?> = _ttsSelfCheck.asStateFlow()
+
+    /**
+     * 云端 ASR 连通性自检（A4）：DashScope WS run-task 握手，3s 预算。
+     * 阻塞探测在 IO 线程执行（不卡主线程）；结果经 [asrSelfCheck] 推送 UI 文案。
+     */
+    fun runAsrSelfCheck() {
+        if (_asrSelfCheck.value?.running == true) return
+        viewModelScope.launch {
+            _asrSelfCheck.value = VoiceSelfCheckState(true, "自检中…")
+            val key = runCatching {
+                apiKeyRepository.readApiKeyOnce(io.prism.voice.cloud.AliCloudAsrEngine.KEY_REF)
+            }.getOrNull()
+            val result = if (key.isNullOrBlank()) {
+                "未配置 DashScope API Key，请先保存 Key"
+            } else {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    io.prism.voice.CloudVoiceSelfCheck.checkAliCloudAsr(key)
+                }
+            }
+            _asrSelfCheck.value = VoiceSelfCheckState(false, result ?: "自检通过 · 云端识别连接正常")
+        }
+    }
+
+    /**
+     * 云端 TTS 连通性自检（A4）：MiniMax WS task_start → task_started，3s 预算。
+     * 阻塞探测在 IO 线程执行（不卡主线程）；结果经 [ttsSelfCheck] 推送 UI 文案。
+     */
+    fun runTtsSelfCheck() {
+        if (_ttsSelfCheck.value?.running == true) return
+        viewModelScope.launch {
+            _ttsSelfCheck.value = VoiceSelfCheckState(true, "自检中…")
+            val apiKey = runCatching {
+                apiKeyRepository.readApiKeyOnce(io.prism.voice.cloud.MiniMaxTtsConfig.KEY_API_KEY)
+            }.getOrNull()
+            val groupId = runCatching {
+                apiKeyRepository.readApiKeyOnce(io.prism.voice.cloud.MiniMaxTtsConfig.KEY_GROUP_ID)
+            }.getOrNull()
+            val result = if (apiKey.isNullOrBlank() || groupId.isNullOrBlank()) {
+                "未配置 MiniMax API Key 或 GroupId，请先保存"
+            } else {
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    io.prism.voice.CloudVoiceSelfCheck.checkMiniMaxTts(apiKey, groupId)
+                }
+            }
+            _ttsSelfCheck.value = VoiceSelfCheckState(false, result ?: "自检通过 · 云端 TTS 连接正常")
+        }
+    }
+
     /** 选择要编辑的 Provider。 */
     fun selectProvider(config: ProviderConfig?) {
         _selectedProvider.value = config
@@ -466,7 +584,9 @@ class SettingsViewModel(
                     // v1 真机二次修复（Issue 4b）：高危动作确认策略仓库
                     highRiskApprovalRepository = app.highRiskApprovalRepository,
                     // v1 批次15（US-1507）：搜索增强配置仓库（SearXNG 端点 + WebView 抓取开关）
-                    searchEnhancementRepository = app.searchEnhancementConfigRepository
+                    searchEnhancementRepository = app.searchEnhancementConfigRepository,
+                    // 批次23-A（ADR-048，A4）：语音引擎手选仓库（ASR/TTS 云端双轨）
+                    voiceEnginePrefs = app.voiceEnginePrefs
                 )
             }
         }

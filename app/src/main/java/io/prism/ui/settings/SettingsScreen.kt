@@ -1,4 +1,4 @@
-﻿package io.prism.ui.settings
+package io.prism.ui.settings
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -29,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -353,6 +354,8 @@ fun SettingsScreen(
             // 批次22 修复轮五（2026-09-07）：语音通话热词（同音字偏置，用户词库）
             item { SetSection("语音通话") }
             item { VoiceHotwordsEditor() }
+            // 批次23-A（ADR-048，A4）：语音引擎（ASR/TTS 云端双轨手选 + Key 配置 + 连通性自检）
+            item { VoiceEngineSection(viewModel) }
             // v1 批次15（US-1501/1502/1507）：搜索增强（智谱 / Tavily / SearXNG）
             item { SetSection("搜索增强") }
             item {
@@ -1628,4 +1631,280 @@ fun VoiceHotwordsEditor() {
             fontSize = 11.sp
         )
     }
+}
+
+/**
+ * 批次23-A（ADR-048，A4）：语音引擎设置区（加在「语音通话」区内）。
+ *
+ * - **ASR 引擎选择**：端侧（默认）/ 云端阿里云——云端项仅在 DashScope Key 非空时可选
+ *   （未配置置灰 + 说明，选择持久化经 [io.prism.voice.VoiceEnginePrefs]）；
+ * - **TTS 引擎选择**：系统（默认）/ 云端 MiniMax——同理（Key + GroupId 非空时可选）；
+ * - **Key 配置输入行**：DashScope API Key / MiniMax API Key / MiniMax GroupId（复用
+ *   [PrismField] 遮蔽样式；保存走 [SettingsViewModel.saveApiKey]，清空保存 = 删除，
+ *   BR-security-006 语义与 [ApiKeySheet] 一致）；
+ * - **连通性自检**：每个云端引擎一个按钮（ASR=WS run-task 握手 / TTS=task_start→
+ *   task_started，3s 预算），结果文案"自检通过/失败原因"就地展示。
+ *
+ * 默认收缩态（与其他设置行形态一致），点击展开配置。
+ */
+@Composable
+private fun VoiceEngineSection(viewModel: SettingsViewModel) {
+    val asrChoice by viewModel.voiceAsrEngine.collectAsState()
+    val ttsChoice by viewModel.voiceTtsEngine.collectAsState()
+    val dashScopeReady by viewModel.dashScopeKeyConfigured.collectAsState()
+    val minimaxKeyReady by viewModel.minimaxKeyConfigured.collectAsState()
+    val minimaxGroupReady by viewModel.minimaxGroupConfigured.collectAsState()
+    val asrCheck by viewModel.asrSelfCheck.collectAsState()
+    val ttsCheck by viewModel.ttsSelfCheck.collectAsState()
+    var expanded by remember { mutableStateOf(false) }
+
+    if (!expanded) {
+        SetRow(
+            icon = "🎛",
+            iconColor = PrismIndigo,
+            title = "语音引擎",
+            subtitle = voiceEngineSubtitle(asrChoice, ttsChoice),
+            onClick = { expanded = true }
+        )
+        return
+    }
+
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+        // ---- ASR 引擎选择（云端项仅在 DashScope Key 就绪时可选）----
+        Text(
+            text = "识别引擎（ASR）",
+            color = PrismTextDim,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.4.sp
+        )
+        Spacer(Modifier.height(8.dp))
+        VoiceEngineOptionRow(
+            label = "端侧识别（默认）",
+            description = "完全离线 · 音频不出设备",
+            selected = asrChoice == io.prism.voice.AsrEngineChoice.SYSTEM,
+            onClick = { viewModel.setVoiceAsrEngine(io.prism.voice.AsrEngineChoice.SYSTEM) }
+        )
+        Spacer(Modifier.height(8.dp))
+        VoiceEngineOptionRow(
+            label = "云端识别（阿里云百炼）",
+            description = if (dashScopeReady) {
+                "Paraformer 实时流式 · 音频实时推流到阿里云（Key 已配置）"
+            } else {
+                "需先配置并保存 DashScope API Key（配置后可选）"
+            },
+            selected = asrChoice == io.prism.voice.AsrEngineChoice.ALI_CLOUD,
+            enabled = dashScopeReady,
+            onClick = { viewModel.setVoiceAsrEngine(io.prism.voice.AsrEngineChoice.ALI_CLOUD) }
+        )
+        Spacer(Modifier.height(8.dp))
+        VoiceKeyField(
+            label = "DashScope API Key",
+            placeholder = "到阿里云百炼控制台获取",
+            keyRef = io.prism.voice.cloud.AliCloudAsrEngine.KEY_REF,
+            secret = true,
+            viewModel = viewModel
+        )
+
+        Spacer(Modifier.height(12.dp))
+        // ---- TTS 引擎选择（云端项仅在 Key + GroupId 就绪时可选）----
+        Text(
+            text = "播报引擎（TTS）",
+            color = PrismTextDim,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.4.sp
+        )
+        Spacer(Modifier.height(8.dp))
+        VoiceEngineOptionRow(
+            label = "系统播报（默认）",
+            description = "零依赖 · 本机 TextToSpeech",
+            selected = ttsChoice == io.prism.voice.TtsEngineChoice.SYSTEM,
+            onClick = { viewModel.setVoiceTtsEngine(io.prism.voice.TtsEngineChoice.SYSTEM) }
+        )
+        Spacer(Modifier.height(8.dp))
+        VoiceEngineOptionRow(
+            label = "云端播报（MiniMax）",
+            description = if (minimaxKeyReady && minimaxGroupReady) {
+                "T2A v2 流式合成 · 音色/语速可由角色包 voice.minimax 指定"
+            } else {
+                "需先配置并保存 MiniMax API Key 与 GroupId（配置后可选）"
+            },
+            selected = ttsChoice == io.prism.voice.TtsEngineChoice.MINIMAX,
+            enabled = minimaxKeyReady && minimaxGroupReady,
+            onClick = { viewModel.setVoiceTtsEngine(io.prism.voice.TtsEngineChoice.MINIMAX) }
+        )
+        Spacer(Modifier.height(8.dp))
+        VoiceKeyField(
+            label = "MiniMax API Key",
+            placeholder = "到 MiniMax 开放平台获取",
+            keyRef = io.prism.voice.cloud.MiniMaxTtsConfig.KEY_API_KEY,
+            secret = true,
+            viewModel = viewModel
+        )
+        Spacer(Modifier.height(8.dp))
+        VoiceKeyField(
+            label = "MiniMax GroupId",
+            placeholder = "MiniMax 开放平台账号基本信息页查看",
+            keyRef = io.prism.voice.cloud.MiniMaxTtsConfig.KEY_GROUP_ID,
+            secret = true,
+            viewModel = viewModel
+        )
+
+        Spacer(Modifier.height(12.dp))
+        // ---- 连通性自检（每个云端引擎一个按钮；结果就地展示）----
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            PrismButton(
+                text = "自检云端识别",
+                variant = PrismButtonVariant.Ghost,
+                enabled = asrCheck?.running != true,
+                onClick = { viewModel.runAsrSelfCheck() }
+            )
+            PrismButton(
+                text = "自检云端 TTS",
+                variant = PrismButtonVariant.Ghost,
+                enabled = ttsCheck?.running != true,
+                onClick = { viewModel.runTtsSelfCheck() }
+            )
+        }
+        asrCheck?.let { check ->
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "识别自检：${check.message}",
+                color = voiceSelfCheckColor(check.message),
+                fontSize = 11.sp,
+                lineHeight = 16.sp
+            )
+        }
+        ttsCheck?.let { check ->
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "播报自检：${check.message}",
+                color = voiceSelfCheckColor(check.message),
+                fontSize = 11.sp,
+                lineHeight = 16.sp
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "云端引擎仅在 Key 就绪时可选；通话中云端连接失败会自动回退端侧并提示。",
+            color = PrismTextFaint,
+            fontSize = 11.sp
+        )
+        Spacer(Modifier.height(8.dp))
+        PrismButton(text = "收起", variant = PrismButtonVariant.Ghost, onClick = { expanded = false })
+    }
+}
+
+/** 语音引擎区收缩态副标题（当前选择摘要）。 */
+private fun voiceEngineSubtitle(
+    asr: io.prism.voice.AsrEngineChoice,
+    tts: io.prism.voice.TtsEngineChoice
+): String =
+    "识别：${if (asr == io.prism.voice.AsrEngineChoice.ALI_CLOUD) "云端（阿里云）" else "端侧"} · " +
+        "播报：${if (tts == io.prism.voice.TtsEngineChoice.MINIMAX) "云端（MiniMax）" else "系统"} · 点此配置"
+
+/** 自检结果文案颜色（"自检通过"前缀 = 薄荷绿；失败原因 = 警示色）。 */
+private fun voiceSelfCheckColor(message: String): Color =
+    if (message.startsWith("自检通过")) PrismMint else PrismWarning
+
+/**
+ * 引擎选择选项行（批次23-A，A4）—— 单选样式 + 置灰态（云端引擎 Key 未配置时不可选）。
+ * 视觉复用 [ToolApprovalOptionRow] 模式，增加 enabled 维度。
+ */
+@Composable
+private fun VoiceEngineOptionRow(
+    label: String,
+    description: String,
+    selected: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .alpha(if (enabled) 1f else 0.5f)
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (selected) PrismMint.copy(alpha = 0.08f) else PrismPanel2)
+            .border(
+                1.dp,
+                if (selected) PrismMint.copy(alpha = 0.4f) else PrismLine,
+                RoundedCornerShape(12.dp)
+            )
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                enabled = enabled,
+                onClick = onClick
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .background(
+                    if (selected) PrismMint.copy(alpha = 0.12f) else PrismPanel2,
+                    RoundedCornerShape(10.dp)
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = if (selected) "✓" else if (enabled) "◈" else "🔒",
+                color = if (selected) PrismMint else PrismTextDim,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = label, color = PrismText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(text = description, color = PrismTextFaint, fontSize = 11.sp)
+        }
+    }
+}
+
+/**
+ * 语音引擎 Key 配置输入行（批次23-A，A4）—— 复用 [PrismField] 遮蔽样式 + ApiKeyRepository
+ * 加密读写（与 [SearchEnhancementSheet] 的 Key 行同模式：仅首次进入回显已存 Key 防重组覆盖；
+ * 清空保存 = 删除已存密钥，BR-security-006）。
+ */
+@Composable
+private fun VoiceKeyField(
+    label: String,
+    placeholder: String,
+    keyRef: String,
+    secret: Boolean,
+    viewModel: SettingsViewModel
+) {
+    var value by remember(keyRef) { mutableStateOf("") }
+    var loaded by remember(keyRef) { mutableStateOf(false) }
+
+    if (!loaded) {
+        viewModel.loadApiKey(keyRef) { v ->
+            value = v.orEmpty()
+            loaded = true
+        }
+    }
+
+    PrismField(
+        label = label,
+        value = value,
+        onValueChange = { value = it },
+        placeholder = placeholder,
+        secret = secret,
+        hint = "Keystore 加密存储 · 清空后保存即删除"
+    )
+    Spacer(Modifier.height(8.dp))
+    PrismButton(
+        text = "保存 $label",
+        variant = PrismButtonVariant.Ghost,
+        onClick = {
+            if (value.isEmpty()) {
+                viewModel.removeApiKey(keyRef)
+            } else {
+                viewModel.saveApiKey(keyRef, value)
+            }
+        }
+    )
 }

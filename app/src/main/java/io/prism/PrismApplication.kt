@@ -965,6 +965,18 @@ class PrismApplication : Application() {
     }
 
     /**
+     * 语音引擎手选偏好仓库（批次23-A，ADR-048，A4）—— 持久化 ASR/TTS 引擎选择
+     * （system|aliCloud / system|minimax，默认端侧/系统）。
+     *
+     * 使用独立 DataStore（`prism_voice_engine`），与 API Key / 角色包 / 思考等 DataStore 隔离。
+     * 由 [io.prism.ui.settings.SettingsViewModel]（设置页「语音引擎」区读写）与
+     * [io.prism.voice.VoiceEngineAssembly]（通话装配读取）消费。
+     */
+    val voiceEnginePrefs: io.prism.voice.VoiceEnginePrefs by lazy {
+        io.prism.voice.VoiceEnginePrefs(voiceEngineDataStore)
+    }
+
+    /**
      * 对话摘要生成器（US-032，ADR-015 5.3）—— 使用 LLM 非流式请求对旧消息生成摘要。
      *
      * 依赖 [openAICompatibleProvider]（已实现 [io.prism.network.ChatCompletionProvider] 接口）。
@@ -1170,6 +1182,9 @@ class PrismApplication : Application() {
 
     /** 角色包配置 DataStore 进程级单例（批次23-B，ADR-048，当前选中角色包 id 持久化）。 */
     private val Context.rolePackDataStore by preferencesDataStore(name = "prism_rolepack")
+
+    /** 语音引擎手选 DataStore 进程级单例（批次23-A，ADR-048，ASR/TTS 引擎选择持久化）。 */
+    private val Context.voiceEngineDataStore by preferencesDataStore(name = "prism_voice_engine")
 
     /** 设备档位配置 DataStore 进程级单例（ADR-017 4.4，US-040 用户手动覆盖持久化）。 */
     private val Context.tierConfigDataStore by preferencesDataStore(name = "prism_tier_config")

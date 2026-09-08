@@ -78,16 +78,36 @@ fun VoiceCallOverlay(
 ) {
     val context = LocalContext.current
 
-    // 控制器随覆盖层创建/销毁（覆盖层关闭 = 挂断）
-    val controller = remember {
-        VoiceSessionController(
+    // 批次23-A（ADR-048，A4/A5）：引擎装配异步化 —— 按 VoiceEnginePrefs 手选云端/端侧
+    //（读 Key/RolePack 为 suspend），就绪前显示"准备中"占位。装配含：云端 Key 缺失静默
+    // 回退端侧（装配提示 toast）+ 降级链端侧引擎供给注入。
+    var controllerHolder by remember { mutableStateOf<VoiceSessionController?>(null) }
+    LaunchedEffect(Unit) {
+        val app = context.applicationContext as io.prism.PrismApplication
+        controllerHolder = io.prism.voice.VoiceEngineAssembly.create(
+            context = context,
             conversation = conversation,
-            asr = AsrEngineFactory.create(context),  // 批次22：端侧流式优先（缺失降级系统引擎）
-            tts = SystemTtsEngine(context),
-            // 批次23-B（ADR-048）：角色包装配（voice.system 音高/语速 + style.voiceCall 分段；
-            // persona 注入在 ConversationViewModel）。出厂态（未导入/未选中）行为与批次22 一致。
-            rolePackLoader = (context.applicationContext as io.prism.PrismApplication).rolePackLoader
+            rolePackLoader = app.rolePackLoader,
+            voiceEnginePrefs = app.voiceEnginePrefs,
+            apiKeyRepository = app.apiKeyRepository
         )
+    }
+    val controller = controllerHolder ?: run {
+        Box(
+            modifier = modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(listOf(PrismBg, Color(0xFF141A2E), PrismBg))
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            androidx.compose.material3.Text(
+                "语音引擎准备中…",
+                color = PrismTextFaint,
+                fontSize = 14.sp
+            )
+        }
+        return
     }
     val phase by controller.phase.collectAsState()
     val partial by controller.partialText.collectAsState()
@@ -108,6 +128,16 @@ fun VoiceCallOverlay(
         micGranted = granted
         if (granted) {
             controller.startCall(context)
+        }
+    }
+
+    // 批次23-A（ADR-048，A5）：降级链 toast —— 层②启动探测失败 / 层③会话中失败自动切端侧
+    //（控制器内部完成引擎切换与当前动作重试），此处仅消费提示文案（展示一次即清除）。
+    val fallbackNotice by controller.fallbackNotice.collectAsState()
+    LaunchedEffect(fallbackNotice) {
+        fallbackNotice?.let {
+            android.widget.Toast.makeText(context, it, android.widget.Toast.LENGTH_SHORT).show()
+            controller.consumeFallbackNotice()
         }
     }
 
@@ -283,11 +313,15 @@ fun VoiceCallOverlay(
                 )
                 // 批次22（SZ-201）：隐私声明随引擎形态区分——端侧流式=完全离线，
                 // 系统引擎=厂商引擎可能云端处理
+                // 批次23-A（ADR-048）：云端 ASR 手选时明示音频实时推流（音频出设备）
                 androidx.compose.material3.Text(
-                    text = if (controller.isStreamingCall) {
-                        "端侧离线语音识别（模型在本机运行，音频不出设备、不落盘存储）"
-                    } else {
-                        "语音识别使用本机系统识别服务（部分厂商引擎会在云端处理音频），不落盘存储"
+                    text = when {
+                        controller.isCloudAsr ->
+                            "云端语音识别（阿里云百炼）：音频实时推流至你配置的服务处理，不落盘存储"
+                        controller.isStreamingCall ->
+                            "端侧离线语音识别（模型在本机运行，音频不出设备、不落盘存储）"
+                        else ->
+                            "语音识别使用本机系统识别服务（部分厂商引擎会在云端处理音频），不落盘存储"
                     },
                     color = PrismTextFaint,
                     fontSize = 11.sp,

@@ -25,11 +25,17 @@ import kotlinx.coroutines.launch
  *
  * **并发守卫**：THINKING/SPEAKING 阶段禁用录音入口（防并发打断会话管线，PRD VC-005）。
  * **线程模型**：ASR/TTS 事件回调在主线程；[conversation.sendMessage] 要求主线程（UI 层调用约定）。
+ *
+ * **批次23-A（ADR-048，A5）双轨降级链**：云端引擎（手选，装配见 [VoiceEngineAssembly]）在
+ * 层②启动探测 / 层③会话中失败（错误文案经 [shouldFallbackToOnDevice] 判定为降级类）时，
+ * 本次通话自动切换端侧引擎（[VoiceOnDeviceEngines] 懒创建缓存）并**重试当前动作**
+ * （ASR=回聆听、TTS=重播当前段），经 [fallbackNotice] 提示"云端不可用，已回退端侧"。
+ * 未选云端引擎（supplier=null）时降级链关闭，行为与批次23-B 完全一致。
  */
 class VoiceSessionController(
     private val conversation: io.prism.ui.chat.ConversationViewModel,
-    private val asr: AsrEngine,
-    private val tts: TtsEngine,
+    asr: AsrEngine,
+    tts: TtsEngine,
     /** 播报开关（用户可关）；默认开。 */
     private val speakEnabled: () -> Boolean = { true },
     /**
@@ -40,8 +46,22 @@ class VoiceSessionController(
      * - [watchAssistantReply]：style.voiceCall 分段（仅用户启用非出厂角色包时生效）。
      * persona 注入装配点在 ConversationViewModel（语音轮次 systemPrompt 层替代）。
      */
-    private val rolePackLoader: io.prism.voice.rolepack.RolePackLoader? = null
+    private val rolePackLoader: io.prism.voice.rolepack.RolePackLoader? = null,
+    /**
+     * 批次23-A（ADR-048，A5）：端侧降级引擎供给（null = 装配未选云端引擎，降级链关闭）。
+     * 由 [VoiceEngineAssembly] 注入；首个降级事件经 [obtainOnDeviceEngines] 懒创建并缓存。
+     */
+    private val onDeviceEngineSupplier: (() -> VoiceOnDeviceEngines)? = null
 ) {
+
+    // 引擎持有为 var（@Volatile 引用写原子）：降级链（层②/层③）运行时把云端引擎替换为
+    // 端侧引擎（批次23-A，ADR-048 决策 3）。读写均以主线程为主（ASR 回调主线程派发；
+    // TTS 回调线程仅经 scope.launch(Main) 改写状态）。
+    @Volatile
+    private var asr: AsrEngine = asr
+
+    @Volatile
+    private var tts: TtsEngine = tts
 
     /**
      * 批次22（SZ-101，ADR-047）：当前识别引擎包名（Shizuku pmGrant 引擎修复用；
@@ -77,6 +97,108 @@ class VoiceSessionController(
 
     /** TTS 是否可用（不可用时覆盖层提示"仅文字模式"）。 */
     val ttsAvailable: Boolean get() = tts.isAvailable
+
+    /** 批次23-A（ADR-048）：当前 ASR 是否云端引擎（覆盖层隐私声明区分——云端音频出设备）。 */
+    val isCloudAsr: Boolean get() = asr is io.prism.voice.cloud.AliCloudAsrEngine
+
+    // ==================== 批次23-A（ADR-048，A5）：双轨降级链 ====================
+
+    /** 端侧降级引擎缓存（首个降级事件时经 supplier 懒创建，本次通话复用）。 */
+    @Volatile
+    private var onDeviceCache: VoiceOnDeviceEngines? = null
+
+    /**
+     * 批次23-A（ADR-048）：最近一次装配的系统播报参数（startCall 读角色包缓存）——
+     * TTS 层②降级切端侧 SystemTtsEngine 后补装配，角色音高/语速不因降级丢失。
+     */
+    @Volatile
+    private var cachedSystemVoice: io.prism.voice.rolepack.RolePack.SystemVoice? = null
+
+    private val _fallbackNotice = MutableStateFlow<String?>(null)
+
+    /** 降级 toast 文案（覆盖层消费后 [consumeFallbackNotice] 清除，防重组重复弹）。 */
+    val fallbackNotice: StateFlow<String?> = _fallbackNotice.asStateFlow()
+
+    /** 消费降级 toast（展示一次即清除）。 */
+    fun consumeFallbackNotice() {
+        _fallbackNotice.value = null
+    }
+
+    /** 装配期静默回退提示（Key 缺失等；[VoiceEngineAssembly] 调用，覆盖层 toast）。 */
+    fun postFallbackNotice(text: String) {
+        _fallbackNotice.value = text
+    }
+
+    /** 端侧降级引擎取用（首个降级事件懒创建并缓存；须在主线程调用）。 */
+    private fun obtainOnDeviceEngines(): VoiceOnDeviceEngines? {
+        onDeviceCache?.let { return it }
+        val created = onDeviceEngineSupplier?.invoke() ?: return null
+        onDeviceCache = created
+        return created
+    }
+
+    /**
+     * 层②启动探测 / 层③会话中降级（ASR）：当前引擎为云端且错误为降级类
+     * （[shouldFallbackToOnDevice]）→ 本次通话切端侧引擎并**重试当前动作**（回聆听——
+     * 层③"当句回退端侧重听"最小实现）。切换同步完成（@Volatile 引用写 + 引擎 cancel 线程
+     * 安全），回聆听经主线程 scope 派发。非降级类错误/无端侧供给 → false（走普通错误路径）。
+     */
+    private fun tryFallbackAsr(message: String): Boolean {
+        if (asr !is io.prism.voice.cloud.AliCloudAsrEngine) return false
+        if (!shouldFallbackToOnDevice(VoiceEngineKind.ASR, message)) return false
+        if (onDeviceEngineSupplier == null) return false
+        val engines = obtainOnDeviceEngines() ?: return false
+        val old = asr
+        asr = engines.asr
+        runCatching { old.cancel() }  // 云端会话断开（丢弃语义）
+        _fallbackNotice.value = FALLBACK_TOAST
+        Log.w(TAG, "云端 ASR 不可用，已回退端侧引擎（错误长度=${message.length}）")
+        scope.launch {
+            errorHandled = false
+            streamingErrorRetries = 0
+            _partialText.value = ""
+            if (callActive) {
+                _phase.value = Phase.IDLE
+                // 端侧引擎若为流式（sherpa）→ 自动回聆听重试；系统引擎（按住说话形态）等待手势
+                if (asr.isStreaming) enterListening(resetBefore = true)
+            }
+        }
+        return true
+    }
+
+    /**
+     * 层②启动探测降级（TTS）：当前引擎为云端且错误为降级类（探测失败文案自带"已回退"）
+     * → 本次通话切端侧系统播报并**重试当前动作**（重播当前段，由调用方经 [retry] 注入；
+     * 主线程执行——SystemTtsEngine 主线程约定）。鉴权/单句合成失败等非降级类错误不回退。
+     */
+    private fun tryFallbackTts(message: String, retry: (() -> Unit)? = null): Boolean {
+        if (tts !is io.prism.voice.cloud.MiniMaxTtsEngine) return false
+        if (!shouldFallbackToOnDevice(VoiceEngineKind.TTS, message)) return false
+        if (onDeviceEngineSupplier == null) return false
+        scope.launch {
+            // 主线程取端侧引擎（SystemTtsEngine 主线程创建约定）并完成切换
+            val engines = obtainOnDeviceEngines() ?: return@launch
+            val old = tts
+            tts = engines.tts
+            runCatching { old.release() }
+            cachedSystemVoice?.let { v ->
+                (tts as? SystemTtsEngine)?.configure(v.pitch, v.speechRate)
+            }
+            _fallbackNotice.value = FALLBACK_TOAST
+            Log.w(TAG, "云端 TTS 不可用，已回退端侧引擎（错误长度=${message.length}）")
+            // 端侧 TTS 初始化异步（刚创建时 ready=false）——短暂等待就绪再重试当前动作，
+            // 防回退后首句播报被"未就绪"错误丢弃（上限 2s；无 TTS 引擎设备照常文字呈现）
+            var waitedMs = 0L
+            while (waitedMs < TTS_FALLBACK_READY_WAIT_MS &&
+                (tts as? SystemTtsEngine)?.isAvailable != true
+            ) {
+                kotlinx.coroutines.delay(TTS_FALLBACK_READY_POLL_MS)
+                waitedMs += TTS_FALLBACK_READY_POLL_MS
+            }
+            retry?.invoke()
+        }
+        return true
+    }
 
     /** AI 回复完成监听（挂断/下次通话防串扰）。 */
     private var watchJob: Job? = null
@@ -223,6 +345,10 @@ class VoiceSessionController(
 
         override fun onError(message: String) {
             if (errorHandled) return  // 防抖：连环错误只取首个
+            // 批次23-A（ADR-048，A5）：层②启动探测 / 层③会话中降级 —— 云端 ASR 失败
+            //（文案含"已回退"或网络类）→ 本次通话切端侧引擎重试当前动作（回聆听）+ toast。
+            // 鉴权/权限等非降级类错误返回 false，走下方原有防抖路径（文案原样上抛）。
+            if (tryFallbackAsr(message)) return
             errorHandled = true
             Log.w(TAG, "ASR 错误：$message")
             _phase.value = Phase.IDLE
@@ -392,6 +518,13 @@ class VoiceSessionController(
             }
 
             override fun onError(utteranceId: String, message: String) {
+                // 批次23-A（ADR-048，A5）：层②启动探测降级 —— 云端 TTS speak 失败（探测
+                // 超时文案自带"已回退"）→ 切端侧系统播报并**重试当前动作**（重播当前段；
+                // 切换在主线程完成后 retry 才执行）。非降级类错误照常终止本轮。
+                val fallbackTriggered = tryFallbackTts(message) {
+                    if (_phase.value == Phase.SPEAKING) speakSegments(segments, index, listener)
+                }
+                if (fallbackTriggered) return
                 // 任一段失败即终止本轮（剩余分段放弃，交外部监听器回写状态机）
                 listener.onError(utteranceId, message)
             }
@@ -444,5 +577,14 @@ class VoiceSessionController(
 
         /** 批次22 R4-1：流式引擎错误自动重试上限（退避 1.5s/次，防错误风暴）。 */
         private const val STREAMING_ERROR_RETRY_LIMIT = 2
+
+        /** 批次23-A（ADR-048，A5）：降级 toast 统一文案（层②/层③与装配期回退共用）。 */
+        private const val FALLBACK_TOAST = "云端不可用，已回退端侧"
+
+        /** 批次23-A（ADR-048，A5）：TTS 降级后等待端侧引擎就绪上限（防首句播报丢失）。 */
+        private const val TTS_FALLBACK_READY_WAIT_MS = 2_000L
+
+        /** 批次23-A（ADR-048，A5）：端侧 TTS 就绪轮询间隔。 */
+        private const val TTS_FALLBACK_READY_POLL_MS = 100L
     }
 }
