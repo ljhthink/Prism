@@ -62,6 +62,75 @@ class PhoneControlAccessibilityService : AccessibilityService() {
     @Volatile
     private var lastScreenshotOrigH: Int = 0
 
+    /**
+     * 批次20（BG-002，ADR-045）：后台执行面——非 null 时所有节点感知/操作路由到该
+     * displayId 的虚拟屏窗口（getWindowsOnAllDisplays），主屏前台窗口不再参与。
+     *
+     * phone_control 工具为串行执行（SkillExecutor while 循环逐工具），volatile 单值
+     * 切换安全；由执行器在后台工具调用前后 set/reset。
+     */
+    @Volatile
+    private var executionDisplayId: Int? = null
+
+    /**
+     * 切换执行面（BG-002）。
+     *
+     * @param displayId 虚拟屏 displayId；null 切回前台（默认主屏活动窗口）
+     */
+    fun setExecutionDisplay(displayId: Int?) {
+        executionDisplayId = displayId
+    }
+
+    /** 当前是否处于后台执行面（供服务内手势受限判断与执行器诊断）。 */
+    val isBackgroundExecution: Boolean
+        get() = executionDisplayId != null
+
+    /**
+     * 批次20（BG-002）：当前执行面的根节点。
+     *
+     * - 后台执行面（executionDisplayId != null，需 API 30+）：从
+     *   [getWindowsOnAllDisplays] 定位该 display 的活动窗口根（优先 active 最高 layer）；
+     * - 前台执行面：走 [currentRoot]（rootInActiveWindow → lastKnownRoot → getWindows 兜底）。
+     *
+     * @return 调用方自持根节点引用（可能为 null）；调用方用毕 recycle（同 currentRoot 语义）
+     */
+    fun executionRoot(): AccessibilityNodeInfo? {
+        val displayId = executionDisplayId ?: return currentRoot()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        val all = getWindowsOnAllDisplays() ?: return null
+        val wins = all.get(displayId) ?: run {
+            Log.w(TAG, "executionRoot: displayId=$displayId 无窗口（目标 App 可能未在虚拟屏运行）")
+            return null
+        }
+        val active = wins.filter { it.isActive }
+        for (window in (active.ifEmpty { wins }).sortedByDescending { it.layer }) {
+            val root = window.root ?: continue
+            if (root.packageName != null) return root
+            root.recycle()
+        }
+        Log.w(TAG, "executionRoot: displayId=$displayId 共 ${wins.size} 个窗口均无可用根")
+        return null
+    }
+
+    /**
+     * 批次20（BG-002）：查询指定 display 上最上层活动窗口的包名
+     * （后台 launch_app 校验"目标 App 是否真的进入虚拟屏"，对应前台 currentForegroundPackage）。
+     *
+     * @return 包名；无窗口返回 null
+     */
+    fun backgroundWindowPackage(displayId: Int): String? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        val wins = getWindowsOnAllDisplays()?.get(displayId) ?: return null
+        val best = wins.filter { it.isActive }.maxByOrNull { it.layer } ?: wins.firstOrNull()
+            ?: return null
+        val root = best.root ?: return null
+        return try {
+            root.packageName?.toString()
+        } finally {
+            root.recycle()
+        }
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
@@ -70,6 +139,9 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         // 1d8h10m + 通知不间断 + START_STICKY 自动重启）修订为「任务期动态保活」——由
         // [PhoneControlSessionManager] 在首个 phone_control__* 工具调用时启动、空闲 120s 停止
         // （ADR-041）。任务进行中防 MIUI 回收的能力保持不变。
+        // 修复轮八：启动对账——清理进程死亡残留的模拟副屏设置（叠加小窗滞留兜底）；
+        // 后台线程执行（Shizuku 绑定 + settings get 最长 5s，不能在主线程）。
+        Thread { runCatching { io.prism.phonecontrol.bg.VirtualDisplayManager.reconcileStaleOverlay() } }.start()
         Log.i(TAG, "手机操控无障碍服务已连接")
     }
 
@@ -90,7 +162,15 @@ class PhoneControlAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         // 维护最后一次已知根节点缓存（Bug A1）：窗口状态变化时记录源节点为最近根。
         // 仅缓存有效节点（避免把 null/回收节点写入）；nodeCounter 语义与 mapNode 一致。
+        // 批次20（guardrail P2-3）：仅缓存**默认屏**事件——虚拟屏窗口事件入缓存会让前台
+        // 执行面的 currentRoot() 第二级兜底命中虚拟屏根（跨屏误读主屏内容）。
         if (event != null && event.eventType == android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            // 批次22 修复轮七（lint NewApi）：AccessibilityRecord.getDisplayId 为 API 33+，
+            // 原门 R(30) 在 30-32 上会 NoSuchMethodError——提至 TIRAMISU(33)（目标真机 API 36
+            // 行为不变；30-32 退化为不过滤虚拟屏事件入缓存，仅影响该区间的兜底纯度）
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && event.displayId != Display.DEFAULT_DISPLAY) {
+                return
+            }
             val src = event.source
             if (src != null) {
                 synchronized(cacheLock) {
@@ -115,12 +195,12 @@ class PhoneControlAccessibilityService : AccessibilityService() {
      * @return 结构化文本；无活动窗口/服务未连接返回 null
      */
     fun getUiTreeText(maxNodes: Int = AccessibilityUiSerializer.MAX_NODES): String? {
-        val root = currentRoot() ?: return null
+        val root = executionRoot() ?: return null
         try {
             val rootNode = mapNode(root, maxNodes) ?: return null
             return AccessibilityUiSerializer.serialize(rootNode, maxNodes)
         } finally {
-            // currentRoot 返回自持硬引用（obtain 副本），用毕回收，杜绝句柄泄漏
+            // executionRoot 返回自持硬引用，用毕回收，杜绝句柄泄漏
             root.recycle()
         }
     }
@@ -187,13 +267,73 @@ class PhoneControlAccessibilityService : AccessibilityService() {
      * @return 成功描述
      */
     fun performTap(nodeId: Int?, x: Int, y: Int): String {
+        // 批次20（BG-002 纵深防御）+ 批次21（SZ-003，ADR-046）：后台执行面下坐标路径依赖
+        // dispatchGesture（仅主屏）——Shizuku 就绪时改经 shell `input -d` 注入到虚拟屏
+        //（先吸附可点击中心，语义与前台一致）；否则维持受限文案。
+        if (isBackgroundExecution && nodeId == null) {
+            if (io.prism.phonecontrol.bg.ShizukuShell.isReady()) {
+                val (sx, sy) = snapToClickableCenter(x, y) ?: (x to y)
+                return if (io.prism.phonecontrol.bg.ShizukuShell.inputTap(
+                        executionDisplayId ?: return bgGestureBlocked("坐标点击"), sx, sy
+                    )
+                ) "已点击坐标 ($sx,$sy)（shell 注入到虚拟屏）" else "错误：后台手势注入失败（Shizuku 命令执行异常），请改用节点操作或切回前台模式"
+            }
+            return bgGestureBlocked("坐标点击")
+        }
         if (nodeId != null) {
             val node = findNodeByNid(nodeId) ?: return "错误：节点 [$nodeId] 不存在（页面可能已变化），请重新获取 UI 状态"
             if (!node.isClickable) {
                 // 点击非 clickable 节点 → 尝试其可点击祖先
                 val clickableAncestor = findClickableAncestor(node)
-                if (clickableAncestor != null && clickableAncestor.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                    return "已点击节点 [$nodeId]（经可点击祖先）"
+                if (clickableAncestor != null) {
+                    // 批次22 修复轮七（guardrail S1）：祖先点击前**复检其聚合文本**——D2 候选
+                    // 扩大后"干净查询词/干净子节点 → 敏感可点击祖先"成为常见路径（Compose/
+                    // 经典布局普遍"文本挂子节点、click 挂容器"），仅按原节点文本判断会放行
+                    // （BFS 子节点精确命中反超敏感祖先成为 bestNid，matchedText 只含子树文本）
+                    val ancestorAgg = aggregateNodeText(clickableAncestor)
+                    if (PhoneControlSecurity.isSensitiveTargetText(ancestorAgg)) {
+                        return "错误：目标所在的可点击容器含敏感内容（${ancestorAgg?.take(30)}），已硬拦截" +
+                            "（支付/密码/验证码类操作请用 take_over 交还用户手动）"
+                    }
+                    if (clickableAncestor.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                        return "已点击节点 [$nodeId]（经可点击祖先）"
+                    }
+                }
+                // 批次22 修复轮七（2026-09-07）：不可点击且无可点击祖先（或祖先点击失败）→
+                // 按 bounds 中心坐标注入降级（后台走 shell tap/前台走手势），不再直接拒绝——
+                // Compose 扁平化树中大量文本节点无 clickable 语义也无 clickable 祖先
+                // （DeepSeek 输入框实证），bounds 即点击目标
+                val bounds = Rect()
+                node.getBoundsInScreen(bounds)
+                if (!bounds.isEmpty) {
+                    val cx = bounds.centerX()
+                    val cy = bounds.centerY()
+                    // 批次22 修复轮七（guardrail S2/Q4）：①落点**复检**敏感文本与密码节点——
+                    // 服务层内部降级不经 executor 的 nodeTextAt/isPasswordNode 回读，必须在
+                    // 服务层补齐；②跳过坐标吸附（snapToClickableCenter 可能把点击重定向到
+                    // 邻近节点改变语义），直接点 bounds 中心
+                    val landingText = nodeTextAt(cx, cy)
+                    if (PhoneControlSecurity.isSensitiveTargetText(landingText)) {
+                        return "错误：点击落点含敏感内容（${landingText?.take(30)}），已硬拦截" +
+                            "（支付/密码/验证码类操作请用 take_over 交还用户手动）"
+                    }
+                    nodeAt(null, cx, cy)?.let { landing ->
+                        if (PhoneControlSecurity.isPasswordNode(landing)) {
+                            return "错误：点击落点为密码/验证码节点，已硬拦截（请用 take_over 交还用户手动输入）"
+                        }
+                    }
+                    return if (isBackgroundExecution) {
+                        if (!io.prism.phonecontrol.bg.ShizukuShell.isReady()) return bgGestureBlocked("坐标点击")
+                        val bgDisplayId = executionDisplayId ?: return bgGestureBlocked("坐标点击")
+                        if (io.prism.phonecontrol.bg.ShizukuShell.inputTap(bgDisplayId, cx, cy)) {
+                            "已点击节点 [$nodeId]（bounds 中心坐标注入，$cx,$cy）"
+                        } else {
+                            "错误：后台手势注入失败（Shizuku 命令执行异常），请改用坐标或切回前台模式"
+                        }
+                    } else {
+                        if (dispatchTap(cx, cy)) "已点击节点 [$nodeId]（bounds 中心坐标，$cx,$cy）"
+                        else "错误：手势点击失败"
+                    }
                 }
                 return "错误：节点 [$nodeId] 不可点击，请改用坐标或重新获取 UI 状态"
             }
@@ -226,7 +366,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
      * @return 吸附后的 (cx, cy)；无命中返回 null（按原坐标点）
      */
     private fun snapToClickableCenter(x: Int, y: Int): Pair<Int, Int>? {
-        val root = rootInActiveWindow ?: return null
+        val root = executionRoot() ?: return null
         val compat = AccessibilityNodeInfoCompat.wrap(root)
         val queue = ArrayDeque<AccessibilityNodeInfoCompat>()
         queue.add(compat)
@@ -262,6 +402,15 @@ class PhoneControlAccessibilityService : AccessibilityService() {
 
     /** 长按节点（通过坐标手势，长按无标准 accessibility action）。 */
     fun performLongPress(nodeId: Int?, x: Int, y: Int): String {
+        // 批次21（SZ-003，ADR-046）：后台下长按经 shell 慢速 swipe（同点 600ms）注入虚拟屏
+        if (isBackgroundExecution) {
+            if (!io.prism.phonecontrol.bg.ShizukuShell.isReady()) return bgGestureBlocked("长按")
+            val (px, py) = resolvePoint(nodeId, x, y) ?: return "错误：节点/坐标无效"
+            return if (io.prism.phonecontrol.bg.ShizukuShell.inputSwipe(
+                    executionDisplayId ?: return bgGestureBlocked("长按"), px, py, px, py, LONG_PRESS_MS
+                )
+            ) "已长按 ($px, $py)（shell 注入到虚拟屏）" else "错误：后台长按注入失败（Shizuku 命令执行异常）"
+        }
         val (px, py) = resolvePoint(nodeId, x, y) ?: return "错误：节点/坐标无效"
         val path = Path().apply { moveTo(px.toFloat(), py.toFloat()) }
         val gesture = GestureDescription.Builder()
@@ -272,6 +421,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
 
     /** 双击节点/坐标（Open-AutoGLM 常用「点两下」打开/展开，无标准 accessibility action）。 */
     fun performDoubleTap(nodeId: Int?, x: Int, y: Int): String {
+        if (isBackgroundExecution) return bgGestureBlocked("双击")
         val (px, py) = resolvePoint(nodeId, x, y) ?: return "错误：节点/坐标无效"
         val path = Path().apply { moveTo(px.toFloat(), py.toFloat()) }
         val stroke1 = GestureDescription.StrokeDescription(path, 0L, TAP_MS)
@@ -295,7 +445,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
      */
     fun nodeTextOf(nodeId: Int?): String? {
         if (nodeId == null) return null
-        val root = rootInActiveWindow ?: return null
+        val root = executionRoot() ?: return null
         // 按 nid 定位节点（BFS 计数器语义与 findNodeByNid / mapNode 一致）
         val rootCompat = AccessibilityNodeInfoCompat.wrap(root)
         val locate = ArrayDeque<AccessibilityNodeInfoCompat>()
@@ -361,7 +511,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
      */
     fun findNodeByTextNid(query: String, threshold: Float = TEXT_MATCH_THRESHOLD): Int? {
         if (query.isBlank()) return null
-        val root = rootInActiveWindow ?: return null
+        val root = executionRoot() ?: return null
         val compat = AccessibilityNodeInfoCompat.wrap(root)
         val queue = ArrayDeque<AccessibilityNodeInfoCompat>()
         queue.add(compat)
@@ -370,15 +520,23 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         var bestScore = threshold
         while (queue.isNotEmpty()) {
             val n = queue.removeFirst()
-            // 仅对可操作节点聚合文本（降低 O(n²) 成本；不可点击文本非点击目标）
-            if (n.isClickable || n.isEditable) {
-                val agg = aggregateNodeText(n)
-                if (agg != null) {
-                    val score = textSimilarity(query, agg)
-                    if (score > bestScore) {
-                        bestScore = score
-                        bestNid = idx
-                    }
+            // 可操作节点聚合子树文本（既有语义）；批次22 修复轮七（2026-09-07）：**非可操作
+            // 节点改用自身文本参与匹配**——Compose 扁平化树中文本常挂在非 clickable 的
+            // TextView 上（DeepSeek 输入框「发消息或按住说话」实证），原过滤导致 tap(text)
+            // 恒未命中而 get_ui_state 全节点可见（感知/操作域不一致）。自身文本取值 O(1)，
+            // 避免子树聚合的 O(n²) 回归；nid 序号对所有节点递增，与 findNodeByNid/get_ui_state
+            // 契约不变。
+            val agg = if (n.isClickable || n.isEditable) {
+                aggregateNodeText(n)
+            } else {
+                listOfNotNull(n.text?.toString(), n.contentDescription?.toString())
+                    .joinToString(" ").trim().takeIf { it.isNotBlank() }
+            }
+            if (agg != null) {
+                val score = textSimilarity(query, agg)
+                if (score > bestScore) {
+                    bestScore = score
+                    bestNid = idx
                 }
             }
             idx++
@@ -396,7 +554,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
      * @return 命中节点文本/描述拼接（可为 null）
      */
     fun nodeTextAt(x: Int, y: Int): String? {
-        val root = rootInActiveWindow ?: return null
+        val root = executionRoot() ?: return null
         val compat = AccessibilityNodeInfoCompat.wrap(root)
         val queue = ArrayDeque<AccessibilityNodeInfoCompat>()
         queue.add(compat)
@@ -451,7 +609,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
      * @return 映射后的 [UiNode]；未命中返回 null
      */
     fun nodeAt(nodeId: Int?, x: Int, y: Int): UiNode? {
-        val root = rootInActiveWindow ?: return null
+        val root = executionRoot() ?: return null
         if (nodeId != null) {
             val compat = findNodeByNid(nodeId) ?: return null
             return mapSingleNode(compat, nodeId)
@@ -481,6 +639,16 @@ class PhoneControlAccessibilityService : AccessibilityService() {
 
     /** 滑动（start→end 坐标）。 */
     fun performSwipe(fromX: Int, fromY: Int, toX: Int, toY: Int, durationMs: Long = SWIPE_MS): String {
+        // 批次21（SZ-003，ADR-046）：后台下滑动经 shell `input -d swipe` 注入虚拟屏
+        if (isBackgroundExecution) {
+            if (!io.prism.phonecontrol.bg.ShizukuShell.isReady()) return bgGestureBlocked("滑动")
+            val did = io.prism.phonecontrol.bg.ShizukuShell.inputSwipe(
+                executionDisplayId ?: return bgGestureBlocked("滑动"),
+                fromX, fromY, toX, toY, durationMs
+            )
+            return if (did) "已滑动 ($fromX,$fromY)→($toX,$toY)（shell 注入到虚拟屏）"
+            else "错误：后台滑动注入失败（Shizuku 命令执行异常）"
+        }
         val path = Path().apply { moveTo(fromX.toFloat(), fromY.toFloat()); lineTo(toX.toFloat(), toY.toFloat()) }
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0L, durationMs))
@@ -488,9 +656,119 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         return if (dispatchGesture(gesture, null, null)) "已滑动 ($fromX,$fromY)→($toX,$toY)" else "错误：滑动手势失败"
     }
 
+    /**
+     * 批次22 修复轮六（2026-09-07）：a11y 截屏指定 display（API 34+）——**模拟副屏（trusted）
+     * 路线**的截图通道（该路线无 ImageReader）。需在系统无障碍设置中为 Prism 开启
+     * 「屏幕截图」能力（一次性授权），否则回调 onError 返回 null。
+     */
+    suspend fun takeScreenshotForDisplay(displayId: Int): android.graphics.Bitmap? {
+        if (android.os.Build.VERSION.SDK_INT < 34) return null
+        // guardrail W2：10s 超时保护（防 ROM 回调双缺时协程无限挂起）
+        return kotlinx.coroutines.withTimeout(10_000) {
+            kotlinx.coroutines.suspendCancellableCoroutine { cont ->
+            takeScreenshot(
+                displayId,
+                mainExecutor,
+                object : AccessibilityService.TakeScreenshotCallback {
+                    override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                        cont.resume(
+                            runCatching {
+                                // HardwareBuffer（GPU）→ 软件位图（JPEG 压缩需要）；
+                                // buffer 生命周期由 ScreenshotResult 管理，无需显式 close
+                                val hw = android.graphics.Bitmap.wrapHardwareBuffer(
+                                    result.hardwareBuffer, result.colorSpace
+                                )
+                                hw?.copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+                            }.getOrNull(),
+                            onCancellation = null
+                        )
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        Log.w(TAG, "takeScreenshot(displayId=$displayId) 失败 code=$errorCode（需开启「屏幕截图」能力？）")
+                        cont.resume(null, onCancellation = null)
+                    }
+                }
+            )
+            }
+        }
+    }
+
     /** 输入文本到节点（ACTION_SET_TEXT；失败降级为剪贴板+长按粘贴的占位提示，由工具层处理）。 */
     fun performType(nodeId: Int?, x: Int, y: Int, text: String): String {
         val node = if (nodeId != null) findNodeByNid(nodeId) else findEditableAt(x, y)
+        // 批次22 修复轮四（2026-09-07）：后台执行面 shell 文字注入 fallback——Compose 扁平化
+        // App 的虚拟屏 a11y 树常无输入框节点（DeepSeek 实证），ACTION_SET_TEXT 无从落地。
+        // 双路径：①剪贴板+焦点节点粘贴（CJK 可靠，无需 IME）；②input text 按键注入（ASCII 兜底）。
+        if (node == null && isBackgroundExecution) {
+            if (!io.prism.phonecontrol.bg.ShizukuShell.isReady()) {
+                return "错误：后台模式输入需要 Shizuku（a11y 树无输入框节点时经 shell 注入）"
+            }
+            val displayId = executionDisplayId
+                ?: return "错误：后台执行面未就绪"
+            if (x == 0 && y == 0) {
+                return "错误：未找到输入框节点（后台 a11y 树受限）。请先用 mode=background 的 " +
+                    "screenshot 获取输入框坐标（OCR），再 type 传 x/y 坐标"
+            }
+            // 1) tap 聚焦（该 display 的焦点窗口切换）
+            if (!io.prism.phonecontrol.bg.ShizukuShell.inputTap(displayId, x, y)) {
+                return "错误：点击聚焦失败（shell 注入异常）"
+            }
+            Thread.sleep(400)  // 聚焦生效窗口
+            // 2) 剪贴板 + 焦点节点粘贴（CJK 可靠路径；root/focus 为自持硬引用，用毕回收）
+            runCatching {
+                val cm = getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                    as android.content.ClipboardManager
+                cm.setPrimaryClip(android.content.ClipData.newPlainText("prism-type", text))
+            }
+            var pasted = false
+            var root: AccessibilityNodeInfo? = null
+            try {
+                root = executionRoot()
+                // 批次22 修复轮七（2026-09-07）：findFocus 依赖 tap 聚焦已生效（事件被目标屏
+                // 接受）；注入被丢弃时恒为 null → 降级按坐标找可编辑节点执行粘贴
+                val focusNode = root?.findFocus(
+                    android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT
+                )
+                if (focusNode != null) {
+                    pasted = focusNode.performAction(
+                        android.view.accessibility.AccessibilityNodeInfo.ACTION_PASTE
+                    )
+                    focusNode.recycle()
+                } else {
+                    // findEditableAt 返回 compat 类型（与 findNodeByNid 同源），ACTION_PASTE
+                    // 语义一致；沿既有约定不回收 compat 节点
+                    val editable = findEditableAt(x, y)
+                    if (editable != null) {
+                        pasted = editable.performAction(
+                            android.view.accessibility.AccessibilityNodeInfo.ACTION_PASTE
+                        )
+                    }
+                }
+            } catch (_: Exception) {
+            } finally {
+                runCatching { root?.recycle() }
+            }
+            if (pasted) {
+                return "已注入文字（tap 聚焦 + 剪贴板粘贴；坐标 $x,$y）。" +
+                    "请用 tap(text=发送) 或坐标点击发送按钮完成提交"
+            }
+            // 3) input text 按键注入（ASCII/数字兜底；CJK 会被 VIRTUAL_KEYBOARD 键表丢弃）。
+            // 批次22 修复轮七：非 ASCII 文本**拒绝执行**并诚实报错——此前 exit==0 即报"已注入"，
+            // CJK 被键表静默丢弃造成"假成功"（真机取证：输入框内容恒为空）
+            if (text.any { it.code > 127 }) {
+                return "错误：文字注入失败——tap 聚焦未生效（粘贴路径无焦点节点），且 input text " +
+                    "不支持中文等非 ASCII 文本（系统键表丢弃，平台限制）。请先用 mode=background " +
+                    "的 tap 点击输入框坐标使其聚焦后重试 type，或改用 mode=foreground / take_over"
+            }
+            val typed = io.prism.phonecontrol.bg.ShizukuShell.inputText(displayId, text)
+            return if (typed) {
+                "已注入文字（tap 聚焦 + input text；坐标 $x,$y）。若输入框内容为空（CJK 可能被丢弃），" +
+                    "请改用 mode=foreground 或 take_over。请用 tap 完成发送"
+            } else {
+                "错误：文字注入失败（input text 执行异常）"
+            }
+        }
         if (node == null) return "错误：未找到输入框（可尝试先点击输入框聚焦）"
         val bundle = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text) }
         if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, bundle)) {
@@ -501,9 +779,38 @@ class PhoneControlAccessibilityService : AccessibilityService() {
 
     /** 全局动作（返回/主页/最近任务）。 */
     fun executeGlobalAction(action: Int): String {
+        // 批次20（BG-002）：全局动作作用于**主屏**导航（back/home 会打断用户正在进行的操作），
+        // 后台执行面下一律拒绝——**批次21（SZ-003）**：Shizuku 就绪时经 shell
+        // `input -d <id> keyevent` 注入到虚拟屏（键事件作用于该屏的焦点窗口）。
+        if (isBackgroundExecution) {
+            if (io.prism.phonecontrol.bg.ShizukuShell.isReady()) {
+                val keyCode = when (action) {
+                    android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK -> 4 // KEYCODE_BACK
+                    android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME -> 3 // KEYCODE_HOME
+                    else -> return "错误：后台模式仅支持返回/主页的 shell 注入，其它全局动作请切回前台模式"
+                }
+                val displayId = executionDisplayId ?: return bgGestureBlocked("全局动作")
+                return if (io.prism.phonecontrol.bg.ShizukuShell.inputKeyevent(displayId, keyCode)) {
+                    "已执行全局动作（shell 注入到虚拟屏）"
+                } else "错误：后台全局动作注入失败（Shizuku 命令执行异常）"
+            }
+            return "错误：后台模式不支持全局动作（back/home 作用于主屏导航，会干扰用户正在使用的主屏）。" +
+                "虚拟屏内请用页面节点操作（tap 页面返回按钮/标签），或该步骤切回前台模式；" +
+                "安装并激活 Shizuku 后可解锁后台 back/home"
+        }
         // super.performGlobalAction 是 AccessibilityService 原生 Boolean 返回实现
         return if (super.performGlobalAction(action)) "已执行全局动作" else "错误：全局动作执行失败"
     }
+
+    /**
+     * 批次20（BG-002）：后台执行面手势受限统一文案（`dispatchGesture` 仅作用于默认屏，
+     * 无法把触摸注入到虚拟屏——调研报告第 7 节 API 事实核验；Shizuku 就绪时各手势方法
+     * 已改经 shell 注入，本文案仅在 Shizuku 不可用时出现）。
+     */
+    private fun bgGestureBlocked(action: String): String =
+        "错误：后台模式不支持${action}（触摸注入仅作用于主屏，虚拟屏无法注入；" +
+            "且主屏手势会干扰用户）。请改用节点操作（get_ui_state 取节点后 tap(text=.../node_id)、type），" +
+            "或该步骤临时切回前台模式执行；安装并激活 Shizuku 可解锁后台手势"
 
     /** 启动应用（包名，launcher intent）。 */
     fun launchApp(packageName: String): String {
@@ -704,9 +1011,9 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         )
     }
 
-    /** 按 nid 查找当前树中的节点（重新采集，页面变化时 nid 可能失效）。 */
+    /** 按 nid 查找当前执行面树中的节点（重新采集，页面变化时 nid 可能失效）。 */
     internal fun findNodeByNid(nid: Int): AccessibilityNodeInfoCompat? {
-        val root = rootInActiveWindow ?: return null
+        val root = executionRoot() ?: return null
         val compat = AccessibilityNodeInfoCompat.wrap(root)
         val queue = ArrayDeque<AccessibilityNodeInfoCompat>()
         queue.add(compat)
@@ -732,18 +1039,38 @@ class PhoneControlAccessibilityService : AccessibilityService() {
     }
 
     private fun findEditableAt(x: Int, y: Int): AccessibilityNodeInfoCompat? {
-        val root = rootInActiveWindow ?: return null
+        val root = executionRoot() ?: return null
         val compat = AccessibilityNodeInfoCompat.wrap(root)
         val queue = ArrayDeque<AccessibilityNodeInfoCompat>()
         queue.add(compat)
+        // 修复轮八：除 isEditable 外，接受**暴露 ACTION_PASTE 能力**的节点——部分 Compose
+        // 渲染（DeepSeek 实证）输入框节点不标 isEditable 但支持粘贴。
+        // guardrail Q-4：BFS 首匹配会命中覆盖坐标的外层大容器（WebView 根常见）——改为
+        // 最小面积优选 + isEditable 命中优先于 ACTION_PASTE-only 命中
+        var best: AccessibilityNodeInfoCompat? = null
+        var bestArea = Long.MAX_VALUE
+        var bestIsEditable = false
         while (queue.isNotEmpty()) {
             val n = queue.removeFirst()
             val bounds = Rect()
             n.getBoundsInScreen(bounds)
-            if (n.isEditable && bounds.contains(x, y)) return n
+            if (bounds.contains(x, y)) {
+                val editable = n.isEditable
+                val canPaste = editable || (n.actions and AccessibilityNodeInfo.ACTION_PASTE) != 0
+                if (canPaste) {
+                    val area = bounds.width().toLong() * bounds.height().toLong()
+                    val better = best == null || (editable && !bestIsEditable) ||
+                        (editable == bestIsEditable && area < bestArea)
+                    if (better) {
+                        best = n
+                        bestArea = area
+                        bestIsEditable = editable
+                    }
+                }
+            }
             for (i in 0 until n.childCount) queue.addLast(n.getChild(i) ?: continue)
         }
-        return null
+        return best
     }
 
     private fun resolvePoint(nodeId: Int?, x: Int, y: Int): IntArray? {

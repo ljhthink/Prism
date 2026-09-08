@@ -71,6 +71,30 @@ object PhoneControlSessionManager {
     private var lastActiveAtMs = 0L
 
     /**
+     * 批次22 修复轮五（2026-09-07）：任务期亮屏锁——**息屏时注入到虚拟屏的触摸/按键会被
+     * 系统输入策略丢弃**（Display OFF，真机实证"shell 注入成功但屏幕无变化"）。SCREEN_BRIGHT
+     * 仅保持亮屏（不主动唤醒已息屏设备），20 分钟上限自愈。
+     */
+    private var wakeLock: android.os.PowerManager.WakeLock? = null
+
+    private fun acquireWakeLockLocked(ctx: android.content.Context) {
+        // 非引用计数锁：重复 acquire 会重置 20min 窗口（真正实现"刷新"）——guardrail F2
+        val pm = ctx.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+        @Suppress("DEPRECATION")
+        val lock = pm.newWakeLock(android.os.PowerManager.SCREEN_BRIGHT_WAKE_LOCK, "prism:bgControl")
+        lock.setReferenceCounted(false)
+        runCatching { lock.acquire(20 * 60_000L) }  // guardrail B1 兜底：ROM 差异不逃逸
+        runCatching { wakeLock?.release() }
+        wakeLock = lock
+        Log.i(TAG, "bg 会话亮屏锁已持有（20min 窗口，工具调用刷新）")
+    }
+
+    private fun releaseWakeLock() {
+        runCatching { wakeLock?.release() }
+        wakeLock = null
+    }
+
+    /**
      * 手机工具调用入口（由 [PhoneControlLocalToolExecutor.execute] 每次调用）。
      *
      * - 首次调用：标记会话活跃 + 启动保活前台服务 + 排定空闲检查；
@@ -92,17 +116,22 @@ object PhoneControlSessionManager {
             if (!sessionActive) {
                 sessionActive = true
                 keepAliveStarter(ctx)
+                acquireWakeLockLocked(ctx)
                 scheduleIdleCheckLocked()
                 Log.i(TAG, "手机操控会话开始，启动任务期保活")
             } else {
+                // 批次22 修复轮五：刷新亮屏锁（acquire 延长 20min 窗口）
+                acquireWakeLockLocked(ctx)
                 Log.d(TAG, "手机操控会话保活刷新")
             }
         }
     }
 
     /**
-     * 空闲到期检查（主线程回调）：距最近一次工具调用满 [IDLE_TIMEOUT_MS] 则停止保活；
-     * 否则说明期间有新调用刷新了时间戳，继续排定下一轮检查。
+     * 空闲到期检查（主线程回调）：距最近一次工具调用满 [IDLE_TIMEOUT_MS] 则停止保活并
+     * 释放后台虚拟屏（guardrail P1-2：任务期结束 = 空闲超时，虚拟屏 ImageReader/HandlerThread
+     * 与 force-stop 回收集中在此收口——[io.prism.phonecontrol.bg.VirtualDisplayManager.ensureDisplay]
+     * 幂等，下次后台调用自动重建）；否则说明期间有新调用刷新了时间戳，继续排定下一轮检查。
      */
     internal fun checkIdle() {
         synchronized(sessionLock) {
@@ -110,9 +139,21 @@ object PhoneControlSessionManager {
             val idleFor = nowMillis() - lastActiveAtMs
             if (idleFor >= IDLE_TIMEOUT_MS) {
                 sessionActive = false
+                releaseWakeLock()
                 val ctx = appContextProvider()
-                if (ctx != null) keepAliveStopper(ctx)
-                Log.i(TAG, "手机操控空闲 ${idleFor}ms ≥ ${IDLE_TIMEOUT_MS}ms，停止保活前台服务")
+                if (ctx != null) {
+                    keepAliveStopper(ctx)
+                    // 批次21（guardrail R5 P2-1）：虚拟屏回收移到后台线程——Shizuku force-stop
+                    // 单条命令最长 5s，主线程同步执行会阻塞 checkIdle 回调（ANR 风险）。
+                    // checkIdle 在主线程回调（scheduler=mainHandler）。
+                    val releaseCtx = ctx.applicationContext
+                    Thread {
+                        runCatching {
+                            io.prism.phonecontrol.bg.VirtualDisplayManager.releaseDisplay(releaseCtx)
+                        }
+                    }.start()
+                }
+                Log.i(TAG, "手机操控空闲 ${idleFor}ms ≥ ${IDLE_TIMEOUT_MS}ms，停止保活前台服务（虚拟屏回收已在后台线程执行）")
             } else {
                 scheduleIdleCheckLocked()
             }
@@ -122,11 +163,23 @@ object PhoneControlSessionManager {
     /**
      * 会话复位：无障碍服务断开（[PhoneControlAccessibilityService.onDestroy]）时调用，
      * 保证下次连接后的首个工具调用重新走 start 分支；亦用于单元测试隔离。
+     * 修复轮八：无障碍断开 = 后台操控能力不可用 → 同步释放后台虚拟屏（进程死亡前的
+     * 最后一次释放机会；后台线程执行防 ANR——Shizuku 命令单条最长 5s）。
      */
     internal fun reset() {
+        val ctx = appContextProvider()
         synchronized(sessionLock) {
             sessionActive = false
             lastActiveAtMs = 0L
+            releaseWakeLock()
+        }
+        if (ctx != null) {
+            val releaseCtx = ctx.applicationContext
+            Thread {
+                runCatching {
+                    io.prism.phonecontrol.bg.VirtualDisplayManager.releaseDisplay(releaseCtx)
+                }
+            }.start()
         }
     }
 

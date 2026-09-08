@@ -298,9 +298,12 @@ class PrismApplication : Application() {
             // UXR9 US-901：多语言嵌入模型（paraphrase-multilingual-MiniLM-L12-v2 qint8，
             // ~113MB）+ Unigram tokenizer（tokenizer.json ~9MB）。英文 MiniLM 对中文语义
             // 区分度差（无关中文片段余弦 0.4~0.7），多语言模型是中文 RAG 治本方案。
+            // 批次22 crash-fix（TKN-B22-CRASH-001 方案C）：改用 **Safe** 工厂——native 库
+            // 故障（缺符号/类毒化）降级 NullEmbedder，绝不向主线程调用方抛 Error
+            //（2026-09-06 真机 FATAL 循环崩溃的防御层，见 docs/reports/2026-09-06-crash-ort-conflict-rca-and-fix.md）。
             assets.open(EmbedderFactory.DEFAULT_MODEL_PATH).use { modelInput ->
                 assets.open(EmbedderFactory.DEFAULT_TOKENIZER_PATH).use { tokenizerInput ->
-                    EmbedderFactory.createMultilingual(modelInput, tokenizerInput)
+                    EmbedderFactory.createMultilingualSafe(modelInput, tokenizerInput)
                 }
             }
         } else {
@@ -695,9 +698,20 @@ class PrismApplication : Application() {
                     // 未显式设置（旧配置）→ 按激活模型名自动检测兜底（开箱即用）
                     else -> io.prism.data.ProviderConfig.detectVisionSupport(active.models.firstOrNull())
                 }
-            }
+            },
+            // 批次20（BG-003，ADR-045）：后台操控会话级开关（VM「后台操控」chip 直推 StateFlow）；
+            // 关闭时 mode=background 工具调用一律拒绝。秒读 current value（工具执行在 IO 协程）。
+            backgroundControlEnabledProvider = { backgroundControlEnabled.value },
+            // 批次20（BG-001）：后台虚拟屏创建/启动 App/回收所需上下文
+            appContext = this
         )
     }
+
+    /**
+     * 批次20（BG-005，ADR-045）：后台操控会话级开关（「后台操控」chip）。
+     * 默认关闭；UI（ConversationViewModel）切换，phone_control 执行器守卫读取。
+     */
+    val backgroundControlEnabled = kotlinx.coroutines.flow.MutableStateFlow(false)
 
     /**
      * 手机操控高危动作（发送/删除/拨号）确认策略仓库（v1 真机二次修复 Issue 4b）。
@@ -1002,6 +1016,13 @@ class PrismApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // 批次21（ADR-046）：ShizukuShell 上下文注入（四态判定需 PackageManager 探测
+        // Shizuku manager 包，区分"未安装"与"已安装未激活"）
+        io.prism.phonecontrol.bg.ShizukuShell.init(this)
+        // 修复轮八：进程死亡残留对账（叠加小窗滞留兜底）——后台线程（Shizuku 绑定 +
+        // settings get 最长 5s）；应用冷启动时 Shizuku 未就绪则 no-op，由 a11y 服务连接
+        // 时再次对账
+        Thread { runCatching { io.prism.phonecontrol.bg.VirtualDisplayManager.reconcileStaleOverlay() } }.start()
         boxStore = MyObjectBox.builder()
             .androidContext(this)
             .build()

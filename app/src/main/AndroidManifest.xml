@@ -7,9 +7,20 @@
     <!-- v1 真机二次修复（Issue 5）：Prism 后台时手机操控高危确认（发送/删除/拨号）需发系统通知，
          Android 13+（targetSdk 34）为运行时权限，需在运行时申请（Settings 无障碍页/首次操控时提示）。 -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 批次22 修复轮五：bg 操控会话期 SCREEN_BRIGHT_WAKE_LOCK（防任务中途息屏丢虚拟屏注入） -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <!-- v1 批次11（F2）：手机操控保活前台服务。Android 14+ 需要前台服务权限 + specialUse 声明用途。 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- 批次20（BG-005，ADR-045）：后台操控悬浮窗权限——系统对「后台启动 Activity」的官方豁免
+         条件（虚拟屏后台启动目标 App 必需）；用户在设置/开关引导中手动授予（Settings.canDrawOverlays 判定）。 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 批次20（VC-001，ADR-044）：语音通话——录音（运行时申请）+ 麦克风前台服务类型（Android 14+ 强制）。 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <!-- 批次22 修复轮七：后台任务回收 killBackgroundProcesses 所需（normal 级权限；
+         lint MissingPermission——批次20 起缺失，releaseDisplay 的非 Shizuku 回收路径必需）。 -->
+    <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
 
     <application
         android:name=".PrismApplication"
@@ -63,6 +74,20 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="LLM 手机操控任务期间保活，防止后台进程被系统回收导致任务中断" />
         </service>
+        <!-- 批次20（VC-001，ADR-044）：语音通话前台服务（microphone 类型，锁屏/后台保持麦克风可用） -->
+        <service
+            android:name=".voice.VoiceForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
+
+        <!-- 批次21（SZ-001，ADR-046）：Shizuku Provider——shell 命令通道的授权与绑定入口 -->
+        <provider
+            android:name="rikka.shizuku.ShizukuProvider"
+            android:authorities="${applicationId}.shizuku"
+            android:multiprocess="false"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
     </application>
 
     <!--
@@ -143,6 +168,17 @@
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+
+        <!-- 批次20 真机修复（RCA 2026-09-05 问题2）：语音识别引擎包可见性。
+             缺失时 SpeechRecognizer.isRecognitionAvailable 在 Android 11+ 恒为 false
+             （MIUI 实证：com.xiaomi.mibrain.speech 引擎存在但被包可见性过滤），
+             导致"按住说话无反应"。 -->
+        <intent>
+            <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
         </intent>
 
     </queries>

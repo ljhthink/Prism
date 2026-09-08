@@ -1,4 +1,4 @@
-package io.prism.ui.settings
+﻿package io.prism.ui.settings
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -126,12 +127,40 @@ fun SettingsScreen(
                 .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
         )
     }
+    // 批次20（BG-005，ADR-045）：悬浮窗授权状态与跳转（后台操控后台启动 Activity 的官方豁免条件）。
+    // guardrail P3-4：状态为可刷新 State（组合期快照会过期），在下方既有轮询循环中一并刷新。
+    var canDrawOverlays by remember { mutableStateOf(android.provider.Settings.canDrawOverlays(context)) }
+    val openOverlaySettings = {
+        context.startActivity(
+            android.content.Intent(
+                android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                android.net.Uri.parse("package:${context.packageName}")
+            ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
+    // 批次21（SZ-004，ADR-046）：Shizuku 四态（未安装/已装未激活/未授权/就绪）——轮询刷新；未授权点击请求授权。
+    // 真机修复 R3：用户装了 Shizuku App 但未激活 server 时，原三态误报"未安装"——拆分 NOT_RUNNING 并给激活指引。
+    var shizukuState by remember { mutableStateOf(io.prism.phonecontrol.bg.ShizukuShell.currentState()) }
+    val shizukuSubtitle = when (shizukuState) {
+        io.prism.phonecontrol.bg.ShizukuShell.State.NOT_INSTALLED ->
+            "未安装 Shizuku（免费开源）· 完整后台化需安装并激活：shizuku.rikka.app"
+        io.prism.phonecontrol.bg.ShizukuShell.State.NOT_RUNNING ->
+            "已安装未激活 · 请打开 Shizuku App 按引导激活（Android 11+ 可用无线调试配对，无需电脑）"
+        io.prism.phonecontrol.bg.ShizukuShell.State.NOT_AUTHORIZED ->
+            "已激活未授权 · 点击在弹窗中允许 Prism 使用 Shizuku"
+        io.prism.phonecontrol.bg.ShizukuShell.State.READY ->
+            "Shizuku 就绪 · 后台模式全能力（手势/滑动/返回均可用）"
+    }
 
     // v1 US-201：UI 侧轮询无障碍服务连接状态（用户在系统设置开关后返回本页自动刷新引导）。
     // VM 侧无循环（避免 JVM 单测 runTest 调度器挂起），轮询放 Composable LaunchedEffect。
     LaunchedEffect(Unit) {
         while (true) {
             viewModel.refreshPhoneControlStatus()
+            // 批次20（guardrail P3-4）：同步刷新悬浮窗授权状态（用户从系统授权页返回后生效）
+            canDrawOverlays = android.provider.Settings.canDrawOverlays(context)
+            // 批次21（SZ-004）：同步刷新 Shizuku 三态
+            shizukuState = io.prism.phonecontrol.bg.ShizukuShell.currentState()
             kotlinx.coroutines.delay(PHONE_CONTROL_POLL_MS)
         }
     }
@@ -256,6 +285,52 @@ fun SettingsScreen(
                     onClick = { viewModel.setHighRiskApprovalMode(nextHighRiskApprovalMode(highRiskApprovalMode)) }
                 )
             }
+            // 批次20（BG-005，ADR-045）：后台模式说明 + 悬浮窗权限引导入口（点击跳系统授权页）
+            item {
+                SetRow(
+                    icon = "🪟",
+                    iconColor = PrismIndigo,
+                    title = "后台操控（虚拟屏）",
+                    subtitle = "聊天页开启「后台操控」后，AI 把应用启动到后台虚拟屏执行，你可同时使用手机。" +
+                        if (canDrawOverlays) "悬浮窗权限：已授权" else "悬浮窗权限：未授权（后台启动需要，点此去授权）",
+                    onClick = {
+                        if (!canDrawOverlays) {
+                            openOverlaySettings()
+                        }
+                    }
+                )
+            }
+            // 批次21（SZ-004，ADR-046）：Shizuku 四态行（未装→下载指引；已装未激活→打开 Shizuku App；
+            // 未授权→点击授权；就绪→提示全能力）
+            item {
+                SetRow(
+                    icon = "⚡",
+                    iconColor = PrismIndigo,
+                    title = "Shizuku（后台化增强）",
+                    subtitle = shizukuSubtitle,
+                    onClick = {
+                        when (shizukuState) {
+                            io.prism.phonecontrol.bg.ShizukuShell.State.NOT_AUTHORIZED ->
+                                io.prism.phonecontrol.bg.ShizukuShell.requestPermission(2026)
+                            io.prism.phonecontrol.bg.ShizukuShell.State.NOT_RUNNING -> {
+                                // 已装未激活：直接打开 Shizuku App（用户按其引导完成无线调试配对/adb 激活）
+                                val launch = context.packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
+                                if (launch != null) {
+                                    context.startActivity(launch.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                                }
+                            }
+                            io.prism.phonecontrol.bg.ShizukuShell.State.NOT_INSTALLED ->
+                                context.startActivity(
+                                    android.content.Intent(
+                                        android.content.Intent.ACTION_VIEW,
+                                        android.net.Uri.parse("https://shizuku.rikka.app/download/")
+                                    ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            io.prism.phonecontrol.bg.ShizukuShell.State.READY -> Unit
+                        }
+                    }
+                )
+            }
             // UXR3 问题 10（ADR-023）：工具审批模式（手动审批 / 自动审批 / 禁用）
             item {
                 SetRow(
@@ -275,6 +350,9 @@ fun SettingsScreen(
                     subtitle = "图片直传你配置的模型端点（无云端旁路），不支持视觉的模型会提示降级"
                 )
             }
+            // 批次22 修复轮五（2026-09-07）：语音通话热词（同音字偏置，用户词库）
+            item { SetSection("语音通话") }
+            item { VoiceHotwordsEditor() }
             // v1 批次15（US-1501/1502/1507）：搜索增强（智谱 / Tavily / SearXNG）
             item { SetSection("搜索增强") }
             item {
@@ -1456,5 +1534,98 @@ private fun SearchEnhancementSheet(
         )
         Spacer(Modifier.height(20.dp))
         PrismButton(text = "关闭", variant = PrismButtonVariant.Ghost, onClick = onClose)
+    }
+}
+/**
+ * 批次22 修复轮五（2026-09-07，SZ-201 同音字优化）：语音热词编辑区。
+ *
+ * 用户维护"人名/专有名词"热词表（每行一个），保存到 filesDir/voice_hotwords.txt；
+ * SherpaAsrEngine 下次启动识别循环时以 modified_beam_search + hotwordsScore=2.0 偏置解码
+ *（sherpa-onnx 官方 contextual biasing，greedy_search 不支持热词）。
+ * 行业实践：个性化热词是同音字/专名识别优化的标准手段（讯飞/会议转写均提供用户词库）。
+ */
+@Composable
+fun VoiceHotwordsEditor() {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val file = java.io.File(context.filesDir, io.prism.voice.VOICE_HOTWORDS_FILE)
+    var text by remember { mutableStateOf("") }
+    var hotwordCount by remember { mutableStateOf(0) }
+    // 批次22 修复轮六：默认**收缩态**（已有热词时折叠为一行摘要，点击展开编辑——与其他
+    // 设置行形态一致；无热词时直接展开引导填写）。保存后自动收缩。
+    var expanded by remember { mutableStateOf(false) }
+
+    // 进入时读取现有热词文件（IO 线程）
+    LaunchedEffect(Unit) {
+        val content = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { if (file.exists()) file.readText() else "" }.getOrDefault("")
+        }
+        text = content
+        hotwordCount = content.lines().count { it.isNotBlank() }
+        expanded = hotwordCount == 0  // 无热词时展开引导；有热词时收缩
+    }
+
+    if (!expanded) {
+        SetRow(
+            icon = "🔤",
+            iconColor = PrismMint,
+            title = "语音热词",
+            subtitle = if (hotwordCount > 0) {
+                "已配置 $hotwordCount 个 · 识别时加权提升同音字区分 · 点此编辑"
+            } else {
+                "未配置 · 添加人名/专有名词可提升同音字识别 · 点此编辑"
+            },
+            onClick = { expanded = true }
+        )
+        return
+    }
+
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+        androidx.compose.material3.Text(
+            "语音热词（每行一个：人名/联系人/专有名词）",
+            color = PrismTextDim,
+            fontSize = 13.sp
+        )
+        Spacer(Modifier.height(6.dp))
+        androidx.compose.material3.OutlinedTextField(
+            value = text,
+            onValueChange = { text = it },
+            modifier = Modifier.fillMaxWidth(),
+            placeholder = {
+                androidx.compose.material3.Text("张三\n某公司简称…", color = PrismTextFaint, fontSize = 13.sp)
+            },
+            minLines = 3,
+            maxLines = 6,
+            textStyle = androidx.compose.ui.text.TextStyle(color = PrismText, fontSize = 14.sp)
+        )
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            PrismButton(
+                text = "保存",
+                variant = PrismButtonVariant.Primary,
+                onClick = {
+                    scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                        runCatching {
+                            if (text.isBlank()) file.delete() else file.writeText(text)
+                        }
+                        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            hotwordCount = text.lines().count { it.isNotBlank() }
+                            expanded = false  // 保存后收缩
+                        }
+                    }
+                }
+            )
+            PrismButton(
+                text = "取消",
+                variant = PrismButtonVariant.Ghost,
+                onClick = { expanded = false }
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        androidx.compose.material3.Text(
+            "保存后下次语音通话生效；识别时将加权匹配这些词，提升同音字区分",
+            color = PrismTextFaint,
+            fontSize = 11.sp
+        )
     }
 }

@@ -306,7 +306,14 @@ class ConversationViewModel(
      * null 时降级为不发完成通知（向后兼容既有测试）。
      * 生产环境由 [Factory] 从 [PrismApplication.phoneControlCompletionNotifier] 注入。
      */
-    private val phoneControlCompletionNotifier: io.prism.phonecontrol.PhoneControlCompletionNotifier? = null
+    private val phoneControlCompletionNotifier: io.prism.phonecontrol.PhoneControlCompletionNotifier? = null,
+    /**
+     * 批次20（BG-005，ADR-045）：后台操控会话级开关（「后台操控」chip）。
+     *
+     * 生产由 [Factory] 传入 [PrismApplication.backgroundControlEnabled]（同一 MutableStateFlow
+     * 实例：VM/UI 写、phone_control 执行器守卫读，单一数据源）。默认新实例（向后兼容既有测试）。
+     */
+    private val bgControlEnabledFlow: kotlinx.coroutines.flow.MutableStateFlow<Boolean> = kotlinx.coroutines.flow.MutableStateFlow(false)
 ) : ViewModel() {
 
     /**
@@ -683,6 +690,12 @@ class ConversationViewModel(
     val webSearchEnabledFlow: StateFlow<Boolean> = _webSearchEnabled.asStateFlow()
 
     /**
+     * 批次20（BG-005，ADR-045）：后台操控开关（与 [bgControlEnabledFlow] 同一实例；
+     * phone_control 执行器经 PrismApplication.backgroundControlEnabled.value 秒读守卫）。
+     */
+    val backgroundControlEnabledFlow: StateFlow<Boolean> = bgControlEnabledFlow
+
+    /**
      * 当前会话 ID（M5 Phase E，US-035）。
      *
      * 首条 [sendMessage] 时生成（UUID），用于 L2 跨会话记忆存储/检索的会话隔离。
@@ -788,6 +801,13 @@ class ConversationViewModel(
      */
     fun setWebSearchEnabled(enabled: Boolean) {
         _webSearchEnabled.value = enabled
+    }
+
+    /**
+     * 批次20（BG-005）：切换后台操控开关（会话级；执行器守卫与 UI 共用同一 StateFlow）。
+     */
+    fun setBackgroundControlEnabled(enabled: Boolean) {
+        bgControlEnabledFlow.value = enabled
     }
 
     /**
@@ -2685,7 +2705,8 @@ class ConversationViewModel(
 2. 遵循用户的语言与表达偏好，保持回复清晰、结构化、易读
 3. 当用户需求匹配下方列出的技能时，按需使用对应能力（不改变你的基础身份）
 4. 不做超出能力范围的承诺，必要时说明限制
-5. （UXR8 N2 Phase 1，ADR-030）当用户需求存在实体/版本/标准等歧义、且缺失信息会实质改变答案时，先向用户澄清追问（一次一问、给出建议选项），不要反复用同义词重试搜索"""
+5. （UXR8 N2 Phase 1，ADR-030）当用户需求存在实体/版本/标准等歧义、且缺失信息会实质改变答案时，先向用户澄清追问（一次一问、给出建议选项），不要反复用同义词重试搜索
+6. （批次22 修复轮四）用户输入可能来自**语音转写**（正文带 🎙 前缀的为纯语音转写）——转写含同音字/近音字错误（如人名"李锦东"→"李进东"）：执行涉及人名、联系人、专有名词的操作时，若候选存在歧义，先向用户确认或用 take_over 交还；不要基于疑似转写错误的实体直接执行不可逆操作"""
 
         /**
          * v1 US-202（LLM 操控手机）：手机操控安全声明 —— 手机操控启用时注入 systemPrompt。
@@ -2702,7 +2723,12 @@ class ConversationViewModel(
 4. 当 get_ui_state 提示"无法通过 UI 树读取/自动切视觉兜底"（微信/WebView/Flutter 等对无障碍树屏蔽），**不要反复重试 get_ui_state**，应立即调用 screenshot 获取当前屏幕：
    - 截图会附带【屏幕文字（OCR，编号+坐标）】与【屏幕图标区域】；
    - 用 **tap(text="目标文字")** 精确点击（系统自动定位，最可靠）；无文字目标（纯图标）用 tap(x,y) 按编号/坐标点击；
-   - 若截图后仍无法判断目标，再考虑 wait 或 take_over，不要盲目点击。"""
+   - 若截图后仍无法判断目标，再考虑 wait 或 take_over，不要盲目点击。
+【后台操控模式】（mode=background，用户已开启「后台操控」开关时可用）：
+5. **用户开启「后台操控」开关后，你的所有手机操控调用默认自动走后台虚拟屏（执行器已兜底），你无需传 mode 也会在后台执行**；仅当你确需主屏手势/全局动作（滑动、长按、双击、back/home）时，才对该次调用显式传 mode="foreground" 临时切回主屏执行。
+6. 后台模式能力取决于 Shizuku 状态：**Shizuku 就绪时全能力**（launch/坐标 tap/滑动/长按/back/home/type 全部经 shell 注入到虚拟屏）；**Shizuku 未就绪时仅节点操作**（get_ui_state / tap(text=.../node_id) / type / launch_app / screenshot），坐标手势（tap x/y）、swipe、long_press、double_tap、back/home 会被拒绝——收到拒绝文案即按其指引处理，不要反复重试。
+7. 后台模式流程：launch_app → get_ui_state → tap/type。需视觉确认时用 screenshot。某步骤被拒绝时改用节点等价操作或对该次调用显式传 mode="foreground"，不要反复重试被拒操作。
+8. **launch_app 在后台被系统拒绝（提示 untrusted display/SecurityException）属未安装 Shizuku 设备的硬限制**：收到该错误后**立即**对该次调用显式传 mode="foreground" 在主屏继续执行任务（不要重试 background、不要询问用户），并在最终汇报中说明"该设备未启用 Shizuku，已在前台完成"。"""
 
         /**
          * v1 批次9（US-904）：热榜能力声明（注入 systemPrompt 供 LLM 感知 hotlist__get）。
@@ -3290,7 +3316,9 @@ class ConversationViewModel(
                     hotListEnabled = true,
                     // v1 真机二次修复（Issue 5）：手机操控高危确认通知（后台作答消费）
                     phoneControlAskUserNotifier = app.phoneControlAskUserNotifier,
-                    phoneControlCompletionNotifier = app.phoneControlCompletionNotifier
+                    phoneControlCompletionNotifier = app.phoneControlCompletionNotifier,
+                    // 批次20（BG-005，ADR-045）：后台操控会话级开关（VM/UI 写、执行器守卫读同一 StateFlow）
+                    bgControlEnabledFlow = app.backgroundControlEnabled
                 )
             }
         }

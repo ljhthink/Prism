@@ -78,3 +78,8 @@ docs/reports/logcat/
 docs/reports/*.xml
 docs/reports/*.txt
 docs/reports/*.png
+
+# 批次22（SZ-201，ADR-047）：sherpa-onnx AAR 与流式语音模型（大二进制不入库）——
+# 由 docs/runbooks/setup-sherpa-voice.md 指引放置；缺失时条件集成自动降级 SystemAsrEngine
+app/libs/*.aar
+app/src/main/assets/models/streaming-zipformer-*/

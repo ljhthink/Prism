@@ -246,3 +246,23 @@
 -dontwarn org.tukaani.xz.MemoryLimitException
 -dontwarn org.tukaani.xz.SingleXZInputStream
 -dontwarn org.tukaani.xz.XZInputStream
+
+# 批次21（ADR-046）：Shizuku UserService——仅以字符串组件名经 Shizuku 反射实例化，
+# R8 混淆会整体删除/改名导致正式包 Shizuku 全能力静默失效（guardrail P1-1）
+-keep class io.prism.phonecontrol.bg.ShizukuUserService { *; }
+-keep class io.prism.phonecontrol.bg.IShizukuUserService { *; }
+-keep class io.prism.phonecontrol.bg.IShizukuUserService$Stub { *; }
+-keepclassmembers class * implements android.os.IInterface { *; }
+# Shizuku API 自身的混淆保护（官方依赖自带 consumer rules，此条为双保险）
+-dontwarn rikka.shizuku.**
+
+# 批次22（SZ-201，ADR-047）：sherpa-onnx 端侧流式 ASR——
+# 1) SherpaAsrEngine 仅以字符串经 AsrEngineFactory 反射创建，R8 缺 keep 会整体删除
+#    （正式包静默回落系统引擎——批次21 Shizuku UserService 同款坑）；
+# 2) com.k2fsa.sherpa.onnx 配置类字段（encoder/decoder/tokens 等）经 JNI 按名访问，
+#    混淆改名会导致 native 层取不到配置（模型加载失败）。
+-keep class io.prism.voice.SherpaAsrEngine { *; }
+-keep class com.k2fsa.sherpa.onnx.** { *; }
+
+# pdfbox-android 可选 JPEG2000 编解码器（运行时不存在的可选依赖，pdfbox 自行降级）
+-dontwarn com.gemalto.jp2.JP2Decoder

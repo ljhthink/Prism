@@ -48,6 +48,11 @@
 | ADR-040 | v1 真机五次修复（搜索 Bing→Baidu 多引擎回退 / 视觉专用 Provider 跳过熔断但守 consent 隐私铁门） | Accepted | 2026-08-19 | [ADR-040-v1-real-device-round5.md](ADR-040-v1-real-device-round5.md) |
 | ADR-041 | v1 手机操控保活策略修订（「无障碍启用期常驻」→「任务期动态保活」+ 事件订阅瘦身） | Accepted | 2026-08-23 | [ADR-041-v1-phone-control-task-scoped-keepalive.md](ADR-041-v1-phone-control-task-scoped-keepalive.md) |
 | ADR-042 | 分支模型落地（feat/m0-scaffold → main + GitHub Flow PR 流程 + 分支保护） | Accepted | 2026-09-03 | [ADR-042-branching-model-main-and-pr-flow.md](ADR-042-branching-model-main-and-pr-flow.md) |
+| ADR-043 | 批次17 四项新功能方案选型（todo_write 单工具全量替换 / 思维链独立字段覆写 / 回退线性硬截断 / 重试 swipes 变体模型） | Accepted | 2026-09-03 | [ADR-043-batch17-features.md](ADR-043-batch17-features.md) |
+| ADR-044 | 语音通话技术选型（端侧 sherpa-onnx ASR + 系统 TTS + 复用会话工具管线） | Accepted | 2026-09-05 | [ADR-044-voice-call-tech-selection.md](ADR-044-voice-call-tech-selection.md) |
+| ADR-045 | 手机操控后台化（虚拟屏 + 跨屏无障碍为主路线，Shizuku 手势增强在后） | Accepted | 2026-09-05 | [ADR-045-virtual-display-bg-control.md](ADR-045-virtual-display-bg-control.md) |
+| ADR-046 | Shizuku 后台化完整化选型（shell 身份 trusted 能力，替代纯 App untrusted 限制） | Accepted | 2026-09-05 | [ADR-046-shizuku-bg-control.md](ADR-046-shizuku-bg-control.md) |
+| ADR-047 | 语音 V2（端侧流式全双工）与后台任务迁移法选型 | Accepted | 2026-09-06 | [ADR-047-voice-v2-and-task-move.md](ADR-047-voice-v2-and-task-move.md) |
 
 ## ADR 生命周期
 
@@ -71,4 +76,3 @@ Proposed → Accepted → Deprecated / Superseded
 5. 变更文档治理规则、版本管理策略或子 Agent 分工
 6. 选择一种实现方案而明确排除其他可行方案
 7. 任何可能对其他模块产生长期影响的决策
-| ADR-043 | 批次17 四项新功能方案选型（todo_write 单工具全量替换 / 思维链独立字段覆写 / 回退线性硬截断 / 重试 swipes 变体模型） | Accepted | 2026-09-03 | [ADR-043-batch17-features.md](ADR-043-batch17-features.md) |

@@ -53,6 +53,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
@@ -105,6 +106,7 @@ import io.prism.ui.components.PrismSheet
 import io.prism.ui.components.PrismSheetHost
 import io.prism.ui.components.PrismTopBar
 import io.prism.ui.components.PrismTopBarAction
+import io.prism.voice.VoiceCallOverlay
 import io.prism.ui.model.ChatMessage
 import io.prism.ui.model.Role
 import io.prism.ui.model.SearchResult
@@ -175,6 +177,10 @@ fun ConversationScreen(
     val ragTarget by viewModel.ragTarget.collectAsState()
     val thinkingEnabled by viewModel.thinkingEnabled.collectAsState()
     val webSearchEnabled by viewModel.webSearchEnabledFlow.collectAsState()
+    // 批次20（BG-005，ADR-045）：后台操控会话级开关
+    val backgroundControlEnabled by viewModel.backgroundControlEnabledFlow.collectAsState()
+    // 批次20（VC-005，ADR-044）：语音通话覆盖层可见性
+    var voiceCallVisible by remember { mutableStateOf(false) }
     // UXR8 N2 Phase 2（ADR-030）：LLM 反问/澄清待答问题（null = 无待答问题，不显示卡片）
     val pendingAskUser by viewModel.pendingAskUser.collectAsState()
     // v1 批次17（US-1703）：TODO 任务清单卡片状态（todo_write 更新，空清单不渲染卡片）
@@ -325,6 +331,12 @@ fun ConversationScreen(
                 title = "Prism",
                 subtitle = "深空 AI · ${activeProvider?.name ?: "未配置"}",
                 actions = {
+                    // 批次20（VC-005，ADR-044）：语音通话入口（全屏覆盖层，轮次进同一会话）
+                    PrismTopBarAction(
+                        icon = { Icon(Icons.Filled.Mic, null, tint = PrismTextDim) },
+                        contentDescription = "语音通话",
+                        onClick = { voiceCallVisible = true }
+                    )
                     // UX-001 问题 4（ADR-021）：历史会话入口（顶栏按钮，null 时隐藏）
                     if (onOpenHistory != null) {
                         PrismTopBarAction(
@@ -428,12 +440,14 @@ fun ConversationScreen(
             Column(modifier = Modifier) {
                 // v1 批次17（US-1703）：TODO 任务清单卡片（todo_write 维护，空清单不渲染）
                 TodoCard(state = todoListState)
-                // UX-001 问题 5（ADR-021）：能力开关行置于输入框上方（联网搜索 / 深度思考）
+                // UX-001 问题 5（ADR-021）：能力开关行置于输入框上方（联网搜索 / 深度思考 / 后台操控）
                 CapabilityToggleRow(
                     thinkingEnabled = thinkingEnabled,
                     webSearchEnabled = webSearchEnabled,
+                    backgroundControlEnabled = backgroundControlEnabled,
                     onThinkingChange = { viewModel.setThinkingEnabled(it) },
-                    onWebSearchChange = { viewModel.setWebSearchEnabled(it) }
+                    onWebSearchChange = { viewModel.setWebSearchEnabled(it) },
+                    onBackgroundControlChange = { viewModel.setBackgroundControlEnabled(it) }
                 )
 
                 MessageInputBar(
@@ -589,6 +603,16 @@ fun ConversationScreen(
                 )
             }
         }
+
+        // 批次20（VC-005，ADR-044）：语音通话全屏覆盖层（共享本页 ConversationViewModel，
+        // 语音轮次与文字轮次同会话同历史；挂断即关闭覆盖层）
+        if (voiceCallVisible) {
+            VoiceCallOverlay(
+                conversation = viewModel,
+                onDismiss = { voiceCallVisible = false },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
     }
 }
 
@@ -602,8 +626,10 @@ fun ConversationScreen(
 private fun CapabilityToggleRow(
     thinkingEnabled: Boolean,
     webSearchEnabled: Boolean,
+    backgroundControlEnabled: Boolean,
     onThinkingChange: (Boolean) -> Unit,
-    onWebSearchChange: (Boolean) -> Unit
+    onWebSearchChange: (Boolean) -> Unit,
+    onBackgroundControlChange: (Boolean) -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -622,6 +648,13 @@ private fun CapabilityToggleRow(
             checked = thinkingEnabled,
             label = "深度思考",
             onCheckedChange = onThinkingChange,
+            modifier = Modifier.weight(1f)
+        )
+        // 批次20（BG-005，ADR-045）：后台操控（手机操控在虚拟屏后台执行，用户可同时使用手机）
+        CapabilityToggleChip(
+            checked = backgroundControlEnabled,
+            label = "后台操控",
+            onCheckedChange = onBackgroundControlChange,
             modifier = Modifier.weight(1f)
         )
     }

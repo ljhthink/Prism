@@ -32,6 +32,28 @@ object EmbedderFactory {
     const val DEFAULT_VOCAB_PATH = "models/vocab.txt"
 
     /**
+     * 批次22 crash-fix（TKN-B22-CRASH-001 方案C，2026-09-06）：**安全创建**多语言嵌入器——
+     * 任何失败（native 库缺符号/类初始化毒化/模型缺失/解析失败）一律降级 [NullEmbedder]，
+     * 不向调用方抛出。
+     *
+     * 背景：2026-09-06 真机实证——sherpa AAR 的 pickFirst so 缺 `OrtGetApiBase` 导出 →
+     * `OrtEnvironment` `<clinit>` 失败毒化 → 主线程 `ConversationViewModel.Factory` 无兜底
+     * 注入 embedder → `NoClassDefFoundError` FATAL 循环崩溃。
+     * **契约：native 故障最多降级 RAG 功能，永不杀死进程。**
+     *
+     * 降级语义：runCatching 捕获 Throwable（含 Error）；失败时调用方拿到缓存的
+     * NullEmbedder（App 正常可用，RAG 检索为空），重启应用自然重试。
+     */
+    fun createMultilingualSafe(
+        modelInput: InputStream,
+        tokenizerJsonInput: InputStream,
+        clock: OnnxEmbedder.Clock = OnnxEmbedder.Clock { System.currentTimeMillis() }
+    ): Embedder = runCatching { createMultilingual(modelInput, tokenizerJsonInput, clock) }.getOrElse { e ->
+        android.util.Log.e("EmbedderFactory", "embedder 创建失败，RAG 降级为 NullEmbedder（重启应用重试）", e)
+        NullEmbedder()
+    }
+
+    /**
      * 从输入流加载多语言模型与 Unigram tokenizer，构造 [OnnxEmbedder]（UXR9 US-901）。
      *
      * 两个流会在方法内关闭。

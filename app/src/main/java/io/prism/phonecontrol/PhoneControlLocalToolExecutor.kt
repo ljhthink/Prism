@@ -81,7 +81,24 @@ class PhoneControlLocalToolExecutor(
      * （防会话 JSON 膨胀 + 渲染 ANR，真机崩溃根因）。false 时走 OCR 文字+坐标（纯文本模型）。
      * 生产由 [io.prism.PrismApplication] 从当前激活 Provider 的 `supportsVision` 注入。
      */
-    private val visionCapableProvider: () -> Boolean = { false }
+    private val visionCapableProvider: () -> Boolean = { false },
+    /**
+     * 批次20（BG-003，ADR-045）：后台操控用户开关（会话级「后台操控」chip，VM 注入）。
+     * 关闭时 mode=background 的工具调用一律拒绝（防 LLM 绕过用户意图）。
+     */
+    private val backgroundControlEnabledProvider: () -> Boolean = { false },
+    /**
+     * 批次20（BG-001/003）：应用上下文（后台虚拟屏创建/启动 App/回收需要）。生产由
+     * PrismApplication 注入 applicationContext；null 时后台模式返回明确错误（保持既有测试兼容）。
+     */
+    private val appContext: android.content.Context? = null,
+    /**
+     * 批次20（guardrail P1-3）：悬浮窗授权判定注入点（默认
+     * [io.prism.phonecontrol.bg.VirtualDisplayManager.canLaunchBackground]——Robolectric 下
+     * Settings.canDrawOverlays 不可控，测试注入常量 true 以覆盖后台路径拦截同源性）。
+     */
+    private val overlayPermissionProvider: (android.content.Context) -> Boolean =
+        { io.prism.phonecontrol.bg.VirtualDisplayManager.canLaunchBackground(it) }
 ) : LocalToolExecutor {
 
     // ==================== v1 批次12（D/E，D15）屏幕状态跟踪 ====================
@@ -119,6 +136,11 @@ class PhoneControlLocalToolExecutor(
      * @return 签名（非空）
      */
     private fun screenSignature(service: PhoneControlAccessibilityService): String {
+        // 批次20（BG-002）：后台执行面签名 = 虚拟屏 UI 树 hash（前台包名无意义——主屏属于用户）
+        if (service.isBackgroundExecution) {
+            val treeHash = runCatching { service.getUiTreeText(maxNodes = 40)?.hashCode() }.getOrNull()
+            return "bg|${treeHash ?: "empty"}"
+        }
         val fg = runCatching { service.currentForegroundPackage() }.getOrNull() ?: ""
         val treeHash = runCatching { service.getUiTreeText(maxNodes = 40)?.hashCode() }.getOrNull()
         return "$fg|${treeHash ?: "empty"}"
@@ -168,10 +190,24 @@ class PhoneControlLocalToolExecutor(
             !result.startsWith(AskUserLocalToolExecutor.RESULT_MARKER)
         if (executed && before != null && after != null && before == after) {
             Log.i(TAG, "动作后屏幕无变化（before/after 签名一致）")
-            // v1 批次13（D）：软提示强化——附"建议改动作/复验"引导，帮助 LLM 走出卡住循环
-            return result + "\n⚠️ 动作后屏幕状态无变化，可能未命中目标或未生效。" +
+            // 批次22 修复轮五：后台模式补充**息屏/焦点限制**诊断（Display OFF 时注入事件被
+            // 系统输入策略丢弃，shell exit=0 但无效果——真机实证），并区分两种处置建议。
+            // 批次22 修复轮七：overlay（trusted）与自建（untrusted）执行面**分文案**——untrusted
+            // 屏 touch NONE，系统直接丢弃合成输入，"重试/重新定位"对它完全无效（真机取证
+            // DeepSeek 会话：LLM 连续 6 次盲试坐标），必须明确劝阻并指向 foreground/take_over。
+            val bgHint = if (PhoneControlAccessibilityService.instance?.isBackgroundExecution == true) {
+                if (io.prism.phonecontrol.bg.VirtualDisplayManager.isOverlayMode) {
+                    "\n【后台模式诊断】虚拟屏注入可能受息屏/焦点限制（亮屏锁已在会话期保持，若用户仍处于息屏状态请先亮屏）。" +
+                        "若多次尝试仍无变化，说明目标 App/显示面不接受合成输入——改用 mode=foreground 或 take_over"
+                } else {
+                    "\n【后台模式诊断】当前执行面为**自建虚拟屏（untrusted，touch NONE）**——系统会丢弃指向它的合成输入（tap/type 均无效，重试无意义）。" +
+                        "请改用 mode=foreground 或 take_over；结束本会话后重新发起任务（Shizuku 就绪时将优先创建系统模拟副屏 trusted，输入可用）"
+                }
+            } else {
                 "请先用 get_ui_state 或 screenshot 确认当前屏幕，若仍未变化可尝试：换一个更精确的目标（tap(text=...) 或 node_id）、" +
-                "先 back 返回再重试、或 take_over 人工接管。不要盲目重复相同操作"
+                    "先 back 返回再重试、或 take_over 人工接管。不要盲目重复相同操作"
+            }
+            return result + "\n⚠️ 动作后屏幕状态无变化，可能未命中目标或未生效。$bgHint"
         }
         return result
     }
@@ -184,52 +220,111 @@ class PhoneControlLocalToolExecutor(
         // 的「无障碍启用期常驻」策略（真机证据见 docs/reports/2026-08-23-keepalive-bug-debug.md）。
         PhoneControlSessionManager.onPhoneToolInvoked()
         val tool = toolName.removePrefix(NAMESPACE)
+        // 批次20（BG-003，ADR-045）：mode 执行面参数。foreground（默认，行为与旧版完全一致）/
+        // background（虚拟屏后台执行，主屏留给用户）。非法值直接拒绝，防 LLM 拼错悄然回退前台。
+        // 批次20 真机修复（RCA 问题1，2026-09-05）：chip 开启且 LLM 未显式传 mode 时默认
+        // **background**（后台优先语义直接生效——真机实证 LLM 自主选择几乎从不传 mode，
+        // 导致"后台化完全无效"）；LLM 仍可显式传 foreground 覆盖（主屏手势类操作）。
+        val explicitMode = parseString(arguments, "mode")
+        val mode = if (explicitMode.isNullOrBlank() && backgroundControlEnabledProvider()) {
+            io.prism.phonecontrol.bg.VirtualDisplayManager.MODE_BACKGROUND
+        } else {
+            io.prism.phonecontrol.bg.VirtualDisplayManager.normalizeMode(explicitMode)
+        }
+        if (mode == null) {
+            return "错误：mode 参数非法（仅支持 foreground/background）"
+        }
+        // 真机取证日志（RCA 问题1）：下次真机问题可直接确认 LLM 实际使用的执行面
+        Log.i(TAG, "tool=$tool mode=$mode")
+        val background = mode == io.prism.phonecontrol.bg.VirtualDisplayManager.MODE_BACKGROUND
         return try {
-            when (tool) {
-                "get_ui_state" -> getUiState()
-                "tap" -> runTargetAction("tap", arguments) { svc, nodeId, x, y ->
-                    svc.performTap(nodeId, x, y)
+            if (background) {
+                if (!backgroundControlEnabledProvider()) {
+                    return blocked("后台操控开关未开启（聊天输入框上方「后台操控」）。请开启后重试，或去掉 mode 参数改用前台模式")
                 }
-                "long_press" -> runTargetAction("long_press", arguments) { svc, nodeId, x, y ->
-                    svc.performLongPress(nodeId, x, y)
-                }
-                "double_tap" -> runTargetAction("double_tap", arguments) { svc, nodeId, x, y ->
-                    svc.performDoubleTap(nodeId, x, y)
-                }
-                "swipe" -> {
-                    val fx = parseInt(arguments, "from_x", 0) ?: 0
-                    val fy = parseInt(arguments, "from_y", 0) ?: 0
-                    val tx = parseInt(arguments, "to_x", 0) ?: 0
-                    val ty = parseInt(arguments, "to_y", 0) ?: 0
-                    // guardrail L-1：滑动本身无点击语义，但起点命中敏感目标（支付/密码等）时
-                    // 仍硬拦截（防"从敏感按钮处滑动触发"的组合绕过）
-                    val fromText = withServiceOrNull { it.nodeTextAt(fx, fy) }
-                    if (PhoneControlSecurity.isSensitiveTargetText(fromText)) {
-                        return blocked("滑动起点含敏感内容（${fromText?.take(30)}），已硬拦截")
+                backgroundGuard()?.let { return it }
+                // 批次21 真机修复 R3（RCA 问题2 续）：bg 工具路径统一先 ensureDisplay（幂等）——
+                // 真机实证 LLM 首个 bg 操作若不是 launch_app（如直接 get_ui_state/screenshot），
+                // 虚拟屏不存在 → 工具失败 → LLM 误判"后台不可用"而显式切 foreground（占用前台）。
+                // 上下文经服务的 applicationContext（服务实例即 bg 执行上下文持有者）。
+                withServiceOrNull { svc ->
+                    // guardrail Q2（修复轮七）：中断类异常必须透传（恢复中断位 + 转 Cancellation）
+                    // ——原 runCatching 会静默吞掉 InterruptedException 后带 INVALID displayId
+                    // 继续执行工具；其余异常维持既有语义（创建失败走工具层诚实报错）
+                    try {
+                        io.prism.phonecontrol.bg.VirtualDisplayManager.ensureDisplay(svc.applicationContext)
+                    } catch (e: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        throw java.util.concurrent.CancellationException("ensureDisplay interrupted")
+                    } catch (e: java.util.concurrent.CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        // 创建失败：后续工具按"虚拟屏未创建"诚实报错
                     }
-                    // v1 批次12（E，D15）：滑动后 before/after 校验（滑到底/未加载时提示）
-                    val beforeSig = withServiceOrNull { screenSignature(it) }
-                    performWithStateCheck(beforeSig) { withService { it.performSwipe(fx, fy, tx, ty) } }
                 }
-                "type" -> runTypeAction(arguments)
-                "back" -> withService { it.executeGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK) }
-                "home" -> withService { it.executeGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME) }
-                "launch_app" -> runLaunchAction(arguments)
-                "wait" -> {
-                    val ms = (parseInt(arguments, "ms", 800) ?: 800).coerceAtLeast(0)
-                    if (ms > MAX_WAIT_MS) return "错误：wait 超过上限 ${MAX_WAIT_MS}ms"
-                    kotlinx.coroutines.delay(ms.toLong())
-                    "已等待 ${ms}ms"
-                }
-                "screenshot" -> runScreenshot()
-                "take_over" -> runTakeOver(arguments)
-                else -> "错误：未知手机操控工具 $tool"
+                return withBackgroundExecution { dispatchTool(tool, arguments) }
             }
+            dispatchTool(tool, arguments)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "execute($tool) 失败：${e::class.simpleName}")
             "错误：手机操控工具执行失败（${e::class.simpleName}）"
+        }
+    }
+
+    /**
+     * 按工具名分派（前台/后台共用同一套方法；执行面差异由服务的
+     * [PhoneControlAccessibilityService.isBackgroundExecution] 驱动，方法内部按需分支）。
+     */
+    private suspend fun dispatchTool(tool: String, arguments: Map<String, Any?>): String {
+        return when (tool) {
+        "get_ui_state" -> getUiState()
+        "tap" -> runTargetAction("tap", arguments) { svc, nodeId, x, y ->
+            svc.performTap(nodeId, x, y)
+        }
+        "long_press" -> runTargetAction("long_press", arguments) { svc, nodeId, x, y ->
+            svc.performLongPress(nodeId, x, y)
+        }
+        "double_tap" -> runTargetAction("double_tap", arguments) { svc, nodeId, x, y ->
+            svc.performDoubleTap(nodeId, x, y)
+        }
+        "swipe" -> {
+            // 批次20（guardrail P3-6）+ 批次21（SZ-003）：bg 且 Shizuku 不可用时短路（执行面下
+            // nodeTextAt 坐标预检错位无意义）；Shizuku 就绪时放行到服务层 shell 注入
+            if (withServiceOrNull { it.isBackgroundExecution } == true &&
+                !io.prism.phonecontrol.bg.ShizukuShell.isReady()
+            ) {
+                return "错误：后台模式不支持滑动（触摸注入仅作用于主屏，虚拟屏无法注入）。" +
+                    "安装并激活 Shizuku 可解锁后台滑动；或先用节点操作，或该步骤切回前台模式"
+            }
+            val fx = parseInt(arguments, "from_x", 0) ?: 0
+            val fy = parseInt(arguments, "from_y", 0) ?: 0
+            val tx = parseInt(arguments, "to_x", 0) ?: 0
+            val ty = parseInt(arguments, "to_y", 0) ?: 0
+            // guardrail L-1：滑动本身无点击语义，但起点命中敏感目标（支付/密码等）时
+            // 仍硬拦截（防"从敏感按钮处滑动触发"的组合绕过）
+            val fromText = withServiceOrNull { it.nodeTextAt(fx, fy) }
+            if (PhoneControlSecurity.isSensitiveTargetText(fromText)) {
+                return blocked("滑动起点含敏感内容（${fromText?.take(30)}），已硬拦截")
+            }
+            // v1 批次12（E，D15）：滑动后 before/after 校验（滑到底/未加载时提示）
+            val beforeSig = withServiceOrNull { screenSignature(it) }
+            performWithStateCheck(beforeSig) { withService { it.performSwipe(fx, fy, tx, ty) } }
+        }
+        "type" -> runTypeAction(arguments)
+        "back" -> withService { it.executeGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK) }
+        "home" -> withService { it.executeGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME) }
+        "launch_app" -> runLaunchAction(arguments)
+        "wait" -> {
+            val ms = (parseInt(arguments, "ms", 800) ?: 800).coerceAtLeast(0)
+            if (ms > MAX_WAIT_MS) return "错误：wait 超过上限 ${MAX_WAIT_MS}ms"
+            kotlinx.coroutines.delay(ms.toLong())
+            "已等待 ${ms}ms"
+        }
+        "screenshot" -> runScreenshot()
+        "take_over" -> runTakeOver(arguments)
+        else -> "错误：未知手机操控工具 $tool"
         }
     }
 
@@ -326,9 +421,15 @@ class PhoneControlLocalToolExecutor(
             Log.i(TAG, "tap text 锚点 UI 树命中 nid=$treeNid（query=${maskLogText(text)}）")
             return AnchorTarget(nodeId = treeNid, matchedText = anchorSecurityText(text, realText))
         }
+        // 批次20（BG-004）：后台执行面下 OCR 兜底不可用（主屏截图≠虚拟屏画面，坐标错位）——
+        // 引导 LLM 用后台 screenshot（虚拟屏帧 OCR）获取坐标后再操作。
+        val service = PhoneControlAccessibilityService.instance
+        if (service?.isBackgroundExecution == true) {
+            Log.i(TAG, "后台执行面：文本锚点 UI 树未命中，跳过主屏 OCR 兜底")
+            return null
+        }
         val extractor = ocrTextExtractor ?: return null
-        val service = PhoneControlAccessibilityService.instance ?: return null
-        val dataUrl = service.captureScreenshot() ?: return null
+        val dataUrl = service?.captureScreenshot() ?: return null
         val size = service.lastScreenshotScreenSize()
         val sw = size?.first ?: 0
         val sh = size?.second ?: 0
@@ -399,6 +500,28 @@ class PhoneControlLocalToolExecutor(
             return blocked("禁止启动金融专用应用（$rawPkg → $pkg），已硬拦截（请用 take_over 交还用户手动操作）")
         }
         val svc = PhoneControlAccessibilityService.instance ?: return serviceUnavailableMessage()
+        // 批次20（BG-003）：后台分支——启动到虚拟屏（ActivityOptions.setLaunchDisplayId），
+        // 校验用 backgroundWindowPackage（虚拟屏窗口包名）替代前台包名轮询。
+        if (svc.isBackgroundExecution) {
+            val ctx = appContext ?: return "错误：后台模式上下文未初始化"
+            val vdm = io.prism.phonecontrol.bg.VirtualDisplayManager
+            val displayId = vdm.currentDisplayId
+            val result = vdm.launchApp(ctx, pkg)
+            if (result.startsWith("已在后台")) {
+                kotlinx.coroutines.delay(LAUNCH_SETTLE_MS)
+                for (i in 1..LAUNCH_VERIFY_TRIES) {
+                    val bgPkg = runCatching { svc.backgroundWindowPackage(displayId) }.getOrNull()
+                    if (bgPkg == pkg) {
+                        resetStuckState()
+                        return "已在后台虚拟屏启动并确认进入 $pkg（主屏已交还用户，可继续后台节点操作）"
+                    }
+                    kotlinx.coroutines.delay(LAUNCH_VERIFY_GAP_MS)
+                }
+                val bgPkg = runCatching { svc.backgroundWindowPackage(displayId) }.getOrNull() ?: "无窗口"
+                return "已在后台虚拟屏启动 $pkg，但当前虚拟屏前台为 $bgPkg（可能仍在启动）。请用 get_ui_state 确认后再继续"
+            }
+            return result
+        }
         val result = svc.launchApp(pkg)
         if (result.startsWith("已启动")) {
             // v1 批次10：启动后 settle 等待目标 App 首绘（避免 get_ui_state 命中窗口切换过渡期空树）。
@@ -440,29 +563,66 @@ class PhoneControlLocalToolExecutor(
     private suspend fun runScreenshot(): String {
         val service = PhoneControlAccessibilityService.instance
             ?: return serviceUnavailableMessage()
-        val dataUrl = service.captureScreenshot()
-            ?: return "错误：截图失败（需 Android 11+；页面含敏感内容、体积超限或系统拒绝时不可用）。若主模型不支持图片，请改用 UI 树 get_ui_state"
+        // 批次20（BG-004）：后台执行面——截虚拟屏帧（ImageReader Surface，免 MediaProjection），
+        // OCR 坐标即虚拟屏坐标（与后台 tap 同一坐标系）。失败不回退截主屏（感知错位比失败更危险）。
+        val dataUrl: String?
+        val screenW: Int
+        val screenH: Int
+        if (service.isBackgroundExecution) {
+            val vdm = io.prism.phonecontrol.bg.VirtualDisplayManager
+            // 批次22 修复轮六：模拟副屏（trusted）路线 → a11y takeScreenshot(displayId)；
+            // 自建虚拟屏路线 → ImageReader 帧缓存
+            val frame = if (vdm.isOverlayMode) {
+                service.takeScreenshotForDisplay(vdm.currentDisplayId)
+                    ?: return "错误：模拟副屏截图失败。需 Android 14+，且在系统「设置 → 无障碍 → Prism」中开启「屏幕截图」能力后重试"
+            } else {
+                vdm.latestFrame()
+                    ?: return "错误：后台虚拟屏暂无可用画面（目标 App 可能尚未渲染）。可稍后重试或用 get_ui_state（节点路径）"
+            }
+            val size = vdm.frameSize()
+            screenW = size?.first ?: frame.width
+            screenH = size?.second ?: frame.height
+            val scaled = service.downsampleBitmap(frame)
+            val bytes = java.io.ByteArrayOutputStream().apply {
+                scaled.compress(
+                    android.graphics.Bitmap.CompressFormat.JPEG,
+                    PhoneControlAccessibilityService.SCREENSHOT_JPEG_QUALITY,
+                    this
+                )
+            }
+            if (scaled !== frame) scaled.recycle()
+            frame.recycle()
+            val base64 = android.util.Base64.encodeToString(bytes.toByteArray(), android.util.Base64.NO_WRAP)
+            if (base64.length > PhoneControlAccessibilityService.SCREENSHOT_MAX_BASE64_LEN) {
+                return "错误：后台截图体积超限，请改用 get_ui_state（节点路径）"
+            }
+            dataUrl = "data:image/jpeg;base64,$base64"
+        } else {
+            dataUrl = service.captureScreenshot()
+                ?: return "错误：截图失败（需 Android 11+；页面含敏感内容、体积超限或系统拒绝时不可用）。若主模型不支持图片，请改用 UI 树 get_ui_state"
+            val screenSize = service.lastScreenshotScreenSize()
+            screenW = screenSize?.first ?: 0
+            screenH = screenSize?.second ?: 0
+        }
         // v1 批次13（A/B，D16）：**不再内嵌 base64 文本进工具结果/会话历史**（真机 ANR 崩溃根因：
         // 400KB base64 单行渲染阻塞主线程 >5s）。
         // - 视觉模型（多模态，如 glm-4.6v-flash）：跳过 OCR（看真图更准更快），返回图片标记，
         //   由 SkillExecutor 把图片以 image_url 注入会话供模型查看；
         // - 纯文本模型：返回 OCR 文字+坐标（无 base64）。
+        val url = dataUrl ?: return "错误：截图数据为空"
         // v1 批次13（B/D16c）：视觉降级后即使 supportsVision=true 也走 OCR（端点实测不支持图片）
         if (visionCapableProvider() && !visionDegraded) {
             Log.i(TAG, "runScreenshot（视觉模型）：返回图片标记，由 SkillExecutor 以 image_url 注入会话")
-            return SCREENSHOT_IMAGE_MARKER + dataUrl
+            return SCREENSHOT_IMAGE_MARKER + url
         }
-        // v1 批次11（A 致命修复）：获取原始屏幕尺寸，把 OCR/图标坐标还原到屏幕空间（与 tap 同一坐标系）
-        val screenSize = service.lastScreenshotScreenSize()
-        val sw = screenSize?.first ?: 0
-        val sh = screenSize?.second ?: 0
+        // v1 批次11（A 致命修复）：把 OCR/图标坐标还原到屏幕空间（与 tap 同一坐标系）
         val extractor = ocrTextExtractor
         val ocr = extractor?.let { e ->
-            runCatching { e.extractElements(dataUrl, sw, sh) }.getOrNull() ?: emptyList()
+            runCatching { e.extractElements(url, screenW, screenH) }.getOrNull() ?: emptyList()
         } ?: emptyList()
         // v1 批次11（F，D12）：图标区域检测（纯图标按钮无文字时，供模型按编号/坐标 tap）
         val icons = if (extractor != null) {
-            runCatching { extractor.detectIcons(dataUrl, ocr, sw, sh) }.getOrNull() ?: emptyList()
+            runCatching { extractor.detectIcons(url, ocr, screenW, screenH) }.getOrNull() ?: emptyList()
         } else {
             emptyList()
         }
@@ -486,7 +646,7 @@ class PhoneControlLocalToolExecutor(
                 append("\n（其余元素省略，共 OCR ${ocr.size} / 图标 ${icons.size} 项）")
             }
         }
-        Log.i(TAG, "runScreenshot: OCR ${ocr.size} 项 / 图标 ${icons.size} 项（屏幕 ${sw}x$sh）")
+        Log.i(TAG, "runScreenshot: OCR ${ocr.size} 项 / 图标 ${icons.size} 项（屏幕 ${screenW}x$screenH）")
         return "截图成功（已附屏幕文字+坐标，供 tap(text=文字) 定位）$screenText"
     }
 
@@ -494,6 +654,47 @@ class PhoneControlLocalToolExecutor(
     private suspend fun runTakeOver(arguments: Map<String, Any?>): String {
         val reason = parseString(arguments, "reason") ?: "遇到需要人工处理的步骤"
         return manualConfirm("需要人工接管：$reason。请手动完成该步骤。")
+    }
+
+    // ==================== 批次20 后台执行面（BG-001/002/004，ADR-045） ====================
+
+    /**
+     * 后台模式前置守卫（BG-003）：API 30+ → 无障碍实例 → 悬浮窗豁免 → 虚拟屏创建。
+     *
+     * @return null=通过；否则返回给 LLM 的可诊断错误文案
+     */
+    private fun backgroundGuard(): String? {
+        val vdm = io.prism.phonecontrol.bg.VirtualDisplayManager
+        if (!vdm.isSupported()) {
+            return "错误：后台操控需要 Android 11（API 30）及以上系统（跨屏无障碍能力），本机不支持。请改用前台模式"
+        }
+        if (PhoneControlAccessibilityService.instance == null) return serviceUnavailableMessage()
+        val ctx = appContext ?: return "错误：后台模式上下文未初始化，请改用前台模式"
+        if (!overlayPermissionProvider(ctx)) {
+            // guardrail R3 P3-A：chip 开启时"去掉 mode 参数"已默认路由后台——指引必须指向
+            // 显式 foreground 覆盖（否则 LLM 去掉 mode 后仍进后台守卫，空转重试）
+            return "错误：后台启动需要「显示在其他应用上层」（悬浮窗）权限——这是系统对后台启动 Activity 的官方豁免条件。" +
+                "请在系统设置中授权 Prism 该权限后重试；或对该次调用显式传 mode=\"foreground\" 改用前台模式"
+        }
+        if (vdm.ensureDisplay(ctx) == android.view.Display.INVALID_DISPLAY) {
+            return "错误：后台虚拟屏创建失败（系统可能限制虚拟显示器）。请改用前台模式"
+        }
+        return null
+    }
+
+    /**
+     * 在后台执行面中执行 [block]（BG-002）：把无障碍服务切换到虚拟屏 displayId，
+     * 节点感知/操作自动路由到虚拟屏窗口；结束后**必须**还原前台执行面（finally）。
+     */
+    private suspend fun withBackgroundExecution(block: suspend () -> String): String {
+        val svc = PhoneControlAccessibilityService.instance
+        val displayId = io.prism.phonecontrol.bg.VirtualDisplayManager.currentDisplayId
+        svc?.setExecutionDisplay(displayId)
+        try {
+            return block()
+        } finally {
+            svc?.setExecutionDisplay(null)
+        }
     }
 
     // ==================== 内部工具 ====================
@@ -543,6 +744,27 @@ class PhoneControlLocalToolExecutor(
         }
         Log.w(TAG, "getUiState: 8 次重试后仍无法读取 UI 树；前台包名=$fg（诊断：见 currentRoot/mapNode 分支日志）")
         val fgHint = fg?.let { "（当前前台应用: $it）" } ?: ""
+        // 批次22 修复轮（2026-09-06）：**后台执行面诚实判定**——先区分"虚拟屏完全无窗口"
+        // （目标 App 拒绝渲染，风控 App 常态，重试无效）与"有窗口但 UI 树受保护"（应走视觉兜底）
+        if (lastService?.isBackgroundExecution == true) {
+            val displayId = io.prism.phonecontrol.bg.VirtualDisplayManager.currentDisplayId
+            val bgPkg = if (displayId != android.view.Display.INVALID_DISPLAY) {
+                runCatching { lastService?.backgroundWindowPackage(displayId) }.getOrNull()
+            } else {
+                null
+            }
+            if (bgPkg == null) {
+                Log.w(TAG, "getUiState: 后台虚拟屏无窗口 → 诚实判定风控拒绝渲染")
+                return "错误：目标应用未在后台虚拟屏渲染（虚拟屏无任何窗口）——大概率该 App 风控拒绝在" +
+                    "非物理屏运行（电商/支付类常见），**重试后台启动与 get_ui_state 均无效**。" +
+                    "请改用 mode=foreground 在主屏继续任务（会打断用户当前操作，先告知用户），" +
+                    "或调用 take_over 交还用户手动处理。不要再对同一应用重试后台启动"
+            }
+            Log.w(TAG, "getUiState: 后台虚拟屏有窗口（$bgPkg）但 UI 树不可读 → 视觉兜底")
+            return "后台虚拟屏上目标应用（$bgPkg）已渲染但对无障碍树不开放。请使用 mode=background 的 " +
+                "screenshot 查看虚拟屏画面：多模态模型直接看图用 tap(text=目标文字) 定位；" +
+                "纯文本模型注意 screenshot 会附带【OCR 文字+坐标】（即虚拟屏坐标），据此 tap(type 皆传 mode=background)。不要再次调用 get_ui_state"
+        }
         // v1 批次11（D5 自动切视觉/坐标兜底）：微信/WebView/Flutter 等对无障碍树完全屏蔽
         // （根拿到了但 childCount=0 → getUiTreeText 返回 null）。UI 树方案对此类 App 本质不可用，
         // 直接引导 LLM 用 screenshot(多模态可读图 / 纯文本模型经 OCR 得文字+坐标)+坐标 tap/swipe 继续。
@@ -639,9 +861,13 @@ class PhoneControlLocalToolExecutor(
         private const val SERVICE_DISABLED_MSG =
             "错误：手机操控无障碍服务未开启。请在系统「设置 → 无障碍」中开启 Prism 的无障碍服务，然后重试"
 
-        /** 无障碍已在系统开启但服务实例暂未连接（重连中）：提示稍后重试，避免 LLM 误判放弃。 */
+        /** 无障碍已在系统开启但服务实例暂未连接（重连中）：提示稍后重试，避免 LLM 误判放弃。
+         *  修复轮九：补充**恢复指引**——系统一键清理（force-stop 语义）后系统不自动重绑，
+         *  打开一次 Prism 应用即可触发重连（真机 19:56:34 OneKeyClean 后卡重连实证）。 */
         private const val SERVICE_REBINDING_MSG =
-            "错误：无障碍已在系统中开启，但服务实例暂未连接（重连中）。请稍等片刻后重试同一操作"
+            "错误：无障碍服务已在系统中开启，但服务实例暂未连接（重连中，通常数秒内自动恢复）。" +
+                "请等待 10-30 秒后重试同一操作；若连续 2 次仍失败，说明系统清理已停止应用进程——" +
+                "请用户手动打开一次 Prism 应用（无障碍将自动重连，无需其他操作），然后继续任务"
 
         /** wait 工具最大等待（防 LLM 无限等待拖死回路）。 */
         const val MAX_WAIT_MS = 10_000
@@ -737,19 +963,21 @@ class PhoneControlLocalToolExecutor(
          * 生成手机操控工具定义（v1 US-201，供 ConversationViewModel.buildTools 合并）。
          *
          * 纯函数可测；JSON Schema 参数格式（type:object + properties），避免 400。
+         * 批次20（BG-003）：get_ui_state/tap/long_press/double_tap/swipe/type/back/home/
+         * launch_app/screenshot 增加可选 mode 执行面参数（默认 foreground 向后兼容）。
          */
         internal fun buildToolDefinitions(): List<io.prism.network.ToolDefinition> = listOf(
-            tool("get_ui_state", "读取当前屏幕 UI 树为结构化文本（节点带 [N] 序号），用于理解屏幕内容。执行任何点击/输入前先调用本工具获取节点；若返回引导使用 screenshot（UI 树受限，常见微信/WebView/Flutter），则改用 screenshot 获取 OCR 文字+坐标。", """{"type":"object","properties":{},"required":[]}"""),
-            tool("tap", "点击屏幕元素。**优先用 text 参数描述目标文字（最可靠，自动定位；支持 UI 树与 OCR 双通道）**；有 node_id（get_ui_state 的 [N] 编号）时用 node_id；仅当两者都不可用时才用坐标 x/y（坐标需精确到目标中心）。禁止点击支付/转账/密码/验证码等敏感内容（已被拦截器硬拦截）。", """{"type":"object","properties":{"text":{"type":"string","description":"目标可见文字（如“搜索”“发送”，优先，系统自动定位并点击）"},"node_id":{"type":"integer","description":"UI 树节点序号 [N]（优先于坐标）"},"x":{"type":"integer","description":"点击 x 坐标（仅当无 text 且无 node_id 时用）"},"y":{"type":"integer","description":"点击 y 坐标（仅当无 text 且无 node_id 时用）"}},"required":[]}"""),
-            tool("long_press", "长按屏幕元素（优先 text 描述目标；或 node_id / 坐标）。", """{"type":"object","properties":{"text":{"type":"string"},"node_id":{"type":"integer"},"x":{"type":"integer"},"y":{"type":"integer"}},"required":[]}"""),
-            tool("double_tap", "双击屏幕元素（优先 text 描述目标；或 node_id / 坐标），用于打开/展开等需要点两下的场景。", """{"type":"object","properties":{"text":{"type":"string"},"node_id":{"type":"integer"},"x":{"type":"integer"},"y":{"type":"integer"}},"required":[]}"""),
-            tool("swipe", "滑动屏幕（from_x,from_y 到 to_x,to_y）。", """{"type":"object","properties":{"from_x":{"type":"integer"},"from_y":{"type":"integer"},"to_x":{"type":"integer"},"to_y":{"type":"integer"}},"required":["from_x","from_y","to_x","to_y"]}"""),
-            tool("type", "向输入框输入文本（node_id 或点击坐标定位输入框）。禁止输入密码/验证码/卡号；发送消息类文本需用户确认。", """{"type":"object","properties":{"node_id":{"type":"integer"},"x":{"type":"integer"},"y":{"type":"integer"},"text":{"type":"string","description":"要输入的文本"}},"required":["text"]}"""),
-            tool("back", "返回上一页。", """{"type":"object","properties":{},"required":[]}"""),
-            tool("home", "返回桌面。", """{"type":"object","properties":{},"required":[]}"""),
-            tool("launch_app", "启动应用（package 为应用包名）。禁止启动支付/银行等金融专用应用。", """{"type":"object","properties":{"package":{"type":"string","description":"应用包名，如 com.tencent.mm"}},"required":["package"]}"""),
+            tool("get_ui_state", "读取当前屏幕 UI 树为结构化文本（节点带 [N] 序号），用于理解屏幕内容。执行任何点击/输入前先调用本工具获取节点；若返回引导使用 screenshot（UI 树受限，常见微信/WebView/Flutter），则改用 screenshot 获取 OCR 文字+坐标。后台操控开关开启时默认读后台虚拟屏。", """{"type":"object","properties":{"mode":{"type":"string","enum":["foreground","background"],"description":"执行面：不传时由「后台操控」开关决定（开=background，关=foreground）；显式 foreground=主屏前台（手势可用）；显式 background=后台虚拟屏（仅节点操作，需 Android 11+ 与悬浮窗）"}},"required":[]}"""),
+            tool("tap", "点击屏幕元素。**优先用 text 参数描述目标文字（最可靠，自动定位；支持 UI 树与 OCR 双通道）**；有 node_id（get_ui_state 的 [N] 编号）时用 node_id；仅当两者都不可用时才用坐标 x/y（坐标需精确到目标中心）。禁止点击支付/转账/密码/验证码等敏感内容（已被拦截器硬拦截）。mode=background 时仅支持 text/node_id（坐标手势不可用）。", """{"type":"object","properties":{"text":{"type":"string","description":"目标可见文字（如“搜索”“发送”，优先，系统自动定位并点击）"},"node_id":{"type":"integer","description":"UI 树节点序号 [N]（优先于坐标）"},"x":{"type":"integer","description":"点击 x 坐标（仅当无 text 且无 node_id 时用）"},"y":{"type":"integer","description":"点击 y 坐标（仅当无 text 且无 node_id 时用）"},"mode":{"type":"string","enum":["foreground","background"],"description":"执行面：foreground=主屏前台（默认）；background=后台虚拟屏（仅 text/node_id）"}},"required":[]}"""),
+            tool("long_press", "长按屏幕元素（优先 text 描述目标；或 node_id / 坐标）。后台模式在 Shizuku 就绪时经 shell 注入可用。", """{"type":"object","properties":{"text":{"type":"string"},"node_id":{"type":"integer"},"x":{"type":"integer"},"y":{"type":"integer"},"mode":{"type":"string","enum":["foreground","background"],"description":"执行面：不传时由「后台操控」开关决定；background 下长按需 Shizuku 就绪"}},"required":[]}"""),
+            tool("double_tap", "双击屏幕元素（优先 text 描述目标；或 node_id / 坐标），用于打开/展开等需要点两下的场景。仅前台模式支持（后台 shell 双击时序不可靠，后台请改用两次 tap 或前台模式）。", """{"type":"object","properties":{"text":{"type":"string"},"node_id":{"type":"integer"},"x":{"type":"integer"},"y":{"type":"integer"},"mode":{"type":"string","enum":["foreground","background"],"description":"执行面（默认由后台操控开关决定；background 不支持双击）"}},"required":[]}"""),
+            tool("swipe", "滑动屏幕（from_x,from_y 到 to_x,to_y）。后台模式在 Shizuku 就绪时经 shell 注入可用（后台翻页也可用可点击标签）。", """{"type":"object","properties":{"from_x":{"type":"integer"},"from_y":{"type":"integer"},"to_x":{"type":"integer"},"to_y":{"type":"integer"},"mode":{"type":"string","enum":["foreground","background"],"description":"执行面：不传时由「后台操控」开关决定；background 下滑动需 Shizuku 就绪"}},"required":["from_x","from_y","to_x","to_y"]}"""),
+            tool("type", "向输入框输入文本（node_id 或点击坐标定位输入框）。禁止输入密码/验证码/卡号；发送消息类文本需用户确认。mode=background 时用虚拟屏 UI 树的 node_id/text 定位。", """{"type":"object","properties":{"node_id":{"type":"integer"},"x":{"type":"integer"},"y":{"type":"integer"},"text":{"type":"string","description":"要输入的文本"},"mode":{"type":"string","enum":["foreground","background"],"description":"执行面：不传时由「后台操控」开关决定（开=background，关=foreground）；显式 foreground=主屏前台；显式 background=后台虚拟屏"}},"required":["text"]}"""),
+            tool("back", "返回上一页。后台模式在 Shizuku 就绪时经 shell keyevent 注入虚拟屏可用；未装 Shizuku 时会拒绝（防干扰主屏）。", """{"type":"object","properties":{"mode":{"type":"string","enum":["foreground","background"],"description":"执行面：不传时由「后台操控」开关决定；background 下 back 需 Shizuku 就绪"}},"required":[]}"""),
+            tool("home", "返回桌面。后台模式在 Shizuku 就绪时经 shell keyevent 注入虚拟屏可用；未装 Shizuku 时会拒绝（防干扰主屏）。", """{"type":"object","properties":{"mode":{"type":"string","enum":["foreground","background"],"description":"执行面：不传时由「后台操控」开关决定；background 下 home 需 Shizuku 就绪"}},"required":[]}"""),
+            tool("launch_app", "启动应用（package 为应用包名）。mode=background 时把应用启动到后台虚拟屏（用户主屏不受影响），随后用 mode=background 的 get_ui_state/tap 继续操作。禁止启动支付/银行等金融专用应用。", """{"type":"object","properties":{"package":{"type":"string","description":"应用包名，如 com.tencent.mm"},"mode":{"type":"string","enum":["foreground","background"],"description":"执行面：foreground=主屏前台（默认）；background=后台虚拟屏（用户可同时使用手机）"}},"required":["package"]}"""),
             tool("wait", "等待页面加载（ms 毫秒，默认 800，上限 10000）。", """{"type":"object","properties":{"ms":{"type":"integer","description":"等待毫秒数"}},"required":[]}"""),
-            tool("screenshot", "截取当前屏幕（需 Android 11+）。**多模态模型：直接看图用 tap(text/坐标) 操作；纯文本模型：截图会附带【OCR 文字+坐标】和【图标区域】，据此用 tap(text=...) 或 tap(x,y) 定位目标**。UI 树受限（微信/WebView/Flutter）或需要确认屏幕状态时调用；支付/密码等受保护页面会失败。", """{"type":"object","properties":{},"required":[]}"""),
+            tool("screenshot", "截取当前屏幕（需 Android 11+）。**多模态模型：直接看图用 tap(text/坐标) 操作；纯文本模型：截图会附带【OCR 文字+坐标】和【图标区域】，据此用 tap(text=...) 或 tap(x,y) 定位目标**。UI 树受限（微信/WebView/Flutter）或需要确认屏幕状态时调用；支付/密码等受保护页面会失败。mode=background 时截后台虚拟屏画面（OCR 坐标即虚拟屏坐标）。", """{"type":"object","properties":{"mode":{"type":"string","enum":["foreground","background"],"description":"执行面：foreground=主屏前台（默认）；background=后台虚拟屏"}},"required":[]}"""),
             tool("take_over", "请求人工接管：遇到登录/验证码/支付/无法自动完成的情况时调用，暂停自动操作并交还用户手动处理。", """{"type":"object","properties":{"reason":{"type":"string","description":"需要人工接管的原因"}},"required":["reason"]}""")
         )
 
