@@ -102,7 +102,11 @@ object VoiceEngineAssembly {
                         io.prism.voice.cloud.MiniMaxTtsConfig(
                             apiKey = apiKey,
                             groupId = groupId,
-                            voiceId = pack.voice.minimax.voiceId?.takeIf { it.isNotBlank() }
+                            // 批次23（ADR-048）：克隆音色优先——MiniMax 平台克隆得到的自定义
+                            // voice_id 在合成接口中与系统音色同参（voice_id），无需独立字段；
+                            // 未克隆时回退 RolePack.voiceId，再回退引擎默认
+                            voiceId = pack.voice.minimax.cloneVoiceId?.takeIf { it.isNotBlank() }
+                                ?: pack.voice.minimax.voiceId?.takeIf { it.isNotBlank() }
                                 ?: io.prism.voice.cloud.MiniMaxTtsConfig.DEFAULT_VOICE_ID,
                             speed = pack.voice.minimax.speed
                         )
