@@ -313,7 +313,20 @@ class ConversationViewModel(
      * 生产由 [Factory] 传入 [PrismApplication.backgroundControlEnabled]（同一 MutableStateFlow
      * 实例：VM/UI 写、phone_control 执行器守卫读，单一数据源）。默认新实例（向后兼容既有测试）。
      */
-    private val bgControlEnabledFlow: kotlinx.coroutines.flow.MutableStateFlow<Boolean> = kotlinx.coroutines.flow.MutableStateFlow(false)
+    private val bgControlEnabledFlow: kotlinx.coroutines.flow.MutableStateFlow<Boolean> = kotlinx.coroutines.flow.MutableStateFlow(false),
+    /**
+     * 批次23-B（ADR-048）：RolePack 角色包加载器。
+     *
+     * **装配语义**：语音轮次（正文带 [VOICE_TURN_PREFIX] 前缀）且用户已导入并选中角色包
+     * （[io.prism.voice.rolepack.RolePackLoader.effectiveRolePack] 非出厂 B0）时，角色包的
+     * persona 区块**替代**设置页「用户规则」（关于我/如何回答）层注入 systemPrompt——
+     * 即设置页字段被 RolePack 值替代的优先级关系（详见 [resolveRolePackPersonaSection]）。
+     * 出厂态（未导入/未选中）行为完全不变。
+     *
+     * null 时降级为无角色包注入（向后兼容既有测试）。
+     * 生产环境由 [Factory] 从 [io.prism.PrismApplication.rolePackLoader] 注入。
+     */
+    private val rolePackLoader: io.prism.voice.rolepack.RolePackLoader? = null
 ) : ViewModel() {
 
     /**
@@ -1595,6 +1608,10 @@ class ConversationViewModel(
             // 最高优先级层（persona 之后、RAG 之前）。读取失败/未配置 → null 跳过注入（降级）。
             // BR-error-handling-007：suspend DataStore 读取禁止 runCatching（会吞 CancellationException），
             // 必须显式 try-catch 重抛（对齐同文件 L1069+/L1113+ 既有模式）。
+            // 批次23-B（ADR-048）：语音轮次且用户已启用角色包时，userRules 层被 RolePack
+            // persona 区块**替代**（设置页字段被角色包值替代的优先级关系，见
+            // resolveRolePackPersonaSection KDoc）——优先级：RolePack.persona > 设置页用户规则。
+            val rolePackPersonaSection = resolveRolePackPersonaSection(userText)
             val userRulesSection = try {
                 userRulesConfigRepository?.getRules()?.toSystemPromptSection()
             } catch (e: CancellationException) {
@@ -1604,6 +1621,7 @@ class ConversationViewModel(
                 Log.w(TAG, "read userRules failed: ${e::class.simpleName}")
                 null
             }
+            val effectiveUserRulesSection = rolePackPersonaSection ?: userRulesSection
 
             // 合并 systemPrompt（ADR-015 决策4 + ADR-030 顺序：用户规则 → RAG → L1 摘要 → L2 跨会话 → L3 画像 → Skill）
             val mergedSystemPrompt = Companion.mergeSystemPrompt(
@@ -1611,7 +1629,7 @@ class ConversationViewModel(
                 l1Summary = memoryContext.l1Summary,
                 l2Memories = memoryContext.l2Memories,
                 l3Profiles = memoryContext.l3Profiles,
-                userRules = userRulesSection,
+                userRules = effectiveUserRulesSection,
                 // v1 US-202：手机操控启用时注入 UI 文本不可信声明（安全层）
                 phoneControlGuidance = if (phoneControlEnabled) Companion.PHONE_CONTROL_GUIDANCE else null,
                 // v1 批次9（US-904）：热榜启用时注入能力声明（LLM 感知 hotlist__get）
@@ -1648,6 +1666,40 @@ class ConversationViewModel(
                     reasoningEffort = reasoningEffort
                 )
             }
+        }
+    }
+
+    /**
+     * 批次23-B（ADR-048）：解析当前轮次应注入的角色包 persona 区块（不适用时 null）。
+     *
+     * **作用域**：仅语音轮次——正文带 [VOICE_TURN_PREFIX] 前缀（[io.prism.voice.VoiceSessionController]
+     * 发送语音转写时附加）。文字会话的 persona 行为完全不变（出厂默认行为不变约束）。
+     *
+     * **优先级关系**（写入 KDoc 供后续批次遵循）：现有"设置页自由文本"机制即
+     * [userRulesConfigRepository]（关于我/如何回答，ADR-030）；角色包启用 = 该设置页字段
+     * 被 RolePack 值**替代**（非叠加、非并存）——即 `RolePack.persona > 设置页用户规则`。
+     * [Companion.DEFAULT_PERSONA] 基础身份**保留不覆盖**：其第 6 条语音转写纠错指引对
+     * 语音轮次为必需（防同音字误执行不可逆操作），不得被角色包内容挤出。
+     *
+     * **生效条件**：[rolePackLoader] 非空 && 当前选中角色包非出厂 B0
+     * （[io.prism.voice.rolepack.RolePack.isBuiltin]）——出厂态（未导入/未选中）恒返回 null，
+     * 行为与批次22 完全一致。
+     *
+     * **降级**：读取失败（IO/解析）降级为 null（不注入，不阻断对话）；对齐
+     * BR-error-handling-007：显式 catch 重抛 CancellationException。
+     */
+    private suspend fun resolveRolePackPersonaSection(userText: String): String? {
+        val loader = rolePackLoader ?: return null
+        if (!userText.startsWith(VOICE_TURN_PREFIX)) return null
+        return try {
+            loader.effectiveRolePack()
+                .takeIf { !it.isBuiltin }
+                ?.toPersonaSystemPromptSection()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "read rolePack failed: ${e::class.simpleName}")
+            null
         }
     }
 
@@ -2688,6 +2740,16 @@ class ConversationViewModel(
         }
 
         /**
+         * 批次23-B（ADR-048）：语音轮次消息正文前缀（[io.prism.voice.VoiceSessionController]
+         * 发送语音转写时附加，PRD VC-005「🎙 语音」标记）。
+         *
+         * [resolveRolePackPersonaSection] 据此判定"语音通话场景"作用域——角色包 persona
+         * 注入仅发生在语音轮次，文字会话不受影响。与 DEFAULT_PERSONA 第 6 条的
+         * "正文带 🎙 前缀"描述共用同一标记。
+         */
+        internal const val VOICE_TURN_PREFIX = "🎙 "
+
+        /**
          * 默认通用 persona（ADR-018，综合 DeepSeek/Claude 最佳实践）。
          *
          * **设计原则**（渐进式加载 + Claude 5「管原则不写死规则」趋势）：
@@ -3167,7 +3229,10 @@ class ConversationViewModel(
          * @param l2Memories L2 跨会话记忆 section（M5 Phase E，默认 null 向后兼容）
          * @param l3Profiles L3 用户画像 section（M5 Phase E，默认 null 向后兼容）
          * @param userRules 用户显式规则 section（UXR8 N1，ADR-030：persona 之后、RAG 之前，
-         *     **除安全限制外最高优先级**；默认 null 向后兼容既有测试）
+         *     **除安全限制外最高优先级**；默认 null 向后兼容既有测试。
+         *     批次23-B（ADR-048）：语音轮次且用户启用角色包时，本层由 RolePack persona
+         *     区块**替代**（设置页字段被角色包值替代的优先级关系，
+         *     见 ConversationViewModel.resolveRolePackPersonaSection））
          * @param phoneControlGuidance 手机操控安全声明（v1 US-202：UI 文本视为不可信数据源 +
          *     phone_control__* 工具使用边界；默认 null 向后兼容）
          * @param enabledSkills 已启用的 Skill 列表（已过滤 isEnabled && isInstalled）
@@ -3318,7 +3383,9 @@ class ConversationViewModel(
                     phoneControlAskUserNotifier = app.phoneControlAskUserNotifier,
                     phoneControlCompletionNotifier = app.phoneControlCompletionNotifier,
                     // 批次20（BG-005，ADR-045）：后台操控会话级开关（VM/UI 写、执行器守卫读同一 StateFlow）
-                    bgControlEnabledFlow = app.backgroundControlEnabled
+                    bgControlEnabledFlow = app.backgroundControlEnabled,
+                    // 批次23-B（ADR-048）：RolePack 角色包（语音轮次 persona 注入装配）
+                    rolePackLoader = app.rolePackLoader
                 )
             }
         }

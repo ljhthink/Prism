@@ -51,6 +51,17 @@ class SystemTtsEngine(context: Context) : TtsEngine {
     @Volatile
     private var ready = false
 
+    /**
+     * 批次23-B（ADR-048）：音高/语速（角色包 voice.system 装配）。
+     * 默认 1.0/1.0（系统 TTS 中性值）——未装配角色包时行为与批次22 完全一致。
+     * 合法域 0.5..2.0（系统 TTS 约定），越界在 [configure] 钳制。
+     */
+    @Volatile
+    private var pitch: Float = 1.0f
+
+    @Volatile
+    private var speechRate: Float = 1.0f
+
     private val tts: TextToSpeech = TextToSpeech(context.applicationContext) { status ->
         onTtsInit(status)
     }
@@ -61,9 +72,36 @@ class SystemTtsEngine(context: Context) : TtsEngine {
         if (ready) {
             // 中文优先（识别与播报同语言；未命中中文回退系统默认语言）
             runCatching { tts.setLanguage(Locale.SIMPLIFIED_CHINESE) }
+            // 批次23-B（ADR-048）：init 就绪后应用已配置的音高/语速（configure 早于 init 的场景补发）
+            applyVoiceParams()
             Log.i(TAG, "TTS 引擎就绪（中文）")
         } else {
             Log.w(TAG, "TTS 初始化失败 status=$status（本机无 TTS 引擎，降级为仅文字）")
+        }
+    }
+
+    /**
+     * 批次23-B（ADR-048）：配置音高/语速（角色包 voice.system 装配点）。
+     *
+     * 由 [VoiceSessionController] 通话开始时从 `effectiveRolePack().voice.system` 取值调用；
+     * 出厂 B0 为 1.0/1.0，装配后行为不变。init 未就绪时仅记录参数，就绪后（[onTtsInit]）
+     * 补发应用；对已入队播报不影响（系统 TTS 语义：参数作用于后续播报请求）。
+     *
+     * 本方法为 [SystemTtsEngine] 特有能力，**不进 [TtsEngine] 接口**（接口零改动约束，ADR-048）。
+     */
+    fun configure(pitch: Float, speechRate: Float) {
+        this.pitch = pitch.coerceIn(MIN_VOICE_PARAM, MAX_VOICE_PARAM)
+        this.speechRate = speechRate.coerceIn(MIN_VOICE_PARAM, MAX_VOICE_PARAM)
+        if (ready) {
+            applyVoiceParams()
+        }
+    }
+
+    /** 应用音高/语速到底层引擎（runCatching：个别 ROM 实现异常不致命，播报继续）。 */
+    private fun applyVoiceParams() {
+        runCatching {
+            tts.setPitch(pitch)
+            tts.setSpeechRate(speechRate)
         }
     }
 
@@ -111,5 +149,11 @@ class SystemTtsEngine(context: Context) : TtsEngine {
 
     companion object {
         private const val TAG = "SystemTtsEngine"
+
+        /** 批次23-B（ADR-048）：pitch/speechRate 合法域下限（系统 TTS 约定）。 */
+        const val MIN_VOICE_PARAM = 0.5f
+
+        /** 批次23-B（ADR-048）：pitch/speechRate 合法域上限（系统 TTS 约定）。 */
+        const val MAX_VOICE_PARAM = 2.0f
     }
 }

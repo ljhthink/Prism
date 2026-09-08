@@ -1,6 +1,7 @@
 package io.prism.voice
 
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -30,7 +31,16 @@ class VoiceSessionController(
     private val asr: AsrEngine,
     private val tts: TtsEngine,
     /** 播报开关（用户可关）；默认开。 */
-    private val speakEnabled: () -> Boolean = { true }
+    private val speakEnabled: () -> Boolean = { true },
+    /**
+     * 批次23-B（ADR-048）：RolePack 角色包加载器（null = 无角色包能力，行为与批次22 完全一致）。
+     *
+     * 装配点：
+     * - [startCall]：voice.system → [SystemTtsEngine.configure]（音高/语速）；
+     * - [watchAssistantReply]：style.voiceCall 分段（仅用户启用非出厂角色包时生效）。
+     * persona 注入装配点在 ConversationViewModel（语音轮次 systemPrompt 层替代）。
+     */
+    private val rolePackLoader: io.prism.voice.rolepack.RolePackLoader? = null
 ) {
 
     /**
@@ -87,6 +97,21 @@ class VoiceSessionController(
         // guardrail P1-1：注册通知挂断回调——通知栏"挂断"触发完整挂断逻辑（状态机回写）
         VoiceForegroundService.hangUpRequested = { hangUp(context) }
         Log.i(TAG, "语音通话开始（FGS 启动=$callActive，流式引擎=${asr.isStreaming}）")
+        // 批次23-B（ADR-048）：装配角色包 voice.system → 系统 TTS 音高/语速（出厂 B0 = 1.0/1.0
+        // 中性值，装配后行为不变；读取失败静默跳过——引擎保持默认参数，不阻断通话）。
+        // MiniMax/GPT-SoVITS 音色映射（voice.minimax/gptsovits）随云端引擎选择器下批接线。
+        rolePackLoader?.let { loader ->
+            scope.launch {
+                try {
+                    val pack = loader.effectiveRolePack()
+                    (tts as? SystemTtsEngine)?.configure(pack.voice.system.pitch, pack.voice.system.speechRate)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "角色包 voice.system 装配失败：${e::class.simpleName}")
+                }
+            }
+        }
         // 批次22（SZ-202）：流式引擎 = 免按压连续对话——通话开始即持续聆听
         if (asr.isStreaming && asr.isAvailable) {
             enterListening(resetBefore = false)
@@ -268,7 +293,9 @@ class VoiceSessionController(
         // 复用现有会话管线：工具调用/RAG/记忆/落库全部生效（ADR-044 决策核心）。
         // 「🎙 语音」标记（PRD VC-005）：USER 消息正文前缀，历史页可辨识语音轮次，
         // LLM 看到的语义不变（明确来自用户口述）。
-        conversation.sendMessage("🎙 $text")
+        // 批次23-B（ADR-048）：前缀常量化（ConversationViewModel.VOICE_TURN_PREFIX）——
+        // 该标记同时是角色包 persona 注入的"语音轮次"作用域判定依据。
+        conversation.sendMessage(io.prism.ui.chat.ConversationViewModel.VOICE_TURN_PREFIX + text)
         watchAssistantReply()
     }
 
@@ -295,7 +322,11 @@ class VoiceSessionController(
                 return@launch
             }
             _phase.value = Phase.SPEAKING
-            tts.speak(reply, object : TtsEngine.Listener {
+            // 批次23-B（ADR-048）：style.voiceCall 分段播报——用户已启用角色包（非出厂 B0）时
+            // 按 maxSentenceLen/sentenceBreak 切句逐段 speak（链式，最后一段 onDone 才回 listening，
+            // 状态机语义不变）。出厂 B0 / 无角色包 → 单元素列表，与批次22 整段播报逐字节等价。
+            val segments = resolveBroadcastSegments(reply)
+            speakSegments(segments, 0, object : TtsEngine.Listener {
                 override fun onStart(utteranceId: String) = Unit
                 override fun onDone(utteranceId: String) {
                     if (_phase.value == Phase.SPEAKING) onTurnEnded()
@@ -307,6 +338,64 @@ class VoiceSessionController(
                 }
             })
         }
+    }
+
+    /**
+     * 批次23-B（ADR-048）：解析本轮播报分段列表（suspend——读角色包）。
+     *
+     * **生效条件**：用户已选中角色包且非出厂 B0（[RolePackLoader.effectiveRolePack] +
+     * isBuiltin=false）——出厂默认行为不变是本批次的硬约束，B0 的 voiceCall 约束
+     * （maxSentenceLen=30/sentenceBreak=true）**不应用**到出厂播报路径，仅作为 Schema
+     * 出厂示例与回落兜底。读取失败降级为整段（不阻断播报；显式 catch 重抛
+     * CancellationException，对齐 BR-error-handling-007 纪律）。
+     */
+    private suspend fun resolveBroadcastSegments(reply: String): List<String> {
+        val loader = rolePackLoader ?: return listOf(reply)
+        val pack = try {
+            loader.effectiveRolePack()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "角色包 style 读取失败，整段播报：${e::class.simpleName}")
+            return listOf(reply)
+        }
+        if (pack.isBuiltin) return listOf(reply)
+        return io.prism.voice.rolepack.RolePackStyleApplier
+            .apply(reply, pack.style.voiceCall)
+            .ifEmpty { listOf(reply) }
+    }
+
+    /**
+     * 批次23-B（ADR-048）：分段链式播报（逐段 speak，段间串行）。
+     *
+     * **状态机语义**（与原单段播报一致）：最后一段 onDone/onError 才转发给外部监听器
+     * （驱动 SPEAKING → IDLE/回聆听）；任一段播完后若 phase 已离开 SPEAKING（语义打断/
+     * 挂断），链条静默终止——打断路径已自行接管话权（enterListening），不允许残留分段
+     * 续播抢回话权。单段场景与原 `tts.speak(reply, listener)` 行为等价
+     * （onStart/onDone/onError 直通转发）。
+     */
+    private fun speakSegments(segments: List<String>, index: Int, listener: TtsEngine.Listener) {
+        if (_phase.value != Phase.SPEAKING) return
+        val segment = segments.getOrNull(index) ?: return
+        tts.speak(segment, object : TtsEngine.Listener {
+            override fun onStart(utteranceId: String) {
+                if (index == 0) listener.onStart(utteranceId)
+            }
+
+            override fun onDone(utteranceId: String) {
+                if (_phase.value != Phase.SPEAKING) return  // 打断/挂断：链条终止（不再续播）
+                if (index + 1 < segments.size) {
+                    speakSegments(segments, index + 1, listener)
+                } else {
+                    listener.onDone(utteranceId)
+                }
+            }
+
+            override fun onError(utteranceId: String, message: String) {
+                // 任一段失败即终止本轮（剩余分段放弃，交外部监听器回写状态机）
+                listener.onError(utteranceId, message)
+            }
+        })
     }
 
     /** 从会话消息取最后一条 ASSISTANT 的正文（工具卡等 TOOL 消息不播）。 */

@@ -947,6 +947,24 @@ class PrismApplication : Application() {
     }
 
     /**
+     * RolePack 角色包加载器（批次23-B，ADR-048）—— 用户私有目录 + 选中态持久化。
+     *
+     * 存储目录 `filesDir/rolepacks/`（随应用卸载清除，不随 APK/assets 分发——ADR-048
+     * "APK 不内置任何第三方角色"边界）；选中 id 经独立 DataStore（`prism_rolepack`）持久化。
+     *
+     * 装配点：
+     * - [io.prism.ui.chat.ConversationViewModel]：语音轮次 persona 注入（出厂 B0 行为不变）；
+     * - [io.prism.voice.VoiceSessionController]：voice.system 音高/语速 + style.voiceCall 分段。
+     * 出厂态（未导入/未选中）= B0 通用人设兜底，全部装配点行为与批次22 一致。
+     */
+    val rolePackLoader: io.prism.voice.rolepack.RolePackLoader by lazy {
+        io.prism.voice.rolepack.RolePackLoader(
+            baseDir = java.io.File(filesDir, "rolepacks"),
+            selectedIdStore = io.prism.voice.rolepack.DataStoreRolePackSelectedIdStore(rolePackDataStore)
+        )
+    }
+
+    /**
      * 对话摘要生成器（US-032，ADR-015 5.3）—— 使用 LLM 非流式请求对旧消息生成摘要。
      *
      * 依赖 [openAICompatibleProvider]（已实现 [io.prism.network.ChatCompletionProvider] 接口）。
@@ -1149,6 +1167,9 @@ class PrismApplication : Application() {
 
     /** 用户规则配置 DataStore 进程级单例（UXR8 N1，ADR-030，关于我+如何回答持久化）。 */
     private val Context.userRulesDataStore by preferencesDataStore(name = "prism_user_rules")
+
+    /** 角色包配置 DataStore 进程级单例（批次23-B，ADR-048，当前选中角色包 id 持久化）。 */
+    private val Context.rolePackDataStore by preferencesDataStore(name = "prism_rolepack")
 
     /** 设备档位配置 DataStore 进程级单例（ADR-017 4.4，US-040 用户手动覆盖持久化）。 */
     private val Context.tierConfigDataStore by preferencesDataStore(name = "prism_tier_config")

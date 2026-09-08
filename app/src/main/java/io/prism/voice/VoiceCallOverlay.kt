@@ -83,7 +83,10 @@ fun VoiceCallOverlay(
         VoiceSessionController(
             conversation = conversation,
             asr = AsrEngineFactory.create(context),  // 批次22：端侧流式优先（缺失降级系统引擎）
-            tts = SystemTtsEngine(context)
+            tts = SystemTtsEngine(context),
+            // 批次23-B（ADR-048）：角色包装配（voice.system 音高/语速 + style.voiceCall 分段；
+            // persona 注入在 ConversationViewModel）。出厂态（未导入/未选中）行为与批次22 一致。
+            rolePackLoader = (context.applicationContext as io.prism.PrismApplication).rolePackLoader
         )
     }
     val phase by controller.phase.collectAsState()
