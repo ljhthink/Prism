@@ -317,16 +317,24 @@ class ConversationViewModel(
     /**
      * 批次23-B（ADR-048）：RolePack 角色包加载器。
      *
-     * **装配语义**：语音轮次（正文带 [VOICE_TURN_PREFIX] 前缀）且用户已导入并选中角色包
-     * （[io.prism.voice.rolepack.RolePackLoader.effectiveRolePack] 非出厂 B0）时，角色包的
-     * persona 区块**替代**设置页「用户规则」（关于我/如何回答）层注入 systemPrompt——
-     * 即设置页字段被 RolePack 值替代的优先级关系（详见 [resolveRolePackPersonaSection]）。
-     * 出厂态（未导入/未选中）行为完全不变。
+     * **装配语义**（TASK-20260910-001 扩展）：语音与文本轮次统一生效——用户已导入并选中
+     * 角色包（[io.prism.voice.rolepack.RolePackLoader.effectiveRolePack] 非出厂 B0）时，
+     * 角色包的 persona 区块**替代**设置页「用户规则」（关于我/如何回答）层注入
+     * systemPrompt——即设置页字段被 RolePack 值替代的优先级关系（详见
+     * [resolveRolePackPersonaSection]）。出厂态（未导入/未选中）行为完全不变。
      *
      * null 时降级为无角色包注入（向后兼容既有测试）。
      * 生产环境由 [Factory] 从 [io.prism.PrismApplication.rolePackLoader] 注入。
      */
-    private val rolePackLoader: io.prism.voice.rolepack.RolePackLoader? = null
+    private val rolePackLoader: io.prism.voice.rolepack.RolePackLoader? = null,
+    /**
+     * TASK-20260910-001：文本聊天播报管理器——AI 回复「播放」按钮后端。
+     * 引擎跟随语音通话设置（MINIMAX 点击时才构建，不提前消耗云端额度）。
+     *
+     * null 时降级为无播放按钮（向后兼容既有测试）。
+     * 生产环境由 [Factory] 从 [io.prism.PrismApplication] 注入；[onCleared] 调用 release。
+     */
+    val textPlayback: io.prism.voice.TextPlaybackController? = null
 ) : ViewModel() {
 
     /**
@@ -387,9 +395,6 @@ class ConversationViewModel(
      * 本标志使流 finally 跳过 isTyping 复位，旁路结束（成功重发 / 失败回退）后复位。
      */
     private val bypassInProgress = java.util.concurrent.atomic.AtomicBoolean(false)
-
-    /** UX-001 问题 2（ADR-022）：用户是否手动切换过深度思考开关（防 init 竞态覆盖）。 */
-    private var thinkingToggledByUser = false
 
     /** UXR8 Bug1（ADR-028）：用户是否手动切换过 RAG 模式（防 init 竞态覆盖，对齐 thinking 模式）。 */
     private var ragTargetToggledByUser = false
@@ -630,20 +635,17 @@ class ConversationViewModel(
     val thinkingEnabled: StateFlow<Boolean> = _thinkingEnabled.asStateFlow()
 
     init {
-        // UX-001 问题 5（ADR-021）+ 问题 2（ADR-022 二次反馈）：初始化深度思考开关状态。
-        // 竞态修复：异步读 DataStore 期间用户可能已点击开关（setThinkingEnabled 已写内存），
-        // 若 init 完成后用 DataStore 旧值覆盖会"点了没反应"。用 [thinkingToggledByUser] 标记：
-        // 用户手动切换过则不再应用 init 读取值。
+        // BUG-20260909-003：深度思考开关改为**持续收集** DataStore flow——原实现仅 init 一次性
+        // 读取，设置页切换对已存在的会话 VM 永不生效（跨 VM 不同步）。flow 为唯一事实来源：
+        // 本 VM setThinkingEnabled 落盘后 flow 会重发同值（幂等），原 thinkingToggledByUser
+        // 竞态标记随之失去存在意义，一并移除。
         viewModelScope.launch {
             try {
-                val stored = thinkingConfigRepository?.getThinkingEnabled()
-                if (!thinkingToggledByUser) {
-                    stored?.let { _thinkingEnabled.value = it }
-                }
+                thinkingConfigRepository?.thinkingEnabled()?.collect { _thinkingEnabled.value = it }
             } catch (e: CancellationException) {
                 throw e // BR-error-handling-007
             } catch (e: Exception) {
-                Log.w(TAG, "init thinkingEnabled failed: ${e::class.simpleName}")
+                Log.w(TAG, "collect thinkingEnabled failed: ${e::class.simpleName}")
             }
         }
         // UXR8 Bug1（ADR-028）：初始化 RAG 检索目标为持久化值（用户上次选择的模式）。
@@ -790,8 +792,6 @@ class ConversationViewModel(
      * 仓库为 null 时仅更新内存状态（降级场景）。
      */
     fun setThinkingEnabled(enabled: Boolean) {
-        // UX-001 问题 2（ADR-022）：标记用户已手动切换（防 init 异步读取覆盖竞态）
-        thinkingToggledByUser = true
         _thinkingEnabled.value = enabled
         val repo = thinkingConfigRepository
         if (repo != null) {
@@ -1562,10 +1562,13 @@ class ConversationViewModel(
                     .filter { isLegalToolName(it.function.name) }
             }
 
-            // 问题 8a（ADR-020）+ UX-001 问题 5（ADR-021）：深度思考开关由 UI 状态驱动。
-            // 关闭时 thinkingEnabled=false，不发送 thinking/reasoning_effort 字段（向后兼容所有端点）。
+            // 问题 8a（ADR-020）+ UX-001 问题 5（ADR-021）+ BUG-20260909-003：
+            // 1) 语音轮次（正文带 VOICE_TURN_PREFIX 前缀）**强制快速模式**——保语音及时性，
+            //    思考延迟会显著拉长语音轮次响应；
+            // 2) 关闭深度思考时由 Provider 显式下发 thinking={"type":"disabled"}（原实现
+            //    不发送任何字段——默认开启思考的端点（如 GLM）会无视开关始终思考，开关成假实现）。
             val thinkingConfig = thinkingConfigRepository
-            val thinkingEnabled = _thinkingEnabled.value
+            val thinkingEnabled = _thinkingEnabled.value && !userText.startsWith(VOICE_TURN_PREFIX)
             val reasoningEffort = thinkingConfig
                 ?.takeIf { thinkingEnabled }
                 ?.getReasoningEffort()
@@ -1611,7 +1614,7 @@ class ConversationViewModel(
             // 批次23-B（ADR-048）：语音轮次且用户已启用角色包时，userRules 层被 RolePack
             // persona 区块**替代**（设置页字段被角色包值替代的优先级关系，见
             // resolveRolePackPersonaSection KDoc）——优先级：RolePack.persona > 设置页用户规则。
-            val rolePackPersonaSection = resolveRolePackPersonaSection(userText)
+            val rolePackPersonaSection = resolveRolePackPersonaSection()
             val userRulesSection = try {
                 userRulesConfigRepository?.getRules()?.toSystemPromptSection()
             } catch (e: CancellationException) {
@@ -1672,8 +1675,10 @@ class ConversationViewModel(
     /**
      * 批次23-B（ADR-048）：解析当前轮次应注入的角色包 persona 区块（不适用时 null）。
      *
-     * **作用域**：仅语音轮次——正文带 [VOICE_TURN_PREFIX] 前缀（[io.prism.voice.VoiceSessionController]
-     * 发送语音转写时附加）。文字会话的 persona 行为完全不变（出厂默认行为不变约束）。
+     * **作用域**（TASK-20260910-001 扩展）：**语音轮次与文本轮次统一注入**——原实现仅
+     * 语音轮次（VOICE_TURN_PREFIX 前缀），用户导入并选中角色包即明确表达"用该角色对话"
+     * 的意图，文本聊天保持默认助手会造成体验割裂（且文本聊天播放按钮以角色音色播报
+     * 默认助手文本，角色体验不完整）。文字会话在未选中角色包时行为完全不变。
      *
      * **优先级关系**（写入 KDoc 供后续批次遵循）：现有"设置页自由文本"机制即
      * [userRulesConfigRepository]（关于我/如何回答，ADR-030）；角色包启用 = 该设置页字段
@@ -1688,9 +1693,8 @@ class ConversationViewModel(
      * **降级**：读取失败（IO/解析）降级为 null（不注入，不阻断对话）；对齐
      * BR-error-handling-007：显式 catch 重抛 CancellationException。
      */
-    private suspend fun resolveRolePackPersonaSection(userText: String): String? {
+    private suspend fun resolveRolePackPersonaSection(): String? {
         val loader = rolePackLoader ?: return null
-        if (!userText.startsWith(VOICE_TURN_PREFIX)) return null
         return try {
             loader.effectiveRolePack()
                 .takeIf { !it.isBuiltin }
@@ -1845,8 +1849,19 @@ class ConversationViewModel(
      */
     override fun onCleared() {
         super.onCleared()
+        textPlayback?.release()  // TASK-20260910-001：文本播报引擎与协程释放
         persistSession()
         persistSessionMemories("onCleared")
+    }
+
+    /** TASK-20260910-001：文本播报状态（控制器 null 时恒 Idle——UI 据此隐藏播放按钮逻辑分支）。 */
+    val textPlaybackState: kotlinx.coroutines.flow.StateFlow<io.prism.voice.TextPlaybackController.State> =
+        textPlayback?.state
+            ?: kotlinx.coroutines.flow.MutableStateFlow(io.prism.voice.TextPlaybackController.State.Idle)
+
+    /** 切换文本播报（AI 回复「播放」按钮；同条点击=停止）。 */
+    fun toggleTextPlayback(messageId: Long, text: String) {
+        textPlayback?.toggle(messageId, text)
     }
 
     /**
@@ -2743,9 +2758,9 @@ class ConversationViewModel(
          * 批次23-B（ADR-048）：语音轮次消息正文前缀（[io.prism.voice.VoiceSessionController]
          * 发送语音转写时附加，PRD VC-005「🎙 语音」标记）。
          *
-         * [resolveRolePackPersonaSection] 据此判定"语音通话场景"作用域——角色包 persona
-         * 注入仅发生在语音轮次，文字会话不受影响。与 DEFAULT_PERSONA 第 6 条的
-         * "正文带 🎙 前缀"描述共用同一标记。
+         * [resolveRolePackPersonaSection] 据此判定角色包作用域（TASK-20260910-001 扩展为
+         * 语音/文本轮次统一注入）——选中角色包的会话 persona 全场景生效。与 DEFAULT_PERSONA
+         * 第 6 条的"正文带 🎙 前缀"描述共用同一标记。
          */
         internal const val VOICE_TURN_PREFIX = "🎙 "
 
@@ -3230,8 +3245,8 @@ class ConversationViewModel(
          * @param l3Profiles L3 用户画像 section（M5 Phase E，默认 null 向后兼容）
          * @param userRules 用户显式规则 section（UXR8 N1，ADR-030：persona 之后、RAG 之前，
          *     **除安全限制外最高优先级**；默认 null 向后兼容既有测试。
-         *     批次23-B（ADR-048）：语音轮次且用户启用角色包时，本层由 RolePack persona
-         *     区块**替代**（设置页字段被角色包值替代的优先级关系，
+         *     批次23-B（ADR-048）+ TASK-20260910-001：用户启用角色包时（语音与文本轮次统一），
+         *     本层由 RolePack persona 区块**替代**（设置页字段被角色包值替代的优先级关系，
          *     见 ConversationViewModel.resolveRolePackPersonaSection））
          * @param phoneControlGuidance 手机操控安全声明（v1 US-202：UI 文本视为不可信数据源 +
          *     phone_control__* 工具使用边界；默认 null 向后兼容）
@@ -3384,8 +3399,15 @@ class ConversationViewModel(
                     phoneControlCompletionNotifier = app.phoneControlCompletionNotifier,
                     // 批次20（BG-005，ADR-045）：后台操控会话级开关（VM/UI 写、执行器守卫读同一 StateFlow）
                     bgControlEnabledFlow = app.backgroundControlEnabled,
-                    // 批次23-B（ADR-048）：RolePack 角色包（语音轮次 persona 注入装配）
-                    rolePackLoader = app.rolePackLoader
+                    // 批次23-B（ADR-048）+ TASK-20260910-001：RolePack 角色包（语音/文本轮次统一 persona 注入）
+                    rolePackLoader = app.rolePackLoader,
+                    // TASK-20260910-001：文本聊天播报管理器（播放按钮；引擎跟随语音通话设置）
+                    textPlayback = io.prism.voice.TextPlaybackController(
+                        app,
+                        app.voiceEnginePrefs,
+                        app.apiKeyRepository,
+                        app.rolePackLoader
+                    )
                 )
             }
         }

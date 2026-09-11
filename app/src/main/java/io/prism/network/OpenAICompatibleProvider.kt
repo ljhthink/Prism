@@ -107,8 +107,9 @@ class OpenAICompatibleProvider(
      * @param ragContext RAG context 文本（可选，知识库片段拼接）；null 时不注入
      * @param tools 工具定义列表（M4，null 时不序列化 tools 字段，向后兼容）
      * @param toolChoice 工具选择策略（M4，null 时不序列化 tool_choice 字段）
-     * @param thinkingEnabled 是否开启深度思考（问题 8a，DeepSeek thinking 模式；null/true 时注入
-     *        `thinking={"type":"enabled"}`；false/null 时不注入，向后兼容所有端点）
+     * @param thinkingEnabled 是否开启深度思考（问题 8a，DeepSeek/GLM thinking 模式；
+     *        true 注入 `thinking={"type":"enabled"}`，false 注入 `{"type":"disabled"}`——
+     *        BUG-20260909-003 显式双态，防默认思考端点无视开关）
      * @param reasoningEffort 思考强度（问题 8a，low/high/max；仅 [thinkingEnabled] 为 true 时注入）
      * @return [StreamEvent] 流：增量 [StreamEvent.Delta] / 思考过程 [StreamEvent.ReasoningDelta] /
      *         工具调用事件 / 结束 [StreamEvent.Done] / 错误 [StreamEvent.Error]
@@ -358,9 +359,12 @@ class OpenAICompatibleProvider(
      * @param tools 工具定义（null 时不序列化 tools 字段，向后兼容）
      * @param toolChoice 工具选择策略（null 时不序列化 tool_choice 字段）
      * @param stream 是否流式请求（默认 true，向后兼容；M5 Phase B 非流式路径传 false）
-     * @param thinkingEnabled 是否开启深度思考（问题 8a；默认 false，仅 true 时注入 thinking 字段，
-     *        避免向 OpenAI/Claude/Ollama 等不兼容端点发送 DeepSeek 专有参数返回 400）
-     * @param reasoningEffort 思考强度（问题 8a；仅 thinkingEnabled 为 true 时注入）
+     * @param thinkingEnabled 是否开启深度思考（问题 8a；**显式双态下发**——true 注入
+     *        `thinking={"type":"enabled"}`，false 注入 `thinking={"type":"disabled"}`。
+     *        BUG-20260909-003：关闭时不再省略字段——默认开启思考的端点（如 GLM）会无视
+     *        缺省始终思考，导致开关成假实现。注意：对拒绝未知字段的严格端点（OpenAI 官方）
+     *        关闭态会 400，属已知取舍，见关联 Bug 报告）
+     * @param reasoningEffort 思考强度（问题 8a；仅 [thinkingEnabled] 为 true 时注入）
      */
     internal fun buildRequestBody(
         config: ProviderConfig,
@@ -398,10 +402,16 @@ class OpenAICompatibleProvider(
             toolChoice = toolChoice?.let { toolChoiceToJson(it) },
             // strict mode 需 parallel_tool_calls=false（OpenAI 限制），且减少并行幻觉
             parallelToolCalls = if (tools != null) false else null,
-            // 问题 8a（ADR-020）：仅 thinkingEnabled 时注入 DeepSeek thinking 模式参数
+            // 问题 8a（ADR-020）+ BUG-20260909-003：thinking 参数**显式双态**下发——
+            // 开启：{"type":"enabled"}；关闭：{"type":"disabled"}（原实现关闭时不发送任何
+            // 字段，默认开启思考的端点（如 GLM 系列）会无视开关始终思考，开关成假实现）。
             // S-3（guardrail TKN-P8-GUARDRAIL-001）：reasoningEffort 纵深防御白名单，
             // 非法值忽略而非发送（避免向 Provider 传无效 effort 返回 400）
-            thinking = if (thinkingEnabled) buildJsonObject { put("type", "enabled") } else null,
+            thinking = if (thinkingEnabled) {
+                buildJsonObject { put("type", "enabled") }
+            } else {
+                buildJsonObject { put("type", "disabled") }
+            },
             reasoningEffort = if (thinkingEnabled) {
                 reasoningEffort?.takeIf { it in VALID_EFFORTS }
             } else {

@@ -420,24 +420,32 @@ class SettingsViewModel(
     val ttsSelfCheck: StateFlow<VoiceSelfCheckState?> = _ttsSelfCheck.asStateFlow()
 
     /**
-     * 云端 ASR 连通性自检（A4）：DashScope WS run-task 握手，3s 预算。
+     * 识别引擎连通性自检（A4，BUG-20260909-002）：**按当前选中引擎分流**。
+     * - 端侧（Sherpa 流式）：无需云端 Key，直接提示可用（原实现无条件检查 DashScope Key，
+     *   选端侧也误报"未配置 Key"）；
+     * - 云端（阿里云百炼）：DashScope WS run-task 握手，3s 预算。
      * 阻塞探测在 IO 线程执行（不卡主线程）；结果经 [asrSelfCheck] 推送 UI 文案。
      */
     fun runAsrSelfCheck() {
         if (_asrSelfCheck.value?.running == true) return
         viewModelScope.launch {
             _asrSelfCheck.value = VoiceSelfCheckState(true, "自检中…")
-            val key = runCatching {
-                apiKeyRepository.readApiKeyOnce(io.prism.voice.cloud.AliCloudAsrEngine.KEY_REF)
-            }.getOrNull()
-            val result = if (key.isNullOrBlank()) {
-                "未配置 DashScope API Key，请先保存 Key"
+            val state = if (voiceAsrEngine.value == io.prism.voice.AsrEngineChoice.SYSTEM) {
+                VoiceSelfCheckState(false, "当前为端侧识别引擎（Sherpa 流式），无需云端 Key")
             } else {
-                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    io.prism.voice.CloudVoiceSelfCheck.checkAliCloudAsr(key)
+                val key = runCatching {
+                    apiKeyRepository.readApiKeyOnce(io.prism.voice.cloud.AliCloudAsrEngine.KEY_REF)
+                }.getOrNull()
+                val result = if (key.isNullOrBlank()) {
+                    "未配置 DashScope API Key，请先保存 Key"
+                } else {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        io.prism.voice.CloudVoiceSelfCheck.checkAliCloudAsr(key)
+                    }
                 }
+                VoiceSelfCheckState(false, result ?: "自检通过 · 云端识别连接正常")
             }
-            _asrSelfCheck.value = VoiceSelfCheckState(false, result ?: "自检通过 · 云端识别连接正常")
+            _asrSelfCheck.value = state
         }
     }
 
@@ -499,6 +507,9 @@ class SettingsViewModel(
      * 导入角色包（批次23-C）：先经 [io.prism.voice.rolepack.RolePackParser] 解析校验，
      * 成功后 loader.import 落盘（存储文件名以包 id 规范化）。onResult(ok, 可读消息) 主线程回调
      * （解析异常消息面向角色作者，直接透出）。
+     *
+     * BUG-20260908-002：导入成功后**自动选中**该包（原实现只落盘不选中——用户导入后
+     * 语音通话仍是出厂默认人设，误以为导入未生效）。
      */
     fun importRolePack(json: String, onResult: (Boolean, String) -> Unit) {
         viewModelScope.launch {
@@ -509,6 +520,8 @@ class SettingsViewModel(
                 }
                 val pack = io.prism.voice.rolepack.RolePackParser.parse(json)
                 loader.import(pack.id, json)
+                loader.select(pack.id)
+                _selectedRolePackId.value = pack.id
                 refreshRolePacks()
                 onResult(true, "导入成功：${pack.name}")
             } catch (e: CancellationException) {
@@ -530,6 +543,23 @@ class SettingsViewModel(
                 throw e // BR-error-handling-007：不吞 CancellationException
             } catch (e: Exception) {
                 Log.w("SettingsViewModel", "选中角色包失败: $id", e)
+            }
+        }
+    }
+
+    /**
+     * 清除选中角色包（回落出厂默认助手；设置页「默认（Prism 助手）」行点击入口，
+     * BUG-20260908-002：原实现无 UI 入口，选错后只能删除包才能回默认）。
+     */
+    fun clearRolePackSelection() {
+        viewModelScope.launch {
+            try {
+                rolePackLoader?.clearSelection()
+                _selectedRolePackId.value = null
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007：不吞 CancellationException
+            } catch (e: Exception) {
+                Log.w("SettingsViewModel", "清除角色包选中失败", e)
             }
         }
     }

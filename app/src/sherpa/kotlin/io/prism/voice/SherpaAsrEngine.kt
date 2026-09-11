@@ -103,6 +103,7 @@ class SherpaAsrEngine(private val context: Context) : AsrEngine {
         // 若不 release 将保持录音态（系统隐私指示器常亮、其它 App 无法录音）。
         // recognizerRef/streamRef 为非空局部变量的镜像（循环内用非空局部驱动，finally 收口）
         var recorder: AudioRecord? = null
+        var echoCanceler: android.media.audiofx.AcousticEchoCanceler? = null
         var recognizerRef: OnlineRecognizer? = null
         var streamRef: com.k2fsa.sherpa.onnx.OnlineStream? = null
         try {
@@ -182,6 +183,18 @@ class SherpaAsrEngine(private val context: Context) : AsrEngine {
             }
             rec.startRecording()
             recorder = rec
+            // BUG-20260909-005：挂 AEC 回声消除——TTS 播报声经麦克风拾取被识别成文本，
+            // 曾致一次通话 SPEAKING 门丢弃 5 次回声转写并误触发语义打断（云端的
+            // VoiceAudio 路径已挂 AEC，sherpa 直读 AudioRecord 路径此前缺失）。
+            if (android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
+                val aec = android.media.audiofx.AcousticEchoCanceler.create(rec.audioSessionId)
+                val enabled = aec != null && runCatching { aec.enabled = true }.isSuccess
+                echoCanceler = aec
+                // guardrail F5：如实记录挂载结果（create 失败/enabled 失败不再误报"已挂载"）
+                Log.i(TAG, "AEC 回声消除挂载：available=true, attached=${aec != null}, enabled=$enabled")
+            } else {
+                Log.i(TAG, "AEC 回声消除：设备不支持（isAvailable=false）")
+            }
             val chunk = ShortArray(1600)  // 100ms @16k
             Log.i(TAG, "sherpa 流式识别循环启动")
             while (running.get()) {
@@ -230,6 +243,7 @@ class SherpaAsrEngine(private val context: Context) : AsrEngine {
                 main.post { listener.onError("端侧识别异常（${e::class.simpleName}），已回退按住说话模式") }
             }
         } finally {
+            runCatching { echoCanceler?.release() }  // BUG-20260909-005：AEC 随录音循环释放
             runCatching { recorder?.stop() }
             runCatching { recorder?.release() }
             runCatching { streamRef?.release() }

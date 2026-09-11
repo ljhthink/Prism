@@ -188,6 +188,51 @@ class MiniMaxTtsEngineTest {
     }
 
     @Test
+    fun `parseServerEvent - task_continued 携带音频解码为 AudioChunk（CN 站音频帧）`() {
+        // BUG-20260909-001 服务端根因：CN 站音频帧 event=task_continued（官方 task_continue
+        // 返回体），data.audio 为 hex PCM——原实现映射 Unknown 静默丢弃导致零音频静音
+        val hex = "0000" // 2 字节静音 PCM（16bit）
+        val event = parseServerEvent("""{"event":"task_continued","data":{"audio":"$hex"}}""")
+        assertTrue(event is MiniMaxEvent.AudioChunk)
+        assertEquals(2, (event as MiniMaxEvent.AudioChunk).bytes.size)
+    }
+
+    @Test
+    fun `parseServerEvent - task_continued data 为 null 或缺 audio 视为 ACK 帧`() {
+        // 官方文档：task_continue 返回体的 data 可能为 null——纯 ACK 帧无音频按信息性处理
+        assertEquals(MiniMaxEvent.Unknown, parseServerEvent("""{"event":"task_continued","data":null}"""))
+        assertEquals(MiniMaxEvent.Unknown, parseServerEvent("""{"event":"task_continued","data":{}}"""))
+    }
+
+    @Test
+    fun `parseServerEvent - task_continued 空串 audio 视为纯 ACK 帧`() {
+        // AC1 边界钉死：task_continued 的 data.audio=""（空字符串载荷）与 data:null/缺字段
+        // 同判——纯 ACK 帧无音频按信息性处理（takeIf isNotEmpty 收敛 Unknown）
+        assertEquals(
+            MiniMaxEvent.Unknown,
+            parseServerEvent("""{"event":"task_continued","data":{"audio":""}}""")
+        )
+    }
+
+    @Test
+    fun `parseServerEvent - task_continued 非法 hex 映射失败`() {
+        // 携带音频字段但内容非法 = 服务端契约破坏，按失败处理（与 data 事件口径一致）
+        assertTrue(
+            parseServerEvent("""{"event":"task_continued","data":{"audio":"zzzz"}}""") is MiniMaxEvent.TaskFailed
+        )
+    }
+
+    @Test
+    fun `parseServerEvent - data 分支空串 audio 保持旧行为 AudioChunk 空数组`() {
+        // M-1 Golden Master（guardrail TKN-VOICE-BUGFIX3-002）：data 事件 data.audio=""
+        // 旧行为 = AudioChunk(空数组)（与 decodeHexAudio"空串=协议允许的无音频分片"契约
+        // 一致；引擎 onServerFrame 对空 chunk 跳过写入，等效旧行为"静默跳过"）
+        val ev = parseServerEvent("""{"event":"data","data":{"audio":""}}""")
+        assertTrue(ev is MiniMaxEvent.AudioChunk)
+        assertEquals(0, (ev as MiniMaxEvent.AudioChunk).bytes.size)
+    }
+
+    @Test
     fun `parseServerEvent - 非法帧容错映射失败`() {
         assertTrue(parseServerEvent("not-json{") is MiniMaxEvent.TaskFailed)
         assertTrue(parseServerEvent("[1,2,3]") is MiniMaxEvent.TaskFailed)

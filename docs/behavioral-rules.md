@@ -388,6 +388,138 @@
 - 适用场景：dev / bugfix
 - 状态：active
 
+#### BR-interface-024: 区域敏感云服务的端点常量必须与账号平台来源成对核验，并以最小握手 PoC 实测
+
+- 类别：interface / ops
+- 规则：接入有区域双站（CN/国际）的云服务（如 MiniMax、DashScope）时：(1) 端点常量必须依据**用户账号实际所属平台**选定（以用户在哪个站完成实名/克隆/充值等账号动作为准），不得直接采信调研报告或文档默认值；(2) 同一端点被多处复制（引擎 + 自检等）时必须**成对修改**并在注释中互相引用，防止"自检用 A 站、引擎用 B 站"漂移；(3) 编码前必须用最小握手 PoC（如 `curl` 裸 WS 升级请求）实测目标端点行为，验证"什么样的响应代表拒绝"；(4) 鉴权前置的 WS 服务（握手层完成鉴权）握手被拒表现为 HTTP 200+JSON 错误体（OkHttp 报 `ProtocolException: Expected HTTP 101 response but was '200 OK'`）——诊断日志须记录 http 状态码（不记录响应体/请求头，防 Key 泄露），UI 文案须给出「Key 与端点站点是否匹配」线索（Key 复制错误与端点错误现象相同，需区分引导）。
+- 反例：`MiniMaxTtsEngine.WS_URL = "wss://api.minimax.io/ws/v1/t2a_v2"`（国际站）硬编码，用户 Key 为 CN 站（platform.minimaxi.com 克隆音色）→ 每次语音通话握手被拒 200，必现回退端侧；`CloudVoiceSelfCheck.MINIMAX_WS_URL` 复制同一错误值 → 自检同败且无站点线索
+- 正例：两常量均为 `wss://api.minimaxi.com/ws/v1/t2a_v2` + 注释注明 CN/国际语义与互引；onFailure 日志 `（http=${response?.code}）`；自检失败文案「…以及 Key 是否为国内站（platform.minimaxi.com）Key」
+- 来源：BUG-20260908-001 云端 TTS 必现回退（TKN-VOICE-BUGFIX-001 考古 + TKN-VOICE-BUGFIX-002 guardrail；PoC 实证两站鉴权失败均为 200+base_resp JSON）
+- 添加日期：2026-09-08
+- 适用场景：dev / bugfix / ops
+- 状态：active
+
+#### BR-interface-026: 云端协议会话的"空成功"必须按失败降级，协议帧必须有诊断留痕
+
+- 类别：interface / error-handling
+- 规则：与云端协议引擎（WS/长连接/流式）对接时：(1) 服务端"正常收尾但零有效载荷"（如 task_finished 但零音频帧、200 但空响应）**不得回调成功**——上层降级链通常仅在错误回调时触发，空成功会让功能静默失效且不降级（比失败更糟）；必须加零载荷守卫，失败文案含降级标记走既有降级链；(2) 协议会话必须留**帧级诊断日志**（事件名/载荷长度/字节数，不含内容与凭据）——"握手成功但无数据"类问题没有帧日志无法定位；(3) 每种帧接收形态都要显式处理（如 OkHttp WebSocket 的 ByteString 二进制帧 override 默认空实现=静默丢帧，必须 override 落日志）；(4) 正常收尾前可设短暂宽限窗口容忍尾部分片乱序补达，收尾态（DRAINING）仍应接受写入。
+- 反例：MiniMax T2A 会话 task_finished 到达即 onDone（残留帧=0），14/14 句静音且无任何回退、无任何日志
+- 正例：finishOrGrace 零帧宽限判定 → fail("云端 TTS 未返回音频，已回退")（命中 FALLBACK_MARK 自动切端侧）+ `server frame: data bytes=N` 帧日志
+- 来源：BUG-20260909-001 语音通话零音频静音（TKN-VOICE-BUGFIX2-001 考古 + 002 guardrail 竞态矩阵验证）
+- 添加日期：2026-09-09
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-interface-027: 布尔型请求参数开关必须显式双态下发，禁止"关闭时省略字段"
+
+- 类别：interface
+- 规则：控制模型/服务端行为的布尔开关参数（如 thinking/reasoning），关闭态必须**显式下发禁用值**（如 `thinking={"type":"disabled"}`），禁止省略字段——省略等于交给端点默认值，默认开启的端点会无视开关（开关成假实现，仅 UI 显隐变化）。若兼容性要求必须省略（严格端点对未知字段 400），须以端点能力开关门控并文档化取舍，不允许静默省略。
+- 反例：`thinking = if (enabled) {"type":"enabled"} else null`——GLM 等默认思考端点下开关无效，用户看到"仅 UI 显示有区别"
+- 正例：`thinking = if (enabled) {"type":"enabled"} else {"type":"disabled"}`，reasoning_effort 仍仅在开启时注入
+- 来源：BUG-20260909-003 深度思考假开关（TKN-VOICE-BUGFIX2-001 考古：请求链本身连通，缺的是关闭态显式参数）
+- 添加日期：2026-09-09
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-ops-009: 自检/诊断类操作必须按当前选中上下文分流
+
+- 类别：ops / interface
+- 规则：设置页的自检/诊断/测试类操作（引擎自检、连通性探测等）必须读取**当前选中的引擎/配置**并按其分流——端侧选项不应要求云端凭据，云端选项才执行云端探测。无条件按固定云端路径自检会对端侧用户产生"未配置 Key"误报，损害自检可信度。自检文案须注明当前上下文（如"当前为端侧识别引擎，无需云端 Key"）。
+- 反例：runAsrSelfCheck 无条件读 DashScope Key——用户选端侧识别仍报"未配置 DashScope API Key，请先保存 Key"
+- 正例：`if (voiceAsrEngine.value == AsrEngineChoice.SYSTEM) "当前为端侧识别引擎（Sherpa 流式），无需云端 Key" else 云端探测`
+- 来源：BUG-20260909-002 ASR 自检误报（TKN-VOICE-BUGFIX2-001 考古确认无条件检查）
+- 添加日期：2026-09-09
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-interface-028: 区域双站服务的协议行为差异必须帧级实证，禁止单站文档推断另一站
+
+- 类别：interface / ops
+- 规则：对接有 CN/国际双站的云服务时，两站的协议细节（端点、**事件/字段名**、响应形状）可能各自演进——用 A 站文档推断 B 站行为是缺陷源。协议适配必须以**真实流量帧级日志**为最终裁判：接入期或异常期在会话层加帧级插桩（事件名/载荷长度，不含内容），"握手成功但零数据"类问题先看帧日志再改代码。修复降级链正确但功能仍不工作时，优先怀疑"上游载荷被解析层静默丢弃"，其次才是服务端故障。
+- 反例：按国际站文档认定音频帧 event=data，CN 站实际为 task_continued（数百帧恒定 4290 字节音频全部映射 Unknown 丢弃）→ 引擎"成功"但零音频、通话静音
+- 正例：parseServerEvent 按"载荷形状优先"解析（有 data.audio 即音频帧），站点差异仅影响事件名分支；帧日志 `server frame: audio chunk bytes=N` 直接可证
+- 来源：BUG-20260909-001 复测轮服务端根因收口（TKN-VOICE-BUGFIX3-001 考古 + 官方 CN 文档 task_continue 返回体证实；上轮按国际站文档调研遗漏）
+- 添加日期：2026-09-09
+- 适用场景：dev / bugfix / ops
+- 状态：active
+
+#### BR-ops-010: "功能无声/无输出"类问题必须先验证系统层路由与引擎进程，再归因应用层
+
+- 类别：ops
+- 规则：排查"播放无声音/输出无结果"类问题时，必须检查**整机 logcat**（含系统引擎进程与音频路由日志），不能只看应用自身进程日志——应用侧"零日志"可能是播报实际发生在独立引擎进程（如厂商 TTS 服务）且被系统路由到其他输出设备（如蓝牙 A2DP）。音频路由决策在系统层，App 无权更改，可靠的干预是：记录输出路由日志 + 向用户提示当前输出设备。真机复测时先隔离路由变量（断开蓝牙）再下结论。
+- 反例：只看 App 进程日志得出"降级后 32 秒零 TTS 活动、播报被丢弃"的错误结论——实际 13 段播报全部在 mibrain TTS 进程完成、输出被路由到蓝牙 A2DP
+- 正例：整机检索 `TtsService.*onSynthesizeText` + `AUDIO_DEVICE_OUT_BLUETOOTH_A2DP` 路由日志定位真因；startCall 记录输出设备列表 + 蓝牙连接时提示用户
+- 来源：BUG-20260909-001 复测轮"降级后仍无声"反转（TKN-VOICE-BUGFIX3-001 考古，简报前提被引擎进程日志证伪）
+- 添加日期：2026-09-09
+- 适用场景：bugfix / ops
+- 状态：active
+
+#### BR-ops-011: 语音 barge-in 打断必须整句锚定停止词、承接打断内容、用代号令牌终止播报链
+
+- 类别：ops / concurrency
+- 规则：语音助手的播报打断（barge-in）三要素：(1) 停止词判定必须**整句/句首锚定**（正则 ^...$ + 语气词容忍），禁止子串匹配——单字"停"会把任何含"停"的回声转写误判为打断；(2) "停止引导词+实际内容"的混合句（"等一下，地址改成X"）打断后必须**剥离引导词把余量作为新轮次**，禁止整句丢弃（用户内容丢失="后续无声"感知）；余量须含实际文字（letterOrDigit）且嵌套停止语（"停，别说了"）降级为纯打断；(3) 多段播报链的续播判定必须用**代号令牌**（离开 SPEAKING 的路径先自增代号再 stop；onDone 回调校验 phase+代号双条件）——TTS 引擎回调在独立线程派发，与主线程 phase 写无 happens-before，仅靠 phase 判定存在 TOCTOU 幽灵段竞态；链条终止必须留日志（剩余 N 段丢弃），禁止静默死亡。
+- 反例：`STOP_PHRASES.any { t.contains(it) }` 含单字"停"→ 回声误打断；打断分支只 stop+回聆听不 dispatch→用户补充内容丢失；speakSegments 仅判 phase→cb 线程 onDone 竞态续播幽灵段后链条静默死亡
+- 正例：classifyInterruption 三分类（PURE/WITH_CONTENT/NONE）+ 逐层剥离嵌套引导词 + 余量 letterOrDigit 校验；speakGeneration 代号 + 链条终止"剩余 N 段丢弃"日志
+- 来源：BUG-20260909-005 播报被打断后无声（TKN-VOICE-BUGFIX4-001 考古：回声源 + TOCTOU 幽灵段 + 链条静默死亡三因叠加）
+- 添加日期：2026-09-09
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-ops-012: 直读 AudioRecord 的端侧识别必须显式挂 AcousticEchoCanceler
+
+- 类别：ops
+- 规则：自建 AudioRecord 采集麦克风做语音识别时，`VOICE_COMMUNICATION` 音源**不保证**系统回声消除生效——必须显式 `AcousticEchoCanceler.create(audioSessionId)` + enabled 并随录音循环 release；否则 TTS 播报声被麦克风拾取识别成文本（回声转写），污染打断判定与对话。排查"播报被自己打断/幽灵识别"时优先核对该路径 AEC 是否挂载（打日志记录 attached/enabled 三态）。
+- 反例：sherpa 直读 AudioRecord 未挂 AEC——一次通话 SPEAKING 门丢弃 5 次回声转写并误触发语义打断（同应用云端路径 VoiceAudio 已挂 AEC，路径差异被忽略）
+- 正例：`if (AcousticEchoCanceler.isAvailable()) aec = create(rec.audioSessionId)?.also { enabled = true }` + finally release + 三态日志
+- 来源：BUG-20260909-005 回声源上游治理（TKN-VOICE-BUGFIX4-001 考古确认路径差异）
+- 添加日期：2026-09-09
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-interface-029: 角色 LLM 的"剧本腔"必须双端防御——prompt 源头禁止 + TTS 播报链净化
+
+- 类别：interface
+- 规则：人格化角色的 LLM 输出偶发夹带括号动作/神态旁白（「（眼神轻轻弯了一下）」）——对话场景的双层防御：(1) **prompt 源头**注入明确的输出格式硬规则（"只输出真正要说的话；不描写动作神态心理环境；不用括号/星号包装；情绪靠措辞断句表现；第一人称状态豁免"——可参考成熟人设项目的 System 规则而非自行措辞）；(2) **TTS 播报链净化层**剥离全角/半角括号包裹段（prompt 不保证被服从）。净化纯函数的坑：空白收敛禁止全量 `\s+`（会破坏以换行为边界的切分契约）、需吸收标点前后空格与行首孤立标点——**必须测试先行矩阵覆盖**。
+- 反例：TTS 逐字读出「（听到这句话，眼神轻轻弯了一下）」；stripActionText 首版 `\s+` 收敛把"下一行\n继续"合并成一句破坏切分（既有测试拦截）
+- 正例：prompt 注入 chat_system 反动作规则 + `stripActionText`（剥括号→空格收敛→标点前后吸收→行首孤立标点剥离）+ 8 单测矩阵（全角/半角/引号对白保留/纯旁白/前缀残留）
+- 来源：TASK-20260910-001 角色回复动作描写（Cyrene-Agent chat_system.md「即时聊天表达」节为规则源；stripActionText 两版被测试纠偏）
+- 添加日期：2026-09-10
+- 适用场景：dev
+- 状态：active
+
+#### BR-ops-013: 云端按量计费能力暴露给 UI 触发时必须"点击即构建、失败即降级、缓存带配置签名"
+
+- 类别：ops / interface
+- 规则：向用户提供触发云端付费能力的 UI（播放按钮等）时：(1) 引擎/客户端**点击时才构建**，禁止提前初始化产生额度消耗；(2) 构建失败（Key 缺失/网络）自动降级免费路径并留日志；(3) 实例缓存必须带**配置签名**（音色/Key 指纹/参数——用 hashCode 不用明文），签名变化自动释放重建；(4) 单播 UI 状态机必须带**代际守卫**（toggle/stop 先自增代号；挂起点后与回调线程中复验；settle 多条件收敛）——引擎回调线程与 UI 主线程无 happens-before，快速连点/陈旧回调会产生双播与状态误清；(5) 引擎回调统一经主线程 scope 派发后再触碰主线程约定资源（如 TextToSpeech）。
+- 反例：文本播报控制器无代际守卫——快速连点两条消息时 stop 落空双播、陈旧 onDone 误清新 Playing 状态；MINIMAX 缓存无配置签名——换 Key 后沿用旧配置
+- 正例：playbackGeneration 三自增三复验 + settle(代际+messageId 双条件) + 回调 scope.launch(Main) 派发 + 配置签名缓存重建
+- 来源：FEAT-20260910-002 文本聊天播放按钮（TKN-ROLEPACK4-002 guardrail Q1/Q2 高危拦截 + Q3 中危）
+- 添加日期：2026-09-10
+- 适用场景：dev
+- 状态：active
+
+#### BR-testing-009: 正则/文本净化类纯函数必须测试先行矩阵，禁止"实现后补测"
+
+- 类别：testing
+- 规则：文本净化、正则匹配、格式解析类纯函数**先写用例矩阵再实现**（全角/半角变体、嵌套、空输入、边界锚定、与既有契约的交互如换行切分）。该类函数的正确性直觉极不可靠——同一实现连续两版被测试纠偏（换行收敛破坏切句边界、标点前后空格残留、行首孤立标点）。测试同时充当回归锁（净化规则演进时逐条锁定行为）。
+- 反例：stripActionText 实现→测试→失败→修→再失败的循环（两轮纠偏，浪费一次全量构建）
+- 正例：先列矩阵（全角括号/半角括号/引号对白保留/纯旁白/前缀残留/换行交互/标点空格）→ 实现 → 矩阵全绿
+- 来源：TASK-20260910-001 stripActionText 两轮测试纠偏（TKN-ROLEPACK4-003 验收确认 8 用例矩阵）
+- 添加日期：2026-09-10
+- 适用场景：dev
+- 状态：active
+
+#### BR-interface-025: 导入类功能的"成功"必须包含"生效"语义，关键回落分支必须有日志留痕
+
+- 类别：interface / error-handling
+- 规则：(1) 导入类功能（角色包/配置/插件等）导入成功后必须**自动选中/激活**，禁止把"选中"留给用户二次操作——用户将"导入成功"理解为"已生效"，导入与生效分离必然产生"我导入了为什么没变化"的错觉 Bug；(2) 带回落语义的读取入口（如 effectiveRolePack 未选中/文件缺失回落默认值）每个回落分支必须有日志留痕（常态回落用 DEBUG，异常回落用 WARN），禁止静默回落——静默回落是排障盲区；(3) 提供"回到默认"的显式 UI 入口（如列表顶部常驻默认行），不允许"只能删除用户数据才能回默认"。
+- 反例：`importRolePack` 只落盘不 select——用户导入后通话仍是出厂人设；`effectiveRolePack()` 未选中/文件缺失静默 return B0——通话中 0 日志，无法区分"未选中"与"链路断"
+- 正例：导入成功链 `import → select(pack.id) → 刷新选中态`；默认行 `selected = selectedId == null` 常驻列表顶部、点击 clearSelection；回落分支 `Log.d/W` 分级留痕
+- 来源：BUG-20260908-002 角色包导入未生效且无默认选项（TKN-VOICE-BUGFIX-001 考古 + TKN-VOICE-BUGFIX-003 验收）
+- 添加日期：2026-09-08
+- 适用场景：dev / bugfix
+- 状态：active
+
 ### ops
 
 （暂无规则，待累积）
@@ -1238,3 +1370,5 @@
 | 2026-08-23 | 主 Agent + guardrail-enforcer + ac-verifier | 新增 BR-ops-005 | v1 批次14 保活 Bug 修复（ADR-041，真机「不用软件也弹窗+卡顿」）：根因为批次11 F2 把保活 FGS 绑在「无障碍启用期」而非「任务期」（dumpsys 实证常驻 1d8h10m + START_STICKY 重启循环）。修复：PhoneControlSessionManager 任务期动态保活状态机（首个 phone_control__* 工具调用启动/空闲 120s 停止/onDestroy reset）+ START_NOT_STICKY + FGS 后台启动拒绝可诊断降级 + 无障碍事件订阅收窄 typeWindowStateChanged+300ms（卡顿根治）。guardrail 两轮（M-1 TOCTOU 锁内单取值修复 / M-2 429 退避真空豁免记录）通过 + ac-verifier 7/7 PASS + 全量回归 2475 用例 0 失败 + lint 0 errors + 真机预验证（覆盖安装重绑后 KeepAlive 不再运行、id=2001 常驻通知消失）。新增规则：BR-ops-005（常驻资源绑定任务活跃期而非能力开关期 + 空闲超时释放 + 高频事件订阅须有消费者） |
 | 2026-09-07 | 主 Agent + guardrail-enforcer + ac-verifier | 新增 BR-ops-006 + BR-security-013 + BR-interface-023 | 后台 trusted 副屏竞态 Bug 修复闭环（TKN-B22R7-BUG-001，B2/P2）：真机取证 zh-CN 本地化谓词失效（trusted 屏 4.1s 超时误拆 → untrusted 屏输入全废，6 症状一链闭环）。guardrail 两轮（R1 有条件通过：S1 敏感祖先拦截绕过 + S2 降级落点绕过 + Q1 快照竞态 + Q2 中断语义 + Q3 宽松重检误吞投屏；全修复后 R2 通过）+ ac-verifier 静态 6/6 通过 + Golden Master 差异仅预期三处 + 全量 2642 用例 0 失败 + lint 0 errors（顺带修复 4 处先前轮次遗留 lint error）。3 条新规则：BR-ops-006（本地化无关资源检测 + 快照先于创建动作 + 宽松重检不拆已有）、BR-security-013（新 sink 前置敏感复检 + 扩候选必须重走拦截链）、BR-interface-023（exit=0 ≠ 语义成功，禁"已成功+可能失败"混合文案） |
 | 2026-09-07 | 主 Agent + guardrail-enforcer + ac-verifier | 新增 BR-ops-007 + BR-ops-008 | 修复轮八闭环（TKN-B22R8-BUG-001，B2/P2）：修复轮七真机验证 D0/D1 生效（trusted 屏就绪、tap(text) 锚点命中），但中文输入仍失败 + 叠加小窗滞留。取证：①`input --display` 是无效选项（AOSP 仅 `-d`，ROM 报 Unknown command 且 exit=0）→ 注入从未执行假成功（`-d` 链路真机实证：tap 聚焦 + IME 在虚拟屏弹出 mInputShown=true）；②进程 18:14:29 死亡早于 120s 空闲释放 → overlay_display_devices 全局设置滞留。修复：-d 选项×4 命令+回归锁、AIDL +execWithOutput（version 1→2）+ 启动对账 reconcileStaleOverlay（isOurOverlaySpec 精确匹配 + 锁内复检 + CAS 去重）、通知「关闭后台虚拟屏」action + onTaskRemoved + a11y 断开三释放入口、findEditableAt 放宽 ACTION_PASTE + 最小面积优选（Q-4）、execWithOutput 超时契约（Q-1 读流线程化 + destroyForcibly）、ADR-046 勘误。guardrail 三轮（R1 有条件通过 Q-1/Q-2 必修 → R2 仅剩 O-2 注释残留 → R3 终审通过）+ ac-verifier 静态通过 + **2647 用例 --rerun-tasks 强制重跑 0 失败**。**BR-ops-002 第四次实证：同消息 3 个 Edit 并行改同一文件后写覆盖先写（复审抓到）**。2 条新规则：BR-ops-007（命令选项以官方 usage+ROM 实测为准，禁采信调研转述）、BR-ops-008（全局状态副作用需进程死亡安全网：多入口释放+启动对账+手动入口） |
+| 2026-09-08 | 主 Agent + guardrail-enforcer + ac-verifier | 新增 BR-interface-024 + BR-interface-025；**BR-ops-002 第五次实证（主 Agent 违规）** | 语音 v2.2 双 Bug 修复闭环（BUG-20260908-001/002，B2/P1，TKN-VOICE-BUGFIX-001~003）。根因 1：MiniMaxTtsEngine 与 CloudVoiceSelfCheck 端点常量硬编码国际站 api.minimax.io，用户 Key 为 CN 站（platform.minimaxi.com 克隆）→ 握手层鉴权拒绝 200+base_resp JSON，OkHttp 报 ProtocolException「Expected HTTP 101」必现回退端侧，自检同败；修复为 CN 站 api.minimaxi.com 成对修改 + onFailure 日志加 http code + 自检文案加站点线索。根因 2：importRolePack 只落盘不选中 + effectiveRolePack 未选中/文件缺失静默回落 B0 零日志 + UI 无默认行 → 导入不生效且无法回默认；修复为导入即 select + 默认行常驻列表顶部（showDelete=false）+ 三回落分支 Log.d/W 分级留痕。guardrail 首审阻断（A1/A2：端点常量与默认行 hunk 未落码）→ 补齐复审 D1（.gitignore 误申报未落码）→ 最小闭环通过；ac-verifier 全 AC 通过 + 全量 2746 用例 0 失败 + Golden Master（PROBE_ERROR_MESSAGE 逐字节不变）。**BR-ops-002 第五次实证**：主 Agent 在同一消息中对同一文件并行发 2 个 Edit（三文件各违反一次），先发 hunk 全部丢失、后发存活——首审 A1/A2 阻断即此模式的后果，任务启动时未按 23.4 必读 BR-ops-002 是流程根因。2 条新规则：BR-interface-024（区域敏感端点与账号站点成对核验 + 最小握手 PoC + 200 握手拒绝诊断口径）、BR-interface-025（导入即生效 + 回落留痕 + 默认入口） |
+| 2026-09-09 | 主 Agent + guardrail-enforcer + ac-verifier | 新增 BR-interface-026 + BR-interface-027 + BR-ops-009 | 语音无声/自检误报/假开关三轮修复闭环（BUG-20260909-001/002/003 + TASK-004 昔涟人设重写，B3/P1~P2，TKN-VOICE-BUGFIX2-001~003）。根因 1：MiniMax T2A 会话 task_finished 零音频帧仍按成功 onDone（CN 端点修复后握手成功，但服务端空完成）→ 14/14 句静音不降级；修复为 finishOrGrace 零帧守卫（600ms 宽限 → fail 含"已回退"标记自动切端侧）+ writeChunk 接受 DRAINING 态 + 6 点帧级插桩（事件名/字节数，不含内容）+ ByteString 二进制帧显式落日志。根因 2：runAsrSelfCheck 无条件要求 DashScope Key；修复为按 voiceAsrEngine 分流（端侧→提示无需 Key）。根因 3：thinking 关闭态省略字段（GLM 等默认思考端点无视开关）+ 会话 VM 仅 init 一次性读（跨 VM 不同步）+ 语音轮次无强制快速模式；修复为 thinking 显式双态下发（false→{"type":"disabled"}，严格端点 400 为已声明取舍）+ flow 持续收集（thinkingToggledByUser 竞态标记随之移除）+ 语音轮次强制 thinkingEnabled=false。TASK-004：cyrene.rolepack 基于 Playa-0v0/Cyrene-Agent（soul/chat_identity/phone_style/canon_quotes）重写 v2.0.0（人家/我 7:3、语音禁 ♪ 与书面词、意象限一、伪人格黑名单），已 adb 推送设备。guardrail 通过（4 低风险观察，O-4 文档失真当场修复）+ ac-verifier 10/10 通过 + 全量 2749 用例 0 失败。**BR-ops-002 第六次实证（反向）**：全程严格单 Edit 串行，零 hunk 丢失——规则有效性再次确认。3 条新规则：BR-interface-026（空成功必须降级 + 帧级诊断留痕）、BR-interface-027（布尔开关参数显式双态下发）、BR-ops-009（自检按当前选中上下文分流） |

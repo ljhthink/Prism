@@ -38,8 +38,11 @@ object CloudVoiceSelfCheck {
     /** 阿里云百炼实时识别 WS 服务地址（与 AliCloudAsrEngine 私有常量同源，官方文档 2026-09 版原样含尾斜杠）。 */
     private const val DASHSCOPE_WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference/"
 
-    /** MiniMax T2A v2 WS 端点（与 MiniMaxTtsEngine 私有常量同源；CN 站账号为 api.minimaxi.com）。 */
-    private const val MINIMAX_WS_URL = "wss://api.minimax.io/ws/v1/t2a_v2"
+    /**
+     * MiniMax T2A v2 WS 端点——CN 站（与 [io.prism.voice.cloud.MiniMaxTtsEngine] 私有常量
+     * WS_URL 同源同步，BUG-20260908-001 一并修复；国际站账号为 api.minimax.io）。
+     */
+    private const val MINIMAX_WS_URL = "wss://api.minimaxi.com/ws/v1/t2a_v2"
 
     /** 独立探测客户端（不触碰引擎共享 CLIENT；连接与读均 3s 预算）。 */
     private val client: OkHttpClient by lazy {
@@ -133,7 +136,14 @@ object CloudVoiceSelfCheck {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                failure.compareAndSet(null, "连接失败（${t::class.simpleName}）——请检查网络与 Key/GroupId")
+                // MiniMax 在 HTTP 层完成鉴权：握手被拒（http=200+JSON 错误体）通常是 Key 与
+                // 端点站点不匹配或 Key/GroupId 无效——文案给出该线索；不输出请求头防 Key 泄露
+                val http = response?.code
+                failure.compareAndSet(
+                    null,
+                    "连接失败（${t::class.simpleName}，http=${http ?: "-"}）" +
+                        "——请检查网络、Key/GroupId 是否有效，以及 Key 是否为国内站（platform.minimaxi.com）Key"
+                )
                 latch.countDown()
             }
         })

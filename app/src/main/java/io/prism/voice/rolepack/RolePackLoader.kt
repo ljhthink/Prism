@@ -163,13 +163,22 @@ class RolePackLoader(
      * 开销可忽略。选中文件缺失/损坏 → 回落 [RolePack.DEFAULT_ROLE_PACK]（不抛）。
      */
     suspend fun effectiveRolePack(): RolePack {
-        val id = selectedIdStore.get() ?: return RolePack.DEFAULT_ROLE_PACK
+        // 回落分支显式留痕（BUG-20260908-002：原未选中/文件缺失回落均为静默，排障盲区）
+        val id = selectedIdStore.get()
+        if (id == null) {
+            // guardrail L1：未选中回落是合法常态（未导入用户的每轮装配），降为 DEBUG 防日志噪音
+            Log.d(TAG, "effectiveRolePack: no rolepack selected, fallback B0 (default)")
+            return RolePack.DEFAULT_ROLE_PACK
+        }
         return withContext(Dispatchers.IO) {
-            findPackFile(id)?.let { f ->
-                runCatching { RolePackParser.parse(f.readText()) }
-                    .onFailure { Log.w(TAG, "selected rolepack unreadable, fallback B0: ${it::class.simpleName}") }
-                    .getOrNull()
-            } ?: RolePack.DEFAULT_ROLE_PACK
+            val file = findPackFile(id)
+            if (file == null) {
+                Log.w(TAG, "effectiveRolePack: selected rolepack file missing, fallback B0: id=$id")
+                return@withContext RolePack.DEFAULT_ROLE_PACK
+            }
+            runCatching { RolePackParser.parse(file.readText()) }
+                .onFailure { Log.w(TAG, "selected rolepack unreadable, fallback B0: ${it::class.simpleName}") }
+                .getOrNull() ?: RolePack.DEFAULT_ROLE_PACK
         }
     }
 

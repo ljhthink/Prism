@@ -114,12 +114,16 @@ class SystemTtsEngine(context: Context) : TtsEngine {
             return
         }
         val utteranceId = "prism-tts-${idCounter.incrementAndGet()}"
+        // BUG-20260909-001 复测取证：成功路径零日志导致"13 段实际已播"在应用日志完全不可见
+        Log.d(TAG, "speak: utt=$utteranceId len=${text.length}")
         tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String?) {
+                Log.d(TAG, "onStart: utt=$utteranceId")
                 utteranceId?.let(listener::onStart)
             }
 
             override fun onDone(utteranceId: String?) {
+                Log.d(TAG, "onDone: utt=$utteranceId")
                 utteranceId?.let(listener::onDone)
             }
 

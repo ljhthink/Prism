@@ -2001,6 +2001,16 @@ private fun RolePackSection(viewModel: SettingsViewModel) {
             Text(text = "尚未导入角色包。", color = PrismTextFaint, fontSize = 11.sp)
             Spacer(Modifier.height(8.dp))
         }
+        // 出厂默认角色包行（BUG-20260908-002）：始终展示——未选中任何包时即「生效中」，
+        // 点击清除选中回落 B0；默认包不可删除（无 ✕）
+        RolePackRow(
+            pack = io.prism.voice.rolepack.RolePack.DEFAULT_ROLE_PACK,
+            selected = selectedId == null,
+            onSelect = { viewModel.clearRolePackSelection() },
+            onDelete = {},
+            showDelete = false
+        )
+        Spacer(Modifier.height(8.dp))
         packs.forEach { pack ->
             RolePackRow(
                 pack = pack,
@@ -2037,13 +2047,15 @@ private fun RolePackSection(viewModel: SettingsViewModel) {
     }
 }
 
-/** 角色包列表行（批次23-C）：点击切换选中，行尾 ✕ 按钮删除（复用引擎选项行视觉）。 */
+/** 角色包列表行（批次23-C）：点击切换选中，行尾 ✕ 按钮删除（复用引擎选项行视觉）；
+ *  showDelete=false 时隐藏删除按钮（出厂默认行专用，默认包不可删）。 */
 @Composable
 private fun RolePackRow(
     pack: io.prism.voice.rolepack.RolePack,
     selected: Boolean,
     onSelect: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    showDelete: Boolean = true
 ) {
     Row(
         modifier = Modifier
@@ -2087,20 +2099,22 @@ private fun RolePackRow(
         if (selected) {
             Text(text = "生效中", color = PrismMint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
         }
-        Box(
-            modifier = Modifier
-                .size(32.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(PrismPanel2)
-                .border(1.dp, PrismLine, RoundedCornerShape(8.dp))
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onDelete
-                ),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(text = "✕", color = PrismTextDim, fontSize = 12.sp)
+        if (showDelete) {
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(PrismPanel2)
+                    .border(1.dp, PrismLine, RoundedCornerShape(8.dp))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onDelete
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(text = "✕", color = PrismTextDim, fontSize = 12.sp)
+            }
         }
     }
 }

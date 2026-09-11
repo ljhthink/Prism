@@ -251,6 +251,31 @@ object RolePackStyleApplier {
     private val CLAUSE_BREAKS = charArrayOf('，', '、', '：', ',', ':', '—')
 
     /**
+     * 剥离动作/神态旁白段（TASK-20260910-001）。
+     *
+     * 角色 LLM 偶发输出括号包装的动作描写（如「（听到这句话，眼神轻轻弯了一下）」）——
+     * 这是剧本写法不是对话内容，TTS 播报会逐字读出，极其出戏。剥离规则：
+     * - 全角括号（…）与半角括号 (...) 包裹的段落整体移除（单层，嵌套括号罕见不做递归）；
+     * - 中文正文中的正常括号补充（如单位换算）一并移除——播报场景下括号补充同样不适合朗读；
+     * - 引号对白（「」“”"）保留——那是对话本体；
+     * - 剥离后收敛多余空白，纯旁白输入（剥完为空）由调用方处理。
+     *
+     * 调用点：[apply] 播报切分前；TextPlaybackController 文本播报前。
+     */
+    fun stripActionText(text: String): String =
+        text.replace("（[^（）]*）".toRegex(), " ")
+            .replace("\\([^()]*\\)".toRegex(), " ")
+            // 仅收敛空格/制表符，保留换行——SENTENCE_BREAKS 以 \n 为切句边界（回归教训：
+            // 全量 \s+ 收敛会把"下一行\n继续"合并成一句，破坏切分契约）
+            .replace("[ \\t]{2,}".toRegex(), " ")
+            // 吸收剥离残留的标点前/后空格（"嗯 。 后来" → "嗯。后来"，防 TTS 停顿怪异感）
+            .replace(" ([，。！？；：、])".toRegex(), "$1")
+            .replace("([，。！？；：、]) ".toRegex(), "$1")
+            // 剥离结果行首孤立标点（guardrail Q5：纯前缀旁白"（…），正文"残留"，正文"）
+            .replace("^[，。！？；：、\\s]+".toRegex(), "")
+            .trim()
+
+    /**
      * 应用 voiceCall 风格分段。
      *
      * @param text 待播报文本（原样，不改动内容——只做切分，不注入 fillers/不改写措辞）
@@ -258,7 +283,8 @@ object RolePackStyleApplier {
      * @return 分段列表（顺序即播报顺序）；空白输入返回空列表（调用方跳过播报）
      */
     fun apply(text: String, style: RolePack.VoiceCallStyle): List<String> {
-        val trimmed = text.trim()
+        // TASK-20260910-001：先剥离括号动作/神态旁白再切分（防 TTS 读出「（…）」剧本描写）
+        val trimmed = stripActionText(text)
         if (trimmed.isEmpty()) return emptyList()
         if (!style.sentenceBreak) return listOf(trimmed)
         val sentences = splitBy(trimmed, SENTENCE_BREAKS)

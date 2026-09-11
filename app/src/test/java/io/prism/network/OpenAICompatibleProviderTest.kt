@@ -333,8 +333,9 @@ class OpenAICompatibleProviderTest {
     }
 
     @Test
-    fun `buildRequestBody omits thinking fields when thinkingEnabled false`() {
-        // 问题 8a（ADR-020）：关闭时不得发送 DeepSeek 专有参数（向后兼容所有端点）
+    fun `buildRequestBody sends explicit disabled thinking when thinkingEnabled false`() {
+        // BUG-20260909-003：关闭时必须**显式下发** thinking={"type":"disabled"}——
+        // 原实现省略字段，默认开启思考的端点（如 GLM）无视开关始终思考（假开关）
         val config = ProviderConfig(
             name = "OpenAI", baseUrl = "https://api.openai.com/v1",
             apiKeyRef = "openai", models = listOf("gpt-4o")
@@ -345,13 +346,13 @@ class OpenAICompatibleProviderTest {
 
         val body = provider.buildRequestBody(config, messages, thinkingEnabled = false, reasoningEffort = "high")
 
-        assertFalse("关闭时不应包含 thinking 字段", body.contains("thinking"))
+        assertTrue("关闭时应显式禁用思考", body.contains("\"thinking\":{\"type\":\"disabled\"}"))
         assertFalse("关闭时不应包含 reasoning_effort 字段", body.contains("reasoning_effort"))
     }
 
     @Test
-    fun `buildRequestBody omits thinking fields when thinkingEnabled default false`() {
-        // 向后兼容：不传 thinkingEnabled（默认 false）时与旧行为一致
+    fun `buildRequestBody sends explicit disabled thinking when thinkingEnabled default false`() {
+        // BUG-20260909-003：默认（不传 thinkingEnabled）与显式 false 行为一致——显式禁用
         val config = ProviderConfig(
             name = "Ollama", baseUrl = "http://localhost:11434/v1",
             apiKeyRef = "", models = listOf("llama3")
@@ -362,7 +363,7 @@ class OpenAICompatibleProviderTest {
 
         val body = provider.buildRequestBody(config, messages)
 
-        assertFalse("默认不应包含 thinking 字段", body.contains("thinking"))
+        assertTrue("默认应显式禁用思考", body.contains("\"thinking\":{\"type\":\"disabled\"}"))
         assertFalse("默认不应包含 reasoning_effort 字段", body.contains("reasoning_effort"))
     }
 

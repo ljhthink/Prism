@@ -157,9 +157,11 @@ Prism/
 │       ├── security/           # 安全层（KeyStore 加密）
 │       └── config/             # 配置仓库
 ├── docs/                       # 文档
-│   ├── decisions/              # 架构决策记录（ADR）
-│   └── templates/              # PRD/ARCH/ADR/Task 模板
-└── AGENTS.md                   # 项目进度与治理记录
+│   ├── decisions/              # 架构决策记录（ADR，本地专属）
+│   ├── templates/              # PRD/ARCH/ADR/Task 模板
+│   └── progress.md             # 项目进展记录（本地专属）
+├── rules/                      # AI 规则模块（本地专属，入口见 AGENTS.md）
+└── AGENTS.md                   # AI 规则体系入口（适配 TRAE / opencode / DeepSeek Harness / Claude Code）
 ```
 
 ## 技术栈
@@ -190,11 +192,13 @@ Prism/
 
 ## 相关文档
 
-- [AGENTS.md](AGENTS.md) —— 项目进度与治理记录（面向 AI Agent 与开发者）
-- [docs/decisions/](docs/decisions/README.md) —— 架构决策记录（ADR-001~ADR-045）
-- [docs/PRD.md](docs/PRD.md) —— 产品需求文档 v0.1
-- [docs/prd-search-fetch-enhancement.md](docs/prd-search-fetch-enhancement.md) —— 搜索命中与 Fetch 反爬优化 PRD（v1 批次15）
-- [docs/prd-v1-b17-features.md](docs/prd-v1-b17-features.md) —— 批次17 四项新功能 PRD（TODO List / 思维链覆写 / 对话回退 / 对话重试）
-- [docs/prd-v1-b20-voice-bg-control.md](docs/prd-v1-b20-voice-bg-control.md) —— 批次20 PRD（语音通话 P1 / 手机操控后台化 M1，ADR-044/045）
+- [AGENTS.md](AGENTS.md) —— AI 规则体系入口（适配 TRAE / opencode / DeepSeek Harness / Claude Code；本地专属）
+- [docs/progress.md](docs/progress.md) —— 项目进展记录（本地专属）
+- 规则模块（本地专属，经 [AGENTS.md](AGENTS.md) 强制加载矩阵读取）：[00-core](rules/00-core.md) / [01-planning-research](rules/01-planning-research.md) / [02-source-github](rules/02-source-github.md) / [03-doc-governance](rules/03-doc-governance.md) / [04-coding-review-loop](rules/04-coding-review-loop.md) / [05-git-release](rules/05-git-release.md) / [06-risk](rules/06-risk.md) / [07-engineering-standards](rules/07-engineering-standards.md) / [08-bugfix-ops](rules/08-bugfix-ops.md)
+- [docs/decisions/](docs/decisions/README.md) —— 架构决策记录（ADR-001~ADR-048，本地专属）
+- [docs/PRD.md](docs/PRD.md) —— 产品需求文档 v0.1（本地专属）
+- [docs/prd-search-fetch-enhancement.md](docs/prd-search-fetch-enhancement.md) —— 搜索命中与 Fetch 反爬优化 PRD（v1 批次15，本地专属）
+- [docs/prd-v1-b17-features.md](docs/prd-v1-b17-features.md) —— 批次17 四项新功能 PRD（TODO List / 思维链覆写 / 对话回退 / 对话重试，本地专属）
+- [docs/prd-v1-b20-voice-bg-control.md](docs/prd-v1-b20-voice-bg-control.md) —— 批次20 PRD（语音通话 P1 / 手机操控后台化 M1，ADR-044/045，本地专属）
 - [docs/runbooks/searxng-selfhost.md](docs/runbooks/searxng-selfhost.md) —— SearXNG 自建搜索接入 Runbook
-- [CLAUDE.md](CLAUDE.md) —— AI 编程行为最高准则
+- [CLAUDE.md](CLAUDE.md) —— 指向 AGENTS.md 的规则入口指针（Claude Code 适配，本地专属）

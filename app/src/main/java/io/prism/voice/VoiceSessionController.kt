@@ -219,6 +219,21 @@ class VoiceSessionController(
         // guardrail P1-1：注册通知挂断回调——通知栏"挂断"触发完整挂断逻辑（状态机回写）
         VoiceForegroundService.hangUpRequested = { hangUp(context) }
         Log.i(TAG, "语音通话开始（FGS 启动=$callActive，流式引擎=${asr.isStreaming}）")
+        // BUG-20260909-001 复测取证：TTS 输出被系统路由到蓝牙 A2DP（用户听手机扬声器 → "全程
+        // 无声"假象，考古报告 13 段播放序列实证）。通话开始时记录输出路由；蓝牙设备连接时
+        // 提示用户（App 无权改系统路由决策，提示是唯一可靠干预）。
+        runCatching {
+            val am = context.getSystemService(android.content.Context.AUDIO_SERVICE) as? android.media.AudioManager
+            val outputs = am?.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS)
+            val hasBt = outputs?.any {
+                it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                    it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+            } == true
+            Log.i(TAG, "音频输出设备：[${outputs?.joinToString(",") { it.type.toString() } ?: "?"}]（蓝牙连接=$hasBt）")
+            if (hasBt) {
+                postFallbackNotice("检测到蓝牙音频设备，播报将输出到蓝牙；若未听到声音请检查耳机连接")
+            }
+        }
         // 批次23-B（ADR-048）：装配角色包 voice.system → 系统 TTS 音高/语速（出厂 B0 = 1.0/1.0
         // 中性值，装配后行为不变；读取失败静默跳过——引擎保持默认参数，不阻断通话）。
         // MiniMax/GPT-SoVITS 音色映射（voice.minimax/gptsovits）随云端引擎选择器下批接线。
@@ -284,13 +299,57 @@ class VoiceSessionController(
     private var muteNextBroadcast = false
 
     /**
-     * 停止/补充短语匹配（语义打断的工程化近似——端侧无法做完整语义模型，
-     * 用 ASR 文本关键词表近似豆包 Seeduplex"动态判停"的打断意图判定）。
+     * BUG-20260909-005（打断链 TOCTOU 竞态根修）：播报链条代号。
+     * 所有强制离开 SPEAKING 的路径（语义打断/挂断）**先自增代号再 tts.stop()**；
+     * [speakSegments] 续播判定 `phase==SPEAKING && 代号一致`——根修 cb 线程 onDone 与
+     * 主线程 phase 写之间无 happens-before 导致的幽灵段续播（真机 51.280 幽灵会话）。
      */
-    private fun containsStopPhrase(text: String): Boolean {
+    @Volatile
+    private var speakGeneration = 0
+
+    /** 语义打断执行：代号自增（根修链条竞态）→ 停播 → 回聆听（保留在途音频）。 */
+    private fun interruptPlaybackAndListen() {
+        speakGeneration++
+        tts.stop()
+        if (asr.isStreaming && callActive) {
+            enterListening(resetBefore = false)
+        } else {
+            _phase.value = Phase.IDLE
+        }
+    }
+
+    /** 打断分类（见 [classifyInterruption]）。 */
+    private enum class Interruption { PURE, WITH_CONTENT, NONE }
+
+    /**
+     * 停止/打断指令分类（BUG-20260909-005，替代旧 containsStopPhrase 子串匹配）。
+     * - PURE：整句即停止/打断指令（正则整句锚定——旧实现单字"停"子串匹配，
+     *   任意含"停"的 10 字回声转写都会误触发打断）；
+     * - WITH_CONTENT：停止引导词 + 实际内容（"等一下，地址改成X"）→ 打断后余量
+     *   作为新轮次 dispatch（旧实现整句丢弃，用户内容丢失="后续无声"感知的一半）；
+     * - NONE：非打断（多为回声/环境音误识别）→ 丢弃。
+     */
+    private fun classifyInterruption(text: String): Pair<Interruption, String?> {
         val t = text.trim()
-        if (t.length > 30) return false  // 长句几乎不可能是打断指令（多为回声误识别）
-        return STOP_PHRASES.any { t.contains(it) }
+        if (t.length > 30) return Interruption.NONE to null  // 长句几乎不可能是打断指令（多为回声误识别）
+        if (PURE_STOP_REGEX.matches(t)) return Interruption.PURE to null
+        // 逐层剥离句首引导词（guardrail F2：嵌套停止语"停，别说了"不得把"别说了"当内容 dispatch；
+        // F1：引导词后允许语气词——"等一下啊，X"）
+        var rest = t
+        var stripped = false
+        repeat(3) {
+            val next = STOP_LEAD_REGEX.replaceFirst(rest, "").trim()
+            if (next == rest) return@repeat
+            rest = next
+            stripped = true
+        }
+        if (!stripped) return Interruption.NONE to null
+        if (PURE_STOP_REGEX.matches(rest)) return Interruption.PURE to null
+        // guardrail F3：余量须含实际文字（纯标点/语气词不算——"等一下，。。"→ 纯打断）
+        if (rest.length >= 2 && rest.any { it.isLetterOrDigit() }) {
+            return Interruption.WITH_CONTENT to rest
+        }
+        return Interruption.PURE to null  // 引导词 + 语气词/标点短尾（"等一下啊"）→ 纯打断
     }
 
     /** 常驻引擎监听器（批次22 抽为字段——流式引擎全程复用同一实例）。 */
@@ -315,21 +374,31 @@ class VoiceSessionController(
             //（多为 TTS 回声/环境音误识别）→ 丢弃并重建流清缓冲。THINKING：停止词 →
             // 置静音标记（回复仅文字不播报）；其余丢弃。
             if (_phase.value == Phase.SPEAKING) {
-                if (containsStopPhrase(text)) {
-                    Log.i(TAG, "语义打断：播报中收到停止/补充指令（长度=${text.length}）")
-                    tts.stop()
-                    if (asr.isStreaming && callActive) {
-                        enterListening(resetBefore = false)
-                    } else {
-                        _phase.value = Phase.IDLE
+                // BUG-20260909-005：打断分类——纯停止指令→停播回聆听；停止引导词+内容→
+                // 打断后余量作为新轮次（旧实现整句丢弃，用户补充内容丢失）；其余丢弃
+                val (kind, remainder) = classifyInterruption(text)
+                when (kind) {
+                    Interruption.WITH_CONTENT -> {
+                        Log.i(TAG, "语义打断：停止+补充内容（余量=${remainder?.length}字）→ 打断并开新轮次")
+                        interruptPlaybackAndListen()
+                        remainder?.let { dispatchToConversation(it) }
                     }
-                } else {
-                    asr.resetCapture()  // 非打断语音（回声/环境音）→ 清流防缓冲累积
+                    Interruption.PURE -> {
+                        Log.i(TAG, "语义打断：纯停止指令（长度=${text.length}）→ 停播回聆听")
+                        interruptPlaybackAndListen()
+                    }
+                    Interruption.NONE -> {
+                        Log.d(TAG, "SPEAKING 门丢弃非停词续话（长度=${text.length}）")
+                        asr.resetCapture()  // 非打断语音（回声/环境音）→ 清流防缓冲累积
+                    }
                 }
                 return
             }
             if (_phase.value == Phase.THINKING) {
-                if (containsStopPhrase(text)) {
+                // 思考期：停止类指令（纯停止或带内容）→ 本轮回复仅文字不播报；
+                // 带内容的余量在本轮无法 dispatch（会话忙），用户需在回复后重述（设计限制）
+                val (kind, _) = classifyInterruption(text)
+                if (kind != Interruption.NONE) {
                     Log.i(TAG, "语义打断：思考期收到停止指令 → 本轮回复仅文字不播报")
                     muteNextBroadcast = true
                 }
@@ -502,6 +571,7 @@ class VoiceSessionController(
      */
     private fun speakSegments(segments: List<String>, index: Int, listener: TtsEngine.Listener) {
         if (_phase.value != Phase.SPEAKING) return
+        val gen = speakGeneration  // 链条代号快照（BUG-20260909-005：续播须代号一致，根修 TOCTOU）
         val segment = segments.getOrNull(index) ?: return
         tts.speak(segment, object : TtsEngine.Listener {
             override fun onStart(utteranceId: String) {
@@ -509,7 +579,11 @@ class VoiceSessionController(
             }
 
             override fun onDone(utteranceId: String) {
-                if (_phase.value != Phase.SPEAKING) return  // 打断/挂断：链条终止（不再续播）
+                if (_phase.value != Phase.SPEAKING || speakGeneration != gen) {
+                    // 打断/挂断：链条终止（不再续播）。留痕——旧实现静默死亡是"后续无声"排障盲区
+                    Log.i(TAG, "播报链条终止：剩余 ${segments.size - index - 1} 段丢弃（打断/挂断/代号过期）")
+                    return
+                }
                 if (index + 1 < segments.size) {
                     speakSegments(segments, index + 1, listener)
                 } else {
@@ -522,7 +596,9 @@ class VoiceSessionController(
                 // 超时文案自带"已回退"）→ 切端侧系统播报并**重试当前动作**（重播当前段；
                 // 切换在主线程完成后 retry 才执行）。非降级类错误照常终止本轮。
                 val fallbackTriggered = tryFallbackTts(message) {
-                    if (_phase.value == Phase.SPEAKING) speakSegments(segments, index, listener)
+                    if (_phase.value == Phase.SPEAKING && speakGeneration == gen) {
+                        speakSegments(segments, index, listener)
+                    }
                 }
                 if (fallbackTriggered) return
                 // 任一段失败即终止本轮（剩余分段放弃，交外部监听器回写状态机）
@@ -541,6 +617,7 @@ class VoiceSessionController(
 
     /** 挂断：终止一切（录音/播报/监听 + FGS），复位状态机（通知挂断与 UI 挂断共用；幂等）。 */
     fun hangUp(context: android.content.Context) {
+        speakGeneration++  // BUG-20260909-005：先失效播报链（防 cb 线程 onDone 竞态续播幽灵段）
         asr.cancel()
         tts.stop()
         watchJob?.cancel()
@@ -566,13 +643,25 @@ class VoiceSessionController(
         private const val TAG = "VoiceSession"
 
         /**
-         * 批次22 修复轮四：停止/补充短语表（语义打断；命中即打断播报并回聆听——
-         * 用户可随后口述补充内容，Seeduplex"等一下，我拿笔记一下"同款交互）。
+         * BUG-20260909-005：停止/打断指令词表（配合 [classifyInterruption] 整句锚定使用）。
+         * 旧实现单字"停"做子串匹配——任意含"停"的回声转写（如"停下来聊"）都会误触发打断；
+         * 现仅作 PURE 正则与引导词剥离的词根，且必须整句/句首锚定。
+         * guardrail F1：补"停一下"；"我还要说"/"我还要"双变体（长词在先防 alternation 短路）。
          */
         private val STOP_PHRASES = listOf(
-            "停", "停下", "停止", "取消", "别说了", "闭嘴", "安静",
+            "停", "停下", "停一下", "停止", "取消", "别说了", "闭嘴", "安静",
             "等一下", "等会", "稍等", "暂停", "打断",
-            "我还要", "还有一件事", "补充一下", "我有补充"
+            "我还要说", "我还要", "还有一件事", "补充一下", "我有补充"
+        )
+
+        /** 整句纯停止/打断指令（句尾允许语气词与标点；BUG-20260909-005）。 */
+        private val PURE_STOP_REGEX = Regex(
+            "^(?:" + STOP_PHRASES.joinToString("|") + ")" + "[吧呀呢啦哦嘛啊～~!！。，,．\\s]*$"
+        )
+
+        /** 句首停止引导词（允许一个语气词后随标点/空白才剥离——防"我们停不下来"类误剥离）。 */
+        private val STOP_LEAD_REGEX = Regex(
+            "^(?:" + STOP_PHRASES.joinToString("|") + ")" + "[吧呀呢啦哦嘛啊～]?[，,。\\s]+"
         )
 
         /** 批次22 R4-1：流式引擎错误自动重试上限（退避 1.5s/次，防错误风暴）。 */

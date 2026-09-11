@@ -176,6 +176,8 @@ fun ConversationScreen(
     val providers by viewModel.providers.collectAsState()
     val ragTarget by viewModel.ragTarget.collectAsState()
     val thinkingEnabled by viewModel.thinkingEnabled.collectAsState()
+    // TASK-20260910-001：文本播报状态（AI 回复「播放」按钮渲染 ▶/⏹）
+    val textPlaybackState by viewModel.textPlaybackState.collectAsState()
     val webSearchEnabled by viewModel.webSearchEnabledFlow.collectAsState()
     // 批次20（BG-005，ADR-045）：后台操控会话级开关
     val backgroundControlEnabled by viewModel.backgroundControlEnabledFlow.collectAsState()
@@ -391,6 +393,7 @@ fun ConversationScreen(
                         message = message,
                         // UXR3 问题 13（ADR-023）：复制 / 编辑
                         onCopy = { copyToClipboard(context, message.content) },
+                        onPlayText = { viewModel.toggleTextPlayback(message.id, message.content) },
                         onEdit = { id, original ->
                             // 编辑：回填输入框 + 标记待编辑消息 id（发送时走编辑重发）
                             editingMessageId = id
@@ -405,6 +408,10 @@ fun ConversationScreen(
                         onRegenerate = { viewModel.regenerateLastAiMessage() },
                         onSwitchVariant = { id, index -> viewModel.switchVariant(id, index) },
                         isLastMessage = message.id == messages.lastOrNull()?.id,
+                        // TASK-20260910-001：本条消息正在播报（按钮渲染 ⏹ 停止）
+                        isPlayingText = textPlaybackState.let {
+                            it is io.prism.voice.TextPlaybackController.State.Playing && it.messageId == message.id
+                        },
                         // UXR4 问题 1/4/6（ADR-024）：思考区展示受深度思考开关控制
                         //（协议层 reasoning_content 回传不受此影响，见 ADR-024 子决策 A）
                         showThinking = thinkingEnabled,
@@ -909,6 +916,10 @@ private fun MessageBubble(
     onSwitchVariant: (Long, Int) -> Unit = { _, _ -> },
     /** v1 批次17（US-1708）：是否为会话最后一条消息（重试/切换器仅末条可用）。 */
     isLastMessage: Boolean = false,
+    /** TASK-20260910-001：切换文本播报（AI 消息「播放/停止」按钮）。 */
+    onPlayText: () -> Unit = {},
+    /** TASK-20260910-001：本条消息是否正在播报（按钮渲染 ⏹ 停止）。 */
+    isPlayingText: Boolean = false,
     /** UXR4 问题 1/4/6（ADR-024）：是否展示「深度思考」折叠区。协议层仍回传 reasoning_content，UI 展示由开关控制。 */
     showThinking: Boolean,
     /** UXR5 问题 1（ADR-024 遗留）：该消息是否为当前正在流式生成的 AI 回复（流式期间用纯文本渲染）。 */
@@ -960,6 +971,9 @@ private fun MessageBubble(
                         canEditAi = isAi && !isStreaming,
                         canRollback = isUser,
                         canRegenerate = isAi && isLastMessage && !isStreaming,
+                        canPlay = isAi && !isStreaming,
+                        isPlaying = isPlayingText,
+                        onPlay = onPlayText,
                         onCopy = onCopy,
                         onEdit = { onEdit(message.id, message.content) },
                         onEditAi = { onEditAi(message) },
@@ -988,11 +1002,17 @@ private fun MessageActionRow(
     canEditAi: Boolean = false,
     canRollback: Boolean = false,
     canRegenerate: Boolean = false,
+    /** TASK-20260910-001：AI 消息可播报（播放按钮）。 */
+    canPlay: Boolean = false,
+    /** TASK-20260910-001：本条消息正在播报（按钮渲染 ⏹ 停止）。 */
+    isPlaying: Boolean = false,
     onCopy: () -> Unit,
     onEdit: () -> Unit,
     onEditAi: () -> Unit = {},
     onRollback: () -> Unit = {},
-    onRegenerate: () -> Unit = {}
+    onRegenerate: () -> Unit = {},
+    /** TASK-20260910-001：切换播报（点击正在播 = 停止）。 */
+    onPlay: () -> Unit = {}
 ) {
     Row(
         modifier = Modifier
@@ -1001,6 +1021,9 @@ private fun MessageActionRow(
         horizontalArrangement = Arrangement.End,
         verticalAlignment = Alignment.CenterVertically
     ) {
+        if (canPlay) {
+            ActionText(if (isPlaying) "⏹ 停止" else "▶ 播放", onClick = onPlay)
+        }
         ActionText("复制", onClick = onCopy)
         if (canEdit) {
             ActionText("编辑", onClick = onEdit)

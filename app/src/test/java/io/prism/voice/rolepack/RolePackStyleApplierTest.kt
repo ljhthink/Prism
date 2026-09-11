@@ -20,6 +20,45 @@ class RolePackStyleApplierTest {
         assertTrue(RolePackStyleApplier.apply("   \n ", default).isEmpty())
     }
 
+    // ==================== TASK-20260910-001：stripActionText 播报净化 ====================
+
+    @Test
+    fun `stripActionText - 剥离全角括号动作旁白`() {
+        val input = "（听到这句话，眼神轻轻弯了一下）你好呀。"
+        assertEquals("你好呀。", RolePackStyleApplier.stripActionText(input))
+    }
+
+    @Test
+    fun `stripActionText - 剥离半角括号与中段旁白`() {
+        assertEquals("嗯。后来呢？", RolePackStyleApplier.stripActionText("嗯（笑）。（*低头*）后来呢？"))
+        assertEquals("好呀 我们走", RolePackStyleApplier.stripActionText("好呀 (站起来) 我们走"))
+    }
+
+    @Test
+    fun `stripActionText - 保留引号对白与无括号文本`() {
+        val dialogue = "人家说：「这是对白，不剥。」"
+        assertEquals(dialogue, RolePackStyleApplier.stripActionText(dialogue))
+        assertEquals("普通句子。", RolePackStyleApplier.stripActionText("普通句子。"))
+    }
+
+    @Test
+    fun `stripActionText - 纯旁白输入剥完为空`() {
+        assertEquals("", RolePackStyleApplier.stripActionText("（轻轻点头）"))
+    }
+
+    @Test
+    fun `stripActionText - 纯前缀旁白残留的孤立标点被剥离`() {
+        // guardrail R2 回归锁：纯前缀旁白"（笑）。后来"不得残留"。后来"行首孤立句号
+        assertEquals("后来", RolePackStyleApplier.stripActionText("（笑）。后来"))
+        assertEquals("正文", RolePackStyleApplier.stripActionText("（动作），正文"))
+    }
+
+    @Test
+    fun `apply - 括号动作不进入播报分段`() {
+        val out = RolePackStyleApplier.apply("（眼神弯了一下）你好呀。今天做什么？", default)
+        assertEquals(listOf("你好呀。", "今天做什么？"), out)
+    }
+
     @Test
     fun `sentenceBreak false - 整段单元素不切分`() {
         val style = RolePack.VoiceCallStyle(maxSentenceLen = 5, sentenceBreak = false)
