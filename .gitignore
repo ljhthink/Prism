@@ -83,3 +83,31 @@ docs/reports/*.png
 # 由 docs/runbooks/setup-sherpa-voice.md 指引放置；缺失时条件集成自动降级 SystemAsrEngine
 app/libs/*.aar
 app/src/main/assets/models/streaming-zipformer-*/
+
+# 用户角色包与克隆音频素材（ADR-048：用户角色包不入 APK/assets/公开仓库；
+# voice-clone-kit 为个人克隆音色素材，guardrail TKN-VOICE-BUGFIX-002 D1）
+cyrene.rolepack
+voice-clone-kit/
+
+# ============================================================
+# 一次性文档与规则体系本地专属（rules/05 §12.6，用户指示 2026-09-11）
+# 以下文档仅在本地维护，禁止通过任何通道推送至 GitHub 远程仓库。
+# 已跟踪的历史文件需执行 git rm --cached 移出版本控制。
+# ============================================================
+
+# 规则文件体系（入口 + 模块 + harness 适配）
+/AGENTS.md
+/CLAUDE.md
+/rules/
+/.trae/
+
+# 项目进展文档（原 AGENTS.md 进度内容，rules/03 §5.7）
+/docs/progress.md
+
+# PRD（一次性需求文档）
+/docs/PRD.md
+/docs/prd-*.md
+/prd.json
+
+# ADR（架构决策记录）
+/docs/decisions/
