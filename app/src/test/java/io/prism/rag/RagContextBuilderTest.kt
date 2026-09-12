@@ -31,6 +31,16 @@ class RagContextBuilderTest {
     }
 
     @Test
+    fun `SYSTEM_PROMPT 不再断言助手身份（TASK-20260912-001 身份中立）`() {
+        val prompt = RagContextBuilder.SYSTEM_PROMPT
+        // 本层追加在 persona 基础身份层之后：若在此重复断言"你是 Prism AI 助手"，
+        // 角色包会话中会与"你就是昔涟"形成同层矛盾，把模型拉回"助手扮演角色"框架
+        // （真机取证：角色会话出现"我是 Prism AI 助手""我是一台 Android 语音助手"）。
+        assertFalse("不得在 grounding 层声明助手身份", prompt.contains("你是 Prism AI 助手"))
+        assertFalse(prompt.contains("AI 助手"))
+    }
+
+    @Test
     fun `buildContext returns empty string for empty results`() {
         assertEquals("", RagContextBuilder.buildContext(emptyList()))
     }

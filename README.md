@@ -195,7 +195,7 @@ Prism/
 - [AGENTS.md](AGENTS.md) —— AI 规则体系入口（适配 TRAE / opencode / DeepSeek Harness / Claude Code；本地专属）
 - [docs/progress.md](docs/progress.md) —— 项目进展记录（本地专属）
 - 规则模块（本地专属，经 [AGENTS.md](AGENTS.md) 强制加载矩阵读取）：[00-core](rules/00-core.md) / [01-planning-research](rules/01-planning-research.md) / [02-source-github](rules/02-source-github.md) / [03-doc-governance](rules/03-doc-governance.md) / [04-coding-review-loop](rules/04-coding-review-loop.md) / [05-git-release](rules/05-git-release.md) / [06-risk](rules/06-risk.md) / [07-engineering-standards](rules/07-engineering-standards.md) / [08-bugfix-ops](rules/08-bugfix-ops.md)
-- [docs/decisions/](docs/decisions/README.md) —— 架构决策记录（ADR-001~ADR-048，本地专属）
+- [docs/decisions/](docs/decisions/README.md) —— 架构决策记录（ADR-001~ADR-049，本地专属）
 - [docs/PRD.md](docs/PRD.md) —— 产品需求文档 v0.1（本地专属）
 - [docs/prd-search-fetch-enhancement.md](docs/prd-search-fetch-enhancement.md) —— 搜索命中与 Fetch 反爬优化 PRD（v1 批次15，本地专属）
 - [docs/prd-v1-b17-features.md](docs/prd-v1-b17-features.md) —— 批次17 四项新功能 PRD（TODO List / 思维链覆写 / 对话回退 / 对话重试，本地专属）

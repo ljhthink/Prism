@@ -91,6 +91,7 @@ object RolePackParser {
             name = name,
             version = version,
             persona = parsePersona(root.optObj("persona")),
+            worldbook = parseWorldbook(root.opt("worldbook")),
             style = parseStyle(root.optObj("style")),
             voice = parseVoice(root.optObj("voice")),
             expression = parseExpression(root.optObj("expression")),
@@ -110,9 +111,19 @@ object RolePackParser {
             put("version", pack.version)
             put("persona", buildJsonObject {
                 put("systemPrompt", pack.persona.systemPrompt)
+                put("callSystemPrompt", pack.persona.callSystemPrompt)
                 put("address", pack.persona.address)
                 put("tone", jsonArray(pack.persona.tone))
                 put("forbidden", jsonArray(pack.persona.forbidden))
+            })
+            put("worldbook", kotlinx.serialization.json.buildJsonArray {
+                pack.worldbook.forEach { entry ->
+                    add(buildJsonObject {
+                        put("keys", jsonArray(entry.keys))
+                        put("content", entry.content)
+                        put("constant", entry.constant)
+                    })
+                }
             })
             put("style", buildJsonObject {
                 put("voiceCall", buildJsonObject {
@@ -155,10 +166,29 @@ object RolePackParser {
 
     private fun parsePersona(obj: JsonObject?): RolePack.Persona = RolePack.Persona(
         systemPrompt = obj?.optString("systemPrompt").orEmpty(),
+        callSystemPrompt = obj?.optString("callSystemPrompt").orEmpty(),
         address = obj?.optString("address").orEmpty(),
         tone = obj?.optStringList("tone") ?: emptyList(),
         forbidden = obj?.optStringList("forbidden") ?: emptyList()
     )
+
+    /**
+     * 解析背景设定条目（TASK-20260912-001，ADR-049 D4）。
+     *
+     * 宽松策略与其它层一致：非数组 → 空列表；数组元素非对象 → 跳过该元素；`keys` 非数组 →
+     * 空关键词（该条目退化为不可命中，恒定条目仍生效）；缺失 `content` → 空正文（渲染时跳过）。
+     */
+    private fun parseWorldbook(value: Any?): List<RolePack.WorldbookEntry> {
+        val array = value as? JsonArray ?: return emptyList()
+        return array.mapNotNull { el ->
+            val obj = el as? JsonObject ?: return@mapNotNull null
+            RolePack.WorldbookEntry(
+                keys = obj.optStringList("keys"),
+                content = obj.optString("content").orEmpty(),
+                constant = obj.optBoolean("constant") ?: false
+            )
+        }
+    }
 
     private fun parseStyle(obj: JsonObject?): RolePack.Style = RolePack.Style(
         voiceCall = obj?.optObj("voiceCall")?.let { vc ->

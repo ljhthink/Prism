@@ -351,8 +351,11 @@ class OpenAICompatibleProviderTest {
     }
 
     @Test
-    fun `buildRequestBody sends explicit disabled thinking when thinkingEnabled default false`() {
-        // BUG-20260909-003：默认（不传 thinkingEnabled）与显式 false 行为一致——显式禁用
+    fun `buildRequestBody omits thinking field when thinkingEnabled null`() {
+        // TASK-20260911-001 三态：默认（null）= 不注入 thinking 字段——适配不支持该字段的
+        // 端点（MiniMax M2-her 角色路由），防未知字段 400。
+        // BUG-20260909-003 的显式双态语义由上方显式 false 用例 + UI 开关链路保持
+        // （sendMessage 从 DataStore 读非空 Boolean，显式 false 仍下发 disabled）。
         val config = ProviderConfig(
             name = "Ollama", baseUrl = "http://localhost:11434/v1",
             apiKeyRef = "", models = listOf("llama3")
@@ -361,10 +364,10 @@ class OpenAICompatibleProviderTest {
             ChatMessage(id = 0, role = Role.USER, content = "hi", timestamp = 0)
         )
 
-        val body = provider.buildRequestBody(config, messages)
+        val body = provider.buildRequestBody(config, messages, thinkingEnabled = null)
 
-        assertTrue("默认应显式禁用思考", body.contains("\"thinking\":{\"type\":\"disabled\"}"))
-        assertFalse("默认不应包含 reasoning_effort 字段", body.contains("reasoning_effort"))
+        assertFalse("null 时不应包含 thinking 字段", body.contains("\"thinking\""))
+        assertFalse("null 时不应包含 reasoning_effort 字段", body.contains("reasoning_effort"))
     }
 
     @Test

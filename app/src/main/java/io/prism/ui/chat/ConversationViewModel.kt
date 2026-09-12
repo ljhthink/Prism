@@ -1611,10 +1611,15 @@ class ConversationViewModel(
             // 最高优先级层（persona 之后、RAG 之前）。读取失败/未配置 → null 跳过注入（降级）。
             // BR-error-handling-007：suspend DataStore 读取禁止 runCatching（会吞 CancellationException），
             // 必须显式 try-catch 重抛（对齐同文件 L1069+/L1113+ 既有模式）。
-            // 批次23-B（ADR-048）：语音轮次且用户已启用角色包时，userRules 层被 RolePack
-            // persona 区块**替代**（设置页字段被角色包值替代的优先级关系，见
-            // resolveRolePackPersonaSection KDoc）——优先级：RolePack.persona > 设置页用户规则。
-            val rolePackPersonaSection = resolveRolePackPersonaSection()
+            // 批次23-B（ADR-048）+ TASK-20260910-001（语音/文本轮次统一注入）+ TASK-20260912-001
+            // （通话专用段按轮次隔离）：用户已启用角色包时，userRules 层被 RolePack persona 区块
+            // **替代**（设置页字段被角色包值替代的优先级关系，见 resolveRolePackPersonaSection
+            // KDoc）——优先级：RolePack.persona > 设置页用户规则。
+            // 角色轮次判定（TASK-20260912-001，ADR-049 D3）：语音通话轮次（正文带 🎙 前缀）
+            // 才允许追加角色包的通话专用收紧段；文本聊天轮次不注入——修复"通话规则泄漏到
+            // 文本聊天导致回复过短"的真机缺陷（同前缀语义见上方 thinkingEnabled）。
+            val isVoiceTurn = userText.startsWith(Companion.VOICE_TURN_PREFIX)
+            val rolePackPersonaSection = resolveRolePackPersonaSection(voiceCall = isVoiceTurn)
             val userRulesSection = try {
                 userRulesConfigRepository?.getRules()?.toSystemPromptSection()
             } catch (e: CancellationException) {
@@ -1624,7 +1629,22 @@ class ConversationViewModel(
                 Log.w(TAG, "read userRules failed: ${e::class.simpleName}")
                 null
             }
-            val effectiveUserRulesSection = rolePackPersonaSection ?: userRulesSection
+            // TASK-20260911-001 身份重排：rolepack 选中时，角色包 persona 直陈身份作为
+            // **基础身份层**（basePersona 置首），userRules 层传 null（替代语义不变）；
+            // 未选中时维持出厂行为（DEFAULT_PERSONA 基础身份 + 设置页用户规则层）。
+            val effectiveUserRulesSection: String?
+            val effectiveBasePersona: String
+            val worldbookSection: String?
+            if (rolePackPersonaSection != null) {
+                effectiveBasePersona = rolePackPersonaSection
+                effectiveUserRulesSection = null
+                // TASK-20260912-001（ADR-049 D4）：背景设定按关键词命中注入（仅角色包选中时）
+                worldbookSection = resolveRolePackWorldbookSection(baseHistory, userText)
+            } else {
+                effectiveBasePersona = Companion.DEFAULT_PERSONA
+                effectiveUserRulesSection = userRulesSection
+                worldbookSection = null
+            }
 
             // 合并 systemPrompt（ADR-015 决策4 + ADR-030 顺序：用户规则 → RAG → L1 摘要 → L2 跨会话 → L3 画像 → Skill）
             val mergedSystemPrompt = Companion.mergeSystemPrompt(
@@ -1639,13 +1659,21 @@ class ConversationViewModel(
                 hotListGuidance = if (hotListEnabled) Companion.HOTLIST_GUIDANCE else null,
                 // v1 批次17（US-1702）：TODO 任务规划指引（todo_write 接线时注入）
                 todoGuidance = if (todoLocalToolExecutor != null) Companion.TODO_GUIDANCE else null,
-                enabledSkills = enabledSkills
+                enabledSkills = enabledSkills,
+                // TASK-20260911-001：基础身份层重排（rolepack 直陈身份置首）
+                basePersona = effectiveBasePersona,
+                // TASK-20260912-001：背景设定层（紧随基础身份层，见 mergeSystemPrompt 层序）
+                worldbookSection = worldbookSection,
+                // TASK-20260912-001（ADR-049 D6）：角色轮次追加风格尾部强化（近因位置）
+                styleTail = if (rolePackPersonaSection != null) Companion.ROLE_STYLE_TAIL else null
             )
 
             // 分支策略（R-1）：tools 非空且 skillExecutor 非空 → executeLoop + onEvent 回调；
             // 否则 → 普通流式 streamChat + collect（保持无 Skill 场景零开销）
             // M5 Phase E：history 替换为 memoryContext.recentHistory（L1 滑动窗口处理后的近期消息）
             // 问题 8a（ADR-020）：深度思考参数透传给两条分支
+            // TASK-20260912-001（ADR-049 D1）：撤销 TASK-20260911-001 的 M2-her 静默自动路由——
+            // 角色轮次与普通轮次统一使用用户当前激活的 Provider（理由与真机证据见 ADR-049）。
             if (tools.isNotEmpty() && skillExecutor != null) {
                 executeWithToolLoop(
                     aiId = aiId,
@@ -1683,26 +1711,86 @@ class ConversationViewModel(
      * **优先级关系**（写入 KDoc 供后续批次遵循）：现有"设置页自由文本"机制即
      * [userRulesConfigRepository]（关于我/如何回答，ADR-030）；角色包启用 = 该设置页字段
      * 被 RolePack 值**替代**（非叠加、非并存）——即 `RolePack.persona > 设置页用户规则`。
-     * [Companion.DEFAULT_PERSONA] 基础身份**保留不覆盖**：其第 6 条语音转写纠错指引对
-     * 语音轮次为必需（防同音字误执行不可逆操作），不得被角色包内容挤出。
+     * **TASK-20260911-001 重排后更新**：本区块在 [Companion.mergeSystemPrompt] 中作为
+     * **basePersona（基础身份层）置首**，替代 DEFAULT_PERSONA 的"你是 Prism AI 助手"位——
+     * 消除"助手在扮演角色"的层级矛盾（Q3"替代品感"根因）；DEFAULT_PERSONA 第 6 条语音
+     * 转写纠错指引由 [RolePack.toPersonaSystemPromptSection] 尾部的去身份化功能条目等价
+     * 承接（防同音字误执行不可逆操作的防线不丢失）。出厂态本方法恒返回 null，行为不变。
      *
      * **生效条件**：[rolePackLoader] 非空 && 当前选中角色包非出厂 B0
      * （[io.prism.voice.rolepack.RolePack.isBuiltin]）——出厂态（未导入/未选中）恒返回 null，
      * 行为与批次22 完全一致。
      *
+     * **场景化**（TASK-20260912-001，ADR-049 D3）：[voiceCall]=true 时追加角色包的
+     * `persona.callSystemPrompt`（电话场景收紧），文本轮次不追加。修复真机缺陷：v5 把通话
+     * 专用收紧规则（"句子要短""不总结不收尾"）并进 persona 后，文本聊天回复被全局压短
+     * （真机取证 47/62/52 字）。
+     *
      * **降级**：读取失败（IO/解析）降级为 null（不注入，不阻断对话）；对齐
      * BR-error-handling-007：显式 catch 重抛 CancellationException。
+     *
+     * @param voiceCall 本轮是否为语音通话轮次（决定是否追加 `callSystemPrompt`）
      */
-    private suspend fun resolveRolePackPersonaSection(): String? {
+    private suspend fun resolveRolePackPersonaSection(voiceCall: Boolean): String? {
         val loader = rolePackLoader ?: return null
         return try {
             loader.effectiveRolePack()
                 .takeIf { !it.isBuiltin }
-                ?.toPersonaSystemPromptSection()
+                ?.toPersonaSystemPromptSection(voiceCall = voiceCall)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.w(TAG, "read rolePack failed: ${e::class.simpleName}")
+            null
+        }
+    }
+
+    /**
+     * TASK-20260912-001（ADR-049 D4）：解析本轮应注入的**背景设定**区块（不适用时 null）。
+     *
+     * **扫描窗口**（[WORLDBOOK_SCAN_TURNS] 条近期消息 + 本轮用户输入）：背景设定命中的是
+     * **对话里出现过的话题**，而非仅当前这一句——用户先问"翁法罗斯是什么"，下一句问"那里的人呢"，
+     * 第二句不含关键词但话题仍在延续。窗口过大会引入无关条目命中（预算浪费），故取较小常数。
+     *
+     * **降级**：读取失败 → null（不注入，不阻断对话）；对齐 BR-error-handling-007
+     * （显式 catch 重抛 CancellationException）。
+     *
+     * @param history 本轮请求历史（**已排除**当前 AI 占位消息）
+     * @param currentUserText 本轮用户输入正文
+     */
+    private suspend fun resolveRolePackWorldbookSection(
+        history: List<ChatMessage>,
+        currentUserText: String
+    ): String? {
+        val loader = rolePackLoader ?: return null
+        return try {
+            val entries = loader.effectiveRolePack()
+                .takeIf { !it.isBuiltin }
+                ?.worldbook
+                ?.takeIf { it.isNotEmpty() }
+                ?: return null
+            val scanText = buildString {
+                history.filter { !it.isSystemNotice && it.content.isNotBlank() }
+                    .takeLast(Companion.WORLDBOOK_SCAN_TURNS)
+                    .forEach { append(it.content).append('\n') }
+                append(currentUserText)
+            }
+            val selection = io.prism.voice.rolepack.RolePackWorldbook
+                .select(entries, scanText)
+            // BR-observability-001：预算丢弃必须留痕（仅条数，不含正文——CWE-532 / rules/07 §19.3）。
+            // 静默丢弃是排障盲区：单条正文超 MAX_CHARS 会让整轮零注入而外部毫无痕迹。
+            if (selection.droppedByBudget > 0) {
+                Log.w(
+                    TAG,
+                    "rolepack worldbook dropped ${selection.droppedByBudget} entries by budget " +
+                        "(picked=${selection.picked.size})"
+                )
+            }
+            io.prism.voice.rolepack.RolePackWorldbook.toSystemPromptSection(selection.picked)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "read rolePack worldbook failed: ${e::class.simpleName}")
             null
         }
     }
@@ -1977,7 +2065,10 @@ class ConversationViewModel(
         ragContext: String?,
         tools: List<ToolDefinition>,
         mcpServers: List<io.prism.data.McpServerConfig>,
-        thinkingEnabled: Boolean,
+        // TASK-20260911-001：可空——null 语义为"端点不支持 thinking 字段，不注入"
+        // （ADR-049 D1 撤销 M2-her 路由后，当前调用方恒传非空 Boolean；能力本身保留，
+        //  见 [io.prism.network.OpenAICompatibleProvider.buildRequestBody] 三态 KDoc）
+        thinkingEnabled: Boolean?,
         reasoningEffort: String?
     ) {
         // UXR4 问题 7/10（ADR-024）：进入工具回路 —— 期间 handleStreamEvent 的 Done 不清除
@@ -2062,7 +2153,10 @@ class ConversationViewModel(
         history: List<ChatMessage>,
         systemPrompt: String?,
         ragContext: String?,
-        thinkingEnabled: Boolean,
+        // TASK-20260911-001：可空——null 语义为"端点不支持 thinking 字段，不注入"
+        // （ADR-049 D1 撤销 M2-her 路由后，当前调用方恒传非空 Boolean；能力本身保留，
+        //  见 [io.prism.network.OpenAICompatibleProvider.buildRequestBody] 三态 KDoc）
+        thinkingEnabled: Boolean?,
         reasoningEffort: String?
     ) {
         try {
@@ -2765,6 +2859,41 @@ class ConversationViewModel(
         internal const val VOICE_TURN_PREFIX = "🎙 "
 
         /**
+         * TASK-20260912-001（ADR-049 D4）：背景设定关键词扫描窗口（近期消息条数）。
+         *
+         * 取 4：既覆盖"上一轮问了 A 主题、这一轮承接"的连续话题，又不让久远话题持续命中
+         * 无关条目（预算浪费 + 稀释当前指令）。与 [RolePackWorldbook.MAX_ENTRIES] /
+         * [RolePackWorldbook.MAX_CHARS] 共同构成注入预算。
+         */
+        internal const val WORLDBOOK_SCAN_TURNS = 4
+
+        /**
+         * TASK-20260912-001（ADR-049 D6）：角色轮次的**风格尾部强化**（systemPrompt 最末层）。
+         *
+         * **依据**（上游调研 docs/reports/2026-09-12-roleplay-fidelity-research.md §B-2）：
+         * 角色扮演社区实证"长度范式由最早出现的表达主导、已有历史后仅改中段主提示词效果有限"，
+         * 通行解法是把**最关键的表达约束复述到提示词末尾**（SillyTavern `Post-History
+         * Instructions` 的同构降级形态）——利用近因位置把"长度随情境"与"不做动作旁白"两条
+         * 压过庞大人设正文的注意力衰减。
+         *
+         * **长度控制**：全文约 90 字（≈60 token），且**正向表述优先**——调研结论指出负向
+         * 禁用词单列时失败率高（属 priming），必须紧跟正向替代；同时提示词指令密度越高
+         * 整体遵循率越低（IFScale），故此处只保留两条最关键的约束，不重复人设正文内容。
+         *
+         * **框架级通用文案**（不含任何具体第三方角色内容，ADR-048 边界不变）：任何角色包
+         * 生效时都注入；出厂态（未选中角色包）不注入，`DEFAULT_PERSONA` 行为不变。
+         *
+         * **作用域声明**（guardrail R2 P3-D）：本常量在**文本轮与通话轮都注入**——它约束的是
+         * "长度随情境自适应"与"不做动作旁白"两条**跨场景**表达纪律，与通话专用收紧段
+         * （`persona.callSystemPrompt`，仅通话轮）不冲突：后者收紧的是**通话语感**，
+         * 前者禁止的是"为求短而省略必要信息"与"叙述化旁白"，二者叠加正是通话轮的期望行为。
+         */
+        internal const val ROLE_STYLE_TAIL: String =
+            "【回复方式】长度跟着情境走：一句话能答完的就短；需要解释、分析、给步骤或对方想深入聊时，" +
+                "就把话说完整——不要因为\"要简短\"而省略必要信息，也不要为凑长度注水。" +
+                "直接说你要说的话，不要描写自己的动作、神态或周围环境。"
+
+        /**
          * 默认通用 persona（ADR-018，综合 DeepSeek/Claude 最佳实践）。
          *
          * **设计原则**（渐进式加载 + Claude 5「管原则不写死规则」趋势）：
@@ -2775,6 +2904,17 @@ class ConversationViewModel(
          *
          * 始终作为 [mergeSystemPrompt] 的基础身份注入，即使无 RAG/记忆/Skill，
          * 避免默认状态无 system message 导致 LLM 行为不可预测或遭残留 Skill 污染。
+         *
+         * **角色包场景下的退位**（TASK-20260911-001）：选中角色包时本常量**完全不注入**，
+         * 由角色包直陈身份占据基础身份位；其第 6 条（语音转写纠错）的**覆盖维度**由
+         * [io.prism.voice.rolepack.RolePack.toPersonaSystemPromptSection] 尾部的
+         * 去身份化条目等价承接（等价性要求见该处注释与 BR-safety-001）。
+         *
+         * **"不改变你的基础身份"一句的口径**（guardrail R2 P3-A 澄清）：本段第 3 条原则中的
+         * 该从句是**出厂助手场景的有意措辞**（约束 Skill 不得改写助手身份），**不是过时残留**
+         * ——角色会话不注入本常量，故不存在身份冲突；角色会话的身份约束由角色包
+         * `persona.forbidden`（元词汇禁令）承载。被移除的只是 [mergeSystemPrompt] 中
+         * **skill 索引行**的同名从句（那一处追加在角色身份之后，构成同层矛盾，见 BR-interface-032）。
          */
         internal const val DEFAULT_PERSONA: String = """你是 Prism AI 助手，一个通用、诚实、乐于助人的 AI 助手。
 原则：
@@ -3218,12 +3358,33 @@ class ConversationViewModel(
         }
 
         /**
+         * TASK-20260912-001（ADR-049 D1）：M2-her 静默自动路由**已撤销**。
+         *
+         * **撤销理由（真机 + 官方文档双证据）**：
+         * 1. 官方 M2-her 专页明确该模型"specifically optimized for brevity / rejecting
+         *    verbosity"（针对简洁性专门优化）——路由后文本回复被压到 47/62/52 字
+         *    （真机取证：安装含路由的构建后首次会话，聊天记录 ObjectBox 实证）；
+         * 2. 官方同时以 **Narrative Bridging（用叙述推进剧情）** 为奖励行为——路由后 3/3 回复
+         *    出现「（眨眨眼，俏皮地笑了笑）」式动作旁白，而昔涟的原作风格明确禁止动作旁白，
+         *    属风格反向优化；
+         * 3. M2-her 未见 function calling 支持：路由对**工具轮**同样生效且当时**无失败回退**
+         *    （仅 KDoc 承诺），一旦不支持即导致搜索/手机操控/知识库等基础能力在角色会话中失效
+         *    ——违反"不破坏项目基础功能"约束。
+         *
+         * 角色轮次与普通轮次统一使用用户当前激活的 Provider（[active]）。若日后需重新引入
+         * 角色特化模型，必须同时满足：显式用户开关 + 工具轮不路由 + 失败按轮回退 + 费用提示
+         * （见 ADR-049「后续可选增强」）。
+         */
+
+        /**
          * 合并多层 system prompt（M4 Phase D R-6 膨胀控制 + M5 Phase E ADR-015 决策4 六层合并 + ADR-018 渐进式加载）。
          *
-         * **合并顺序**（ADR-015 决策4 + ADR-018 + ADR-030）：
-         * 0. [DEFAULT_PERSONA] 默认 persona（始终作为基础身份，ADR-018）
+         * **合并顺序**（ADR-015 决策4 + ADR-018 + ADR-030 + TASK-20260911-001 重排）：
+         * 0. [basePersona] 基础身份层——出厂默认 [DEFAULT_PERSONA]；rolepack 选中时为
+         *    角色包直陈身份（"你就是X"），替代助手身份位（Q3"替代品感"根修）
          * 0.5. 用户规则 [userRules]（UXR8 N1，ADR-030：persona 之后、RAG 之前，
-         *      **除安全限制外最高优先级**——语义对齐 Claude Code 分层记忆：用户显式规则 > 自动记忆 > 通用 persona）
+         *      **除安全限制外最高优先级**——语义对齐 Claude Code 分层记忆：用户显式规则 > 自动记忆 > 通用 persona；
+         *      rolepack 场景传 null——角色包值替代设置页用户规则的优先级关系不变）
          * 1. RAG grounding rules（防幻觉约束）
          * 2. L1 早期对话摘要（[SlidingWindowResult.toSummarySystemPromptSection]，格式 `[早期对话摘要] ...`）
          * 3. L2 跨会话记忆（[CrossSessionMemoryManager.formatMemoriesAsContext]，格式 `相关历史对话：...`）
@@ -3245,13 +3406,18 @@ class ConversationViewModel(
          * @param l3Profiles L3 用户画像 section（M5 Phase E，默认 null 向后兼容）
          * @param userRules 用户显式规则 section（UXR8 N1，ADR-030：persona 之后、RAG 之前，
          *     **除安全限制外最高优先级**；默认 null 向后兼容既有测试。
-         *     批次23-B（ADR-048）+ TASK-20260910-001：用户启用角色包时（语音与文本轮次统一），
-         *     本层由 RolePack persona 区块**替代**（设置页字段被角色包值替代的优先级关系，
-         *     见 ConversationViewModel.resolveRolePackPersonaSection））
+         *     批次23-B（ADR-048）+ TASK-20260910-001/20260911-001：用户启用角色包时，
+         *     本层传 null——RolePack persona 区块已上移至 [basePersona] 基础身份位（替代关系见
+         *     ConversationViewModel.resolveRolePackPersonaSection））
          * @param phoneControlGuidance 手机操控安全声明（v1 US-202：UI 文本视为不可信数据源 +
          *     phone_control__* 工具使用边界；默认 null 向后兼容）
          * @param enabledSkills 已启用的 Skill 列表（已过滤 isEnabled && isInstalled）
-         * @return 合并后的 systemPrompt；**始终非空**（至少含 [DEFAULT_PERSONA]）
+         * @param basePersona 基础身份层（TASK-20260911-001：rolepack 直陈身份置首；默认
+         *     [DEFAULT_PERSONA] 向后兼容）
+         * @param worldbookSection 背景设定层（TASK-20260912-001，ADR-049 D4：角色包 worldbook
+         *     关键词命中后的区块，紧随 [basePersona]——它是"角色自己的世界"，属于身份的一部分，
+         *     必须排在任何外部资料（RAG/记忆）之前；默认 null 向后兼容既有测试）
+         * @return 合并后的 systemPrompt；**始终非空**（至少含 [basePersona]，出厂态即 [DEFAULT_PERSONA]）
          */
         internal fun mergeSystemPrompt(
             ragPrompt: String?,
@@ -3263,7 +3429,24 @@ class ConversationViewModel(
             hotListGuidance: String? = null,
             // v1 批次17（US-1702）：TODO 任务规划使用指引（默认 null 向后兼容既有测试）
             todoGuidance: String? = null,
-            enabledSkills: List<SkillRegistry.SkillEntry>
+            enabledSkills: List<SkillRegistry.SkillEntry>,
+            /**
+             * 基础身份层（TASK-20260911-001 重排）：rolepack 选中时传入角色包 persona 区块
+             * （[RolePack.toPersonaSystemPromptSection]，直陈式"你就是X"）置于 systemPrompt
+             * **最前**，替代 [DEFAULT_PERSONA] 的"你是 Prism AI 助手"位——消除"助手在扮演
+             * 角色"的层级矛盾（Q3"替代品感"根因）。默认 [DEFAULT_PERSONA] 向后兼容既有测试。
+             * userRules 层在 rolepack 场景传 null（由调用方 [resolveRolePackPersonaSection]
+             * 的替代语义保证，见 KDoc"优先级关系"）。
+             */
+            basePersona: String = DEFAULT_PERSONA,
+            /** 背景设定层（紧随基础身份层；见 @param worldbookSection） */
+            worldbookSection: String? = null,
+            /**
+             * 风格尾部强化（TASK-20260912-001，ADR-049 D6：角色轮次传 [ROLE_STYLE_TAIL]，
+             * 追加在**全部层之后**——近因位置对抗长人设正文的注意力衰减；默认 null 不注入，
+             * 出厂路径逐字节不变）
+             */
+            styleTail: String? = null
         ): String {
             val hasUserRules = !userRules.isNullOrBlank()
             val hasRag = !ragPrompt.isNullOrBlank()
@@ -3273,6 +3456,8 @@ class ConversationViewModel(
             val hasPhoneGuidance = !phoneControlGuidance.isNullOrBlank()
             val hasHotListGuidance = !hotListGuidance.isNullOrBlank()
             val hasTodoGuidance = !todoGuidance.isNullOrBlank()
+            val hasWorldbook = !worldbookSection.isNullOrBlank()
+            val hasStyleTail = !styleTail.isNullOrBlank()
             // ADR-018：轻量 Skill 索引（name + description），不注入完整 systemPrompt。
             // description 缺失时回退为 name（仍可感知能力存在）。
             val skillIndex = enabledSkills.mapNotNull { entry ->
@@ -3282,8 +3467,15 @@ class ConversationViewModel(
             }
 
             return buildString {
-                // ADR-018：默认 persona 始终作为基础身份
-                append(DEFAULT_PERSONA)
+                // ADR-018 + TASK-20260911-001：基础身份层——出厂默认 DEFAULT_PERSONA；
+                // rolepack 选中时为角色包直陈身份（置首，替代助手身份，见 basePersona KDoc）
+                append(basePersona)
+                // TASK-20260912-001（ADR-049 D4）：背景设定层——角色自己的世界与经历，
+                // 紧随基础身份层（同属"我是谁"），排在用户规则/外部资料（RAG/记忆）之前。
+                if (hasWorldbook) {
+                    append("\n\n")
+                    append(worldbookSection)
+                }
                 // ADR-030：用户规则（除安全限制外最高优先级）—— persona 之后、RAG 之前
                 if (hasUserRules) {
                     append("\n\n")
@@ -3328,9 +3520,17 @@ class ConversationViewModel(
                 if (skillIndex.isNotEmpty()) {
                     append("\n\n")
                     // DEF-007（Bug-5 次根因）：强化措辞 —— 用户明确点名技能名/能力时必须执行，
-                    // 否则按需使用、不改变基础身份。降低 LLM 忽略索引的概率。
-                    append("可用技能（用户明确提到技能名或对应能力时必须按对应规则执行；否则按需使用，不改变你的基础身份）：")
+                    // 否则按需使用。降低 LLM 忽略索引的概率。
+                    // TASK-20260912-001（ADR-049 决策 D2）：删去尾句"不改变你的基础身份"——
+                    // 该身份断言追加在 persona 层之后，与角色包直陈身份同层矛盾（该从句在
+                    // ADR-018 停用整份 Skill systemPrompt 注入后已无实际防线作用，属残留）。
+                    append("可用技能（用户明确提到技能名或对应能力时必须按对应规则执行；否则按需使用）：")
                     append(skillIndex.joinToString("、"))
+                }
+                // TASK-20260912-001（ADR-049 D6）：风格尾部强化——置于**最后**（近因位置）
+                if (hasStyleTail) {
+                    append("\n\n")
+                    append(styleTail)
                 }
             }.trim()
         }

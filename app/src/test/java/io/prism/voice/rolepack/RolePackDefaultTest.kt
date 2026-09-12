@@ -73,4 +73,29 @@ class RolePackDefaultTest {
         assertTrue(section!!.contains("Prism 助手"))
         assertTrue(section.contains("语音助手"))
     }
+
+    @Test
+    fun `toPersonaSystemPromptSection - 直陈式身份头 + 语音转写纠错条目`() {
+        // TASK-20260911-001：头部从"【角色包人设 · 生效角色：X】"改为直陈式"【身份说明】你就是X"
+        // ——去"人设/生效角色"元词汇（Q3 替代品感根因之一）；尾部追加去身份化的语音转写纠错
+        // 功能条目（DEFAULT_PERSONA 第 6 条在 basePersona 重排后的替代注入点）
+        val pack = RolePack.DEFAULT_ROLE_PACK.copy(
+            id = "test", name = "昔涟",
+            persona = RolePack.Persona(
+                systemPrompt = "人格核心内容", address = "称你", tone = listOf("轻快"), forbidden = listOf("不说教")
+            )
+        )
+        val section = pack.toPersonaSystemPromptSection()!!
+        assertTrue("头部应为直陈式身份", section.startsWith("【身份说明】你就是昔涟"))
+        assertTrue("不应残留'人设'元词汇标记", !section.contains("角色包人设"))
+        assertTrue("不应残留'生效角色'标记", !section.contains("生效角色"))
+        assertTrue("应包含语音转写纠错条目", section.contains("转写注意事项"))
+        // TASK-20260912-001（guardrail R1 M1 / BR-safety-001）：防线迁移的**覆盖维度等价性**——
+        // 原断言只钉"不可逆操作"一个词，无法发现"人名/联系人/专有名词"实体维度被收窄。
+        // 此处逐维度钉住（等价性细则与回归背景见 RolePackV6Test 同名维度用例）。
+        assertTrue("纠错条目应覆盖不可逆操作确认", section.contains("不可逆"))
+        assertTrue("应覆盖人名维度", section.contains("人名"))
+        assertTrue("应覆盖联系人维度", section.contains("联系人"))
+        assertTrue("应覆盖专有名词维度", section.contains("专有名词"))
+    }
 }

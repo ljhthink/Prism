@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -71,15 +72,23 @@ class DataStoreRolePackSelectedIdStore(
  * 选中持久化经 [RolePackSelectedIdStore] 抽象——JVM 单测注入临时目录 + 内存 store，
  * 不依赖 Robolectric。
  *
- * **线程模型**：文件 IO 全部经 [withContext]（[Dispatchers.IO]）；选中读写随 store 实现
- * （DataStore 自身协程安全）。
+ * **线程模型**：文件 IO 全部经 [withContext]（[ioDispatcher]，生产为 [Dispatchers.IO]）；
+ * 选中读写随 store 实现（DataStore 自身协程安全）。
+ *
+ * **IO 调度器可注入**（TASK-20260912-001，ADR-049 修复轮）：原实现硬编码 [Dispatchers.IO]，
+ * 与 `runTest` 的虚拟调度器互不可见——**装配层端到端测试无法确定性等待**（实测：在
+ * IO 调度器为测试调度器的环境中经真实入口触发本类的真实 IO 挂起点时，`advanceUntilIdle()`
+ * 会提前返回，被测链路静默不执行）。对齐本项目既有约定
+ * （[io.prism.ui.chat.ConversationViewModel] 同款 `ioDispatcher` 注入），生产缺省不变。
  *
  * @param baseDir 角色包存储目录（生产：`File(context.filesDir, "rolepacks")`；不存在时导入自动创建）
  * @param selectedIdStore 选中 id 持久化（生产：[DataStoreRolePackSelectedIdStore]）
+ * @param ioDispatcher 文件 IO 调度器（缺省 [Dispatchers.IO]；测试注入测试调度器以获得确定性）
  */
 class RolePackLoader(
     private val baseDir: File,
-    private val selectedIdStore: RolePackSelectedIdStore
+    private val selectedIdStore: RolePackSelectedIdStore,
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) {
 
     /**
@@ -87,7 +96,7 @@ class RolePackLoader(
      * 单个文件解析失败（损坏/被外部改动）时**跳过该文件**（不抛——列表页可用性优先；
      * 损坏文件可经 [remove] 清除或重新导入覆盖）。
      */
-    suspend fun list(): List<RolePack> = withContext(Dispatchers.IO) {
+    suspend fun list(): List<RolePack> = withContext(ioDispatcher) {
         packFiles()
             .mapNotNull { f ->
                 runCatching { RolePackParser.parse(f.readText()) }
@@ -107,7 +116,7 @@ class RolePackLoader(
      * @throws RolePackParseException JSON 畸形 / schema 版本不支持 / id 为出厂保留值
      *   （[RolePack.DEFAULT_ID]，防用户包与内置角色语义冲突；不落盘）
      */
-    suspend fun import(name: String, json: String): RolePack = withContext(Dispatchers.IO) {
+    suspend fun import(name: String, json: String): RolePack = withContext(ioDispatcher) {
         // 先解析校验再落盘：畸形包绝不进用户目录（fail-fast，导入方直接拿到可读错误）
         val pack = RolePackParser.parse(json)
         if (pack.id == RolePack.DEFAULT_ID) {
@@ -121,6 +130,17 @@ class RolePackLoader(
         val file = File(baseDir, safeFileName(pack.id))
         file.writeText(json)
         Log.i(TAG, "rolepack imported: name=$name id=${pack.id} file=${file.name}")
+        // guardrail R1 M2 配套（BR-security-002）：背景设定条目含疑似指令性文字的**资产治理可见性**。
+        // 仅记条数（不记正文，遵守 CWE-532 / rules/07 §19.3），不拦截不改写（角色包属用户自有资产）。
+        // 运行时防线是 RolePackWorldbook.toSystemPromptSection 的"资料非指令"边界声明。
+        val suspicious = RolePackWorldbook.suspiciousEntries(pack.worldbook)
+        if (suspicious.isNotEmpty()) {
+            Log.w(
+                TAG,
+                "rolepack worldbook has ${suspicious.size}/${pack.worldbook.size} entries " +
+                    "with instruction-like text; injection adds a data-not-instruction boundary"
+            )
+        }
         pack
     }
 
@@ -130,7 +150,7 @@ class RolePackLoader(
      * @return 是否删除了文件（不存在返回 false）；**若删除的是当前选中包，选中态同步清除**
      *   （下次 [effectiveRolePack] 回落 B0——删除自动回落语义）
      */
-    suspend fun remove(id: String): Boolean = withContext(Dispatchers.IO) {
+    suspend fun remove(id: String): Boolean = withContext(ioDispatcher) {
         val target = findPackFile(id)
         val removed = target != null && target.delete()
         if (removed) {
@@ -170,7 +190,7 @@ class RolePackLoader(
             Log.d(TAG, "effectiveRolePack: no rolepack selected, fallback B0 (default)")
             return RolePack.DEFAULT_ROLE_PACK
         }
-        return withContext(Dispatchers.IO) {
+        return withContext(ioDispatcher) {
             val file = findPackFile(id)
             if (file == null) {
                 Log.w(TAG, "effectiveRolePack: selected rolepack file missing, fallback B0: id=$id")

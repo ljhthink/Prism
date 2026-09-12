@@ -228,11 +228,13 @@ class RolePackParserTest {
         )
         val section = pack.toPersonaSystemPromptSection()
         assertNotNull(section)
-        assertTrue(section!!.startsWith("【角色包人设 · 生效角色：测试角色】"))
+        // TASK-20260911-001：头部改为直陈式"【身份说明】你就是X"（去"人设/生效角色"元词汇）
+        assertTrue(section!!.startsWith("【身份说明】你就是测试角色"))
         assertTrue(section.contains("人设正文"))
         assertTrue(section.contains("对用户的称呼：称呼"))
         assertTrue(section.contains("语气规则：语气A；语气B"))
         assertTrue(section.contains("禁止事项：禁A"))
+        assertTrue("尾部应含语音转写纠错功能条目", section.contains("转写注意事项"))
     }
 
     // ==================== 导出 ====================
