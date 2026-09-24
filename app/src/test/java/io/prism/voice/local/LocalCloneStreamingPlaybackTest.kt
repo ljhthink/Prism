@@ -405,6 +405,63 @@ class LocalCloneStreamingPlaybackTest {
         assertEquals("应正常播完", listOf("start", "close", "done"), events)
     }
 
+    /**
+     * 流式分支的**段间停顿接线**（验收 F2）。
+     *
+     * 为什么单独立这一条：`gapMsFor` / `silenceSamples` 的算法已有专项用例，但**流式分支里
+     * "到底插没插"这层接线**在改造时**没有任何断言**（既有流式用例全部 gap=0）。
+     * 而 BUG-20260924-003 把 `$SilenceScale` 由 0.5 改回 1.0，`silenceScale == 1` 正是流式门控
+     * ⇒ **流式分支由"生产不可达"变为可达**，这条盲区从理论问题变成实际问题（ac-verifier 判定）。
+     *
+     * 期望值口径：本用例的被测量是**接线**（插入与否、位置、尾部不插），
+     * 故段数与"哪些边界该给停顿"由同一套纯函数推导（算法本身不在此用例的射程内），
+     * 并**先断言推导出的边界数 ≥ 1**——否则本用例会退化成"0 个静音也算通过"的空断言。
+     */
+    @Test
+    fun `流式 - 段间停顿生效于流式分支且末段之后不插（sentenceGapMs）`() = runBlocking {
+        val events = mutableListOf<String>()
+        val synth = StreamSynth(chunksPerCall = 3)
+        val player = StreamPlayer(events = events)
+        val gapMs = 400
+        // 必须**长于 DEFAULT_SEGMENT_CHARS(40)**，否则 segmentForSynthesis 直接返回单段 ⇒ 无段边界
+        val text = "第一段测试内容需要足够长才能被切成两段以上。" +
+            "第二段同样要足够长，用来验证段间停顿确实被插进去了！" +
+            "第三段继续补充一些文字凑长度，确保总长超过切分阈值？"
+        val config = LocalCloneConfig(sentenceGapMs = gapMs)
+
+        // 用与引擎**同一套**输入推导期望（常量是 internal，测试可见）
+        val segments = segmentForSynthesis(text, DEFAULT_SEGMENT_CHARS, FIRST_SEGMENT_CHARS)
+        val expectedGaps = segments.dropLast(1).count {
+            LocalCloneSegmentGap.gapMsFor(it, gapMs) > 0
+        }
+        assertTrue("前置：本用例的文本必须真的产生 ≥1 个「该插停顿」的段边界，否则是空断言", expectedGaps >= 1)
+
+        val engine = engine(synth, player, config)
+        engine.speak(text, RecListener(events))
+
+        assertEquals("必须走流式路径（否则测的不是本用例的目标分支）", 1, player.openCalls.get())
+        assertEquals("流式路径不得再调用整段播放", 0, player.playCalls.get())
+
+        val silences = player.written.filter { it.isNotEmpty() && it.all { s -> s == 0f } }
+        assertEquals("段间静音块数应等于「该插停顿」的段边界数", expectedGaps, silences.size)
+        // 400ms @24kHz = 9600 样本
+        silences.forEach { assertEquals("静音长度 = ${gapMs}ms @24kHz", 9_600, it.size) }
+        assertFalse(
+            "末段之后不得插静音（否则尾音被拖长、onDone 被无谓延迟）",
+            player.written.last().all { s -> s == 0f }
+        )
+        // 位置保真：每个静音块的前后都必须是非静音块（不得出现连续静音 / 贴在结尾）
+        silences.forEach { sil ->
+            val i = player.written.indexOfFirst { it === sil }
+            assertTrue("静音块前必须是音频块（idx=$i）", i > 0 && player.written[i - 1].any { s -> s != 0f })
+            assertTrue(
+                "静音块后必须是音频块（idx=$i）",
+                i < player.written.lastIndex && player.written[i + 1].any { s -> s != 0f }
+            )
+        }
+        assertEquals("应正常播完", listOf("start", "close", "done"), events)
+    }
+
     private companion object {
         /** 每块样本数（仅需非零，用于 framesWritten 与顺序断言）。 */
         const val CHUNK_SAMPLES = 8
