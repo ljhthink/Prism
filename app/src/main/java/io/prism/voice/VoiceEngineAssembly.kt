@@ -135,10 +135,23 @@ object VoiceEngineAssembly {
             TtsEngineChoice.LOCAL_CLONE -> {
                 val pack = runCatching { rolePackLoader?.effectiveRolePack() }
                     .getOrNull() ?: io.prism.voice.rolepack.RolePack.DEFAULT_ROLE_PACK
-                val voiceId = pack.voice.local.voiceId
+                // BUG-20260924-002（设置页 F5）：用户显式选择优先于角色包声明——与文本播报链
+                // （TextPlaybackController.ensureLocalCloneEngine）共用同一纯函数，杜绝两处口径分叉。
+                val voiceId = io.prism.voice.resolveLocalVoiceId(
+                    userSelected = voiceEnginePrefs.localVoiceIdOnce(),
+                    // ⚠️ 入参必须与另两处（TextPlaybackController / SettingsViewModel）**逐字同源**。
+                    // 审查发现 M-1：本分支的 `pack` 有 `DEFAULT_ROLE_PACK` 兜底，而另两处在同情形
+                    // （loader 为 null / 抛错）得到的是 **null** ⇒ 若这里写 `pack.voice.local.voiceId`，
+                    // "共用同一纯函数"就只对**函数体**成立、**入参**仍分叉（ADR-058/BR-interface-039 ②
+                    // 要求的同源是"连输入一起同源"）。
+                    // 实测：当前 `DEFAULT_ROLE_PACK.voice.local.voiceId == null`（RolePack.kt:330），
+                    // 故本改动**行为等价**，仅消除潜在分叉。
+                    rolePackDeclared = runCatching { rolePackLoader?.effectiveRolePack() }
+                        .getOrNull()?.voice?.local?.voiceId
+                )
                 if (voiceId.isNullOrBlank()) {
                     notices.add("当前角色未声明本地音色，已回退系统播报")
-                    Log.w(TAG, "角色包未声明 voice.local.voiceId，装配回退系统播报")
+                    Log.w(TAG, "未选择本地音色包且角色包未声明 voice.local.voiceId，装配回退系统播报")
                     SystemTtsEngine(appContext)
                 } else {
                     val status = io.prism.voice.local.LocalVoicePackStore(
@@ -150,7 +163,10 @@ object VoiceEngineAssembly {
                             // 两条链路各读各的默认值会让"设置页选了档位，通话里却没变"。
                             val config = io.prism.voice.local.tieredLocalCloneConfig(
                                 base = status.pack.generation,
-                                rolePackNumSteps = pack.voice.local.numSteps,
+                                // 角色包的 numSteps 覆盖只对**它自己声明**的包有意义；用户另选包时不套用
+                                // （BUG-20260924-002 起用户可跨包选择，不设此闸会把包 A 的步数加到包 B）。
+                                rolePackNumSteps = pack.voice.local.numSteps
+                                    .takeIf { voiceId == pack.voice.local.voiceId },
                                 tier = voiceEnginePrefs.localVoiceTierOnce()
                             )
                             val engine = io.prism.voice.local.LocalCloneEngineFactory

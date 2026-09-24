@@ -99,7 +99,7 @@ enum class LocalClonePlaybackMode(val storeValue: String) {
 /**
  * TKN-LVC-016（ADR-056）：本地音色（ZipVoice）播报档位。
  *
- * 三档只调**步数**与**线程数**两个旋钮——这是 PC 侧逐轴实测（`.tmp-cyrene/bench-zipvoice.json`）
+ * 三档只调**步数**与**线程数**两个旋钮——这是 PC 侧逐轴实测（`tmp/voice/lvc-analysis/zipvoice-bench.json`）
  * 唯一被证实稳定收益的两个：步数 8→4 = 2.16×、线程 2→4 = 1.60×（合计约 3.46×）。
  *
  * **刻意不含"缩短参考音频"**：该轴虽然另有 1.46×，但补丁4 已实测短参考会让生成 F0 漂移
@@ -199,6 +199,27 @@ class VoiceEnginePrefs(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { prefs -> prefs[KEY_LOCAL_VOICE_TIER] = tier.storeValue }
     }
 
+    /**
+     * 观察用户**显式选择**的本地音色包 id（BUG-20260924-002 / 设置页 F5）。
+     *
+     * `null` = 用户没选过 ⇒ 由角色包 `voice.local.voiceId` 决定（改造前的唯一来源）。
+     * 值域与音色包 id 同源（`LocalVoicePackStore.VOICE_ID_PATTERN`），此处不校验——
+     * 失效值由装配点的 `store.status()` 判定为不可用并**回落角色包声明值**，不做静默沿用。
+     */
+    fun localVoiceId(): Flow<String?> =
+        dataStore.data.map { it[KEY_LOCAL_VOICE_ID]?.trim()?.takeIf { v -> v.isNotBlank() } }
+
+    /** 一次性读取用户显式选择的本地音色包 id（装配/播报前取值）。 */
+    suspend fun localVoiceIdOnce(): String? = localVoiceId().first()
+
+    /** 保存用户显式选择的本地音色包 id；传 null/空白 = 清除选择（回落角色包声明）。 */
+    suspend fun setLocalVoiceId(voiceId: String?) {
+        val value = voiceId?.trim()?.takeIf { it.isNotBlank() }
+        dataStore.edit { prefs ->
+            if (value == null) prefs.remove(KEY_LOCAL_VOICE_ID) else prefs[KEY_LOCAL_VOICE_ID] = value
+        }
+    }
+
     companion object {
         /** DataStore key：ASR 引擎选择（值域 [AsrEngineChoice.storeValue]）。 */
         val KEY_ASR_ENGINE = stringPreferencesKey("voice_asr_engine")
@@ -211,5 +232,35 @@ class VoiceEnginePrefs(private val dataStore: DataStore<Preferences>) {
 
         /** DataStore key：本地音色播报档位（值域 [LocalVoiceTier.storeValue]）。 */
         val KEY_LOCAL_VOICE_TIER = stringPreferencesKey("voice_local_voice_tier")
+
+        /** DataStore key：用户显式选择的本地音色包 id（缺省 = 由角色包声明决定）。 */
+        val KEY_LOCAL_VOICE_ID = stringPreferencesKey("voice_local_voice_id")
     }
 }
+
+/**
+ * 解析"本次要用的本地音色包 id"（BUG-20260924-002）——**用户显式选择优先于角色包声明**。
+ *
+ * 优先级理由与项目既有约定一致（用户主动意图优先于资产默认，同档位压过角色包覆盖的先例）；
+ * 两者都为空时返回 `null`，由调用方按既有降级链（未声明 ⇒ 不可选 / 回落系统播报）处理。
+ *
+ * **纯函数**（JVM 单测见 `VoiceEnginePrefsTest`）：装配点与设置页共用同一判定，杜绝两处口径分叉。
+ */
+fun resolveLocalVoiceId(userSelected: String?, rolePackDeclared: String?): String? =
+    userSelected?.trim()?.takeIf { it.isNotBlank() }
+        ?: rolePackDeclared?.trim()?.takeIf { it.isNotBlank() }
+
+/**
+ * 删除音色包后"用户显式选择"应当变成什么（独立审查 **H-2** 的修复点；抽成纯函数以便钉住）。
+ *
+ * 语义：**删的正是当前选择** ⇒ 返回 `null`（清选，让角色包声明值重新生效）；
+ * 删的是别的包、或本来就没选 ⇒ **原样返回**（不得顺手清掉用户的选择）。
+ *
+ * 为什么必须清选：选择被持久化成一个 **id**，包被删掉后这个 id 仍会**遮蔽角色包声明值** ⇒
+ * 两处装配点看到的是"该 id 未安装"，于是回退**系统播报**，而不是 [resolveLocalVoiceId]
+ * 与 [VoiceEnginePrefs.localVoiceId] 承诺的"失效选择**回落角色包声明值**"。
+ * 不抽成内联判断的具体理由：这是一条**新引入的回归路径**（改造前生效包只由角色包决定、
+ * 删任何包都不影响声明值），必须有可失败的用例钉住。
+ */
+fun resolveSelectionAfterDelete(selected: String?, deleted: String): String? =
+    if (selected != null && selected == deleted) null else selected

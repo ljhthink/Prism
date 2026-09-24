@@ -96,3 +96,11 @@
 - 评测台（gitignored，`tmp/rolecard-eval/`）：`build-prompt.js`（角色轮角色层子集等效复刻）、`run-eval.js`、`tools-probe`、`rescore.js`（口径修正后重算）、`out/results-{v5,v6,v7,v5-flash,v7-flash}.{json,md}`、`out/tools-probe-{v5,v6,v7}.json`
 - [perf/2026-09-13-pet-baseline.md](perf/2026-09-13-pet-baseline.md) —— 桌宠静态资源与性能基线（**perf/ 子目录提交远程**；真机项标"未验证"）
 
+当前在用批次（2026-09-24，批次28 端侧音色质量 / 设置页音色包 UI / 资产与临时文件治理，ADR-058/059/060；BUG-20260924-001/002/003）
+—— **以下文件仅本地存在，不入远程**（rules/05 §12.6 一次性工件禁令）：
+
+- [2026-09-24-voice-quality-ui-and-asset-tidy-proposal.md](2026-09-24-voice-quality-ui-and-asset-tidy-proposal.md) —— 方案与既有取证（主 Agent：真机产物一致性、客观测量口径、`voicebox` 路线裁决；用户逐项裁决 Q1~Q6）
+- [2026-09-24-batch28-realdevice-checklist.md](2026-09-24-batch28-realdevice-checklist.md) —— 真机手动测试清单（主 Agent；A 设置页 UI / B 音色包切换 / C VITS 听感 / D 性能 / E 回归）
+- 19 臂扫参产物（gitignored，`tmp/voice/sweep-20260924/`）：`README.md`（人读）、`sweep-report.json`（全数字）、`determinism-probe.json`、19 个 wav；脚本 `voice-clone-kit/tools/sweep-vits-arms.py`、`probe-vits-determinism.py`
+- 调研与取证（gitignored，`tmp/research-20260924/`）：`R1-voicebox-evaluation.md`、`R2-zipvoice-quality-speed.md`、`R3-vits-quality-diagnosis.md`、`T-tidy-completion.md`、`T-tidy-completion-r2.md`
+

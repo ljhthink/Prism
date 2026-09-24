@@ -249,6 +249,26 @@ data class LocalReference(
  * @property numThreads 推理线程数（**不影响音色**，只影响速度）
  * @property timeoutMs **合成看门狗**无进展阈值（ms）：**只告警，不取消合成**（TKN-LVC-011 修订，ADR-053 决策 7）——
  *   防低端机 RTF 不达标时用户长时间无响应
+ * @property sentenceGapMs **段间停顿**（ms）：在**播放层**为相邻文本段之间插入的静音长度。
+ *
+ *   为什么需要它：真机"本地音色语速过快"的实测根因**不是音素念得快，而是停顿被压缩**
+ *   （有声帧占比 0.849 vs 训练语料 0.736；平均停顿 0.232s vs 语料 0.538s，−57%）。
+ *   端侧把长文本切段**逐段合成后连续播放，段间不插任何静音** ⇒ 听感进一步变快。
+ *   故在段与段之间补固定静音，直接补偿被切段吃掉的停顿。
+ *
+ *   **为什么默认 0**：0 = 不插静音，与改造前**逐字节等价**（回归基线）；具体值须由真机试听定完后
+ *   写进音色包清单，库侧不预设"看起来合理"的非零默认（那会让未标注的音色包听感被静默改动）。
+ *
+ *   **为什么越界回落默认 0 而不是钳到边界**（与本类其余 Int 字段同口径，但与 `coerceIn` 语义**不同**）：
+ *   清单来自设备可写目录，脏数据（负数/超大值）若被钳成 2000 会**静默改变听感基线**；
+ *   回落默认 0 则等价于"该字段没写"，与"档位脏数据回落最保真档"同一约定。
+ *
+ *   **两引擎通用**：段间停顿发生在播放层（[io.prism.voice.local.LocalCloneTtsEngine] 的分段生产/流式写入），
+ *   与合成引擎无关，ZipVoice 与 VITS 同源生效。故它属于本类（通用域），**刻意不放进** [VitsGeneration]
+ *   ——那里只放 VITS 专属旋钮，以免语义串味。
+ *
+ *   **必须进缓存键**（[localCloneCacheKey]）：它是在引擎/流水线构造期定死的输入，少一项就会
+ *   "改了没效果"（与本仓历史缺陷 F-3 同型）。
  */
 data class LocalCloneConfig(
     val numSteps: Int = DEFAULT_NUM_STEPS,
@@ -261,7 +281,9 @@ data class LocalCloneConfig(
     val minCharInSentence: Int = DEFAULT_MIN_CHARS,
     val maxCharInSentence: Int = DEFAULT_MAX_CHARS,
     val numThreads: Int = DEFAULT_NUM_THREADS,
-    val timeoutMs: Long = DEFAULT_TIMEOUT_MS
+    val timeoutMs: Long = DEFAULT_TIMEOUT_MS,
+    /** 段间停顿 ms（见类 KDoc；放在字段末尾以免破坏既有命名参数调用）。默认 0 = 不插（行为等价改造前）。 */
+    val sentenceGapMs: Int = DEFAULT_SENTENCE_GAP_MS
 ) {
     /**
      * 生成的 `extra` 键值对（ZipVoice 专有参数经此传递）。
@@ -320,6 +342,10 @@ data class LocalCloneConfig(
         val shift = if (tShift.isFinite() && tShift in MIN_T_SHIFT..MAX_T_SHIFT) tShift else DEFAULT_T_SHIFT
         val rms = if (targetRms.isFinite() && targetRms in MIN_TARGET_RMS..MAX_TARGET_RMS)
             targetRms else DEFAULT_TARGET_RMS
+        // 段间停顿：越界/非法**回落默认 0**（与上面各字段同一"if in range else default"口径，
+        // 但语义上刻意**不用** coerceIn —— 钳到边界会让脏数据静默改变听感基线，回落 0 等价"没写该字段"）
+        val sentenceGap = if (sentenceGapMs in MIN_SENTENCE_GAP_MS..MAX_SENTENCE_GAP_MS) sentenceGapMs
+        else DEFAULT_SENTENCE_GAP_MS
         return copy(
             numSteps = steps,
             speed = sp,
@@ -331,7 +357,8 @@ data class LocalCloneConfig(
             minCharInSentence = minChar,
             maxCharInSentence = maxChar,
             numThreads = threads,
-            timeoutMs = timeout
+            timeoutMs = timeout,
+            sentenceGapMs = sentenceGap
         )
     }
 
@@ -381,6 +408,14 @@ data class LocalCloneConfig(
         const val MIN_CHARS = 1
         const val MAX_CHARS = 1_000
 
+        /**
+         * 段间停顿合法域（ms）：0 = 不插静音；上限 2000 防"每段之间空两秒以上"这种明显不合理的
+         * 清单值把播报拖成灾难（真机试听的预期区间在数百 ms 量级）。
+         * 越界**回落 [DEFAULT_SENTENCE_GAP_MS]**，不钳到边界（理由见类 KDoc）。
+         */
+        const val MIN_SENTENCE_GAP_MS = 0
+        const val MAX_SENTENCE_GAP_MS = 2_000
+
         /** 默认值（**依据见类 KDoc**；除 numSteps/numThreads 外均取 ZipVoice 官方训练/推理值）。 */
         const val DEFAULT_NUM_STEPS = 8
         const val DEFAULT_NUM_THREADS = 4
@@ -393,5 +428,13 @@ data class LocalCloneConfig(
         const val DEFAULT_TARGET_RMS = 0.1f
         const val DEFAULT_MIN_CHARS = 10
         const val DEFAULT_MAX_CHARS = 200
+
+        /**
+         * 段间停顿默认值 = **0（不插静音）**。
+         *
+         * 刻意不给 300/400 之类的非零默认：0 与改造前逐字节等价，是"未标注音色包"的保真基线；
+         * 具体毫秒数须由真机多臂试听定完后写进音色包清单 `generation.sentenceGapMs`。
+         */
+        const val DEFAULT_SENTENCE_GAP_MS = 0
     }
 }

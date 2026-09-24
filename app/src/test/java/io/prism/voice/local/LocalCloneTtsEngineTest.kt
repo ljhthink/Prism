@@ -155,6 +155,12 @@ class LocalCloneTtsEngineTest {
         @Volatile
         var lastSamples = 0
 
+        /** 累计写入样本数（段间停顿用例：断言"各段之和 + (段数-1)×gap"）。 */
+        val playedTotalSamples = AtomicInteger(0)
+
+        /** 每次 `play` 的样本数（顺序敏感：末次必须是末段音频，不是静音）。 */
+        val playedSizes = CopyOnWriteArrayList<Int>()
+
         private val stopSignal = CountDownLatch(1)
 
         override fun play(samples: FloatArray, sampleRate: Int, isCancelled: () -> Boolean) {
@@ -162,6 +168,8 @@ class LocalCloneTtsEngineTest {
             playCalls.incrementAndGet()
             lastSampleRate = sampleRate
             lastSamples = samples.size
+            playedTotalSamples.addAndGet(samples.size)
+            playedSizes += samples.size
             if (blockUntilStoppedMs > 0) {
                 stopSignal.await(blockUntilStoppedMs, TimeUnit.MILLISECONDS)
             }
@@ -663,6 +671,138 @@ class LocalCloneTtsEngineTest {
         assertEquals("onStart/onDone 各一次", listOf("start", "done"), listener.events.toList())
         assertTrue("长文本必须被切成多段合成（实际调用 ${synth.synthCalls.get()} 次）", synth.synthCalls.get() >= 2)
         assertEquals("每段都要播放（段数应与合成次数一致）", synth.synthCalls.get(), player.playCalls.get())
+        engine.release()
+    }
+
+    /** 段间停顿用例共用的长文本（必被切成多段）。 */
+    private val gapLongText = "今天天气很好，我们一起出去走走吧。等风停了，我就带你去看那边的云。" +
+        "路上要是遇见卖糖葫芦的，你可别又走不动路呀。" +
+        "我还想跟你说说，昨天夜里我梦见了一片很安静的湖。"
+
+    @Test
+    fun `段间停顿 - 相邻段之间插入静音且末段之后不插（sentenceGapMs）`() = runBlocking {
+        // 真机"语速过快"的根因是停顿被压缩；段间停顿是**播放层**补偿（ZipVoice/VITS 同源）。
+        // 契约（与生产逐字对齐）：连续模式下每段一次 `play`，段间再插一个**独立静音 piece**，
+        // 而**最后一段之后不插**（否则尾音被拖长、onDone 延迟）。
+        val synth = FakeSynth()
+        val player = FakePlayer()
+        val gapMs = 100
+        val engine = concurrentEngine(
+            synth, player,
+            LocalCloneConfig(timeoutMs = 5_000L, sentenceGapMs = gapMs)
+        )
+        val listener = RecListener()
+        engine.speak(gapLongText, listener)
+
+        assertTrue("必须播完", awaitUntil(8_000) { listener.events.contains("done") })
+        val segCount = synth.synthCalls.get()
+        assertTrue("前提：长文本必须被切成多段（实际 $segCount）", segCount >= 2)
+        val perSegment = 2 // FakeSynth 默认产出 2 样本
+        // 期望值必须**按边界类型逐段算**（段边界 ≠ 句边界：句末满额、子句打折、硬切 0）
+        val segments = segmentForSynthesis(gapLongText, DEFAULT_SEGMENT_CHARS, FIRST_SEGMENT_CHARS)
+        val expectedGapSamples = segments.dropLast(1).sumOf {
+            LocalCloneSegmentGap.silenceSamples(LocalCloneSegmentGap.gapMsFor(it, gapMs), 24_000)
+        }
+        assertTrue("前提：该文本必须至少有一个边界产生停顿（实际 $expectedGapSamples）", expectedGapSamples > 0)
+        assertEquals(
+            "写入总样本数 = 各段之和 + 各边界按类型判定的停顿（末段之后不得有多余静音）",
+            segCount * perSegment + expectedGapSamples,
+            player.playedTotalSamples.get()
+        )
+        assertEquals(
+            "最后一块必须是末段音频而不是静音",
+            perSegment,
+            player.playedSizes.last()
+        )
+        engine.release()
+    }
+
+    @Test
+    fun `段间停顿 - 逗号边界只插四成而不是满额（段边界不等于句边界）`() = runBlocking {
+        // 切分规则（LocalCloneTextSegmenter）：句末标点优先 → 句内过长退到子句标点 → 仍无则硬切。
+        // 在**逗号**边界插满额会让试听听到明显顿挫、并污染"定值"结论，故子句档必须打折。
+        val synth = FakeSynth()
+        val player = FakePlayer()
+        val gapMs = 100
+        // 逗号恰在第 16 字符（= FIRST_SEGMENT_CHARS，硬上限）：首段必以 "，" 结尾
+        val textWithComma = "一二三四五六七八九十甲乙丙丁戊，" +
+            "然后我们一起去山上看那远远的云还有风里的花香和鸟鸣"
+        val segments = segmentForSynthesis(textWithComma, DEFAULT_SEGMENT_CHARS, FIRST_SEGMENT_CHARS)
+        assertEquals("前提：必须恰好切成 2 段（实际 $segments）", 2, segments.size)
+        assertTrue("前提：首段必须以逗号结尾（实际『${segments[0]}』）", segments[0].endsWith("，"))
+        val clauseGapMs = LocalCloneSegmentGap.gapMsFor(segments[0], gapMs)
+        val fullSamples = LocalCloneSegmentGap.silenceSamples(gapMs, 24_000)
+        val clauseSamples = LocalCloneSegmentGap.silenceSamples(clauseGapMs, 24_000)
+        assertEquals("前提：逗号档 = round(base×0.4)", 40, clauseGapMs)
+        assertEquals("前提：逗号档样本数", 960, clauseSamples)
+        assertTrue("前提：逗号档必须严格小于满额（$clauseSamples vs $fullSamples）", clauseSamples < fullSamples)
+
+        val engine = concurrentEngine(
+            synth, player,
+            LocalCloneConfig(timeoutMs = 5_000L, sentenceGapMs = gapMs)
+        )
+        val listener = RecListener()
+        engine.speak(textWithComma, listener)
+
+        assertTrue("必须播完", awaitUntil(8_000) { listener.events.contains("done") })
+        assertEquals("必须恰好 2 段", 2, synth.synthCalls.get())
+        assertEquals(
+            "逗号边界必须插四成（若插满额则总数会多出 ${fullSamples - clauseSamples} 样本）",
+            2 * 2 + clauseSamples,
+            player.playedTotalSamples.get()
+        )
+        assertEquals("静音片段的长度必须是四成档而不是满额", clauseSamples, player.playedSizes[1])
+        engine.release()
+    }
+
+    @Test
+    fun `段间停顿 - 无标点硬切文本一律不插（词中间不得出现停顿）`() = runBlocking {
+        // 硬切可能切在词中间：此处插停顿 = "词中间凭空停顿"，比改动前更糟 ⇒ 必须 0
+        val synth = FakeSynth()
+        val player = FakePlayer()
+        // 65 字、**无任何标点**（句末/子句标点都不含）⇒ 全部边界都是硬切
+        val hardCutText = "春风吹过山岗带走最后一片雪".repeat(5)
+        val segments = segmentForSynthesis(hardCutText, DEFAULT_SEGMENT_CHARS, FIRST_SEGMENT_CHARS)
+        assertTrue("前提：必须切成多段（实际 ${segments.size}）", segments.size >= 2)
+        segments.dropLast(1).forEach {
+            assertEquals("前提：每个边界都必须是硬切档（0）", 0, LocalCloneSegmentGap.gapMsFor(it, 400))
+        }
+
+        val engine = concurrentEngine(
+            synth, player,
+            LocalCloneConfig(timeoutMs = 5_000L, sentenceGapMs = 400)
+        )
+        val listener = RecListener()
+        engine.speak(hardCutText, listener)
+
+        assertTrue("必须播完", awaitUntil(8_000) { listener.events.contains("done") })
+        val segCount = synth.synthCalls.get()
+        assertEquals("段间静音样本总数必须为 0", segCount * 2, player.playedTotalSamples.get())
+        assertEquals("不得有任何额外的静音 play 调用", segCount, player.playCalls.get())
+        engine.release()
+    }
+
+    @Test
+    fun `段间停顿默认 0 - 写入样本数与改造前一致（回归钉子）`() = runBlocking {
+        // 默认 0 必须与改造前**逐字节等价**：不插任何静音 piece，play 次数 == 段数。
+        val synth = FakeSynth()
+        val player = FakePlayer()
+        val engine = concurrentEngine(
+            synth, player,
+            LocalCloneConfig(timeoutMs = 5_000L, sentenceGapMs = 0)
+        )
+        val listener = RecListener()
+        engine.speak(gapLongText, listener)
+
+        assertTrue("必须播完", awaitUntil(8_000) { listener.events.contains("done") })
+        val segCount = synth.synthCalls.get()
+        assertTrue("前提：长文本必须被切成多段（实际 $segCount）", segCount >= 2)
+        assertEquals(
+            "gap=0 时写入样本数必须恰为各段之和（没有额外静音）",
+            segCount * 2,
+            player.playedTotalSamples.get()
+        )
+        assertEquals("gap=0 时播放次数必须恰为段数", segCount, player.playCalls.get())
         engine.release()
     }
 

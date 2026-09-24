@@ -467,6 +467,74 @@ class LocalVoicePackStoreTest {
     }
 
     @Test
+    fun `generation sentenceGapMs 生效 - 段间停顿由清单声明（播放层，两引擎同源）`() {
+        val root = tempRoot()
+        buildPack(
+            root,
+            rawManifest = """
+                {
+                  "schema": "${LocalVoicePackStore.SCHEMA}",
+                  "voiceId": "cyrene",
+                  "engine": "zipvoice",
+                  "model": {
+                    "tokens": "model/tokens.txt",
+                    "encoder": "model/encoder.int8.onnx",
+                    "decoder": "model/decoder.int8.onnx",
+                    "vocoder": "model/vocos_24khz.onnx",
+                    "lexicon": "model/lexicon.txt",
+                    "dataDir": "model/espeak-ng-data"
+                  },
+                  "generation": {"sentenceGapMs": 350},
+                  "references": [{"audio": "refs/ref_00.wav", "text": "你好"}]
+                }
+            """.trimIndent()
+        )
+        val gen = (store(root).resolve("cyrene") as LocalVoiceStatus.Ready).pack.generation
+        assertEquals("清单声明的段间停顿必须原样生效（不得被钳制误伤）", 350, gen.sentenceGapMs)
+        assertEquals("合法域上限必须放行", LocalCloneConfig.MAX_SENTENCE_GAP_MS, 2_000)
+        assertEquals("合法域下限必须放行", LocalCloneConfig.MIN_SENTENCE_GAP_MS, 0)
+    }
+
+    @Test
+    fun `generation sentenceGapMs 越界回落默认 0 - 不钳到边界（脏数据不得改变听感基线）`() {
+        // 与既有 coerceIn 语义**不同**：越界回落 DEFAULT_SENTENCE_GAP_MS=0（= 不插静音，等价改造前），
+        // 而不是钳成 2000/0 的边界值——边界钳制会让脏数据静默改变听感基线
+        val high = tempRoot()
+        buildPack(high, rawManifest = gapManifest(99_999))
+        val highGen = (store(high).resolve("cyrene") as LocalVoiceStatus.Ready).pack.generation
+        assertEquals(
+            "超上限必须回落默认 0（不得被钳成 2000ms）",
+            LocalCloneConfig.DEFAULT_SENTENCE_GAP_MS,
+            highGen.sentenceGapMs
+        )
+        assertEquals(0, highGen.sentenceGapMs)
+
+        val low = tempRoot()
+        buildPack(low, rawManifest = gapManifest(-5))
+        val lowGen = (store(low).resolve("cyrene") as LocalVoiceStatus.Ready).pack.generation
+        assertEquals("负数必须回落默认 0", LocalCloneConfig.DEFAULT_SENTENCE_GAP_MS, lowGen.sentenceGapMs)
+    }
+
+    /** 只含 `sentenceGapMs` 的清单原文（越界用例共用）。 */
+    private fun gapManifest(gapMs: Int): String = """
+        {
+          "schema": "${LocalVoicePackStore.SCHEMA}",
+          "voiceId": "cyrene",
+          "engine": "zipvoice",
+          "model": {
+            "tokens": "model/tokens.txt",
+            "encoder": "model/encoder.int8.onnx",
+            "decoder": "model/decoder.int8.onnx",
+            "vocoder": "model/vocos_24khz.onnx",
+            "lexicon": "model/lexicon.txt",
+            "dataDir": "model/espeak-ng-data"
+          },
+          "generation": {"sentenceGapMs": $gapMs},
+          "references": [{"audio": "refs/ref_00.wav", "text": "你好"}]
+        }
+    """.trimIndent()
+
+    @Test
     fun `generation 缺省兜底 - 使用 TKN-LVC-003 音质调优默认值`() {
         val root = tempRoot()
         buildPack(

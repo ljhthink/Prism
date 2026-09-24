@@ -23,7 +23,9 @@ import java.io.File
  * @param tts 引擎类型（ADR-055 新增）——**必须参与**：同一 voiceId 由 ZipVoice 换成 VITS 时，
  *   若不进键，同一进程内会继续复用旧引擎 → 又一次"换了没效果"（与 F-3 同源）
  * @param referenceCount 参考音频条数（参考集变了要重建）
- * @param config 生效生成参数（**全部字段**都参与——少一个就会出现"改了没效果"）
+ * @param config 生效生成参数（**全部字段**都参与——少一个就会出现"改了没效果"）。
+ *   其中 [LocalCloneConfig.sentenceGapMs]（段间停顿）虽只在**播放层**生效，却是在流水线构造期
+ *   定死的输入，故同样必须进键（与 F-3 同型：漏掉它会让"改了 gap 没效果"）
  * @param vits VITS 专属旋钮（TKN-LVC-016）——同样必须参与：只改 `noiseScale` 而键不变时，
  *   同一进程内会继续复用旧引擎，属同一类"改了没效果"（与 F-3 同源）
  * @param playbackMode 播报管线模式（TKN-LVC-016）——**必须参与**：它是在**构造时**注入引擎的
@@ -57,6 +59,8 @@ internal fun localCloneCacheKey(
     appendField("maxChar", config.maxCharInSentence.toString())
     appendField("threads", config.numThreads.toString())
     appendField("timeoutMs", config.timeoutMs.toString())
+    // 段间停顿（播放层参数）也必须参与：它在流水线/引擎构造期定死，漏进键就会"改了没效果"（F-3 同型）
+    appendField("sentenceGapMs", config.sentenceGapMs.toString())
     appendField("vitsNoiseScale", vits.noiseScale.toString())
     appendField("vitsNoiseScaleW", vits.noiseScaleW.toString())
 }

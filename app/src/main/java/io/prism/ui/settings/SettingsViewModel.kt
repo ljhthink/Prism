@@ -428,14 +428,25 @@ class SettingsViewModel(
     private val _localVoiceStatus = MutableStateFlow<io.prism.voice.local.LocalVoiceStatus?>(null)
 
     /**
-     * 当前生效角色包所声明的本地音色包安装状态。
+     * 当前**生效**本地音色包的安装状态（生效包 = 用户显式选择，其次角色包 `voice.local.voiceId`，
+     * 见 [io.prism.voice.resolveLocalVoiceId]）。
      *
      * `null` = **尚未检测**（设置页首帧/展开前）或本 VM 未注入仓库——UI 必须把 null 与
      * "未安装"区分呈现，避免把"没查过"显示成"没装"。
-     * 检测由 [refreshLocalVoiceStatus] 触发（进入/展开「语音引擎」区时调用）。
+     * 检测由 [refreshLocalVoiceStatus] 触发（进入/展开「语音引擎」区、切换音色包后调用）。
      */
     val localVoiceStatus: StateFlow<io.prism.voice.local.LocalVoiceStatus?> =
         _localVoiceStatus.asStateFlow()
+
+    private val _effectiveLocalVoiceId = MutableStateFlow<String?>(null)
+
+    /**
+     * 当前**实际生效**的本地音色包 id（用户显式选择，其次角色包声明；`null` = 两者都没有）。
+     *
+     * 与 [localVoiceStatus] 同一次检测写入；列表据此显示"使用中"，
+     * 避免用户面对"能听的是哪个包"无从判断（BUG-20260924-001 的观感面）。
+     */
+    val effectiveLocalVoiceId: StateFlow<String?> = _effectiveLocalVoiceId.asStateFlow()
 
     /**
      * 重新检测本地音色包状态（进入/展开「语音引擎」区、侧载完成后手动刷新时调用）。
@@ -447,7 +458,11 @@ class SettingsViewModel(
         viewModelScope.launch {
             val store = localVoicePackStore
             val voiceId = try {
-                rolePackLoader?.effectiveRolePack()?.voice?.local?.voiceId?.takeIf { it.isNotBlank() }
+                // BUG-20260924-002：与两处装配点同源——用户显式选择优先于角色包声明。
+                io.prism.voice.resolveLocalVoiceId(
+                    userSelected = voiceEnginePrefs?.localVoiceIdOnce(),
+                    rolePackDeclared = rolePackLoader?.effectiveRolePack()?.voice?.local?.voiceId
+                )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -455,10 +470,12 @@ class SettingsViewModel(
                 null
             }
             if (store == null || voiceId == null) {
+                _effectiveLocalVoiceId.value = voiceId
                 _localVoiceStatus.value =
                     io.prism.voice.local.LocalVoiceStatus.NotInstalled(voiceId.orEmpty())
                 return@launch
             }
+            _effectiveLocalVoiceId.value = voiceId
             _localVoiceStatus.value = try {
                 store.status(voiceId)
             } catch (e: CancellationException) {
@@ -517,6 +534,43 @@ class SettingsViewModel(
                 throw e
             } catch (e: Exception) {
                 Log.w(TAG, "保存本地音色播报模式失败: $mode", e)
+            }
+        }
+    }
+
+    // ==================== BUG-20260924-002（设置页 F5）：本地音色包选用 ====================
+
+    /**
+     * 用户显式选择的本地音色包 id（`null` = 未选择 ⇒ 由角色包声明决定，即改造前行为）。
+     *
+     * 与两处装配点（[io.prism.voice.VoiceEngineAssembly] / `TextPlaybackController`）共用
+     * [io.prism.voice.resolveLocalVoiceId] 判定；选择本身进
+     * [io.prism.voice.local.localCloneCacheKey] 的 `voiceId` 项 ⇒ 切换后**下次播报即重建引擎**。
+     */
+    val activeLocalVoiceId: StateFlow<String?> =
+        (voiceEnginePrefs?.localVoiceId() ?: flowOf(null))
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /**
+     * 选择当前本地音色包；传 `null` = 清除选择（回落角色包声明）。
+     *
+     * 落盘后**立即重算生效状态**：选择会改变"本地昔涟（离线）"这一项是否可选，
+     * 状态不刷新会让用户看到"选完了却还是灰的"。
+     * 失败（DataStore 异常）只记日志 + 提示，不抛——与档位/播报模式一致的收敛口径。
+     */
+    fun selectLocalVoicePack(voiceId: String?) {
+        viewModelScope.launch {
+            try {
+                voiceEnginePrefs?.setLocalVoiceId(voiceId)
+                refreshLocalVoiceStatus()
+                _voicePackMessage.value =
+                    if (voiceId.isNullOrBlank()) "已清除音色包选择，回落角色包声明"
+                    else "已选择：$voiceId（下次播报生效）"
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007：不吞 CancellationException
+            } catch (e: Exception) {
+                Log.w(TAG, "保存本地音色包选择失败: $voiceId", e)
+                _voicePackMessage.value = "选择失败：${e.message ?: e::class.simpleName}"
             }
         }
     }
@@ -729,8 +783,14 @@ class SettingsViewModel(
     /**
      * 删除已安装音色包。
      *
-     * 删除的是**当前生效包**时不做特殊处理：播报链路每次取包都会重新校验，
-     * 包一消失即按"未安装"回退系统播报（无需额外的手动清选）。
+     * **删的若是"用户显式选择"的那个包，必须同时清除选择**（独立审查 H-2 / BR-interface-039 ④）。
+     * 为什么不是"不做特殊处理"：选择被持久化成一个 **id**，包删掉后这个 id 仍然会**遮蔽角色包声明值**
+     * ⇒ 两处装配点看到的是"该 id 未安装"，于是回退**系统播报**，而不是
+     * [io.prism.voice.VoiceEnginePrefs.localVoiceId] KDoc 承诺的"失效选择回落**角色包声明值**"。
+     * 用户侧的现象是"删了一个包，本地音色整个没了"，且列表里没有任何包显示「使用中」而无法自救。
+     *
+     * 改造前不存在这条路径（那时生效包只由角色包决定，删任何包都不影响声明值）
+     * ⇒ 属 BUG-20260924-002 **新引入**的回归，本处即其修复点。
      */
     fun deleteVoicePack(voiceId: String) {
         viewModelScope.launch {
@@ -747,7 +807,20 @@ class SettingsViewModel(
                     dir.deleteRecursively()
                 }
                 if (removed) {
-                    _voicePackMessage.value = "已删除音色包：$voiceId"
+                    // 删的正是**用户显式选择**的那个包 ⇒ 一并清选，让角色包声明值重新生效（H-2）。
+                    // 不清选的话，这个失效 id 会继续遮蔽角色包声明值，装配点按"未安装"回退**系统播报**
+                    // ——与 localVoiceId KDoc 承诺的"回落角色包声明值"相反。
+                    val selected = voiceEnginePrefs?.localVoiceIdOnce()
+                    // 判定收敛到纯函数（独立审查 H-2，可被单测钉住）：删的正是当前选择 ⇒ 清选。
+                    val afterDelete = io.prism.voice.resolveSelectionAfterDelete(selected, voiceId)
+                    val cleared = selected != null && afterDelete == null
+                    if (cleared) voiceEnginePrefs?.setLocalVoiceId(null)
+                    _voicePackMessage.value = if (cleared) {
+                        "已删除音色包：$voiceId（原为当前选择，已回落角色包声明）"
+                    } else {
+                        "已删除音色包：$voiceId"
+                    }
+                    refreshLocalVoiceStatus()
                 } else {
                     // 内部根没有 ⇒ 可能装在外部队列根里。**必须给出可操作的提示**：
                     // 早先只回"未找到该音色包"，用户会以为包已经没了，而列表里它还在

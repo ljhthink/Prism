@@ -70,10 +70,16 @@ internal fun segmentForSynthesis(
     return out
 }
 
-private fun isSentenceBoundary(c: Char): Boolean =
+/**
+ * 句末标点判定。**internal 而非 private**：段间停顿（[LocalCloneSegmentGap.gapMsFor]）必须按
+ * **同一套**边界定义判定"这个段边界是句末 / 子句 / 硬切"，两处若各写一份字符集会静默漂移
+ * （切分按 A 判、插停顿按 B 判 ⇒ 逗号处插满停顿或句末处不插）。
+ */
+internal fun isSentenceBoundary(c: Char): Boolean =
     c == '。' || c == '！' || c == '？' || c == '!' || c == '?' || c == '.'
 
-private fun isClauseBoundary(c: Char): Boolean =
+/** 子句（逗号/分号/冒号）标点判定；internal 理由同 [isSentenceBoundary]。 */
+internal fun isClauseBoundary(c: Char): Boolean =
     c == '，' || c == '；' || c == '：' || c == ',' || c == ';' || c == ':'
 
 /**

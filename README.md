@@ -231,7 +231,7 @@ Prism/
 - [AGENTS.md](AGENTS.md) —— AI 规则体系入口（适配 TRAE / opencode / DeepSeek Harness / Claude Code；本地专属）
 - [docs/progress.md](docs/progress.md) —— 项目进展记录（本地专属）
 - 规则模块（本地专属，经 [AGENTS.md](AGENTS.md) 强制加载矩阵读取）：[00-core](rules/00-core.md) / [01-planning-research](rules/01-planning-research.md) / [02-source-github](rules/02-source-github.md) / [03-doc-governance](rules/03-doc-governance.md) / [04-coding-review-loop](rules/04-coding-review-loop.md) / [05-git-release](rules/05-git-release.md) / [06-risk](rules/06-risk.md) / [07-engineering-standards](rules/07-engineering-standards.md) / [08-bugfix-ops](rules/08-bugfix-ops.md)
-- [docs/decisions/](docs/decisions/README.md) —— 架构决策记录（ADR-001~ADR-050，本地专属）
+- [docs/decisions/](docs/decisions/README.md) —— 架构决策记录（ADR-001~ADR-060，本地专属）
 - [docs/PRD.md](docs/PRD.md) —— 产品需求文档 v0.1（本地专属）
 - [docs/prd-search-fetch-enhancement.md](docs/prd-search-fetch-enhancement.md) —— 搜索命中与 Fetch 反爬优化 PRD（v1 批次15，本地专属）
 - [docs/prd-v1-b17-features.md](docs/prd-v1-b17-features.md) —— 批次17 四项新功能 PRD（TODO List / 思维链覆写 / 对话回退 / 对话重试，本地专属）
@@ -242,6 +242,12 @@ Prism/
 - [docs/decisions/ADR-053-local-voice-clone-ondevice.md](docs/decisions/ADR-053-local-voice-clone-ondevice.md) —— 端侧本地音色克隆（ZipVoice）与音色包侧载分发（本地专属）
 - [docs/decisions/ADR-054-local-clone-streaming-playback.md](docs/decisions/ADR-054-local-clone-streaming-playback.md) —— 本地音色**流式播放**（合成回调分块 → 常开音轨逐块写入，本地专属）
 - [docs/decisions/ADR-055-ondevice-vits-voicepack.md](docs/decisions/ADR-055-ondevice-vits-voicepack.md) —— 端侧**微调 VITS** 音色包与 ZipVoice 并存切换（Proposed，本地专属）
+- [docs/decisions/ADR-056-local-clone-playback-modes-and-tiers.md](docs/decisions/ADR-056-local-clone-playback-modes-and-tiers.md) —— 本地音色**播报管线双模（连续/整段）与三档合成档位**（本地专属）
+- [docs/decisions/ADR-057-voicepack-inapp-import.md](docs/decisions/ADR-057-voicepack-inapp-import.md) —— 音色包**应用内导入**（`.voicepack` zip 归档，本地专属）
+- [docs/decisions/ADR-058-local-voice-pack-user-selection.md](docs/decisions/ADR-058-local-voice-pack-user-selection.md) —— 本地音色包的**用户选择与生效优先级**（用户选择 > 角色包声明，本地专属）
+- [docs/decisions/ADR-059-sentence-gap-for-local-tts.md](docs/decisions/ADR-059-sentence-gap-for-local-tts.md) —— 段间停顿 `generation.sentenceGapMs`（处置端侧"语速过快"，本地专属）
+- [docs/decisions/ADR-060-voice-clone-kit-versioning-boundary.md](docs/decisions/ADR-060-voice-clone-kit-versioning-boundary.md) —— `voice-clone-kit/` 版本控制边界收窄（脚本入库、素材与体积产物继续忽略，本地专属）
+- [docs/reports/2026-09-24-voice-quality-ui-and-asset-tidy-proposal.md](docs/reports/2026-09-24-voice-quality-ui-and-asset-tidy-proposal.md) —— 端侧音色质量 / 设置页 UI / 资产与临时文件治理方案（含真机取证、客观测量与 `voicebox` 调研裁决，一次性报告）
 - [docs/reports/2026-09-20-vits-finetune-verification.md](docs/reports/2026-09-20-vits-finetune-verification.md) —— 中文 VITS 微调全链路验证（训练/导出/加载崩溃根因/RTF 实测，一次性报告）
 - [docs/reports/2026-09-20-local-voice-clone-streaming-measurement.md](docs/reports/2026-09-20-local-voice-clone-streaming-measurement.md) —— 流式播放机制核实与一手实测（TKN-LVC-013，一次性报告）
 - [docs/reports/2026-09-20-voice-clone-vits-route-research.md](docs/reports/2026-09-20-voice-clone-vits-route-research.md) —— 中文 VITS 微调→sherpa-onnx ONNX 路线一手核查（一次性报告）

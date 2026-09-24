@@ -1607,10 +1607,15 @@ fun VoiceHotwordsEditor() {
             textStyle = androidx.compose.ui.text.TextStyle(color = PrismText, fontSize = 14.sp)
         )
         Spacer(Modifier.height(8.dp))
+        // ⚠️ BR-ui-003 ② / BUG-20260924-001 同类漏网点：同排两个 PrismButton 必须各给
+        // `weight(1f)` 并关掉组件内部的 `fillMaxWidth()`，否则**第一个吃满整行、第二个被压成 0 宽**
+        // （独立审查 H-1：本行改造前"取消"按钮实际不可见/不可点）。
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             PrismButton(
                 text = "保存",
                 variant = PrismButtonVariant.Primary,
+                fillWidth = false,
+                modifier = Modifier.weight(1f),
                 onClick = {
                     scope.launch(kotlinx.coroutines.Dispatchers.IO) {
                         runCatching {
@@ -1626,6 +1631,8 @@ fun VoiceHotwordsEditor() {
             PrismButton(
                 text = "取消",
                 variant = PrismButtonVariant.Ghost,
+                fillWidth = false,
+                modifier = Modifier.weight(1f),
                 onClick = { expanded = false }
             )
         }
@@ -1667,6 +1674,8 @@ private fun VoiceEngineSection(viewModel: SettingsViewModel) {
     val localTier by viewModel.localVoiceTier.collectAsState()
     val playbackMode by viewModel.localPlaybackMode.collectAsState()
     val installedPacks by viewModel.localVoicePacks.collectAsState()
+    val activeVoiceId by viewModel.activeLocalVoiceId.collectAsState()
+    val effectiveVoiceId by viewModel.effectiveLocalVoiceId.collectAsState()
     val packBusy by viewModel.voicePackBusy.collectAsState()
     val packMessage by viewModel.voicePackMessage.collectAsState()
     val pendingOverwrite by viewModel.pendingVoicePackOverwrite.collectAsState()
@@ -1901,39 +1910,25 @@ private fun VoiceEngineSection(viewModel: SettingsViewModel) {
             onClick = { viewModel.setLocalPlaybackMode(io.prism.voice.LocalClonePlaybackMode.WHOLE) }
         )
 
-        // ---- TKN-LVC-016（ADR-057）：音色包导入 / 列表 / 删除 ----
+        // ---- TKN-LVC-016（ADR-057）+ BUG-20260924-001/002：音色包 导入/列表/选用/删除 ----
+        // ⚠️ 标题与"导入"按钮**必须分两行**：PrismButton 默认 fillMaxWidth，与标题同排会各自
+        // 抢占整行宽度（真机现象："本地音色包"与"导入音色包"被挤在同一行）。
         Spacer(Modifier.height(10.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "本地音色包",
-                color = PrismTextDim,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
-                letterSpacing = 0.4.sp
-            )
-            PrismButton(
-                text = if (packBusy) "处理中…" else "导入音色包",
-                variant = PrismButtonVariant.Ghost,
-                enabled = !packBusy,
-                onClick = {
-                    viewModel.consumeVoicePackMessage()
-                    // MIME 无法可靠表达 `.voicepack`（zip），用 application/zip + 通配兜底
-                    packImportLauncher.launch(
-                        arrayOf("application/zip", "application/octet-stream", "*/*")
-                    )
-                }
-            )
-        }
+        Text(
+            text = if (installedPacks.isEmpty()) "本地音色包"
+            else "本地音色包（${installedPacks.size} 个 · 点击设为当前播报音色）",
+            color = PrismTextDim,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.4.sp
+        )
         packMessage?.let { message ->
             Spacer(Modifier.height(6.dp))
             Text(
                 text = message,
                 color = if (message.startsWith("导入成功") || message.startsWith("已覆盖") ||
-                    message.startsWith("已删除")
+                    message.startsWith("已删除") || message.startsWith("已选择") ||
+                    message.startsWith("已清除")
                 ) PrismMint else PrismDanger,
                 fontSize = 11.sp,
                 lineHeight = 16.sp
@@ -1942,24 +1937,48 @@ private fun VoiceEngineSection(viewModel: SettingsViewModel) {
         if (installedPacks.isEmpty()) {
             Spacer(Modifier.height(6.dp))
             Text(
-                text = "尚未导入任何音色包。",
+                text = "尚未检测到任何音色包。点下方「导入音色包」选择 .voicepack 文件即可。",
                 color = PrismTextFaint,
                 fontSize = 11.sp
             )
         } else {
+            Spacer(Modifier.height(6.dp))
             installedPacks.forEach { pack ->
-                Spacer(Modifier.height(6.dp))
                 VoicePackRow(
                     pack = pack,
                     busy = packBusy,
+                    selected = effectiveVoiceId != null && pack.voiceId == effectiveVoiceId,
+                    onSelect = { viewModel.selectLocalVoicePack(pack.voiceId) },
                     onDelete = { viewModel.deleteVoicePack(pack.voiceId) }
                 )
+                Spacer(Modifier.height(6.dp))
             }
         }
+        if (activeVoiceId != null) {
+            PrismButton(
+                text = "清除选择（改由角色包声明决定）",
+                variant = PrismButtonVariant.Ghost,
+                enabled = !packBusy,
+                onClick = { viewModel.selectLocalVoicePack(null) }
+            )
+            Spacer(Modifier.height(6.dp))
+        }
+        PrismButton(
+            text = if (packBusy) "处理中…" else "导入音色包（.voicepack）",
+            variant = PrismButtonVariant.Ghost,
+            enabled = !packBusy,
+            onClick = {
+                viewModel.consumeVoicePackMessage()
+                // MIME 无法可靠表达 `.voicepack`（zip），用 application/zip + 通配兜底
+                packImportLauncher.launch(
+                    arrayOf("application/zip", "application/octet-stream", "*/*")
+                )
+            }
+        )
         Spacer(Modifier.height(4.dp))
         Text(
-            text = "导入的包存放在应用私有目录，卸载 App 后一并清除；" +
-                "要让某个角色使用它，请在该角色的角色包里把 voice.local.voiceId 设为包名。",
+            text = "点击某个包即设为当前播报音色（显示「使用中」）；未选择时由角色包 voice.local.voiceId 决定。" +
+                "音色包存放在应用私有目录，卸载 App 后一并清除，不上传、不联网。",
             color = PrismTextFaint,
             fontSize = 11.sp,
             lineHeight = 16.sp
@@ -1967,17 +1986,26 @@ private fun VoiceEngineSection(viewModel: SettingsViewModel) {
 
         Spacer(Modifier.height(12.dp))
         // ---- 连通性自检（每个云端引擎一个按钮；结果就地展示）----
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // ⚠️ 同一行放两个 PrismButton 时必须 `fillWidth = false` + `weight(1f)`：默认
+        // fillMaxWidth 会让**第一个**吃满整行、第二个被压成 0 宽（BUG-20260924-001 同类漏改）。
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
             PrismButton(
                 text = "自检云端识别",
                 variant = PrismButtonVariant.Ghost,
                 enabled = asrCheck?.running != true,
+                fillWidth = false,
+                modifier = Modifier.weight(1f),
                 onClick = { viewModel.runAsrSelfCheck() }
             )
             PrismButton(
                 text = "自检云端 TTS",
                 variant = PrismButtonVariant.Ghost,
                 enabled = ttsCheck?.running != true,
+                fillWidth = false,
+                modifier = Modifier.weight(1f),
                 onClick = { viewModel.runTtsSelfCheck() }
             )
         }
@@ -2104,16 +2132,26 @@ private fun VoiceEngineOptionRow(
 }
 
 /**
- * 已安装音色包一行（TKN-LVC-016，ADR-057）：包名 + 引擎 + 体积 + 就绪状态 + 删除。
+ * 已安装音色包一行（TKN-LVC-016，ADR-057；BUG-20260924-001/002 改造）：
+ * 包名 + 引擎 + 体积 + 就绪状态 + 「使用中」+ 删除。
+ *
+ * **尾控件必须是与 [RolePackRow] 同款的 32dp ✕，不得使用 [PrismButton]**：后者内部
+ * `fillMaxWidth()`，会让 `Row` 先给尾控件分配整行宽度，`Modifier.weight(1f)` 的名称列被压成
+ * **0 宽**——真机现象就是"列表只剩一个占满整行的删除按钮、看不到装了哪些包"（BUG-20260924-001）。
  *
  * 为什么把"未就绪"的包也列出来（带问题原因）：导入链路校验通过的包才会落盘，但**用户手动
  * 修改过**或**侧载残留**的目录同样会出现在扫描结果里。若这类目录直接不显示，用户会看到
  * "明明有目录却选不了"而无从排查；显示 + 给出问题原因才能自证。
+ *
+ * @param selected 由**生效包 id**（用户选择 or 角色包声明）判定，不是"用户选择"本身
+ * @param onSelect 点击整行设为当前播报音色（未就绪的包不可点，避免让用户选到一个用不了的包）
  */
 @Composable
 private fun VoicePackRow(
     pack: SettingsViewModel.InstalledVoicePack,
     busy: Boolean,
+    selected: Boolean,
+    onSelect: () -> Unit,
     onDelete: () -> Unit
 ) {
     val engineLabel = when (pack.ttsWire) {
@@ -2125,11 +2163,21 @@ private fun VoicePackRow(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(PrismPanel2)
+            .background(if (selected) PrismMint.copy(alpha = 0.08f) else PrismPanel2)
             .border(
                 1.dp,
-                if (pack.ready) PrismLine else PrismDanger.copy(alpha = 0.4f),
+                when {
+                    !pack.ready -> PrismDanger.copy(alpha = 0.4f)
+                    selected -> PrismMint.copy(alpha = 0.4f)
+                    else -> PrismLine
+                },
                 RoundedCornerShape(12.dp)
+            )
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                enabled = pack.ready && !busy,
+                onClick = onSelect
             )
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -2156,12 +2204,30 @@ private fun VoicePackRow(
                 lineHeight = 16.sp
             )
         }
-        PrismButton(
-            text = "删除",
-            variant = PrismButtonVariant.Ghost,
-            enabled = !busy,
-            onClick = onDelete
-        )
+        if (selected) {
+            Text(
+                text = "使用中",
+                color = PrismMint,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(PrismPanel2)
+                .border(1.dp, PrismLine, RoundedCornerShape(8.dp))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    enabled = !busy,
+                    onClick = onDelete
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(text = "✕", color = PrismTextDim, fontSize = 12.sp)
+        }
     }
 }
 

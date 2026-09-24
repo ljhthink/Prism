@@ -281,9 +281,14 @@ class TextPlaybackController(
      */
     private suspend fun ensureLocalCloneEngine(): io.prism.voice.local.LocalCloneTtsEngine? = try {
         val pack = rolePackLoader?.effectiveRolePack()
-        val voiceId = pack?.voice?.local?.voiceId?.takeIf { it.isNotBlank() }
+        // BUG-20260924-002（设置页 F5）：用户在设置页显式选择的音色包**优先于**角色包声明。
+        // 改造前唯一来源是角色包 `voice.local.voiceId` ⇒ 已安装的 VITS 包在真机上永远无法启用。
+        val voiceId = io.prism.voice.resolveLocalVoiceId(
+            userSelected = voiceEnginePrefs?.localVoiceIdOnce(),
+            rolePackDeclared = pack?.voice?.local?.voiceId
+        )
         if (voiceId == null) {
-            Log.w(TAG, "角色包未声明本地音色（voice.local.voiceId），降级系统播报")
+            Log.w(TAG, "未选择本地音色包且角色包未声明（voice.local.voiceId），降级系统播报")
             null
         } else {
             val status = localVoiceStore.status(voiceId)
@@ -300,7 +305,12 @@ class TextPlaybackController(
                     ?: io.prism.voice.LocalClonePlaybackMode.CONTINUOUS
                 val config = io.prism.voice.local.tieredLocalCloneConfig(
                     base = status.pack.generation,
-                    rolePackNumSteps = pack.voice.local.numSteps,
+                    // ⚠️ 必须安全调用：`pack` 在 `voiceId` 判定改为函数调用后**不再被智能转换**为非空
+                    // （BUG-20260924-002 的连带改动），写成 `pack.voice...` 直接编译失败。
+                    // 另外：角色包的 numSteps 覆盖**只对它自己声明的那个包**有意义——用户另选包时
+                    // 不套用，否则会把为包 A 调的步数强加到包 B 上（本改动引入的口径问题）。
+                    rolePackNumSteps = pack?.voice?.local?.numSteps
+                        .takeIf { voiceId == pack?.voice?.local?.voiceId },
                     tier = tier
                 )
                 // 缓存键必须覆盖**全部**生效输入（guardrail F-3/N-1/N-2）：引擎在构造时把 config 与模型

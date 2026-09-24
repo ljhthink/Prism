@@ -15,7 +15,7 @@
 | 1 | 数据集 44.1kHz 单声道 | **必须 16 kHz**：`training_data/configs/{c,cj,cje}_finetune_speaker.json` 的 `sampling_rate` **都是 16000**，且 `data_utils.get_audio()` 用 `torchaudio.load()` **不做重采样** ⇒ 喂 44.1kHz 会得到错误频谱。**产物也就是 16 kHz**（低于 ZipVoice 的 24 kHz） |
 | 2 | `python finetune_speaker_v2.py -m ./OUTPUT_MODEL --max_epochs N --save_every_epoch K` | **该 CLI 不可用**：`run_finetuning()` 需要 8 个位置参数，`main()` 只传了 1 个（`TypeError`）。且**没有 `--save_every_epoch` 这个参数**。⇒ 用 `voice-clone-kit/run-vits-finetune.py` |
 | 3 | 训练启动即可跑 | 会在 `TCPStore` rendezvous 处 `DistNetworkError: Unknown error` ⇒ 需把 `MASTER_ADDR` 从 `localhost` 改成 `127.0.0.1`（补丁已打在 vendored `finetune_speaker_v2.py`，允许 `VITS_MASTER_ADDR/PORT` 覆盖） |
-| 4 | 导出的 onnx 直接可用 | **不能直接用**：`comment` 元数据为空串 ⇒ sherpa-onnx `SHERPA_ONNX_READ_META_DATA_STR(comment,"comment")` 判为缺失 ⇒ **`SHERPA_ONNX_EXIT(-1)` 原生崩溃**。须先跑 `.tmp-cyrene/fix-vits-onnx-metadata.py` 把 `comment` 写成非空 ASCII（详见验证报告 §5） |
+| 4 | 导出的 onnx 直接可用 | **不能直接用**：`comment` 元数据为空串 ⇒ sherpa-onnx `SHERPA_ONNX_READ_META_DATA_STR(comment,"comment")` 判为缺失 ⇒ **`SHERPA_ONNX_EXIT(-1)` 原生崩溃**。须先跑 `voice-clone-kit/tools/fix-vits-onnx-metadata.py` 把 `comment` 写成非空 ASCII（详见验证报告 §5） |
 
 实测数值（可复算）：**78 条 / 513.67s**；**100 epochs ≈ 35 分钟**；显存峰值 **7570MiB@batch16 / 6552MiB@batch8**；
 导出 **fp32 RTF 0.10–0.11、int8 RTF 0.90–1.00**（**端上应选 fp32**，与本模型 int8 反而更慢）；
@@ -37,15 +37,15 @@
 
 | 项 | 状态 | 证据 |
 | --- | --- | --- |
-| 训练数据 | ✅ 78 条 / **513.67s（8.56 分钟）** / 平均 6.59s / 台词覆盖 78/78 | `voice-clone-kit/build-vits-dataset.ps1` 实测退出码 0；产物 `vits-dataset/`（`sampled_audio4ft.txt`、`manifest.json`、`build-report.txt`） |
+| 训练数据 | ✅ 78 条 / **513.67s（8.56 分钟）** / 平均 6.59s / 台词覆盖 78/78 | `voice-clone-kit/build-vits-dataset.ps1` 实测退出码 0；产物 `build-out/vits/dataset/`（`sampled_audio4ft.txt`、`manifest.json`、`build-report.txt`） |
 | Python 环境 | ✅ conda env `vits38` = Python **3.8.20** + `torch 2.4.1+cu124` + `torchaudio 2.4.1` + `CUDA=True`（RTX 4060 Laptop 8GB） | `voice-clone-kit/prepare-vits-toolchain.ps1` 配套命令 |
-| 工具链仓库 | ✅ `ANONEKO777/sherpa-onnx-vits-fine-tuning-webui`（MIT）已 clone | `voice-clone-kit/vits-toolchain/sherpa-onnx-vits-fine-tuning-webui/` |
-| 底模（中文单语 C） | ✅ `G_0.pth` 151.7MB / `D_0.pth` 178.4MB / `configs/finetune_speaker.json`（经 **hf-mirror** 取得；HF 直连被重置、`hf-mirror.com/spaces/` 404，故走 **datasets** 路径） | `vits-toolchain/prepare-log.txt` |
+| 工具链仓库 | ✅ `ANONEKO777/sherpa-onnx-vits-fine-tuning-webui`（MIT）已 clone | `voice-clone-kit/build-out/vits/toolchain/sherpa-onnx-vits-fine-tuning-webui/` |
+| 底模（中文单语 C） | ✅ `G_0.pth` 151.7MB / `D_0.pth` 178.4MB / `configs/finetune_speaker.json`（经 **hf-mirror** 取得；HF 直连被重置、`hf-mirror.com/spaces/` 404，故走 **datasets** 路径） | `build-out/vits/toolchain/prepare-log.txt` |
 | 训练依赖 | ⏳ `pip install -r requirements.txt`（含 `demucs`/`openai-whisper`/`gradio`/`onnx==1.11.0`）与 `monotonic_align` 编译 | 见 §7 风险 |
 
 ## 2. 训练（命令级）
 
-工作目录一律为 `voice-clone-kit/vits-toolchain/sherpa-onnx-vits-fine-tuning-webui`。
+工作目录一律为 `voice-clone-kit/build-out/vits/toolchain/sherpa-onnx-vits-fine-tuning-webui`。
 
 ### 2.1 放数据（**跳过 Whisper 转写**——我们已有逐字官方台词）
 
@@ -58,11 +58,11 @@ LOCAL.md 的原流程要求先 `short_audio_transcribe.py --whisper_size large` 
 cd voice-clone-kit
 powershell -ExecutionPolicy Bypass -File build-vits-dataset.ps1 -SampleRate 16000 -RelPrefix "training_data/cyrene_wavs"
 # ② 放入训练仓库约定的相对路径（清单里写的就是这个前缀）
-$repo = "vits-toolchain/sherpa-onnx-vits-fine-tuning-webui"
+$repo = "build-out/vits/toolchain/sherpa-onnx-vits-fine-tuning-webui"
 New-Item -ItemType Directory -Force -Path "$repo/training_data/cyrene_wavs" | Out-Null
-Copy-Item vits-dataset/sampled_audio4ft/*.wav "$repo/training_data/cyrene_wavs/" -Force
+Copy-Item build-out/vits/dataset/sampled_audio4ft/*.wav "$repo/training_data/cyrene_wavs/" -Force
 # ③ 清单原样作为短音频标注（格式与 LOCAL.md 的 short_character_anno.txt 一致，UTF-8 无 BOM）
-Copy-Item vits-dataset/sampled_audio4ft.txt "$repo/training_data/short_character_anno.txt" -Force
+Copy-Item build-out/vits/dataset/sampled_audio4ft.txt "$repo/training_data/short_character_anno.txt" -Force
 ```
 
 > ⚠️ **不要**把语料放进 `training_data/sampled_audio4ft/`：那是仓库自带的**辅助数据集**（1092 条 `N.wav`，
@@ -154,7 +154,7 @@ $py = "C:\Users\ljh\.conda\envs\vits38\python.exe"
 ### 3.1 ⚠️ 必须的收尾步骤：修 `comment` 元数据（**否则端上/PC 加载都会原生崩溃**）
 
 ```powershell
-& $py ..\..\..\..\.tmp-cyrene\fix-vits-onnx-metadata.py     # 或用仓库内任意副本
+& $py ..\..\..\..\voice-clone-kit\tools\fix-vits-onnx-metadata.py     # 或用仓库内任意副本
 # 产出 model.fixed.onnx / model.int8.fixed.onnx（不覆盖原文件，保留导出证据）
 ```
 
@@ -176,8 +176,8 @@ $py = "C:\Users\ljh\.conda\envs\vits38\python.exe"
 
 ```powershell
 # 4.1 用本机基础环境（sherpa_onnx 1.13.8）直接加载 fp32 导出物并合成
-python .tmp-cyrene\verify-vits-export.py      # 产出 vits-export-verify.json（含 RTF）
-python .tmp-cyrene\make-vits-sample.py        # 产出可试听的 wav（fp32 / int8 各一段）
+python voice-clone-kit\tools\verify-vits-export.py      # 产出 vits-export-verify.json（含 RTF）
+python voice-clone-kit\tools\make-vits-sample.py        # 产出可试听的 wav（fp32 / int8 各一段）
 ```
 
 判据（**实测已满足**）：能加载、能出声、无掉字、`sample_rate=16000` 与导出元数据一致。

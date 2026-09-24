@@ -61,6 +61,16 @@ class LocalCloneCacheKeyTest {
     }
 
     @Test
+    fun `段间停顿必须参与缓存键（否则改了 gap 没效果）`() {
+        // 段间停顿在流水线/引擎构造期定死，键少一项就是 F-3 的同型缺陷（"改了没效果"）
+        assertNotEquals(
+            "只改 sentenceGapMs 时键必须不同",
+            key(),
+            key(config = LocalCloneConfig(sentenceGapMs = 400))
+        )
+    }
+
+    @Test
     fun `同一输入必须稳定`() {
         assertEquals(key(), key())
         assertEquals(key(LocalCloneConfig(numSteps = 4, speed = 0.8f)), key(LocalCloneConfig(numSteps = 4, speed = 0.8f)))
@@ -81,7 +91,8 @@ class LocalCloneCacheKeyTest {
             // maxChar 必须同时 ≥ minChar（不变量），故两个一起改
             "maxCharInSentence" to baseConfig.copy(maxCharInSentence = baseConfig.maxCharInSentence + 1),
             "numThreads" to baseConfig.copy(numThreads = baseConfig.numThreads + 1),
-            "timeoutMs" to baseConfig.copy(timeoutMs = baseConfig.timeoutMs + 1_000L)
+            "timeoutMs" to baseConfig.copy(timeoutMs = baseConfig.timeoutMs + 1_000L),
+            "sentenceGapMs" to baseConfig.copy(sentenceGapMs = baseConfig.sentenceGapMs + 300)
         )
         variants.forEach { (name, variant) ->
             assertNotEquals("字段 $name 必须参与缓存键", key(), key(variant))

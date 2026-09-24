@@ -55,7 +55,7 @@
 # ① 抽官方台词（biligame WIKI「昔涟/语音」→ cyrene-voice-lines.json）
 powershell -ExecutionPolicy Bypass -File parse-wiki-vo-lines.ps1
 
-# ② 体检素材 + 构建参考集与清单（产出 voicepack\cyrene\{voicepack.json, refs\}）
+# ② 体检素材 + 构建参考集与清单（产出 build-out\zipvoice\voicepack\cyrene\{voicepack.json, refs\}）
 powershell -ExecutionPolicy Bypass -File build-local-voicepack.ps1
 ```
 
@@ -81,17 +81,17 @@ powershell -ExecutionPolicy Bypass -File install-local-voicepack.ps1 -Push
 
 ## 3.5 应用内导入音色包（TKN-LVC-016 / ADR-057）—— **不需要 USB**
 
-> 适用：任何已组装好的 `voicepack\<VoiceId>\`。**这是普通用户路径**；第 3 节的 `-Push` 是
+> 适用：任何已组装好的 `build-out\zipvoice\voicepack\<VoiceId>\`。**这是普通用户路径**；第 3 节的 `-Push` 是
 > 开发/调试路径（可一次推多个包、可直接覆盖，不经过用户确认）。
 
 ```powershell
 # 组装（VITS 包为例；ZipVoice 包用 build-local-voicepack.ps1）
 powershell -ExecutionPolicy Bypass -File build-vits-voicepack.ps1
-# 打成手机可导入的单文件归档 → dist\<VoiceId>.voicepack
+# 打成手机可导入的单文件归档 → build-out\zipvoice\dist\<VoiceId>.voicepack
 powershell -ExecutionPolicy Bypass -File pack-voicepack.ps1 -VoiceId cyrene-vits
 ```
 
-把 `dist\cyrene-vits.voicepack` 传到手机（微信/网盘/`adb push /sdcard/Download/` 均可），然后：
+把 `build-out\zipvoice\dist\cyrene-vits.voicepack` 传到手机（微信/网盘/`adb push /sdcard/Download/` 均可），然后：
 
 **设置 → 语音引擎 → 展开 → 播报引擎（TTS） → 「导入音色包」→ 文件选择器里选中该 `.voicepack`。**
 
@@ -211,7 +211,7 @@ adb logcat -c ; adb logcat -s "LocalClone" "LocalClone/ZipVoice"
 }
 ```
 
-资产来源：`voice-clone-kit/vits-toolchain/sherpa-onnx-vits-fine-tuning-webui/onnx-output/vits-cyrene/`
+资产来源：`voice-clone-kit/build-out/vits/toolchain/sherpa-onnx-vits-fine-tuning-webui/onnx-output/vits-cyrene/`
 （`model.fixed.onnx` = 用 `fix-vits-onnx-metadata.py` 修过 `comment` 的那份）。
 
 | # | 待测项 | 怎么测 | 判据 / 说明 |
@@ -261,7 +261,7 @@ adb logcat -c ; adb logcat -s "LocalClone" "LocalClone/ZipVoice" "LocalClone/Vit
 | T7 | 再次导入并**确认覆盖** | 替换成功，列表仍是一个；`.bak-*` 被清理 | 无 `.bak-*` 残留 |
 | T8 | 导入一个**改坏的包**（把 `voicepack.json` 删掉重打包） | 中文错误提示；`files/voicepack` 下无新增目录 | 提示"清单缺少合法的 voiceId" |
 | T9 | 导入后选中 VITS 播报 | 语速比改造前**明显更慢**（speed 1.0→0.8，约 5.9 字/秒） | 清单 `generation.speed = 0.8` 被读入（可对比同一句话时长） |
-| T11 | 听 `vits-listening-samples/vits-cyrene-sample-{fp32,e500-fp32}.wav` | 判断续训（epoch 500）是否真的缓解了"有气无力" | **主观判听**；客观对拍只显示小幅变化（动态范围 +0.5dB、频谱重心 +215Hz、F0 摆动收窄），**不足以代替听感** |
+| T11 | 听 `build-out/vits/listening/vits-cyrene-sample-{fp32,e500-fp32}.wav` | 判断续训（epoch 500）是否真的缓解了"有气无力" | **主观判听**；客观对拍只显示小幅变化（动态范围 +0.5dB、频谱重心 +215Hz、F0 摆动收窄），**不足以代替听感** |
 
 > **T11 是 Q4（续训 400–600 epoch）的验收项**：epoch-500 权重已打进音色包，
 > 但"是否值得替换"必须由你听完两组样本定论。若判定 500 反而不如 100，

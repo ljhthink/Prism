@@ -407,7 +407,10 @@ class LocalVoicePackStore(
             minCharInSentence = gen?.optInt("minCharInSentence") ?: LocalCloneConfig.DEFAULT_MIN_CHARS,
             maxCharInSentence = gen?.optInt("maxCharInSentence") ?: LocalCloneConfig.DEFAULT_MAX_CHARS,
             numThreads = gen?.optInt("numThreads") ?: LocalCloneConfig.DEFAULT_NUM_THREADS,
-            timeoutMs = gen?.optLong("timeoutMs") ?: LocalCloneConfig.DEFAULT_TIMEOUT_MS
+            timeoutMs = gen?.optLong("timeoutMs") ?: LocalCloneConfig.DEFAULT_TIMEOUT_MS,
+            // 段间停顿（播放层参数，ZipVoice/VITS 同源生效）：缺省 = 0 = 不插静音（与改造前等价）；
+            // 越界由 `sanitized()` **回落默认 0**（不是钳到边界——见 LocalCloneConfig KDoc）
+            sentenceGapMs = gen?.optInt("sentenceGapMs") ?: LocalCloneConfig.DEFAULT_SENTENCE_GAP_MS
         )
         // 值域钳制（guardrail F-4/C3）：清单可被任意改写，数值必须先钳再进 native
         val generation = rawGeneration.sanitized()

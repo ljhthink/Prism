@@ -449,9 +449,13 @@ class LocalCloneTtsEngine(
                     // 生成结束后才做 `if (config.silence_scale != 1) result.ScaleSilence(...)`，
                     // 而流式路径只消费回调块、**丢弃** `result` ⇒ 非 1.0 时流式会静默丢掉该后处理，
                     // 产出与整段路径不同的音频（属于"外观正常但行为变了"）。故非 1.0 一律退回整段路径。
+                    // 段间停顿（sentenceGapMs）需要"引擎回报的采样率"，而它目前只在 withContext 内取得；
+                    // 故把采样率提到 block 外（**不硬编码** 24000/16000——VITS 与 ZipVoice 未必同率）。
+                    var streamRate = 0
                     val streamSession: LocalCloneStreamSession? = withContext(ioDispatcher) {
                         val synth = ensureSynthesizer() ?: throw IllegalStateException(SYNTH_UNAVAILABLE)
                         val rate = synth.sampleRate()
+                        streamRate = rate
                         if (rate <= 0 || config.silenceScale != SILENCE_SCALE_STREAMABLE ||
                             playbackMode != LocalClonePlaybackMode.CONTINUOUS
                         ) null
@@ -463,7 +467,7 @@ class LocalCloneTtsEngine(
                         // 上游 `offline-tts-zipvoice-impl.h` 每段生成完即 `callback(cur.samples...)`，
                         // 且块是**增量音频**（实测各块样本数之和恰等于整段样本数）⇒ 首声只需等第一句。
                         try {
-                            for (segment in segments) {
+                            for ((index, segment) in segments.withIndex()) {
                                 if (request.cancelled || outputSinkDead) break
                                 val audio = withContext(ioDispatcher) {
                                     val synth = ensureSynthesizer()
@@ -498,6 +502,26 @@ class LocalCloneTtsEngine(
                                 if (audio.truncated) {
                                     Log.w(TAG, "该段合成被中止（truncated=true）：停止后续分段，不按成功播放")
                                     break
+                                }
+                                // ---- 段间停顿（sentenceGapMs，播放层补偿被切段吃掉的停顿）----
+                                // **最后一段之后不插**：否则尾音被拖长、onDone 被无谓延迟。
+                                // 写失败按**既有**口径处理（只反映"确实放弃这段音频"；空块已在上方整体跳过，
+                                // 故此处非空仍返回 false ⇒ 输出栈失效）。
+                                if (index != segments.lastIndex) {
+                                    // 边界类型判定（**段边界 ≠ 句边界**）：只有真句末给满额，
+                                    // 子句（逗号/分号/冒号）打折，硬切/无标点一律 0
+                                    val gap = LocalCloneSegmentGap.silence(
+                                        LocalCloneSegmentGap.gapMsFor(segment, config.sentenceGapMs),
+                                        streamRate
+                                    )
+                                    if (gap.isNotEmpty()) {
+                                        request.touch()
+                                        if (streamSession.write(gap)) {
+                                            playedAny = true
+                                        } else if (!abandonProbe()) {
+                                            outputSinkDead = true
+                                        }
+                                    }
                                 }
                             }
                             // 看门狗须在**排空**之前停表：排空期间没有合成，不该按"无进展"告警
@@ -579,7 +603,7 @@ class LocalCloneTtsEngine(
                         val roundStartNanos = System.nanoTime()
                         val producer = scope.launch(ioDispatcher) {
                             try {
-                                for (segment in segments) {
+                                for ((index, segment) in segments.withIndex()) {
                                     if (request.cancelled || outputSinkDead) break
                                     val synth = ensureSynthesizer()
                                         ?: throw IllegalStateException(SYNTH_UNAVAILABLE)
@@ -597,6 +621,32 @@ class LocalCloneTtsEngine(
                                     }
                                     if (firstAudioNanos == 0L) firstAudioNanos = System.nanoTime()
                                     queue.send(audio)
+                                    // ---- 段间停顿（sentenceGapMs）----
+                                    // 作为**独立 piece** 入队：CONTINUOUS（逐段 `play`）与 WHOLE（拼接后一次 `play`）
+                                    // 两条消费路径都因此自动获得段间停顿，无需改消费端。
+                                    // **最后一段之后不插**（否则尾音被拖长、onDone 延迟）；不计入 synthNanos；
+                                    // 除 request.touch() 外不产生任何副作用。
+                                    if (index != segments.lastIndex) {
+                                        // 边界类型判定（**段边界 ≠ 句边界**：切分可能退到子句标点甚至硬切）：
+                                        // 真句末给满额、子句打折、硬切/无标点 0 —— 否则逗号处顿挫、
+                                        // 硬切处出现"词中间停顿"，比改动前更糟。
+                                        val gap = LocalCloneSegmentGap.silence(
+                                            LocalCloneSegmentGap.gapMsFor(
+                                                segments[index], config.sentenceGapMs
+                                            ),
+                                            audio.sampleRate
+                                        )
+                                        if (gap.isNotEmpty()) {
+                                            request.touch()
+                                            queue.send(
+                                                LocalCloneAudio(
+                                                    samples = gap,
+                                                    sampleRate = audio.sampleRate,
+                                                    truncated = false
+                                                )
+                                            )
+                                        }
+                                    }
                                 }
                             } catch (e: CancellationException) {
                                 throw e
