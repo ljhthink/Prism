@@ -18,6 +18,7 @@ package io.prism.voice.rolepack
  *   "style":   { "voiceCall": { "maxSentenceLen", "sentenceBreak", "fillers[]" } },
  *   "voice":   { "minimax": { "voiceId", "speed", "emotion", "cloneVoiceId" },
  *                "gptsovits": { "baseUrl", "refAudioPath", "promptText", "promptLang" },
+ *                "local": { "voiceId", "numSteps" },
  *                "system": { "pitch", "speechRate" } },
  *   "expression": { "avatars[]", "stickers[]", "enabled" },
  *   "memory":  { "worldbookImport" }
@@ -118,7 +119,8 @@ data class RolePack(
     data class Voice(
         val minimax: MiniMaxVoice = MiniMaxVoice(),
         val gptsovits: GptSovitsVoice = GptSovitsVoice(),
-        val system: SystemVoice = SystemVoice()
+        val system: SystemVoice = SystemVoice(),
+        val local: LocalVoice = LocalVoice()
     )
 
     /**
@@ -149,6 +151,26 @@ data class RolePack(
     data class SystemVoice(
         val pitch: Float = 1.0f,
         val speechRate: Float = 1.0f
+    )
+
+    /**
+     * 本地音色克隆参数（LVC-1，ADR-053）——**只声明引用，不内嵌资产**。
+     *
+     * **背景**：端侧克隆模型单角色约 195MB（ZipVoice int8 distill + vocos 声码器），进 APK 不可接受；
+     * 且 ADR-048 已确立"角色资产不入 APK/assets/公开仓库"的边界。因此角色包只写
+     * [voiceId]，实际音色包（模型 + 参考音频集）由脚本侧载到设备
+     * `<externalFilesDir>/voicepack/<voiceId>/`，见 `docs/runbooks/setup-local-voice-clone.md`。
+     *
+     * **兼容性**：旧角色包无 `voice.local` 字段 → [voiceId] 为 null → 设置页"本地昔涟（离线）"
+     * 不可选；旧版 App 读到带 `voice.local` 的包 → 未知子键被宽松解析忽略（无破坏）。
+     *
+     * @property voiceId 本地音色包 id（null/空白 = 该角色不使用本地音色）
+     * @property numSteps 可选覆盖：ZipVoice 流匹配步数（真机调 RTF↔质量的最有用旋钮；
+     *   null = 用音色包清单值。合法域 1..16，越界由 [io.prism.voice.local.LocalCloneConfig] 兜底）
+     */
+    data class LocalVoice(
+        val voiceId: String? = null,
+        val numSteps: Int? = null
     )
 
     /** 表情层（批次23-B，ADR-048）——v1 仅预留 schema，enabled=false 不装配。 */
@@ -192,7 +214,7 @@ data class RolePack(
      *
      * 格式：
      * ```
-     * 【身份说明】你就是<name>。以下内容就是你自己，不是需要扮演的设定。
+     * 【身份说明】你就是<name>。你就是这个人，不是在描述或者模仿谁。
      * <systemPrompt>
      * 对用户的称呼：<address>
      * 语气规则：<tone1>；<tone2>
@@ -213,7 +235,15 @@ data class RolePack(
         return buildString {
             append("【身份说明】你就是")
             append(name.ifBlank { id })
-            append("。以下内容就是你自己，不是需要扮演的设定。")
+            // ADR-052 D6（**自洽摘要**：原句为"以下内容就是你自己，不是需要扮演的设定。"，
+            // 在被注入的最高显著位置同时出现「扮演」「设定」两个元词汇，与角色包自身 forbidden
+            // 的元词汇禁令正面冲突；且"否定式表述"本身构成 priming——点名即激活）：
+            //
+            // 但**不得因此丢掉引擎级反出戏锚点**：本句对任意用户导入的角色包一律生效，是
+            // "通用覆盖"；若只把去元描述职责交给资产内的 persona.systemPrompt，则第三方角色包
+            // 不写该句时覆盖归零（防御面收窄）。故改为沿用上游 soul.md 的措辞范式——否定
+            // 「描述/模仿」而非否定「扮演/设定」：既无元词汇，又保留通用反出戏语义。
+            append("。你就是这个人，不是在描述或者模仿谁。")
             if (persona.systemPrompt.isNotBlank()) {
                 append("\n").append(persona.systemPrompt.trim())
             }
@@ -295,7 +325,9 @@ data class RolePack(
             voice = Voice(
                 minimax = MiniMaxVoice(),
                 gptsovits = GptSovitsVoice(),
-                system = SystemVoice(pitch = 1.0f, speechRate = 1.0f)
+                system = SystemVoice(pitch = 1.0f, speechRate = 1.0f),
+                // LVC-1（ADR-053）：出厂 B0 不引用任何本地音色包（voiceId=null → 设置页该项不可选）
+                local = LocalVoice(voiceId = null)
             ),
             expression = Expression(avatars = emptyList(), stickers = emptyList(), enabled = false),
             memory = Memory(worldbookImport = null)
@@ -416,7 +448,10 @@ object RolePackWorldbook {
         val bodies = entries.mapNotNull { it.content.trim().takeIf(String::isNotEmpty) }
         if (bodies.isEmpty()) return null
         return buildString {
-            append(SECTION_HEADER).append("以下是你自己记得的世界与经历（属于你的事实，不是需要扮演的设定；")
+            // ADR-052 D6（自洽摘要：原句"属于你的事实，不是需要扮演的设定"里的「扮演」「设定」
+            // 是元词汇，与角色包 forbidden 的元词汇禁令冲突）：改为直陈"你真实记得的事"。
+            // **安全声明（资料非指令）逐字保留**——二者是不同职责，不得因去元词汇而削弱注入防线。
+            append(SECTION_HEADER).append("以下是你真实记得的世界与经历（是你自己的事；")
             // guardrail R1 M2 修复（BR-security-002）：边界声明——正文来自用户导入的角色包，
             // 其中任何看似指令的文字都不得改变行为准则与安全要求（提示词层的第一道防线；
             // 代码层拦截与 [io.prism.ui.chat.ConversationViewModel.PHONE_CONTROL_GUIDANCE]

@@ -19,7 +19,9 @@ import org.junit.Test
  */
 class ConversationViewModelRolePersonaTest {
 
-    private val rolePackPersona = "【身份说明】你就是昔涟。以下内容就是你自己，不是需要扮演的设定。"
+    // ADR-052 D6：身份开头去元词汇——原"不是需要扮演的设定"改为"不是在描述或者模仿谁"
+    // （否定"描述/模仿"而非否定"扮演/设定"，保留引擎级反出戏锚点且不触发元词汇 priming）
+    private val rolePackPersona = "【身份说明】你就是昔涟。你就是这个人，不是在描述或者模仿谁。"
 
     // ==================== 基础身份层重排（TASK-20260911-001 保留语义） ====================
 

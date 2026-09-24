@@ -42,6 +42,9 @@ node_modules/
 logs/
 tmp/
 temp/
+# 一次性调查/实验产物（LVC 流式播放调研脚本与原始输出，TKN-LVC-013；可复算，不入库）
+.tmp-cyrene/
+.tmp_research/
 .coverage/
 .nyc_output/
 dist/
@@ -111,3 +114,13 @@ voice-clone-kit/
 
 # ADR（架构决策记录）
 /docs/decisions/
+
+# 联网调研的正文抓取缓存（一次工件，供引文复核；不入库）
+/.research-cache/
+
+# codegraph 工具索引（本地生成，43MB+，不入库）
+/.codegraph/
+
+# 批次24（ADR-051）：桌宠形象资产（用户私有资产，不入 Git、不入 APK）
+# 与 cyrene.rolepack 同一边界；重生成：node tmp/build-cyrene-petpack.js
+*.petpack

@@ -101,6 +101,12 @@ class VoiceSessionController(
     /** 批次23-A（ADR-048）：当前 ASR 是否云端引擎（覆盖层隐私声明区分——云端音频出设备）。 */
     val isCloudAsr: Boolean get() = asr is io.prism.voice.cloud.AliCloudAsrEngine
 
+    /**
+     * LVC-1（ADR-053）：当前 TTS 是否端侧本地音色引擎（覆盖层隐私声明区分——本地合成文本不出设备）。
+     * 端侧引擎在失败降级后会切回系统播报，本属性随之变为 false（读的是当前引擎实例）。
+     */
+    val isLocalTts: Boolean get() = tts is io.prism.voice.local.LocalCloneTtsEngine
+
     // ==================== 批次23-A（ADR-048，A5）：双轨降级链 ====================
 
     /** 端侧降级引擎缓存（首个降级事件时经 supplier 懒创建，本次通话复用）。 */
@@ -167,12 +173,18 @@ class VoiceSessionController(
     }
 
     /**
-     * 层②启动探测降级（TTS）：当前引擎为云端且错误为降级类（探测失败文案自带"已回退"）
-     * → 本次通话切端侧系统播报并**重试当前动作**（重播当前段，由调用方经 [retry] 注入；
-     * 主线程执行——SystemTtsEngine 主线程约定）。鉴权/单句合成失败等非降级类错误不回退。
+     * 层②启动探测降级（TTS）：当前引擎为**非端侧系统播报**（云端 MiniMax 或本地音色）且错误为
+     * 降级类（探测失败文案自带"已回退"） → 本次通话切端侧系统播报并**重试当前动作**（重播当前段，
+     * 由调用方经 [retry] 注入；主线程执行——SystemTtsEngine 主线程约定）。
+     * 鉴权/单句合成失败等非降级类错误不回退。
+     *
+     * **LVC-1（ADR-053）口径扩展**：原判定为 `tts !is MiniMaxTtsEngine`（只放行云端）。本地音色
+     * 引擎同样可能失败（模型加载失败/合成超时/参考集不可用），若被挡在降级链外，本轮会
+     * "静默结束、用户听不到任何声音"。故判定改为"当前不是端侧系统播报即可回退"——
+     * 对 MiniMax 行为**完全不变**（它仍不是 SystemTtsEngine），端侧引擎自身失败仍不回退（无可回退目标）。
      */
     private fun tryFallbackTts(message: String, retry: (() -> Unit)? = null): Boolean {
-        if (tts !is io.prism.voice.cloud.MiniMaxTtsEngine) return false
+        if (tts is SystemTtsEngine) return false
         if (!shouldFallbackToOnDevice(VoiceEngineKind.TTS, message)) return false
         if (onDeviceEngineSupplier == null) return false
         scope.launch {
@@ -279,6 +291,12 @@ class VoiceSessionController(
      */
     private fun onTurnEnded() {
         _phase.value = Phase.IDLE
+        // 批次24（ADR-051 D8）：轮次结束 → 停口型。收口在此而非只挂在 speakSegments 的
+        // onDone：跳过播报、会话忙拒绝、TTS 失败等路径同样会走到本函数，
+        // 单点收口可避免"桌宠一直张着嘴"的残留态。
+        io.prism.pet.PetActionBus.emit(
+            io.prism.pet.PetActionBus.Event.Speaking(active = false)
+        )
         if (asr.isStreaming && callActive) {
             enterListening(resetBefore = true)
         }
@@ -311,6 +329,11 @@ class VoiceSessionController(
     private fun interruptPlaybackAndListen() {
         speakGeneration++
         tts.stop()
+        // 批次24（ADR-051 D8）：打断/挂断路径**不触发 onDone**（见 PRD US-2407 AC-3），
+        // 必须在此显式停口型，否则形象会卡在播放态。
+        io.prism.pet.PetActionBus.emit(
+            io.prism.pet.PetActionBus.Event.Speaking(active = false)
+        )
         if (asr.isStreaming && callActive) {
             enterListening(resetBefore = false)
         } else {
@@ -576,6 +599,16 @@ class VoiceSessionController(
         tts.speak(segment, object : TtsEngine.Listener {
             override fun onStart(utteranceId: String) {
                 if (index == 0) listener.onStart(utteranceId)
+                // 批次24（ADR-051 D8）：**分段级**口型驱动。
+                // 刻意放在这里而不是外层 Listener：外层 onStart 只在 index==0 转发
+                // （:578 的既有契约，本批次不改），若挂在外层则多段播报期间口型会在
+                // 第一段结束后停住。此处旁路广播不影响任何既有语义（无返回值、无副作用）。
+                io.prism.pet.PetActionBus.emit(
+                    io.prism.pet.PetActionBus.Event.Speaking(
+                        active = true,
+                        durationMs = io.prism.pet.PetManager.estimateSpeechMs(segment)
+                    )
+                )
             }
 
             override fun onDone(utteranceId: String) {
@@ -631,10 +664,25 @@ class VoiceSessionController(
         Log.i(TAG, "语音通话结束")
     }
 
-    /** 永久释放（Screen 销毁；非挂断）。 */
+    /**
+     * 永久释放（Screen 销毁；非挂断）。
+     *
+     * **guardrail R1 F-6（LVC-1 修复）**：补收端侧降级引擎缓存。原实现只释放 `asr`/`tts` 两个
+     * "当前引擎"，而 [VoiceOnDeviceEngines] 里被降级链创建过、却未被提升为当前引擎的那个实例
+     * （例如"本地音色失败 → 切系统播报"时创建的 `SystemTtsEngine`）永远不会被释放——
+     * 每次通话泄漏一个 `TextToSpeech` 服务绑定。本轮把"本地音色失败"纳入降级触发面后该路径
+     * 变为常规路径，故一并补收。**不强制创建**（读 [VoiceOnDeviceEngines.createdTts]/[createdAsr]），
+     * 且跳过与当前 `asr`/`tts` 同一实例者（避免二次释放）。
+     */
     fun release() {
         asr.release()
         tts.release()
+        val cached = onDeviceCache
+        onDeviceCache = null
+        if (cached != null) {
+            cached.createdAsr()?.let { if (it !== asr) runCatching { it.release() } }
+            cached.createdTts()?.let { if (it !== tts) runCatching { it.release() } }
+        }
         scope.cancel()
         VoiceForegroundService.hangUpRequested = null
     }

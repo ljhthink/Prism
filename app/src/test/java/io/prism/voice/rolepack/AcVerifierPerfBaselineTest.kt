@@ -14,7 +14,7 @@ import java.io.File
  *
  * 对 AC10 指定的三个关键纯函数做计时测试并输出 p50/p95/p99：
  * 1. [RolePackWorldbook.select]（真实资产规模 40 条 / 20,750 字）
- * 2. [RolePack.toPersonaSystemPromptSection]（真实 person 规模 14,963 字 / 通话段 1,620 字）
+ * 2. [RolePack.toPersonaSystemPromptSection]（真实 person 规模 10,548 字 / 通话段 919 字，ADR-052 v7）
  * 3. [ConversationViewModel.mergeSystemPrompt]（全层齐备 + 真实角色包体量）
  *
  * **基线状态**：`docs/reports/perf/` 内 12 份既有基线**均不覆盖**这三个函数
@@ -31,29 +31,44 @@ class AcVerifierPerfBaselineTest {
 
     // ==================== 被测数据 ====================
 
-    private fun realPack(): RolePack {
+    /**
+     * 真实资产判据（guardrail F1 修复）：返回 **(角色包, 是否为磁盘真实资产)**。
+     *
+     * 原实现靠 `persona.length == 14963` 反推"是否真实资产"，属**由内容反推来源**的脆弱写法——
+     * 资产一升级判据即静默失效（v7 后真假两路同时落入"合成等价输入"）。改为由**取数分支**
+     * 直接给出事实，不再依赖任何会随版本漂移的字数常量。
+     */
+    private fun realPack(): Pair<RolePack, Boolean> {
         val f = listOf(File("..", "cyrene.rolepack"), File("cyrene.rolepack"))
             .firstOrNull { it.isFile }
         return if (f != null) {
-            RolePackParser.parse(f.readText())
+            RolePackParser.parse(f.readText()) to true
         } else {
             // 无资产环境（干净检出）：按报告登记的真实规模合成等价输入
-            syntheticPack()
+            syntheticPack() to false
         }
     }
 
     private fun syntheticPack(): RolePack {
-        val persona = "人格正文".repeat(14963 / 4)
-        val call = "通话收紧段".repeat(1620 / 5)
+        // ADR-052：资产升级 v7 后规模由 14,963/1,620 → 10,548/919 字（删除非人格移植物、
+        // 新增示例对话层与执行态表达层后的净结果）。合成夹具必须随资产同步前移，否则干净
+        // 检出（无 cyrene.rolepack）时性能基线与真实规模脱钩（code-archaeologist 复核 R-d）。
+        //
+        // guardrail F9：下面用单字符填充 + `repeat(n)` 使长度**精确等于** n（原写法以多字
+        // 词元取整，实际为 10,476/915/20,640，与注释暗示的等号不符）。取整误差 ≤0.5% 不影响
+        // 门禁结论，但"注释说等号、实际不等"是会被后续读者当成事实的漂移源，故一并收紧。
+        val persona = "人".repeat(10548)
+        val call = "话".repeat(919)
         val entries = (1..40).map { i ->
             RolePack.WorldbookEntry(
                 keys = listOf("关键词$i", "kw$i"),
-                content = "设定正文$i".repeat(20750 / 40 / 6),
+                // 40 条等分 20,750 字：前 39 条各 519 字、末条补齐余数（519*39=20,241，余 509）
+                content = "设".repeat(if (i <= 39) 519 else 509),
                 constant = i <= 3
             )
         }
         return RolePack(
-            id = "synthetic", name = "合成角色", version = "6.0.0",
+            id = "synthetic", name = "合成角色", version = "7.0.0",
             persona = RolePack.Persona(systemPrompt = persona, callSystemPrompt = call),
             worldbook = entries
         )
@@ -117,14 +132,14 @@ class AcVerifierPerfBaselineTest {
 
     @Test
     fun `AC10 - 三个关键纯函数计时基线（p50 p95 p99 与吞吐）`() {
-        val pack = realPack()
+        val (pack, isRealAsset) = realPack()
         val entries = pack.worldbook
         val persona = pack.persona.systemPrompt
         val call = pack.persona.callSystemPrompt
         val allKeys = entries.flatMap { it.keys }.filter { it.isNotBlank() }
         val fullSkills = skills(6)
 
-        val assetDesc = if (entries.size == 40 && persona.length == 14963) "真实资产" else "合成等价输入"
+        val assetDesc = if (isRealAsset) "真实资产" else "合成等价输入"
 
         // **隔离测量**：scanText 用 StringBuilder 预构造（禁用 `+=`——Kotlin 的 String.plus 是
         // 逐次分配新串，长串上会退化为 O(n²)，会把**测试夹具开销**误报成产品开销；

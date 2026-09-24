@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Prism Pet Renderer</title>
+  <style>
+    /* 透明背景是硬要求：悬浮窗必须是"只有角色"的形态。
+       html/body 与 canvas 三层都要透明，否则会出现白底/黑底方块。 */
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: transparent;
+    }
+    #stage {
+      display: block;
+      width: 100%;
+      height: 100%;
+      background: transparent;
+    }
+    #fallback {
+      display: none;
+      position: absolute;
+      inset: 0;
+      align-items: center;
+      justify-content: center;
+      color: rgba(255, 255, 255, 0.92);
+      font: 13px/1.5 -apple-system, "Noto Sans CJK SC", sans-serif;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+      text-align: center;
+      padding: 8px;
+      box-sizing: border-box;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <div id="fallback"></div>
+
+  <!-- ⚠️ 环境垫片，**必须排在所有 vendor 脚本之前**（BUG-20260913-001）。
+       原因：`pixi-live2d-display` 的 UMD 产物内部裸露引用 `process.env.NODE_ENV`
+       （打包时未被替换，bundle 内可见 `"production"===process.env.NODE_ENV?…`）。
+       WebView 里没有 `process` ⇒ 抛 `ReferenceError: process is not defined`
+       ⇒ 该 UMD 工厂函数整体中断 ⇒ **`PIXI.live2d` 永远不会被挂载** ⇒ 模型无法加载。
+       上游 Cyrene-Agent 跑在 Electron（`process` 天然存在）故从未暴露；
+       同类上游 issue：guansss/pixi-live2d-display#129。
+       垫一个最小 `process` 即可：`NODE_ENV="production"` 让那处断言退化为 no-op（正是期望行为）。 -->
+  <script>
+    window.process = window.process || { env: { NODE_ENV: 'production' } };
+  </script>
+
+  <!-- 载入顺序是硬约束：
+       pixi.min.js 先建立全局 PIXI；
+       live2dcubismcore.min.js 建立 window.Live2DCubismCore（Cubism Core，must 在 runtime 之前）；
+       pixi-live2d-display 的 cubism4 包最后挂到 PIXI.live2d；
+       pet-renderer.js 依赖上面三者，必须最后。 -->
+  <script src="vendor/pixi.min.js"></script>
+  <script src="vendor/live2dcubismcore.min.js"></script>
+  <script src="vendor/pixi-live2d-display-cubism4.min.js"></script>
+  <script src="pet-renderer.js"></script>
+</body>
+</html>

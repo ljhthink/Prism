@@ -264,5 +264,20 @@
 -keep class io.prism.voice.SherpaAsrEngine { *; }
 -keep class com.k2fsa.sherpa.onnx.** { *; }
 
+# LVC-1/LVC-3（ADR-053/055，TKN-LVC-002 H-1 / TKN-LVC-015）：
+# 1) 合成器仅以字符串经 LocalCloneEngineFactory 反射创建（`Class.forName`），
+#    R8 缺 keep 会整体改名/删除 → **正式包静默回退系统播报**（批次21 Shizuku / 批次22 ASR 同款坑）；
+# 2) LocalCloneSampleCallback 是传给 sherpa JNI 的生成回调，JNI 按**运行时类**查找
+#    `invoke([F)Ljava/lang/Integer;`（offline-tts.cc::CallCallback）→ 改名/内联/删除同样会导致失败。
+#    该描述符已在 debug 下实证：lambda 形态直接 SIGABRT（真机 2026-09-20）。
+#
+# **按通配而非逐类列举**（TKN-LVC-016 修正）：TKN-LVC-015 曾逐类写
+# `-keep ...SherpaVitsSynthesizer`，而当时已有的写法**按类名**只覆盖了 ZipVoice 那一类 ⇒
+# 新增 VITS 时漏 keep，**仅正式包**静默失效（debug 全绿）。逐类 keep 天然对新类失效，
+# 是"同一缺陷反复复发"的根因 ⇒ 此处改为 `Sherpa*Synthesizer` 通配：新增任何
+# `io.prism.voice.local.SherpaXxxSynthesizer` 自动被覆盖，无需再改本文件。
+-keep class io.prism.voice.local.Sherpa*Synthesizer { *; }
+-keep class io.prism.voice.local.LocalCloneSampleCallback { *; }
+
 # pdfbox-android 可选 JPEG2000 编解码器（运行时不存在的可选依赖，pdfbox 自行降级）
 -dontwarn com.gemalto.jp2.JP2Decoder

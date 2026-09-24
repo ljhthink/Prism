@@ -80,6 +80,20 @@
             android:exported="false"
             android:foregroundServiceType="microphone" />
 
+        <!-- 批次24（ADR-051 D5）：桌宠悬浮窗前台服务。
+             与 PhoneControlKeepAliveService 同用 specialUse——Android 14 起
+             FOREGROUND_SERVICE_TYPE_NONE 会抛 InvalidForegroundServiceTypeException，
+             而"在桌面上显示一个用户自己打开的窗口"不属于任何既有专用类型。
+             本服务由用户在设置页显式开启，窗口本身可见，关闭开关即 stopSelf。 -->
+        <service
+            android:name=".pet.overlay.PetOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="用户主动开启的桌面宠物悬浮窗显示（可在应用内随时收起）" />
+        </service>
+
         <!-- 批次21（SZ-001，ADR-046）：Shizuku Provider——shell 命令通道的授权与绑定入口 -->
         <provider
             android:name="rikka.shizuku.ShizukuProvider"

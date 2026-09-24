@@ -8,61 +8,18 @@ import org.junit.Test
 /**
  * UXR11 补充测试（ac-verifier，TKN-UXR11-ACCEPTANCE-001）。
  *
- * 覆盖 U1（RAG 误注入根因修复）与 U4（Fetch 失败后乱码净化）的纯函数：
- * - **U1** [ConversationViewModel.needsRagRetrieval]：文档内容直发消息
- *   （`【文档：…】` 前缀）必须跳过 RAG 自动注入；普通查询/短查询照常保留（防误伤）。
+ * 覆盖 U4（Fetch 失败后乱码净化）的纯函数：
  * - **U4** [sanitizeToolCallSyntax]：剥离 LLM 幻觉输出的完整工具调用块
  *   （`<tool_calls>…</tool_calls>` / `<invoke…>…</invoke>` / `<|…|>` / `<｜…｜>` 变体），
  *   并转义残余标签起始 `<`，使 Markdown 渲染显示实际文本而非乱码。
+ *
+ * **U1 相关用例已于 2026-09-12 随 ADR-050 移除**：原 4 个 `needsRagRetrieval` 用例
+ * （文档前缀跳过 RAG 自动注入）验证的是"用启发式判据决定是否自动检索"这一范式下的行为。
+ * ADR-050 撤除了客户端按轮自动检索注入（知识库正文只经 LLM 主动调用 `knowledge_base__*`
+ * 工具进入上下文），该函数与其黑名单判据一并删除，故用例同批移除；
+ * 新契约由 `ConversationViewModelKnowledgeBaseInjectionTest` 覆盖。
  */
 class ConversationUxr11SupplementTest {
-
-    // ==================== U1：RAG 文档前缀（ADR-033） ====================
-
-    @Test
-    fun `needsRagRetrieval skips document content message`() {
-        // R5「＋→文件」上传后文本以【文档：…】包裹直发 —— 文档本身即本轮上下文，跳过 RAG
-        assertFalse(
-            "文档内容直发应跳过 RAG",
-            ConversationViewModel.needsRagRetrieval("【文档：年度报告.pdf】\n第一章 概述\n…正文…")
-        )
-        assertFalse(
-            "文档 + 用户需求合并仍应跳过",
-            ConversationViewModel.needsRagRetrieval("【文档：设计稿.docx】请根据文档内容帮我总结要点")
-        )
-    }
-
-    @Test
-    fun `needsRagRetrieval keeps normal queries after document prefix check`() {
-        // 非文档消息照常：含查询内容的长句保留（防误伤）
-        assertTrue(
-            "普通查询应保留",
-            ConversationViewModel.needsRagRetrieval("帮我查一下项目里 RAG 的嵌入模型是什么")
-        )
-        // 文档前缀必须是完整前缀（【文档：），其它【xxx： 不触发跳过
-        assertTrue(
-            "非文档前缀的【内容应保留",
-            ConversationViewModel.needsRagRetrieval("【提示】请帮我总结知识库")
-        )
-    }
-
-    @Test
-    fun `needsRagRetrieval document prefix does not break greeting skip`() {
-        // 原 UXR8-R3 行为不回归：纯寒暄仍跳过
-        assertFalse("寒暄仍应跳过", ConversationViewModel.needsRagRetrieval("你好"))
-        assertFalse("确认语仍应跳过", ConversationViewModel.needsRagRetrieval("好的，谢谢"))
-    }
-
-    @Test
-    fun `needsRagRetrieval boundary blank and prefix-only messages`() {
-        // 边界：空白消息无检索需求
-        assertFalse("空白消息应跳过", ConversationViewModel.needsRagRetrieval(""))
-        assertFalse("纯空白应跳过", ConversationViewModel.needsRagRetrieval("   "))
-        // 边界：仅前缀无正文（极端占位）也应跳过 RAG
-        assertFalse("仅前缀也应跳过", ConversationViewModel.needsRagRetrieval("【文档："))
-        // 边界：非文档前缀且非寒暄 → 保留（防误伤）
-        assertTrue("含查询的长句应保留", ConversationViewModel.needsRagRetrieval("帮我查一下 Prism 的嵌入模型"))
-    }
 
     // ==================== U4：工具调用语法块净化（ADR-033） ====================
 

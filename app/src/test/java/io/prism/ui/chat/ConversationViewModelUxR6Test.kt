@@ -57,7 +57,9 @@ import java.io.File
  *    使重复工具熔断可触发。
  * 3. **问题 2（每消息流式标记）**：流式期间 aiId 在 streamingIds 中、完成后移除，
  *    且工具回路中 Error 事件**不**提前清 streamingIds（Error 守卫 + finally 兜底）。
- * 4. **问题 3a（RAG 检索状态驱动指示）**：ragRetrieving 在 launchAnswer 期间短暂置位后复位。
+ * 4. **问题 3a（检索状态指示）**：ADR-050 后 `ragRetrieving` 恒为 false（自动检索已撤除），
+ *    "知识库检索中"的可见性改由工具调用指示承载（见 `ConversationViewModelKnowledgeBaseInjectionTest`
+ *    的 `describeActiveTool` 映射用例）。
  * 5. **问题 1（重复工具熔断常量）**：熔断分类别阈值（v1 批次18）：网络类 3 / phone_control 4，外科式仅禁用失败工具。
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -483,10 +485,10 @@ class ConversationViewModelUxR6Test {
         )
     }
 
-    // ==================== 问题 3a：ragRetrieving 状态 ====================
+    // ==================== 问题 3a：ragRetrieving 状态（ADR-050 后恒 false） ====================
 
     @Test
-    fun `ragRetrieving toggles during launchAnswer`() = runTest(mainDispatcher) {
+    fun `ragRetrieving stays false because kb auto retrieval is removed`() = runTest(mainDispatcher) {
         saveActiveProvider()
         val vm = ConversationViewModel(
             providerRepository = ProviderConfigRepository(boxStore),
@@ -495,13 +497,14 @@ class ConversationViewModelUxR6Test {
             knowledgeBaseRepository = KnowledgeBaseRepository(boxStore),
             skillExecutor = null,
             ioDispatcher = mainDispatcher
-        ).apply { setRagTarget(RagTarget.AllLibraries) } // RAG 开启
+        ).apply { setRagTarget(RagTarget.AllLibraries) } // 知识库开启
 
-        vm.sendMessage("你好") // 寒暄也应走检索流程（buildRagPlan）
+        vm.sendMessage("你好")
         advanceUntilIdle()
 
+        // ADR-050：客户端不再自动检索 → 该指示流不再被置位（保留字段供未来接工具事件）
         assertFalse(
-            "回答完成后 ragRetrieving 应复位为 false（不残留「正在检索知识库」指示）",
+            "ADR-050：自动检索已撤除，ragRetrieving 应恒为 false",
             vm.ragRetrieving.value
         )
     }

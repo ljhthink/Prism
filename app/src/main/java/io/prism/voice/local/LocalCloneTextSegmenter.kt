@@ -1,0 +1,96 @@
+package io.prism.voice.local
+
+/**
+ * 长文本切段（纯函数，TKN-LVC-012 / BUG-20260920-006）。
+ *
+ * ## 为什么必须切段
+ *
+ * 真机缺陷：长文本被当作**一次无界合成**——sherpa 内部虽有 `max_char_in_sentence` 分段，
+ * 但**全部分段落都累积进同一个音频对象**，直到全部算完才可能播放。后果（真机日志）：
+ *
+ * ```
+ * 19:44:30.670 I/Process: Sending signal. PID: 24565 SIG: 9      ← 进程被系统杀掉
+ * （同时段 Java 堆: Clamp target GC heap from 284MB to 256MB / 217MB/221MB / Waiting for a blocking GC Alloc）
+ * ```
+ *
+ * ⇒ ① 合成期间**完全没有声音**（第一段要等整段算完）；② 音频与算力累积把 App 推到内存/耗时上限外被 kill。
+ *
+ * 切段后：每段的合成时长与峰值内存都有界，且**第一段算完即可出声**（逐段播放）。
+ *
+ * ## 切分规则（优先自然边界，硬保证不超长）
+ *
+ * 1. 长度 ≤ [maxChars] ⇒ 原样返回（**不改变既有短文本行为**）；
+ * 2. 否则在**句末标点**（`。！？!?.`）后切（若当前段已达 [maxChars] 的一半以上）；
+ * 3. 句内过长时退而在**子句标点**（`，；：,;:`）后切；
+ * 4. 仍无标点可用则**硬切**；
+ * 5. **不丢字符**：`segments.joinToString("") == text`（由单测钉住——这是最重要的不变量）。
+ */
+internal fun segmentForSynthesis(
+    text: String,
+    maxChars: Int,
+    firstMaxChars: Int = maxChars
+): List<String> {
+    if (maxChars <= 0 || text.length <= maxChars) return listOf(text)
+    val out = ArrayList<String>(text.length / maxChars + 1)
+    val sb = StringBuilder()
+    var lastClauseBreak = -1
+    var limit = if (firstMaxChars in 1..maxChars) firstMaxChars else maxChars
+    for (ch in text) {
+        sb.append(ch)
+        if (isClauseBoundary(ch)) lastClauseBreak = sb.length
+        val atHardLimit = sb.length >= limit
+        val atSentenceBoundary = isSentenceBoundary(ch) && sb.length >= limit / 2
+        if (atSentenceBoundary || atHardLimit) {
+            var cut = when {
+                // 句末标点：直接在此收束
+                atSentenceBoundary -> sb.length
+                // 句内过长：优先回退到最近的子句标点（避免切在词中间）
+                lastClauseBreak in 1 until sb.length -> lastClauseBreak
+                else -> sb.length
+            }
+            // 代理对安全（guardrail TKN-LVC-012 N4）：不得把代理对切成两半
+            if (cut > 0 && cut < sb.length && Character.isHighSurrogate(sb[cut - 1])) cut -= 1
+            if (cut <= 0) cut = sb.length
+            out.add(sb.substring(0, cut))
+            sb.delete(0, cut)
+            lastClauseBreak = -1
+            limit = maxChars // 仅**第一段**用较短上限（尽快出声），其后恢复常规上限
+        }
+    }
+    if (sb.isNotEmpty()) {
+        // 收尾修正：若剩余**只含标点**（典型场景：硬切恰好落在句末标点之前），
+        // 并回上一段而不是产出孤立的"。"段——否则既产生怪异分段、又让该段缺句末停顿线索。
+        // 允许因此超出上限至多 2 字符（已在单测与 KDoc 中显式声明该边界）。
+        if (out.isNotEmpty() && sb.length <= 2 && sb.all { isSentenceBoundary(it) || isClauseBoundary(it) }) {
+            out[out.size - 1] = out[out.size - 1] + sb
+        } else {
+            out.add(sb.toString())
+        }
+    }
+    return out
+}
+
+private fun isSentenceBoundary(c: Char): Boolean =
+    c == '。' || c == '！' || c == '？' || c == '!' || c == '?' || c == '.'
+
+private fun isClauseBoundary(c: Char): Boolean =
+    c == '，' || c == '；' || c == '：' || c == ',' || c == ';' || c == ':'
+
+/**
+ * 单段最大字符数（第一段之后）。
+ *
+ * 取 40：按实测 0.24s 音频/字、RTF 2.2–8.4 估算，单段音频约 10s、合成约 22–84s，
+ * 峰值内存 O(40 字) ≈ 0.88MiB（实测单次整段 PCM 约 23KB/字，9000 字可达 198MB）。
+ *
+ * ⚠️ 与 `LocalCloneConfig.maxCharsInSentence` **不是同一概念**（后者是 sherpa 内部按句切分的上限）：
+ * 本常量是**播放粒度**（每次合成/播放的单位），目的不同，故不合并为单一来源（guardrail N6 已登记口径）。
+ */
+internal const val DEFAULT_SEGMENT_CHARS = 40
+
+/**
+ * **第一段**的字符上限（guardrail TKN-LVC-012 N1）。
+ *
+ * 取 16：按 0.24s 音频/字、RTF 2.2–8.4 估算，首段音频约 3.8s、合成约 **8–32s**
+ * ⇒ 首声延迟从 21–81s 降到 8–32s（用户主诉"完全没声音"的关键指标）。
+ */
+internal const val FIRST_SEGMENT_CHARS = 16

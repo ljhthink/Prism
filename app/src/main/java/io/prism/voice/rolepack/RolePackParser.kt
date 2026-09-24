@@ -149,6 +149,10 @@ object RolePackParser {
                     put("pitch", pack.voice.system.pitch.toDouble())
                     put("speechRate", pack.voice.system.speechRate.toDouble())
                 })
+                put("local", buildJsonObject {
+                    put("voiceId", pack.voice.local.voiceId)
+                    put("numSteps", pack.voice.local.numSteps)
+                })
             })
             put("expression", buildJsonObject {
                 put("avatars", jsonArray(pack.expression.avatars))
@@ -222,7 +226,14 @@ object RolePackParser {
                 pitch = s.optFloat("pitch") ?: 1.0f,
                 speechRate = s.optFloat("speechRate") ?: 1.0f
             )
-        } ?: RolePack.SystemVoice()
+        } ?: RolePack.SystemVoice(),
+        // LVC-1（ADR-053）：本地音色包**按 id 引用**（资产侧载，不内嵌）；缺失 → voiceId=null（不可选）
+        local = obj?.optObj("local")?.let { l ->
+            RolePack.LocalVoice(
+                voiceId = l.optString("voiceId")?.takeIf { it.isNotBlank() },
+                numSteps = l.optInt("numSteps")
+            )
+        } ?: RolePack.LocalVoice()
     )
 
     private fun parseExpression(obj: JsonObject?): RolePack.Expression = RolePack.Expression(

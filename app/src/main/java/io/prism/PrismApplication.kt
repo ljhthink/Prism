@@ -630,6 +630,53 @@ class PrismApplication : Application() {
      * （`ask_user__*`）组合为单个 [io.prism.skill.LocalToolExecutor] 门面，
      * 注入 [skillExecutor]，使 SkillExecutor 零改动感知全部本地工具。
      */
+    /**
+     * 批次24（ADR-051）：桌宠配置仓库 —— 持久化开关/形象/尺寸/位置/待机等设置。
+     *
+     * 使用独立 DataStore（`prism_pet`），与 API Key / 角色包 / 语音引擎等 DataStore 隔离。
+     * 读取侧统一经 [io.prism.pet.model.PetConfig.clamped] 钳制，外部脏数据不会流进业务逻辑。
+     */
+    val petConfigRepository: io.prism.pet.PetConfigRepository by lazy {
+        io.prism.pet.PetConfigRepository(petConfigDataStore)
+    }
+
+    /**
+     * 批次24（ADR-051 D4）：桌宠形象安装器 —— 用户导入的 `.petpack` / 单图落
+     * `filesDir/pets/<id>/`，**不入 APK、不入公开仓库**（与角色包同一私有资产边界）。
+     */
+    val petPackInstaller: io.prism.pet.asset.PetPackInstaller by lazy {
+        io.prism.pet.asset.PetPackInstaller(
+            baseDir = java.io.File(filesDir, io.prism.pet.PetManager.PETS_DIR)
+        )
+    }
+
+    /**
+     * 批次24（ADR-051）：桌宠门面 —— 设置页与悬浮窗服务之间的唯一协调者。
+     *
+     * 承载形象列表/配置读写/服务起停；窗口与渲染细节在
+     * [io.prism.pet.overlay.PetOverlayService] 内，本门面不碰 WindowManager。
+     */
+    val petManager: io.prism.pet.PetManager by lazy {
+        io.prism.pet.PetManager(
+            context = applicationContext,
+            installer = petPackInstaller,
+            configRepository = petConfigRepository
+        )
+    }
+
+    /**
+     * 批次24（ADR-051 D8）：`pet__play_action` 本地工具执行器。
+     *
+     * 依赖以函数注入（形象来源 = [petManager]，开关来源 = [petConfigRepository]），
+     * 使执行器本身保持纯 JVM 可测。
+     */
+    val petLocalToolExecutor: io.prism.pet.PetLocalToolExecutor by lazy {
+        io.prism.pet.PetLocalToolExecutor(
+            appearanceProvider = { petManager.effectiveAppearance() },
+            enabledProvider = { petConfigRepository.get().enabled }
+        )
+    }
+
     val compositeLocalToolExecutor: io.prism.skill.CompositeLocalToolExecutor by lazy {
         io.prism.skill.CompositeLocalToolExecutor(
             listOf(
@@ -643,7 +690,9 @@ class PrismApplication : Application() {
                 // v1 US-201（LLM 操控手机）：phone_control__* 工具
                 phoneControlLocalToolExecutor,
                 // v1 批次17（US-1701）：TODO 任务规划工具（todo_write，ADR-043 D1）
-                todoLocalToolExecutor
+                todoLocalToolExecutor,
+                // 批次24（ADR-051 D8）：桌宠动作工具（pet__play_action）
+                petLocalToolExecutor
             )
         )
     }
@@ -977,6 +1026,36 @@ class PrismApplication : Application() {
     }
 
     /**
+     * 本地音色包仓库（LVC-1，ADR-053）—— 只读地定位/校验端侧克隆所需的音色包
+     * （`<externalFilesDir>/voicepack/<voiceId>/`，由 `voice-clone-kit\install-local-voicepack.ps1`
+     * 侧载；**模型与参考音频不入 APK、不入仓库**）。
+     *
+     * 消费点：
+     * - [io.prism.voice.VoiceEngineAssembly]：通话装配（本地引擎可选性判定）；
+     * - [io.prism.voice.TextPlaybackController]：文本播报按钮（同口径）；
+     * - [io.prism.ui.settings.SettingsViewModel]：设置页展示安装状态（未安装/不完整/就绪）。
+     */
+    val localVoicePackStore: io.prism.voice.local.LocalVoicePackStore by lazy {
+        io.prism.voice.local.LocalVoicePackStore(
+            roots = io.prism.voice.local.LocalVoicePackStore.defaultRoots(this)
+        )
+    }
+
+    /**
+     * 本地音色包导入器（TKN-LVC-016，ADR-057）—— 把 `.voicepack` 归档解到应用私有目录。
+     *
+     * **落点为什么固定是内部根**（`<filesDir>/voicepack`）：外部目录在小存储/多用户场景下
+     * 可能不可写；内部目录是引擎一定能读到的位置，且与 `install-local-voicepack.ps1` 的最终
+     * 落点一致 ⇒ 侧载与应用内导入两条通道写入同一处，[localVoicePackStore] 用同一套校验识别。
+     */
+    val localVoicePackImporter: io.prism.voice.local.LocalVoicePackImporter by lazy {
+        io.prism.voice.local.LocalVoicePackImporter(
+            store = localVoicePackStore,
+            targetRoot = java.io.File(filesDir, io.prism.voice.local.LocalVoicePackStore.DIR_NAME)
+        )
+    }
+
+    /**
      * 对话摘要生成器（US-032，ADR-015 5.3）—— 使用 LLM 非流式请求对旧消息生成摘要。
      *
      * 依赖 [openAICompatibleProvider]（已实现 [io.prism.network.ChatCompletionProvider] 接口）。
@@ -1088,6 +1167,16 @@ class PrismApplication : Application() {
                 android.util.Log.e("PrismApplication", "embedder 预热失败（后续按需重试）", e)
             }
         }
+        // 批次24（BUG-20260913-001 附带修复 / PRD US-2413 AC-3）：桌宠开关是持久化的，
+        // 但服务不会自己回来。这里在进程启动时触达 petManager（by lazy），
+        // 由其 init 按持久化状态恢复悬浮窗——否则"杀进程后再打开 App"会呈现
+        // "开关是开的、桌面却没有窗口"，用户会以为功能坏了。
+        // 放在 appScope(IO) 内：需要读 DataStore，不占主线程。
+        appScope.launch {
+            runCatching { petManager.restoreIfEnabled() }.onFailure { e ->
+                android.util.Log.w("PrismApplication", "pet restore skipped (${e::class.simpleName})")
+            }
+        }
         // 异步加载持久化授权根目录到 SAF 访问层（ADR-006 5.3），与 registerFilesystemRoot 经
         // rootsMutex 串行化（C3），失败静默（容错，不阻断启动）
         appScope.launch {
@@ -1188,6 +1277,9 @@ class PrismApplication : Application() {
 
     /** 设备档位配置 DataStore 进程级单例（ADR-017 4.4，US-040 用户手动覆盖持久化）。 */
     private val Context.tierConfigDataStore by preferencesDataStore(name = "prism_tier_config")
+
+    /** 桌宠配置 DataStore 进程级单例（批次24，ADR-051：开关/形象/尺寸/位置/待机持久化）。 */
+    private val Context.petConfigDataStore by preferencesDataStore(name = "prism_pet")
 
     /** 视觉旁路配置 DataStore 进程级单例（v1 US-301：授权 + 自动开关 + 熔断计数持久化）。 */
     private val Context.visionBypassConfigDataStore by preferencesDataStore(name = "prism_vision_bypass_config")

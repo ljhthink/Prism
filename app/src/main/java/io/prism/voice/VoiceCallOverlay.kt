@@ -307,7 +307,12 @@ fun VoiceCallOverlay(
                     }
                 }
                 androidx.compose.material3.Text(
-                    text = if (!controller.ttsAvailable) "本机无语音合成引擎，回复将以文字展示" else "",
+                    text = when {
+                        !controller.ttsAvailable -> "本机无语音合成引擎，回复将以文字展示"
+                        // LVC-1（ADR-053）：本地音色=端侧离线合成，与云端不同——明示文本不出设备
+                        controller.isLocalTts -> "语音播报使用本机本地音色（完全离线，文本不出设备）"
+                        else -> ""
+                    },
                     color = PrismTextFaint,
                     fontSize = 12.sp
                 )

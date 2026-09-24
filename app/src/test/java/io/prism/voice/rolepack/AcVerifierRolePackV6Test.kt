@@ -152,20 +152,32 @@ class AcVerifierRolePackV6Test {
      * 读取仓库根目录的真实资产 `cyrene.rolepack`。
      *
      * 该文件为 gitignored 的用户私有资产，可能不存在于其它环境（如 CI 干净检出）——
-     * 不存在时以 `Assume` 语义跳过（返回 null），避免把环境差异误判为失败。
-     * **TDD 说明**：本环境实测存在（116,620 B），故本用例为**实际执行**而非跳过。
+     * 不存在时**返回 null 让用例静默通过**（等价于 `Assume` 跳过，但不会在报告里留下
+     * skipped 计数，见 KL-12：CI 干净检出时本类所有"真实资产"护栏**不可见**，不得把本类
+     * 读成"CI 有护栏"）。断言值随资产版本同步前移（guardrail F2/R3/F4 均因此项与本文件
+     * 的耦合而提过发现）。
+     * **本环境实测**：资产存在且为 v7.0.0（`persona.systemPrompt` 10,548 字 / 104,615 B），
+     * 故下列用例为**实际执行**而非跳过。
      */
     private fun realAsset(): File? {
         val f = File("..", "cyrene.rolepack").let { if (it.exists()) it else File("cyrene.rolepack") }
         return f.takeIf { it.isFile }
     }
 
+    /**
+     * 规模核验（ADR-052：资产升级 v6.0.0 → v7.0.0，persona 断言随版本同步前移）。
+     *
+     * v7 口径变化：`persona.systemPrompt` 由 14,963 → 10,548 字——减少部分是**非人格移植物**
+     * （`tool_usage.md` 全文移植 + 手写 Prism 工具清单 + 工程记账语言），soul 层角色内容未减、
+     * 另新增示例对话层与执行态表达层（见 ADR-052 D1/D2/D3）。
+     * `worldbook` 三层逐字节透传，故条目数/字数/恒定数与 v6 完全一致（本用例即其回归护栏）。
+     */
     @Test
     fun `AC4-真实资产 - 规模与恒定条目数核验（40 条 20750 字 3 恒定）`() {
         val f = realAsset() ?: return
         val pack = RolePackParser.parse(f.readText())
         assertEquals("资产 schema 应为 v1", RolePack.SCHEMA_V1, pack.schema)
-        assertEquals("资产版本应为 v6.0.0（D5 全量还原）", "6.0.0", pack.version)
+        assertEquals("资产版本应为 v7.0.0（ADR-052 角色卡重构）", "7.0.0", pack.version)
 
         val total = pack.worldbook.sumOf { it.content.length }
         val constants = pack.worldbook.count { it.constant }
@@ -176,8 +188,53 @@ class AcVerifierRolePackV6Test {
         assertEquals("worldbook 条目数应为 40", 40, pack.worldbook.size)
         assertEquals("worldbook 总字数应为 20,750", 20750, total)
         assertEquals("恒定条目应为 3 条", 3, constants)
-        assertEquals("文本人格应为 14,963 字", 14963, pack.persona.systemPrompt.length)
-        assertEquals("通话段应为 1,620 字", 1620, pack.persona.callSystemPrompt.length)
+        assertEquals("文本人格应为 10,548 字", 10548, pack.persona.systemPrompt.length)
+        assertEquals("通话段应为 919 字", 919, pack.persona.callSystemPrompt.length)
+    }
+
+    /**
+     * guardrail R3 N1：**真实资产示例对话层的合规护栏**（机制型，非文档要求）。
+     *
+     * 背景：v7 首版示例里有两处括号旁白（`（看完之后）` / `（这一步被系统拦下）`），与
+     * `persona.forbidden` 第 1 条及 `ROLE_STYLE_TAIL`「不要描写自己的动作、神态或周围环境」
+     * **自相矛盾**，构成示范性污染——ac-verifier 实测 `v7-flash` 因此产出整段括号旁白。
+     * 该缺陷的成因是"要求只写在文档里、没有机制约束"，故此处把它钉成可失败的断言。
+     *
+     * **反证方法**：在 `cyrene.rolecard-v7.md` 任一条 `**你**：` 回复前插入 `（看了一眼）`，
+     * 重新生成资产后本用例即变红（生成器的同名校验也会 fail-fast）。
+     */
+    @Test
+    fun `AC2-真实资产 - 示例对话层不得含旁白且他你回合配对`() {
+        val f = realAsset() ?: return
+        val pack = RolePackParser.parse(f.readText())
+        val sp = pack.persona.systemPrompt
+        val his = Regex("^\\*\\*他\\*\\*：", RegexOption.MULTILINE).findAll(sp).count()
+        val hers = Regex("^\\*\\*你\\*\\*：", RegexOption.MULTILINE).findAll(sp).count()
+        assertTrue("示例对话层应≥8 组（实测他=$his 你=$hers）", his >= 8)
+        assertEquals("他/你 回合必须数量相等（畸形分组会让模型把两段并成一个回复）", his, hers)
+
+        // ac-verifier R5 条件①：**严格交替**（他、你、他、你…）。原实现只数条数，
+        // 交换相邻回合顺序仍会通过，与注释声称的"严格交替"不符。
+        val seq = Regex("^\\*\\*(他|你)\\*\\*：", RegexOption.MULTILINE).findAll(sp)
+            .map { it.groupValues[1] }.toList()
+        val brokenAt = seq.withIndex().firstOrNull { (i, who) -> who != if (i % 2 == 0) "他" else "你" }?.index ?: -1
+        assertTrue(
+            "他/你 回合必须严格交替（首个不一致位置=${if (brokenAt >= 0) brokenAt else "无"}）：$seq",
+            brokenAt < 0
+        )
+
+        val demoLines = Regex("^\\*\\*(?:他|你)\\*\\*：.*$", RegexOption.MULTILINE).findAll(sp)
+            .map { it.value }.toList()
+        // guardrail R4 F2①：星号规则先剥掉成对 `**` 再检测剩余的单星包裹，避免把行内
+        // Markdown 加粗（`**强调**`）误判为动作旁白。
+        // ac-verifier R5 条件③：量词收紧为 `+`（≥1 字符），单字包裹（`*笑*`/`（笑）`）不再逃逸。
+        // 已知覆盖缺口（KL-11）：本护栏是**行级**的——旁白写在续行/独立行检不出；当前资产
+        // 采用"一回合一行"写法，故实际覆盖完整。
+        val narrated = demoLines.filter {
+            Regex("[（(][^）)]+[）)]").containsMatchIn(it) ||
+                Regex("\\*[^*\\n]+\\*").containsMatchIn(it.replace("**", ""))
+        }
+        assertTrue("示例对话不得含括号/星号旁白（违者与 forbidden[0] 自相矛盾）：$narrated", narrated.isEmpty())
     }
 
     @Test
@@ -428,8 +485,10 @@ class AcVerifierRolePackV6Test {
         assertNotNull(text)
         assertEquals("v5 包在文本轮与通话轮必须逐字节等价（扩展零影响）", text, call)
 
-        // 段落构成等价：v5 段落 + 转写条目，不含任何新层痕迹
-        val expectedPrefix = "【身份说明】你就是v5 角色。以下内容就是你自己，不是需要扮演的设定。\n" +
+        // ADR-052 D6：身份开头由"以下内容就是你自己，不是需要扮演的设定。"改为
+        // "你就是这个人，不是在描述或者模仿谁。"（去元词汇但保留引擎级反出戏锚点）；
+        // 其余段落构成必须逐字节保持。
+        val expectedPrefix = "【身份说明】你就是v5 角色。你就是这个人，不是在描述或者模仿谁。\n" +
             "v5 人格正文\n对用户的称呼：称你为旅人\n语气规则：轻快；直接\n禁止事项：动作旁白"
         assertTrue("v5 前缀应逐字节保持", text!!.startsWith(expectedPrefix))
         assertFalse("不得出现任何 worldbook 痕迹", text.contains("【背景设定】"))

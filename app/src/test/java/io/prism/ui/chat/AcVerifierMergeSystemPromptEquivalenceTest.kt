@@ -18,11 +18,13 @@ import java.io.File
  * （唯一**预期**差异为 D2 有意删除的 skill 索引身份断言从句——本条单独归因）。
  *
  * **双保险方法**（不转录、可执行、防自证）：
- * 1. **[headMergeSystemPrompt] 忠实转录**：改动前实现的逐行抄录（仅换名为 head*）。
+ * 1. **[headMergeSystemPrompt] 转录体**：TASK-20260912-001 改动**之前**实现的逐行抄录（仅换名为 head*）。
  *    它在**编译期**存在，可与当前实现做全组合**逐字节**比较（这是主判据）。
- * 2. **[HEAD 保真校验] 运行时从 git 对象库取 HEAD 源码**，做结构性断言
- *    （函数体行数 / append 次数 / 分支数 / 不含新层 / 含旧身份断言），
- *    证明 ① 中的转录与真实 HEAD 结构一致——防"转录时顺手改了内容"导致等价性结论失真。
+ * 2. **[基线监测] 运行时从 git 对象库取 HEAD 源码**，比较其 `mergeSystemPrompt` 行数与记录的
+ *    基线快照——HEAD 前进即失败，提示重新取证。
+ *    **诚实边界（guardrail R-4，2026-09-12）**：本项**不度量转录体**，因此**不能**证明"转录未失真"；
+ *    转录体与历史实现的对应关系由代码评审 + 基线常量共同保证。原命名「HEAD 保真」与 KDoc 中
+ *    "（函数体行数 / append 次数 / 分支数 / 不含新层 / 含旧身份断言）"的表述已按事实收窄。
  *
  * 覆盖组合：8 个可空文本层全 2^8 = 256 种 non-null/null 组合 + 空白串边界 + 技能索引 3 态。
  *
@@ -166,50 +168,64 @@ class AcVerifierMergeSystemPromptEquivalenceTest {
         }
     }
 
-    // ==================== 2. HEAD 保真校验（防转录失真） ====================
+    // ==================== 2. 基线漂移监测（**不再声称"转录保真"**） ====================
 
+    /**
+     * **2026-09-12 语义修正（guardrail R-4）**：本用例**原名**「HEAD 保真 - 运行时从 git 取证的
+     * HEAD 版本与转录体结构一致」，但经复核其**从未度量转录体**——它只比较"硬编码常量 vs 当前
+     * HEAD 实测行数"，因此无法发现"转录体被改写"（防转录失真保真度为 0），却仍以"保真/逐行对应"
+     * 命名，具备掩盖回归的路径。现按事实收窄为**基线漂移监测**：
+     *
+     * - 判据：当前 HEAD 中 `mergeSystemPrompt` 的提取行数 == 记录基线 [BASELINE_BODY_LINE_COUNT]。
+     * - 作用：HEAD 前进（函数被改动）时**主动失败**，提示重新取证基线；不声称验证转录体内容。
+     * - 转录体的价值仍在（[headMergeSystemPrompt] 是被 2^8 组合比较的执行基准），但其与
+     *   "历史实现"的对应关系由**代码评审 + 本常量**共同保证，不由本用例保证。
+     *
+     * **基线历史**：81（TASK-20260912-001 改动前）→ 115（ed48974 起，当前）。
+     */
     @Test
-    fun `HEAD 保真 - 运行时从 git 取证的 HEAD 版本与转录体结构一致`() {
+    fun `基线监测 - 当前 HEAD 的 mergeSystemPrompt 行数与记录基线一致`() {
         val head = headSource()
-        assumeTrue("无 git 环境，跳过 HEAD 保真校验", head != null)
+        assumeTrue("无 git 环境，跳过基线监测", head != null)
         val body = extractFunction(head!!, "internal fun mergeSystemPrompt(")
         assertTrue("应能从 HEAD 提取 mergeSystemPrompt", body != null)
         val b = body!!
 
-        // ① HEAD 版本确实不含本轮新增物
-        assertFalse("HEAD 不得含 basePersona", b.contains("basePersona"))
-        assertFalse("HEAD 不得含 worldbookSection", b.contains("worldbookSection"))
-        assertFalse("HEAD 不得含 styleTail", b.contains("styleTail"))
-        assertFalse("HEAD 不得含 hasWorldbook", b.contains("hasWorldbook"))
-        assertFalse("HEAD 不得含 hasStyleTail", b.contains("hasStyleTail"))
-        // ② HEAD 版本确实含被本轮删除/实参化的锚点
-        assertTrue("HEAD 应含 append(DEFAULT_PERSONA)", b.contains("append(DEFAULT_PERSONA)"))
-        assertTrue("HEAD 应含旧身份断言", b.contains("不改变你的基础身份"))
+        // HEAD 形状自检（防提取函数抓错目标）
+        assertTrue("HEAD 应含 basePersona 形参", b.contains("basePersona"))
         assertTrue("HEAD 应含 todoGuidance 分支", b.contains("if (hasTodoGuidance)"))
+        assertTrue("HEAD 应以 .trim() 收尾", b.contains(".trim()"))
 
-        // ③ 转录体与 HEAD 的函数体行数一致（结构未被转录者增删）
-        val transcribedLines = TRANSCRIBED_HEAD_BODY_LINE_COUNT
+        val baselineLines = BASELINE_BODY_LINE_COUNT
         val headLines = b.lines().size
-        println("[AC-VERIFIER] HEAD mergeSystemPrompt 行数=$headLines，转录常量=$transcribedLines")
+        println("[AC-VERIFIER] HEAD mergeSystemPrompt 行数=$headLines，记录基线=$baselineLines")
         assertEquals(
-            "转录体行数与 HEAD 不符——转录或 HEAD 取值有误（等价性结论将失真）",
-            headLines, transcribedLines
+            "HEAD 的 mergeSystemPrompt 行数偏离记录基线——该函数已改动，请重新取证基线常量" +
+                "（并复核 headMergeSystemPrompt 转录体是否仍与历史实现一致）",
+            baselineLines, headLines
         )
-
-        // ④ 分支数量一致（8 个 if(has*) + skill 索引 if）
-        val headIfs = b.lines().count { it.trim().startsWith("if (has") || it.trim().startsWith("if (skillIndex") }
-        assertEquals("HEAD 的条件分支数应为 9", 9, headIfs)
     }
 
     // ==================== 转录：改动前的 mergeSystemPrompt ====================
 
     /**
-     * 改动前（HEAD）实现的结构常量：函数体行数。用于 [HEAD 保真] 用例的交叉校验。
-     * 改动 HEAD 源码会使本数值失效，届时保真用例会失败并提示重新取证——这是刻意的。
+     * 基线快照常量与转录体辅助。基线失效时 [基线监测] 用例会失败并提示重新取证——这是刻意的。
      */
     private companion object {
-        /** `git show HEAD:...ConversationViewModel.kt` 中 mergeSystemPrompt 的花括号配平文本行数。 */
-        const val TRANSCRIBED_HEAD_BODY_LINE_COUNT = 81
+        /**
+         * **基线快照**：记录基线时 `git show HEAD:...ConversationViewModel.kt` 中
+         * `mergeSystemPrompt` 的花括号配平文本行数。
+         *
+         * **基线历史（2026-09-12 校正）**：81 → 115。
+         * - 81：TASK-20260912-001 改动**之前**的历史实现（[headMergeSystemPrompt] 转录所对应的版本）；
+         * - 115：TASK-20260912-001 提交（ed48974）把 basePersona / worldbook / styleTail 三层并入
+         *   该函数后的行数（当前 HEAD，`ConversationViewModel.kt:3422-3536`）。
+         *
+         * **本常量不随仓库前进自动更新**：HEAD 改动该函数后，基线监测用例会失败并要求重新取证
+         * （刻意保留的漂移信号）。它**只**度量 HEAD 行数，不度量 [headMergeSystemPrompt] 转录体——
+         * 后者与历史实现的对应关系由代码评审保证（见用例 KDoc 的 R-4 说明）。
+         */
+        const val BASELINE_BODY_LINE_COUNT = 115
     }
 
     /** 出厂路径（D2 之前）skill 索引行原文；新实现删除了"不改变你的基础身份"从句。 */
@@ -219,11 +235,11 @@ class AcVerifierMergeSystemPromptEquivalenceTest {
     private fun normalize(headOutput: String): String = headOutput.replace(legacyIdentityClause, "")
 
     /**
-     * **改动前 `mergeSystemPrompt` 的忠实转录**（结构见 [TRANSCRIBED_HEAD_BODY_LINE_COUNT] 校验）。
+     * **基线快照的转录体**（TASK-20260912-001 改动**之前**的历史实现，行数对应基线历史值 81）。
      *
-     * 逐行对应 `git show HEAD:app/src/main/java/io/prism/ui/chat/ConversationViewModel.kt`
-     * 中同名函数体（3256–3336 行），仅做机械换名（`mergeSystemPrompt`→`headMergeSystemPrompt`），
-     * 注释按原文保留以便逐行目视比对。
+     * 逐行机械换名（`mergeSystemPrompt`→`headMergeSystemPrompt`），注释按原文保留以便目视比对；
+     * 它是 [主判据] 2^8 组合逐字节比较的**执行基准**（无 basePersona/worldbook/styleTail 三层，
+     * 故与当前实现比较时需 `normalize` 掉 D2 有意删除的身份从句）。
      */
     private fun headMergeSystemPrompt(
         inputs: List<String?>,

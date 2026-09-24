@@ -69,12 +69,12 @@ import java.util.concurrent.atomic.AtomicLong
  * **US-006**：构造注入 [ProviderConfigRepository] + [ChatStreamProvider]，
  * [sendMessage] 由 Mock 替换为真实 SSE 流式请求（ADR-004 4.5）。
  *
- * **US-019 RAG 集成**（ADR-012）：
- * - 构造额外注入 [Embedder] + [KnowledgeBaseRepository]
- * - [sendMessage] 在 [RagTarget] 非 [Off][RagTarget.Off] 时执行：embed(query) → search → 阈值过滤 →
- *   RagContextBuilder 拼 system prompt + context → provider.streamChat(..., systemPrompt, ragContext)
- * - 引用来源在检索阶段就附在 AI 占位消息上（用户更早看到引用，无需等 Done）
- * - 失败降级三级（ADR-012 5.5）：embed 失败 / search 失败或空 / 整个 RAG 异常 → 退化为普通对话
+ * **US-019 RAG 集成 → ADR-050（2026-09-12）知识库能力暴露**：
+ * - 构造额外注入 [Embedder] + [KnowledgeBaseRepository]（后者仍用于 init 恢复指定库时的存在性校验）
+ * - [sendMessage] 在 [RagTarget] 非 [RagTarget.Off] 且 `ragTopK > 0` 时仅拼入**能力声明**
+ *   （[Companion.buildRagPromptFor] → systemPrompt 的 RAG 层）；**不再自动检索/注入知识库正文**
+ * - 知识库正文只经 LLM 主动调用 `knowledge_base__*` 工具进入上下文（role=tool），
+ *   引用来源由工具结果解析（[parseKnowledgeBaseCitations]）
  * - [_messages] 改用 [update] 原子 CAS（修复 R-5，BR-concurrency-004）
  *
  * **US-026 Skill 工具执行回路集成**（ADR-014 5.4，M4 Phase D）：
@@ -178,7 +178,13 @@ class ConversationViewModel(
      *
      * - FULL 档：5（标准批次）
      * - STANDARD 档：3（小批次，4-6GB 设备约束）
-     * - MINIMAL / CHAT_ONLY 档：0（RAG 禁用，值不使用，因 [buildRagPlan] 在 RagTarget.Off 时短路）
+     * - MINIMAL / CHAT_ONLY 档：0（RAG 禁用）
+     *
+     * **ADR-050（TASK-20260912-002）语义收窄**：客户端已不再按轮自动检索注入，故本值不再
+     * 用作"注入片段数"；当前生产用途是**档位能力信号**——`ragTopK <= 0` 表示该档位不加载
+     * 嵌入模型（[io.prism.embedding.NullEmbedder]），据此对低端档关闭知识库**能力暴露**
+     * （不注入 `knowledge_base__*` 工具、不注入能力声明，对齐 ADR-017 档位约束）。
+     * 工具实际返回片段数由调用参数 `topK` 决定（见 [io.prism.network.KnowledgeBaseLocalToolExecutor]）。
      *
      * 默认 [DEFAULT_RAG_TOP_K]=3（向后兼容既有测试，未注入时按 STANDARD 行为）。
      * 生产环境由 [Factory] 从 [io.prism.tier.TierManager.currentTier.ragTopK] 注入。
@@ -265,6 +271,18 @@ class ConversationViewModel(
      * 生产环境由 [Factory] 从 [PrismApplication.todoLocalToolExecutor] 注入。
      */
     private val todoLocalToolExecutor: io.prism.skill.TodoLocalToolExecutor? = null,
+    /**
+     * 批次24（ADR-051 D8）：桌宠动作工具执行器（`pet__play_action`）。
+     *
+     * 非 null 时把 `pet__play_action` 注入 [buildTools]，使角色能对自己的桌面形象下达
+     * 动作/表情指令。**是否真的会播**由执行器内部判定（桌宠关闭/无形象时返回可读说明，
+     * 不抛异常），因此这里只做"是否暴露工具"的门控，不做"桌宠是否开启"的门控——
+     * 否则开关桌宠会让工具集在会话中途变化，破坏 provider 前缀缓存的稳定性。
+     *
+     * null 时降级为不注册该工具（向后兼容既有测试）。
+     * 生产环境由 [Factory] 从 [PrismApplication.petLocalToolExecutor] 注入。
+     */
+    private val petLocalToolExecutor: io.prism.pet.PetLocalToolExecutor? = null,
     /**
      * v1 US-301/302（方案 B 纯文本模型识图）：视觉旁路编排器。
      *
@@ -589,9 +607,11 @@ class ConversationViewModel(
     /**
      * UXR6 问题 3a：当前是否正在执行 RAG 检索（反映「本消息」的检索活动）。
      *
-     * [launchAnswer] 的 [buildRagPlan] 前置 true、完成/降级后置 false。
-     * UI 据此决定是否显示「正在检索知识库…」指示，替代旧「ragTarget 开关 + 全局 ragDone」
-     * 推断（旧逻辑对每条消息无条件显示检索画面）。
+     * **ADR-050（TASK-20260912-002）后恒为 false**：知识库正文不再由客户端按轮自动检索注入
+     * （检索改由 LLM 主动调用 `knowledge_base__*` 工具触发），故本流不再有置位路径。
+     * 保留字段与 UI 接线（[io.prism.ui.chat.ConversationScreen] 的 `TypingIndicator(isRagOn=…)`）
+     * 是为了让"知识库检索中"这一**用户可见状态**继续可用——将来若需要基于工具事件驱动该指示
+     * （例如 knowledge_base__search 执行期间置 true），无需改动 UI 侧契约。
      */
     private val _ragRetrieving = MutableStateFlow(false)
     val ragRetrieving: StateFlow<Boolean> = _ragRetrieving.asStateFlow()
@@ -1104,11 +1124,10 @@ class ConversationViewModel(
      * **流程**：
      * 1. trim 输入 → 追加用户消息（[nextId] 原子自增）→ 追加空 AI 占位消息 → isTyping=true
      * 2. 取激活 Provider；无则追加错误提示
-     * 3. **RAG 注入**（若 [ragTarget] 非 [Off][RagTarget.Off]）：
-     *    - IO 协程执行 embed(query) → search → 阈值过滤
-     *    - 拼 system prompt + ragContext
-     *    - 引用来源 [io.prism.ui.model.Citation] 列表附在 AI 占位消息上
-     *    - 失败按 [RagBuildResult] 三态降级（ADR-012 5.5），不阻断对话
+     * 3. **知识库能力声明**（ADR-050：若 [ragTarget] 非 [RagTarget.Off] 且 `ragTopK > 0`）：
+     *    - 仅拼入**能力声明**（[Companion.buildRagPromptFor]，稳定文本）到 system prompt
+     *    - **不再**自动检索/注入知识库正文（正文只经 LLM 主动调用 `knowledge_base__*` 工具进入）
+     *    - 客户端侧不再产生引用来源（`sources` 由工具结果解析得到）
      * 4. **M5 Phase E：会话启动**（[startSessionIfNeeded]）—— 首条消息生成 sessionId +
      *    L2 检索（retrieveRelevantMemories）+ L3 画像加载（formatProfilesAsContext）
      * 5. **M4 Phase D：构建 tools**（[Companion.buildTools]）
@@ -1126,10 +1145,9 @@ class ConversationViewModel(
      * **状态原子性**：所有 [_messages] 写入均通过 [update] CAS（BR-concurrency-004），
      * 避免 RAG 检索协程与 stream collect 协程并发写导致 lost update（修复 R-5）。
      *
-     * **降级提示策略**（ADR-012 5.5 + G-02/G-03 修复 + M5 Phase E 记忆降级）：
-     * - [RagBuildResult.Success] → 附 citations，注入 systemPrompt + ragContext
-     * - [RagBuildResult.EmbedFailed] → appendDelta 简短提示（项目暂无 Toast 基建，ADR-012 5.5 备注）
-     * - [RagBuildResult.NormalChat] → 主动关闭 / search 空 / 阈值过滤空 / RAG 异常，用户无感
+     * **降级策略**（ADR-050 更新 + M5 Phase E 记忆降级）：
+     * - 知识库：不再有"检索失败降级"路径（客户端不检索）；能力声明按 [ragTarget]/档位门控，
+     *   不满足时传 null 跳过该层
      * - L1/L2/L3 任一失败 → 降级为 null（用户无感，不阻断对话）
      *
      * **M4 Phase D 已知限制**（R-5，ADR-014 5.7 偏差）：
@@ -1425,54 +1443,21 @@ class ConversationViewModel(
                 return@launch
             }
 
-            // UXR6 问题 3a：RAG 检索开始 —— UI 显示「正在检索知识库…」（仅真实检索期间）
-            _ragRetrieving.value = true
-            // RAG 注入（IO 协程，BR-concurrency-002 全程持锁，禁止 Main）
-            // Bug fix（UXR8-R3）：先做轻量级需求预判，避免问候/闲聊/确认类消息
-            // 也触发昂贵的 embed+search（知识库片段无条件注入污染 LLM 上下文）。
-            // 判定规则见 [needsRagRetrieval]（整句归一化精确匹配，无长度/前缀过滤）。
-            val ragResult = if (needsRagRetrieval(userText)) {
-                runCatching { buildRagPlan(userText) }
-                    .getOrElse { e ->
-                        if (e is CancellationException) throw e
-                        Log.w(TAG, "RAG injection failed: ${e::class.simpleName}, degrading to normal chat")
-                        RagBuildResult.NormalChat
-                    }
-            } else {
-                RagBuildResult.NormalChat
-            }
-            // UXR6 问题 3a：RAG 检索结束（无论成功/降级，避免「检索知识库」指示残留）
-            _ragRetrieving.value = false
-
-            // G-02 修复：按 RagBuildResult 三态差异化处理用户感知
-            val ragPlan: RagPlan? = when (ragResult) {
-                is RagBuildResult.Success -> {
-                    // v1 批次18（可观测性）：RAG 注入成功补结构化日志——此前注入无任何日志，
-                    // 真机 RCA「未请求知识库却被注入」时无法确认注入发生与注入规模。
-                    // guardrail P3：target 用可读文本（避免 data object toString 噪音）
-                    val targetDesc = when (val t = _ragTarget.value) {
-                        is RagTarget.SpecificLibrary -> "SpecificLibrary(kbId=${t.kbId})"
-                        else -> t::class.simpleName ?: "unknown"
-                    }
-                    Log.i(
-                        TAG,
-                        "RAG injected: target=$targetDesc citations=${ragResult.plan.citations.size}"
-                    )
-                    // 引用来源在检索阶段就附在 AI 占位消息上（用户更早看到引用，无需等 Done，ADR-012 5.3）
-                    if (ragResult.plan.citations.isNotEmpty()) {
-                        _messages.update { msgs ->
-                            msgs.map { if (it.id == aiId) it.copy(sources = ragResult.plan.citations) else it }
-                        }
-                    }
-                    ragResult.plan
-                }
-                RagBuildResult.EmbedFailed -> {
-                    // embed 失败 → 提示用户（ADR-012 5.5：项目暂无 Toast，用 appendDelta 简短提示）
-                    // 末尾空行分隔后续 AI 流式回复，避免「对话」「回复」直接拼接
-                    appendDelta(aiId, "⚠️ 知识库检索失败，已降级为普通对话\n\n")
-                    null
-                }
-                RagBuildResult.NormalChat -> null  // 主动关闭 / search 空 / 阈值过滤空 / RAG 异常，无提示
+            // ADR-050（TASK-20260912-002）：知识库**不再自动注入内容**。
+            // 原实现每轮无条件 embed+search 并把命中片段作为独立 user 消息塞进请求体
+            // （与 LLM 是否调用工具无关），是"知识库内容在 LLM 未调用时进入上下文"的根因
+            // （详见 docs/reports/2026-09-12-kb-auto-injection-archaeology.md）。
+            // 现仅注入**能力声明**（稳定文本，随配置变化，不随轮次变化——对前缀缓存友好），
+            // 正文一律经 LLM 主动调用 knowledge_base__* 工具进入上下文（按需检索）。
+            //
+            // guardrail G-5 修复：**只读一次** target，供「能力声明 / 工具定义门控 / 决策日志」
+            // 三处复用——三者必须同源，否则中途切换 RAG 模式会出现"声明了但没给工具"
+            // （或反之）的自相矛盾请求。
+            val kbTarget = _ragTarget.value
+            val ragPrompt: String? = Companion.buildRagPromptFor(kbTarget, ragTopK).also { prompt ->
+                // BR-observability-002：能力声明与工具注入两条路径均留痕（不含 query 正文），
+                // 供真机验证"本轮是否声明了知识库能力"，与工具调用日志共同构成可追溯链路。
+                Log.i(TAG, "KB capability declared: target=${describeRagTarget(kbTarget)} declared=${prompt != null}")
             }
 
             // M5 Phase E（US-035）：会话启动 —— 首条消息生成 sessionId + L2 检索 + L3 画像加载
@@ -1494,19 +1479,22 @@ class ConversationViewModel(
                 // PRD MCP/API 增强（US-002）：今日热榜工具（hotlist__get，按 VM 开关注入）
                 hotListEnabled = hotListEnabled,
                 // v1 批次17（US-1702）：TODO 任务规划工具（todo_write，恒启用，纯本地能力）
-                todoWriteEnabled = todoLocalToolExecutor != null
+                todoWriteEnabled = todoLocalToolExecutor != null,
+                // 批次24（ADR-051 D8）：桌宠动作工具（pet__play_action，恒启用，纯本地能力；
+                // 桌宠未开启时执行器返回可读说明，不改变工具集 → 不破坏 provider 前缀缓存）
+                petActionEnabled = petLocalToolExecutor != null
             )
-            // UXR4 问题 2/3（ADR-024）：知识库工具在 **RAG 开启 + 嵌入可用** 时注入
-            //（LLM 可主动枚举/检索/读取知识库，解决 RAG 仅自动注入、LLM 无知识库感知能力的问题）。
-            // 语义对齐：RAG 关闭（RagTarget.Off）或低端档（ragTopK<=0，NullEmbedder）时
-            // LLM 不应感知知识库能力（与 buildRagPlan 短路一致 + guardrail Q2 能力对齐）。
-            val kbTools = if (_ragTarget.value is RagTarget.Off || ragTopK <= 0) {
+            // UXR4 问题 2/3（ADR-024）+ ADR-050：知识库工具在 **能力开启 + 嵌入可用** 时注入
+            //（LLM 可主动枚举/检索/读取知识库）。ADR-050 后这是知识库正文进入上下文的**唯一通道**，
+            // 故门控必须与能力声明（[Companion.buildRagPromptFor]）严格一致：
+            // RAG 关闭（RagTarget.Off）或低端档（ragTopK<=0，NullEmbedder）时两者都不注入
+            //（LLM 既拿不到工具也看不到声明，与 guardrail Q2 能力对齐一致）。
+            val kbTools = if (kbTarget is RagTarget.Off || ragTopK <= 0) {
                 emptyList()
             } else {
                 io.prism.network.KnowledgeBaseLocalToolExecutor.buildToolDefinitions()
             }
-            val mcpServers = mcpServerRepository?.servers?.value ?: emptyList()
-            // DEF-008（Bug-3）：注入已启用 MCP Server 的工具（带 mcp_ 命名空间前缀，支持多 server 精确路由）。
+            val mcpServers = mcpServerRepository?.servers?.value ?: emptyList()            // DEF-008（Bug-3）：注入已启用 MCP Server 的工具（带 mcp_ 命名空间前缀，支持多 server 精确路由）。
             // describeTools 失败降级为空（不阻断对话），命名空间由 SkillExecutor.stripNamespace/selectMcpServer 处理。
             // M-2 修复（guardrail TKN-P17-GUARDRAIL-001）：原 runCatching 会吞 CancellationException，
             // 违反 BR-error-handling-007。改为显式 try-catch 重抛 CancellationException。
@@ -1647,8 +1635,9 @@ class ConversationViewModel(
             }
 
             // 合并 systemPrompt（ADR-015 决策4 + ADR-030 顺序：用户规则 → RAG → L1 摘要 → L2 跨会话 → L3 画像 → Skill）
+            // ADR-050：ragPrompt 仅为**知识库能力声明**（null = 不声明），不再携带任何知识库正文。
             val mergedSystemPrompt = Companion.mergeSystemPrompt(
-                ragPrompt = ragPlan?.systemPrompt,
+                ragPrompt = ragPrompt,
                 l1Summary = memoryContext.l1Summary,
                 l2Memories = memoryContext.l2Memories,
                 l3Profiles = memoryContext.l3Profiles,
@@ -1680,7 +1669,9 @@ class ConversationViewModel(
                     active = active,
                     history = sanitizedHistory,
                     mergedSystemPrompt = mergedSystemPrompt,
-                    ragContext = ragPlan?.ragContext,
+                    // ADR-050：客户端不再自动注入知识库正文——恒 null（保留形参以兼容
+                    // 协议层既有能力；知识库正文只经 knowledge_base__* 工具结果进入上下文）。
+                    ragContext = null,
                     tools = tools,
                     mcpServers = mcpServers,
                     thinkingEnabled = thinkingEnabled,
@@ -1692,7 +1683,8 @@ class ConversationViewModel(
                     active = active,
                     history = sanitizedHistory,
                     systemPrompt = mergedSystemPrompt,
-                    ragContext = ragPlan?.ragContext,
+                    // ADR-050：同上，恒 null。
+                    ragContext = null,
                     thinkingEnabled = thinkingEnabled,
                     reasoningEffort = reasoningEffort
                 )
@@ -2303,7 +2295,11 @@ class ConversationViewModel(
                 // UX-001 问题 7（ADR-022）：工具调用状态可视化 —— 记录活动工具名，
                 // UI 展示「正在调用工具: xxx」（对齐 Claude Code 工具进度模型）。
                 // 工具名去命名空间前缀展示（如 web_search__search → search）。
-                _activeTool.value = event.toolName.substringAfterLast(SkillExecutor.NAMESPACE_SEPARATOR)
+                // ADR-050（TASK-20260912-002）：知识库工具单独映射为「正在查知识库」——
+                // 撤除自动注入后，"知识库检索中"的唯一可见通道就是工具调用指示，
+                // 而 `substringAfterLast("__")` 会把它显示为泛化的 search/list_documents，
+                // 用户无法分辨是否在查自己的资料（考古 §3 缺口）。
+                _activeTool.value = describeActiveTool(event.toolName)
                 // v1 批次16（US-1605）：记录本轮使用过手机操控工具——回复完成后
                 // App 在后台时发完成回报通知（用户在其它 App 也能知道任务结束）。
                 if (event.toolName.startsWith("phone_control__")) phoneControlUsedThisTurn = true
@@ -2314,7 +2310,7 @@ class ConversationViewModel(
                 //（继续展示「正在调用工具: xxx」）+ 置 isTyping=true，使工具执行阶段有进行中指示，
                 // 而非 Done 后立即清除导致执行期空白。
                 _isTyping.value = true
-                _activeTool.value = event.toolName.substringAfterLast(SkillExecutor.NAMESPACE_SEPARATOR)
+                _activeTool.value = describeActiveTool(event.toolName)
             }
             is StreamEvent.AskUser -> {
                 // UXR8 N2 Phase 2（ADR-030）：LLM 主动反问 → 设置待答问题供 UI 展示提问卡片。
@@ -2422,9 +2418,11 @@ class ConversationViewModel(
      * @param failedAiId 失败的 AI 占位 id（移除）
      */
     private fun relaunchAnswerWithImageDescription(lastUser: ChatMessage, prefixedDesc: String, failedAiId: Long) {
-        // guardrail 提交前审计（TKN-PREPUSH-V1-B1B7-001，#1）：launchAnswer 的 RAG 检索 query /
-        // needsRagRetrieval 以描述文本为入参，必须与存储层一致地用净化版（长度上限 + 控制字符过滤），
-        // 避免图片内嵌文本经视觉模型转述后绕过 MAX_VISION_INJECT_CHARS / ISO 控制字符过滤。
+        // guardrail 提交前审计（TKN-PREPUSH-V1-B1B7-001，#1）：视觉描述文本进入 user 消息前必须与
+        // 存储层一致地用净化版（长度上限 MAX_VISION_INJECT_CHARS + 控制字符过滤），避免图片内嵌
+        // 文本经视觉模型转述后把超长/控制字符带进上下文。
+        // （ADR-050 更新：本处原注释还提到"launchAnswer 的 RAG 检索 query / needsRagRetrieval 以
+        //  描述文本为入参"——该自动检索链路已撤除，相关符号不存在，故删去该半句以免悬空引用。）
         val sanitizedDesc = sanitizeVisionText(prefixedDesc)
         _messages.update { list ->
             list.filter { it.id != failedAiId }.map { msg ->
@@ -2584,81 +2582,12 @@ class ConversationViewModel(
     }
 
     /**
-     * 构建 RAG 注入结果（system prompt + ragContext + citations 或降级标记）。
-     *
-     * **必须**在 IO 协程调用（[Embedder.embed] 串行持锁 ~100ms + [KnowledgeBaseRepository.search]
-     * 同步阻塞，BR-concurrency-002）。
-     *
-     * **降级策略**（ADR-012 5.5 + G-01/G-02 修复）：
-     * - [RagTarget.Off] → [RagBuildResult.NormalChat]（普通对话，无提示）
-     * - embed 失败 → [RagBuildResult.EmbedFailed]（普通对话 + appendDelta 提示）
-     * - search 失败或结果为空 → [RagBuildResult.NormalChat]（普通对话，无提示，AI 自然回答）
-     * - search 有结果但阈值过滤后为空 → [RagBuildResult.NormalChat]（普通对话，无提示）
-     * - 成功 → [RagBuildResult.Success]
-     *
-     * **G-01 修复**（guardrail TKN-US019-RAG-GUARDRAIL-001，BR-error-handling-007 提议）：
-     * 内层禁用 `runCatching { }.getOrElse { }`（会吞 CancellationException 破坏结构化并发），
-     * 改用显式 try-catch，先 `catch (e: CancellationException) { throw e }` 再 `catch (e: Exception)`。
-     *
-     * @param queryText 用户查询文本
-     * @return RAG 构建结果（成功或降级标记），调用方按 [RagBuildResult] 三态决定用户感知
+     * ADR-050（TASK-20260912-002）：RagTarget 的**可读文本**（结构化日志用，避免 data object
+     * toString 噪音——沿用 v1 批次18 既有约定）。
      */
-    private suspend fun buildRagPlan(queryText: String): RagBuildResult {
-        val target = _ragTarget.value
-        if (target is RagTarget.Off) return RagBuildResult.NormalChat
-        // M-02 修复（guardrail TKN-M7-GUARDRAIL-001，BR-error-handling-004）：
-        // MINIMAL/CHAT_ONLY 档 ragTopK=0，NullEmbedder 返回空 FloatArray(0) 会导致下游
-        // KnowledgeBaseRepository.search 的 require(query.size == 384) 抛 IllegalArgumentException。
-        // 虽被外层 catch 兜住降级为 NormalChat，但异常路径成为热路径且无 Log.w 违反
-        // BR-error-handling-004（不吞异常）。此处短路返回 NormalChat，避免异常路径。
-        if (ragTopK <= 0) return RagBuildResult.NormalChat
-
-        // IO 协程执行 embed + search（全程阻塞，禁止 Main）
-        return withContext(ioDispatcher) {
-            // 1. embed(query) —— BR-concurrency-002 全程持锁 ~100ms
-            // G-01 修复：显式 try-catch，重抛 CancellationException（BR-error-handling-007）
-            val queryVector = try {
-                embedder.embed(queryText)
-            } catch (e: CancellationException) {
-                throw e  // 协程取消必须传播，禁止吞掉
-            } catch (e: Exception) {
-                return@withContext RagBuildResult.EmbedFailed  // embed 失败 → 提示降级
-            }
-
-            // 2. search —— 同步阻塞，kbId 由 RagTarget 决定
-            // G-04 修复：RagTarget.SpecificLibrary init 已校验 kbId > 0，此处无需重复校验
-            val kbId = when (target) {
-                is RagTarget.AllLibraries -> null
-                is RagTarget.SpecificLibrary -> target.kbId
-                RagTarget.Off -> return@withContext RagBuildResult.NormalChat  // 理论不可达，防御
-            }
-            val results = try {
-                knowledgeBaseRepository.search(queryVector, k = ragTopK, knowledgeBaseId = kbId)
-            } catch (e: CancellationException) {
-                throw e  // G-01 修复：协程取消必须传播
-            } catch (e: Exception) {
-                // M-02 修复（BR-error-handling-004）：search 失败记录警告日志，不静默吞异常
-                Log.w("ConversationViewModel", "RAG search 失败，降级为普通对话", e)
-                return@withContext RagBuildResult.NormalChat  // search 失败 → 自然降级
-            }
-
-            // 3. 相似度阈值过滤（R-6，调用方责任，ADR-012 5.6）
-            val filtered = results.filter { it.similarity >= RAG_SIMILARITY_THRESHOLD }
-            if (filtered.isEmpty()) return@withContext RagBuildResult.NormalChat  // 无相关结果 → 自然降级
-
-            // UXR9 US-901 AC-4：限制注入片段条数（top-2），控制上下文膨胀。
-            // 必须在 buildContext/buildCitations 前截断，保证 [来源N] 编号与 UI 引用一致。
-            val capped = filtered.take(RAG_MAX_INJECTED)
-
-            // 4. 拼接 system prompt + ragContext + citations
-            RagBuildResult.Success(
-                RagPlan(
-                    systemPrompt = RagContextBuilder.SYSTEM_PROMPT,
-                    ragContext = RagContextBuilder.buildContext(capped),
-                    citations = RagContextBuilder.buildCitations(capped)
-                )
-            )
-        }
+    private fun describeRagTarget(target: RagTarget): String = when (target) {
+        is RagTarget.SpecificLibrary -> "SpecificLibrary(kbId=${target.kbId})"
+        else -> target::class.simpleName ?: "unknown"
     }
 
     /** 将增量 token 追加到指定 AI 消息末尾（原子 CAS，BR-concurrency-004）。 */
@@ -2689,7 +2618,46 @@ class ConversationViewModel(
      *（swipes 语义：全部版本保留可切换）；regenTargetId 置位保证幂等（markCompleted
      * 会被 finally 兜底多次调用，仅首次追加）。
      */
+    /**
+     * 批次24（ADR-051 D8 / PRD US-2408）：把本轮助手回复正文广播给桌宠气泡。
+     *
+     * **只广播正文**：思考链（`thinkingChain`）、工具调用结果、引用来源都不进气泡——
+     * 气泡是"角色在说话"，不是"界面在展示调试信息"。
+     *
+     * **同一消息只广播一次**（guardrail L-10）：`markCompleted` 是**幂等**函数，
+     * 正常完成、错误兜底、用户终止等**多条完成路径**都可能对同一个 `aiId` 调用它。
+     * 不去重会让气泡重复出现并不断重置 6 秒计时 —— 用户感知为"气泡赖着不走"。
+     * 用一个小容量 LinkedHashSet 记住已广播过的 id（**上限 [PET_BUBBLE_DEDUPE_LIMIT]，
+     * 清空发生在加入之前**，见其 KDoc）。
+     *
+     * **无消费者时零成本**：[io.prism.pet.PetActionBus.emit] 是非挂起的 `tryEmit`，
+     * 桌宠未开启时事件直接落在缓冲区并被丢弃，不影响会话主链路。
+     */
+    private fun publishPetBubble(aiId: Long) {
+        // 清空要在**加入之前**做（guardrail R3-B 的 N-4）：写成 `add` 之后再判超限清空，
+        // 会把**刚刚加进去的 id 一起清掉** —— 去重出现周期性空窗，
+        // "气泡重复显示"的症状只是被推迟到第 LIMIT+1 次而不是被消除。
+        if (petBubblePublished.size >= PET_BUBBLE_DEDUPE_LIMIT) petBubblePublished.clear()
+        if (!petBubblePublished.add(aiId)) return
+        val text = _messages.value
+            .lastOrNull { it.id == aiId && it.role == Role.ASSISTANT }
+            ?.content
+            ?.trim()
+            .orEmpty()
+        if (text.isEmpty()) return
+        io.prism.pet.PetActionBus.emit(io.prism.pet.PetActionBus.Event.Bubble(text))
+    }
+
+    /** 已广播过气泡的助手消息 id（guardrail L-10 去重；见 [publishPetBubble]）。 */
+    private val petBubblePublished = LinkedHashSet<Long>()
+
     private fun markCompleted(aiId: Long) {
+        // 批次24（ADR-051 D8 / PRD US-2408）：本轮助手回复完成 → 广播给桌宠气泡。
+        // 收口在此是刻意的：markCompleted 是**所有完成路径**（正常结束 / 用户终止 / 错误兜底 /
+        // 视觉兜底 / 重试…）共用的唯一私有函数，逐条分支挂钩必然漏挂，
+        // 而漏挂的表现是"有时有气泡有时没有"。
+        // （刻意不写死调用点条数——计数会随重构漂移，而漂移后无人会回来改这句话。）
+        publishPetBubble(aiId)
         _streamingIds.update { it - aiId }
         if (regenTargetId == aiId) {
             regenTargetId = -1L
@@ -2737,6 +2705,15 @@ class ConversationViewModel(
          */
         internal const val MAX_VARIANTS = 10
 
+        /**
+         * 桌宠气泡去重集合的上限（guardrail L-10）。
+         *
+         * 达到上限即整体清空而非逐个淘汰：这是纯粹的**近期重复抑制**，
+         * 清空后最坏结果是"很久以前的那条消息若再次 markCompleted 会重播一次气泡"，
+         * 代价可忽略，换来的是无需维护 LRU 结构。
+         */
+        private const val PET_BUBBLE_DEDUPE_LIMIT = 32
+
         /** v1 US-301（guardrail M-2）：视觉描述/OCR 文本注入 user 消息的字符上限（防上下文撑爆）。 */
         internal const val MAX_VISION_INJECT_CHARS = 2000
 
@@ -2747,106 +2724,57 @@ class ConversationViewModel(
         internal const val REQUEST_RESUME_TIMEOUT_MS = 15_000L
 
         /**
-         * RAG 注入片段条数上限（UXR9 US-901 AC-4）。
+         * ADR-050（TASK-20260912-002）：构建本轮要注入 systemPrompt 的**知识库能力声明**。
          *
-         * buildRagPlan 阈值过滤后再截断为 top-2 注入 LLM 上下文与引用来源，
-         * 控制上下文膨胀（多语言模型相关片段实测 0.58~0.66，2 条足够作为事实依据）。
+         * **背景（为什么不再有"自动注入"）**：原实现（ADR-012 起）在 [launchAnswer] 中对**每条**
+         * 用户消息无条件执行 embed + top-k 检索，把命中片段拼成 `ragContext` 作为独立 user 消息
+         * 插入请求体——与 LLM 是否调用知识库工具**完全无关**。历次修复（调阈值 / 加寒暄黑名单 /
+         * 改默认开关 / 文档前缀跳过）均只改判据而保留范式，故反复复发（详见
+         * docs/reports/2026-09-12-kb-auto-injection-archaeology.md 与
+         * docs/reports/2026-09-12-kb-injection-fix-history.md）。ADR-050 决定：
+         * **正文一律经 LLM 主动调用 `knowledge_base__*` 工具进入上下文**，本函数只产出
+         * **能力声明**（告诉模型"你有这个能力、该在什么时候用"），不再产出任何知识库正文。
+         *
+         * **纯函数**（BR-testing-004）：无 IO、无状态，可被任意协程并发调用。
+         *
+         * **门控与工具注入保持语义一致**（同一开关同时决定"能力声明"与"工具定义"）：
+         * - [RagTarget.Off] → null（用户关闭知识库：不声明、不注入工具）
+         * - `ragTopK <= 0`（MINIMAL / CHAT_ONLY 档，embedder 为 [io.prism.embedding.NullEmbedder]）
+         *   → null（低端档不提供知识库检索能力，对齐 ADR-017 档位约束）
+         * - 其余 → 能力声明文本（[io.prism.rag.RagContextBuilder.buildToolGuidance]）
+         *
+         * **前缀缓存友好**：返回值只随配置（RagTarget / 档位）变化，不随轮次变化，消除
+         * "每轮注入内容不同"导致的 prompt 前缀失效。
+         *
+         * @param target 当前知识库检索目标（[RagTarget]）
+         * @param ragTopK 当前档位的 RAG top-k（<=0 表示该档位禁用嵌入检索）
+         * @return 能力声明文本；不声明时返回 null
          */
-        internal const val RAG_MAX_INJECTED = 2
-
-        /**
-         * RAG 相似度阈值（ADR-012 5.6，过滤无关结果污染 context）。
-         *
-         * UXR3 问题 6（ADR-023）：0.3 → 0.5。用户反馈「打开知识库检索功能后第一份资料必被塞入」，
-         * 根因是阈值过低：库中仅有的片段（无论与问题是否相关）都会命中并注入上下文。
-         * 提高阈值过滤低相关片段，只有足够相关的资料才进入 context 与引用来源。
-         *
-         * **UXR9 实测校准**（ChineseSimilarityDiagnosticTest，多语言 MiniLM qint8 + Unigram）：
-         * 0.5 在多语言模型下仍是最优分隔点——相关中文句对 0.582/0.655，无关中文句对
-         * 最大 0.322（旧英文模型无关片段 0.4~0.7 是 RAG 污染结构性根因，已换模型根治）。
-         */
-        private const val RAG_SIMILARITY_THRESHOLD = 0.5
-
-        /**
-         * 纯确认/寒暄/无实质内容消息的**整句**短语集（命中即跳过 RAG 检索）。
-         *
-         * Bug fix（UXR8-R3，guardrail H-1 修复）：**禁止前缀匹配**。此前用
-         * `startsWith` 匹配使"你好，帮我查一下xxx""谢谢，请总结一下…"等真实查询被
-         * 整句跳过（误伤面比长度过滤更广）。现改为**整句归一化精确匹配**：
-         * - [needsRagRetrieval] 先对消息 lower-case + 剥离空白/标点归一化
-         * - 归一化结果**整句**命中本集合才跳过（如"好的，谢谢"→"好的谢谢"）
-         * - 含实际查询内容的消息归一化后不在集合内 → 照常走相似度阈值过滤
-         *
-         * 不替代 [buildRagPlan] 的相似度防线，两者叠加（先按需、再按相关度）。
-         */
-
-        /**
-         * UXR11 U1（ADR-033）：文档内容直发消息前缀（与 ConversationScreen.extractDocumentText
-         * 的 `【文档：$displayName】` 包装一致）。以此前缀开头的用户消息 = R5「＋→文件」上传的
-         * 文档内容（+ 用户需求合并），跳过 RAG 自动注入（见 [needsRagRetrieval]）。
-         */
-        internal const val DOCUMENT_MESSAGE_PREFIX = "【文档："
-
-        /**
-         * RAG 需求预判跳过短语集（UXR8-R3，ADR-028；UXR11 U1 扩展）。
-         *
-         * 以下消息**整句**（归一化后）命中 → [needsRagRetrieval] 返回 false，跳过 embed+search：
-         * - 寒暄/问候、确认/回应、礼貌回应、结束/离开
-         *
-         * 不替代 [buildRagPlan] 的相似度防线，两者叠加（先按需、再按相关度）。
-         */
-        private val RAG_SKIP_PHRASES = setOf(
-            // 寒暄/问候
-            "你好", "您好", "hi", "hello", "嗨", "哈喽", "在吗", "早上好", "下午好", "晚上好",
-            // 确认/回应
-            "好", "好的", "好的好的", "好吧", "行", "行吧", "嗯", "嗯嗯", "哦", "哦哦", "啊",
-            "明白", "明白了", "知道", "知道了", "了解", "了解了", "收到", "ok", "okay", "okok",
-            "对", "对的", "没错", "同意", "没问题", "可以", "可以的",
-            // 礼貌回应
-            "谢谢", "谢谢你", "感谢", "辛苦了", "多谢", "thanks", "thankyou",
-            // 结束/离开
-            "再见", "拜拜", "晚安",
-            // 复合确认语（归一化后整句）
-            "好的谢谢", "谢谢好的", "好谢谢", "好的没问题", "没问题谢谢", "明白了谢谢", "知道了谢谢",
-            "嗯嗯好的", "好的了解", "收到谢谢", "好嘞", "好嘞谢谢", "可以的谢谢",
-            // 中英混合确认语
-            "ok谢谢", "ok好的", "谢谢ok", "好的ok"
-        )
-
-        /**
-         * 归一化 RAG 预判输入：lower-case + 仅保留字母/数字（剥离空白与中文标点）。
-         * 如"好的，谢谢。"→"好的谢谢"。纯函数（BR-testing-004）。
-         */
-        private fun normalizeRagText(text: String): String =
-            text.lowercase().filter { it.isLetterOrDigit() }
-
-        /**
-         * 判断一条用户消息是否有检索知识库的需求（纯函数，BR-testing-004）。
-         *
-         * Bug fix（UXR8-R3，TKN-UXR8-R3-ARCHAEOLOGY-001 根因）：`buildRagPlan` 对**每条**
-         * 用户消息无条件执行 embed+search，导致问候/闲聊/确认类消息也触发知识库片段注入，
-         * 污染 LLM 上下文。本函数做轻量级需求预判：
-         * - 消息归一化后**整句**命中 [RAG_SKIP_PHRASES] → 跳过（纯确认/寒暄，无检索意图）
-         * - UXR11 U1（ADR-033）：**文件内容直发消息**（R5「＋→文件」上传，文本以
-         *   [DOCUMENT_MESSAGE_PREFIX]「【文档：」包裹）→ 跳过 RAG 自动注入 —— 文档本身
-         *   就是本轮上下文，无需知识库检索；且长文档作为 query 会让多语言嵌入模型检索出
-         *   无关片段注入 LLM 上下文（真机实测：上传文件后即使无检索需求，知识库资料仍被注入）。
-         *   用户如需知识库关联，可显式用 knowledge_base__search 工具（RAG 开启时已注入）。
-         * - 其余消息（包括短查询如"查询"，以及含查询内容的长句）照常走相似度阈值过滤
-         *
-         * 启发式是**保守过滤器**：仅拦截明显无需求的消息，其余照常走相似度阈值过滤。
-         * 不替代 [buildRagPlan] 的相似度防线，两者叠加（先按需、再按相关度）。
-         *
-         * @param queryText 已 trim 的用户消息
-         * @return true=应尝试 RAG 检索；false=跳过
-         */
-        internal fun needsRagRetrieval(queryText: String): Boolean {
-            // 空白消息无检索需求
-            if (queryText.isBlank()) return false
-            // UXR11 U1（ADR-033）：文档内容直发消息跳过 RAG 自动注入
-            if (queryText.startsWith(DOCUMENT_MESSAGE_PREFIX)) return false
-            return normalizeRagText(queryText) !in RAG_SKIP_PHRASES
+        internal fun buildRagPromptFor(target: RagTarget, ragTopK: Int): String? {
+            if (target is RagTarget.Off) return null
+            if (ragTopK <= 0) return null
+            return RagContextBuilder.buildToolGuidance(
+                scope = when (target) {
+                    is RagTarget.SpecificLibrary -> "指定知识库（knowledgeBaseId=${target.kbId}）"
+                    else -> "全部知识库"
+                }
+            )
         }
+
+        /**
+         * ADR-050（TASK-20260912-002）：把工具名转换为 UI 展示文本（纯函数，BR-testing-004）。
+         *
+         * 默认沿用 UX-001 问题 7（ADR-022）的约定——去掉命名空间前缀（`web_search__search` → `search`）；
+         * 知识库工具（`knowledge_base__*`）单独映射为「查知识库」：撤除自动注入后，"正在检索知识库"
+         * 的唯一可见通道就是这个工具指示（`ConversationScreen` 的 `ToolCallIndicator`），
+         * 泛化的 `search`/`list_documents` 会让用户无法分辨是否在查自己的资料。
+         */
+        internal fun describeActiveTool(toolName: String): String =
+            if (toolName.startsWith(KnowledgeBaseLocalToolExecutor.NAMESPACE_PREFIX)) {
+                "查知识库"
+            } else {
+                toolName.substringAfterLast(SkillExecutor.NAMESPACE_SEPARATOR)
+            }
 
         /**
          * 批次23-B（ADR-048）：语音轮次消息正文前缀（[io.prism.voice.VoiceSessionController]
@@ -3300,7 +3228,9 @@ class ConversationViewModel(
             phoneControlEnabled: Boolean = false,
             hotListEnabled: Boolean = false,
             // v1 批次17（US-1702）：TODO 任务规划工具（默认 false 向后兼容既有测试）
-            todoWriteEnabled: Boolean = false
+            todoWriteEnabled: Boolean = false,
+            // 批次24（ADR-051 D8）：桌宠动作工具（pet__play_action，默认 false 向后兼容既有测试）
+            petActionEnabled: Boolean = false
         ): List<ToolDefinition> {
             val skillTools = enabledSkills.flatMap { entry ->
                 (entry.manifest.tools ?: emptyList()).map { toolDecl ->
@@ -3354,7 +3284,14 @@ class ConversationViewModel(
             } else {
                 emptyList()
             }
-            return skillTools + crossAppTools + webSearchTools + documentTools + askUserTools + phoneControlTools + hotListTools + todoTools
+            // 批次24（ADR-051 D8）：桌宠动作工具（pet__play_action，让角色用形象配合表达）
+            val petTools = if (petActionEnabled) {
+                listOf(io.prism.pet.PetLocalToolExecutor.buildToolDefinition())
+            } else {
+                emptyList()
+            }
+            return skillTools + crossAppTools + webSearchTools + documentTools + askUserTools +
+                phoneControlTools + hotListTools + todoTools + petTools
         }
 
         /**
@@ -3601,6 +3538,8 @@ class ConversationViewModel(
                     bgControlEnabledFlow = app.backgroundControlEnabled,
                     // 批次23-B（ADR-048）+ TASK-20260910-001：RolePack 角色包（语音/文本轮次统一 persona 注入）
                     rolePackLoader = app.rolePackLoader,
+                    // 批次24（ADR-051 D8）：桌宠动作工具（pet__play_action）
+                    petLocalToolExecutor = app.petLocalToolExecutor,
                     // TASK-20260910-001：文本聊天播报管理器（播放按钮；引擎跟随语音通话设置）
                     textPlayback = io.prism.voice.TextPlaybackController(
                         app,
@@ -3613,32 +3552,3 @@ class ConversationViewModel(
         }
     }
 }
-
-/**
- * RAG 构建结果（G-01/G-02 修复，ADR-012 5.5 三级降级差异化感知）。
- *
- * 调用方 [ConversationViewModel.sendMessage] 按 [when] 分支决定是否提示用户：
- * - [Success] → 注入 systemPrompt + ragContext + citations
- * - [EmbedFailed] → appendDelta 简短提示（ADR-012 5.5：项目暂无 Toast 基建）
- * - [NormalChat] → 主动关闭 / search 空 / 阈值过滤空 / 整个 RAG 异常，用户无感
- */
-private sealed interface RagBuildResult {
-    /** RAG 检索成功，注入 [plan]。 */
-    data class Success(val plan: RagPlan) : RagBuildResult
-
-    /** embed 失败，降级为普通对话，调用方应 appendDelta 提示用户。 */
-    object EmbedFailed : RagBuildResult
-
-    /**
-     * 普通对话（无提示）：RAG 主动关闭 / search 失败或空 / 阈值过滤后空 / 整个 RAG 注入异常。
-     * 整个 RAG 异常时，调用方已通过 [Log.w] 记录 simpleName（G-03 修复），用户侧无感。
-     */
-    object NormalChat : RagBuildResult
-}
-
-/** RAG 注入计划（system prompt + context + citations）。 */
-private data class RagPlan(
-    val systemPrompt: String,
-    val ragContext: String,
-    val citations: List<io.prism.ui.model.Citation>
-)

@@ -15,11 +15,26 @@ class VoiceOnDeviceEngines(context: Context) {
 
     private val appContext: Context = context.applicationContext
 
+    private val asrLazy = lazy { AsrEngineFactory.create(appContext) }
+
+    private val ttsLazy = lazy { SystemTtsEngine(appContext) }
+
     /** 端侧 ASR（懒创建；首次访问须在主线程——enterListening 主线程编排约定）。 */
-    val asr: AsrEngine by lazy { AsrEngineFactory.create(appContext) }
+    val asr: AsrEngine by asrLazy
 
     /** 端侧 TTS（懒创建；首次访问须在主线程——TextToSpeech 主线程创建约定）。 */
-    val tts: TtsEngine by lazy { SystemTtsEngine(appContext) }
+    val tts: TtsEngine by ttsLazy
+
+    /**
+     * 已创建的 ASR 实例（未创建 → null）。
+     *
+     * 供 [VoiceSessionController.release] 的补收路径判断用——**不得**直接读 [asr]（那会强制创建，
+     * 把"只想释放已创建资源"变成"顺手创建一个再释放"）。
+     */
+    fun createdAsr(): AsrEngine? = if (asrLazy.isInitialized()) asrLazy.value else null
+
+    /** 已创建的 TTS 实例（未创建 → null）；语义同 [createdAsr]。 */
+    fun createdTts(): TtsEngine? = if (ttsLazy.isInitialized()) ttsLazy.value else null
 }
 
 /**
@@ -114,6 +129,56 @@ object VoiceEngineAssembly {
                 }
             }
             TtsEngineChoice.SYSTEM -> SystemTtsEngine(appContext)
+            // LVC-1（ADR-053）：本地音色（ZipVoice 端侧克隆）——需「角色包声明 voiceId」+
+            // 「对应音色包已侧载且完整」两个条件同时成立；任一不成立即静默回退系统播报 + 提示
+            // （对齐云端 Key 缺失的既有语义：不可用不得表现为"没声音"）。
+            TtsEngineChoice.LOCAL_CLONE -> {
+                val pack = runCatching { rolePackLoader?.effectiveRolePack() }
+                    .getOrNull() ?: io.prism.voice.rolepack.RolePack.DEFAULT_ROLE_PACK
+                val voiceId = pack.voice.local.voiceId
+                if (voiceId.isNullOrBlank()) {
+                    notices.add("当前角色未声明本地音色，已回退系统播报")
+                    Log.w(TAG, "角色包未声明 voice.local.voiceId，装配回退系统播报")
+                    SystemTtsEngine(appContext)
+                } else {
+                    val status = io.prism.voice.local.LocalVoicePackStore(
+                        io.prism.voice.local.LocalVoicePackStore.defaultRoots(appContext)
+                    ).status(voiceId)
+                    when (status) {
+                        is io.prism.voice.local.LocalVoiceStatus.Ready -> {
+                            // 档位与播报模式（TKN-LVC-016）：与文本播报链**同一套**口径——
+                            // 两条链路各读各的默认值会让"设置页选了档位，通话里却没变"。
+                            val config = io.prism.voice.local.tieredLocalCloneConfig(
+                                base = status.pack.generation,
+                                rolePackNumSteps = pack.voice.local.numSteps,
+                                tier = voiceEnginePrefs.localVoiceTierOnce()
+                            )
+                            val engine = io.prism.voice.local.LocalCloneEngineFactory
+                                .create(
+                                    pack = status.pack,
+                                    config = config,
+                                    playbackMode = voiceEnginePrefs.localPlaybackModeOnce()
+                                )
+                            if (engine == null) {
+                                notices.add("本地音色引擎不可用，已回退系统播报")
+                                SystemTtsEngine(appContext)
+                            } else {
+                                engine
+                            }
+                        }
+                        is io.prism.voice.local.LocalVoiceStatus.Incomplete -> {
+                            notices.add("本地音色包不完整，已回退系统播报")
+                            Log.w(TAG, "本地音色包不完整（${status.problems.size} 项问题），装配回退系统播报")
+                            SystemTtsEngine(appContext)
+                        }
+                        is io.prism.voice.local.LocalVoiceStatus.NotInstalled -> {
+                            notices.add("本地音色包未安装，已回退系统播报")
+                            Log.w(TAG, "本地音色包未安装（$voiceId），装配回退系统播报")
+                            SystemTtsEngine(appContext)
+                        }
+                    }
+                }
+            }
         }
 
         val controller = VoiceSessionController(

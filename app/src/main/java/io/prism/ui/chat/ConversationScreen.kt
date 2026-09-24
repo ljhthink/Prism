@@ -430,10 +430,10 @@ fun ConversationScreen(
                     item { ToolCallIndicator(toolName) }
                 }
                 if (isTyping) {
-                    // UXR6 问题 3a（替代 UXR3 问题 7 的全局 ragDone 推断）：是否显示「正在检索
-                    // 知识库…」由**真实检索状态**（ragRetrieving）驱动 —— 仅当前消息实际执行 RAG
-                    // 检索期间显示；检索完成/降级后切换为「正在生成回答…」。修复旧逻辑
-                    // 「ragTarget 非 Off + 全局 ragDone」导致无论问题是否相关都显示检索画面。
+                    // ADR-050（2026-09-12）：知识库**不再自动检索**——`ragRetrieving` 因此恒为 false
+                    // （ConversationViewModel 侧已无置位路径，字段保留以备将来接工具事件），
+                    // 本指示事实上恒显示「正在思考…」。"正在查资料"的可见性改由上方工具调用
+                    // 指示（activeTool → ToolCallIndicator）承载：知识库工具会显示为「查知识库」。
                     item { TypingIndicator(isRagOn = ragRetrieving) }
                 }
             }
@@ -739,16 +739,23 @@ private fun ProviderChip(name: String?, onClick: () -> Unit, modifier: Modifier 
 }
 
 /**
- * RAG 模式切换胶囊（US-019，ADR-012 5.2/5.8）。
+ * 知识库模式切换胶囊（US-019，ADR-012 5.2/5.8）。
  *
- * 三态显示：全库（默认，薄荷色）/ 指定库（薄荷色 + 库 id）/ 关闭（灰色）。
+ * 三态显示：全库（薄荷色）/ 指定库（薄荷色 + 库 id）/ 关闭（灰色）。
+ *
+ * **ADR-050（2026-09-12）语义**：本开关控制的是"是否向 AI 暴露知识库检索能力"，
+ * **不再**表示"每条消息都自动检索知识库"（该范式已撤除）。出厂默认值为「关闭」（v1 批次18 opt-in）。
+ *
+ * **术语统一（guardrail D-6 / R3-N2，2026-09-12）**：标签由「RAG 关 / RAG 全库 / RAG #id」改为
+ * 「知识库关 / 知识库 / 知识库 #id」，与弹层（`知识库检索模式` / `关闭知识库`）统一为同一术语，
+ * 消除"同一控件两套术语"；真机清单 A1/B1/B4/B5/C1 的描述已同步。
  */
 @Composable
 private fun RagModeChip(target: RagTarget, onClick: () -> Unit) {
     val (label, accent) = when (target) {
-        RagTarget.Off -> "RAG 关" to PrismTextFaint
-        RagTarget.AllLibraries -> "RAG 全库" to PrismMint
-        is RagTarget.SpecificLibrary -> "RAG #${target.kbId}" to PrismMint
+        RagTarget.Off -> "知识库关" to PrismTextFaint
+        RagTarget.AllLibraries -> "知识库" to PrismMint
+        is RagTarget.SpecificLibrary -> "知识库 #${target.kbId}" to PrismMint
     }
     Row(
         modifier = Modifier
@@ -774,7 +781,7 @@ private fun RagModeChip(target: RagTarget, onClick: () -> Unit) {
     }
 }
 
-/** RAG 模式切换弹层（US-019，ADR-012 5.2）。 */
+/** RAG 模式切换弹层（US-019，ADR-012 5.2；语义按 ADR-050 收窄为"知识库能力开关"）。 */
 @Composable
 private fun RagModeSelectorSheet(
     current: RagTarget,
@@ -782,19 +789,19 @@ private fun RagModeSelectorSheet(
     onClose: () -> Unit
 ) {
     PrismSheet(
-        title = "RAG 检索模式",
-        subtitle = "对话时检索知识库并标注引用来源（默认全库检索）"
+        title = "知识库检索模式",
+        subtitle = "开启后 AI 可主动检索你的知识库并在回答中标注引用来源；不该查时不会查"
     ) {
         RagModeOption(
             label = "全库检索",
-            description = "跨所有知识库检索 top-3 片段",
+            description = "AI 需要时可在全部知识库中检索并引用",
             selected = current is RagTarget.AllLibraries,
             onClick = { onSelect(RagTarget.AllLibraries) }
         )
         Spacer(Modifier.height(8.dp))
         RagModeOption(
-            label = "关闭 RAG",
-            description = "普通对话，不检索知识库",
+            label = "关闭知识库",
+            description = "AI 不检索知识库，按普通对话回答",
             selected = current is RagTarget.Off,
             onClick = { onSelect(RagTarget.Off) }
         )
@@ -1943,7 +1950,10 @@ private fun CollapsibleSourcesCard(sources: List<io.prism.ui.model.Citation>) {
 /**
  * AI 打字指示 —— 三点呼吸 + 状态文案（US-019 文案修正，ADR-012 5.8 修复 R-7）。
  *
- * @param isRagOn RAG 是否开启；true 显示「正在检索知识库…」，false 显示「正在思考…」
+ * @param isRagOn 知识库检索指示；true 显示「正在检索知识库…」，false 显示「正在思考…」。
+ *   **ADR-050 后恒为 false**（自动检索已撤除，`ragRetrieving` 无置位路径），故本分支当前不可达；
+ *   **有意保留**：待 ADR-050 备选方案 B（用户手势显式注入）或"按工具事件驱动指示"落地时可直接复用
+ *   （guardrail G-7 / 验收报告 D-7）。
  */
 @Composable
 private fun TypingIndicator(isRagOn: Boolean) {

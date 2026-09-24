@@ -6,6 +6,32 @@ Prism 是一款 Android 原生 AI 聊天应用，核心定位是**个人 Agent �
 
 ## 特性
 
+### 角色包（RolePack）
+
+把角色作为**可导入的资产包**使用，而不是把第三方角色写死在应用里：
+
+- Schema `prism-rolepack/1`：persona / worldbook（关键词激活的背景设定）/ style / voice / pet
+- 用户导入到应用私有目录（`filesDir/rolepacks/`），随应用卸载清除，不入 APK、不入公开仓库
+- 出厂仅内置一个中性通用助手（B0），未导入时行为与无角色包完全一致
+- 选中后统一作用于**文本聊天 + 语音通话**人设，语音通话可另带「电话场景收紧」段
+
+### 角色包桌宠（桌面宠物）
+
+让角色**看得见**：在手机桌面显示角色形象，可拖动、可点击互动、可做动作表情。
+
+- **形象来源由用户决定**：导入 `.petpack` 形象包（含 Live2D 模型全套资产），或直接选一张立绘图片
+- **Live2D 渲染**（WebView + pixi.js + pixi-live2d-display + Live2D Cubism Core），支持动作、
+  表情、物理摆动、命中区点击、自动眨眼与呼吸、口型同步
+- **点击互动**：点击模型不同部位触发不同反应（映射由形象包声明，因为 Cubism 官方规范
+  的 `HitAreas[]` 并不携带"命中后播什么"）
+- **AI 联动**：内置 `pet__play_action` 工具，角色可让自己的形象配合说话内容做动作；
+  语音播报时嘴型跟随，回复内容以气泡显示在形象旁
+- **默认关闭**：在「设置 → 桌宠」显式开启；窗口可见、通知即收起入口、关闭即停止服务，无开机自启
+- **合规**：角色形象资产始终是**用户私有资产**（`filesDir/pets/`），不提交版本库、不打进 APK
+
+> 形象资产请自行确认使用权。以昔涟为例，其 Live2D 模型作者为 B 站 UP 主
+> [是依七哒](https://space.bilibili.com/457683484)，角色 IP 属米哈游/HoYoverse 且禁止商用。
+
 ### 联网搜索（零配置，开箱即用）
 
 内置 **Bing RSS 联网搜索**，无需 API Key、无需注册，在 App 内开启联网开关即可使用。AI 可实时搜索互联网获取最新信息并引用来源。
@@ -154,8 +180,18 @@ Prism/
 │       ├── embedding/          # 端侧嵌入引擎（ONNX Runtime）
 │       ├── ingestion/          # 文档摄入管线
 │       ├── crossapp/           # 跨 App 调用
+│       ├── pet/                # 角色包桌宠（ADR-051）
+│       │   ├── model/          # 纯数据层：形象描述 / 动作目录 / 配置 / 窗口几何（JVM 可测）
+│       │   ├── asset/          # 形象资产：.petpack 解析、安装（zip slip 防护）、引用校验
+│       │   ├── overlay/        # 悬浮窗：前台 Service、WindowManager、虚拟资源路由
+│       │   ├── PetManager.kt   # 门面：形象管理 + 服务起停 + 渲染描述符编译
+│       │   └── PetLocalToolExecutor.kt  # pet__play_action 工具
+│       ├── voice/local/        # 端侧本地音色克隆（ADR-053）：音色包定位/校验、文本规范化、
+│       │                       # 参考音频选择、ZipVoice 引擎与 AudioTrack 播放（JVM 可测）
 │       ├── security/           # 安全层（KeyStore 加密）
 │       └── config/             # 配置仓库
+├── app/src/sherpa/kotlin/      # sherpa-onnx 条件源集（AAR 就位才编译；含 ASR 与 ZipVoice TTS）
+├── app/src/main/assets/pet/    # 桌宠渲染器（HTML/JS + 内置 pixi/Cubism 运行时）
 ├── docs/                       # 文档
 │   ├── decisions/              # 架构决策记录（ADR，本地专属）
 │   ├── templates/              # PRD/ARCH/ADR/Task 模板
@@ -195,10 +231,21 @@ Prism/
 - [AGENTS.md](AGENTS.md) —— AI 规则体系入口（适配 TRAE / opencode / DeepSeek Harness / Claude Code；本地专属）
 - [docs/progress.md](docs/progress.md) —— 项目进展记录（本地专属）
 - 规则模块（本地专属，经 [AGENTS.md](AGENTS.md) 强制加载矩阵读取）：[00-core](rules/00-core.md) / [01-planning-research](rules/01-planning-research.md) / [02-source-github](rules/02-source-github.md) / [03-doc-governance](rules/03-doc-governance.md) / [04-coding-review-loop](rules/04-coding-review-loop.md) / [05-git-release](rules/05-git-release.md) / [06-risk](rules/06-risk.md) / [07-engineering-standards](rules/07-engineering-standards.md) / [08-bugfix-ops](rules/08-bugfix-ops.md)
-- [docs/decisions/](docs/decisions/README.md) —— 架构决策记录（ADR-001~ADR-049，本地专属）
+- [docs/decisions/](docs/decisions/README.md) —— 架构决策记录（ADR-001~ADR-050，本地专属）
 - [docs/PRD.md](docs/PRD.md) —— 产品需求文档 v0.1（本地专属）
 - [docs/prd-search-fetch-enhancement.md](docs/prd-search-fetch-enhancement.md) —— 搜索命中与 Fetch 反爬优化 PRD（v1 批次15，本地专属）
 - [docs/prd-v1-b17-features.md](docs/prd-v1-b17-features.md) —— 批次17 四项新功能 PRD（TODO List / 思维链覆写 / 对话回退 / 对话重试，本地专属）
 - [docs/prd-v1-b20-voice-bg-control.md](docs/prd-v1-b20-voice-bg-control.md) —— 批次20 PRD（语音通话 P1 / 手机操控后台化 M1，ADR-044/045，本地专属）
+- [docs/prd-v1-b24-rolepack-pet.md](docs/prd-v1-b24-rolepack-pet.md) —— 批次24 PRD（角色包桌宠 US-2401~US-2413，ADR-051，本地专属）
+- [docs/decisions/ADR-051-rolepack-pet-live2d.md](docs/decisions/ADR-051-rolepack-pet-live2d.md) —— 桌宠架构与 Live2D 移动端渲染选型（本地专属）
+- [docs/prd-local-voice-clone.md](docs/prd-local-voice-clone.md) —— 端侧本地音色克隆 PRD（US-001~US-004、AC0~AC8，ADR-053，本地专属）
+- [docs/decisions/ADR-053-local-voice-clone-ondevice.md](docs/decisions/ADR-053-local-voice-clone-ondevice.md) —— 端侧本地音色克隆（ZipVoice）与音色包侧载分发（本地专属）
+- [docs/decisions/ADR-054-local-clone-streaming-playback.md](docs/decisions/ADR-054-local-clone-streaming-playback.md) —— 本地音色**流式播放**（合成回调分块 → 常开音轨逐块写入，本地专属）
+- [docs/decisions/ADR-055-ondevice-vits-voicepack.md](docs/decisions/ADR-055-ondevice-vits-voicepack.md) —— 端侧**微调 VITS** 音色包与 ZipVoice 并存切换（Proposed，本地专属）
+- [docs/reports/2026-09-20-vits-finetune-verification.md](docs/reports/2026-09-20-vits-finetune-verification.md) —— 中文 VITS 微调全链路验证（训练/导出/加载崩溃根因/RTF 实测，一次性报告）
+- [docs/reports/2026-09-20-local-voice-clone-streaming-measurement.md](docs/reports/2026-09-20-local-voice-clone-streaming-measurement.md) —— 流式播放机制核实与一手实测（TKN-LVC-013，一次性报告）
+- [docs/reports/2026-09-20-voice-clone-vits-route-research.md](docs/reports/2026-09-20-voice-clone-vits-route-research.md) —— 中文 VITS 微调→sherpa-onnx ONNX 路线一手核查（一次性报告）
+- [docs/runbooks/setup-local-voice-clone.md](docs/runbooks/setup-local-voice-clone.md) —— 本地音色包侧载与启用 Runbook（含真机验收清单）
+- [docs/runbooks/finetune-vits-zh-cyrene.md](docs/runbooks/finetune-vits-zh-cyrene.md) —— 中文 VITS 微调（昔涟音色）→ sherpa-onnx 端侧 Runbook（TKN-LVC-014，**已按实测更正**）
 - [docs/runbooks/searxng-selfhost.md](docs/runbooks/searxng-selfhost.md) —— SearXNG 自建搜索接入 Runbook
 - [CLAUDE.md](CLAUDE.md) —— 指向 AGENTS.md 的规则入口指针（Claude Code 适配，本地专属）

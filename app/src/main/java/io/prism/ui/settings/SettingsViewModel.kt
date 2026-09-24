@@ -15,6 +15,7 @@ import io.prism.data.ProviderConfig
 import io.prism.data.ProviderConfigRepository
 import io.prism.security.ApiKeyRepository
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -24,6 +25,8 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 import java.util.UUID
 
 /**
@@ -60,7 +63,21 @@ class SettingsViewModel(
     /** 批次23-A（ADR-048，A4）：语音引擎手选仓库；null 时引擎选择状态降级为默认端侧/系统（向后兼容） */
     private val voiceEnginePrefs: io.prism.voice.VoiceEnginePrefs? = null,
     /** 批次23-C（ADR-048）：角色包加载器；null 时角色包管理降级为不可用（向后兼容，保持 JVM 可测） */
-    private val rolePackLoader: io.prism.voice.rolepack.RolePackLoader? = null
+    private val rolePackLoader: io.prism.voice.rolepack.RolePackLoader? = null,
+    /** 批次24（ADR-051）：桌宠门面；null 时桌宠管理降级为不可用（向后兼容，保持 JVM 可测） */
+    private val petManager: io.prism.pet.PetManager? = null,
+    /** 批次24（ADR-051）：桌宠配置仓库；null 时桌宠配置状态降级为默认值（向后兼容） */
+    private val petConfigRepository: io.prism.pet.PetConfigRepository? = null,
+    /**
+     * LVC-1（ADR-053）：本地音色包仓库（只读定位/校验端侧音色包）；
+     * null 时本地音色状态恒为 null（设置页该项按"未安装"呈现，向后兼容且保持 JVM 可测）。
+     */
+    private val localVoicePackStore: io.prism.voice.local.LocalVoicePackStore? = null,
+    /**
+     * TKN-LVC-016（ADR-057）：音色包导入器（`.voicepack` 归档 → 应用私有目录）；
+     * null 时导入入口降级为不可用（向后兼容且保持 JVM 可测）。
+     */
+    private val localVoicePackImporter: io.prism.voice.local.LocalVoicePackImporter? = null
 ) : ViewModel() {
 
     /** Provider 已配置列表。 */
@@ -406,6 +423,356 @@ class SettingsViewModel(
         }
     }
 
+    // ==================== LVC-1（ADR-053）：本地音色包状态 ====================
+
+    private val _localVoiceStatus = MutableStateFlow<io.prism.voice.local.LocalVoiceStatus?>(null)
+
+    /**
+     * 当前生效角色包所声明的本地音色包安装状态。
+     *
+     * `null` = **尚未检测**（设置页首帧/展开前）或本 VM 未注入仓库——UI 必须把 null 与
+     * "未安装"区分呈现，避免把"没查过"显示成"没装"。
+     * 检测由 [refreshLocalVoiceStatus] 触发（进入/展开「语音引擎」区时调用）。
+     */
+    val localVoiceStatus: StateFlow<io.prism.voice.local.LocalVoiceStatus?> =
+        _localVoiceStatus.asStateFlow()
+
+    /**
+     * 重新检测本地音色包状态（进入/展开「语音引擎」区、侧载完成后手动刷新时调用）。
+     *
+     * 角色包声明了 `voice.local.voiceId` 才检测；未声明 → 置为 `NotInstalled`（该项不可选）。
+     * 任何异常都被收敛为状态值，不向 UI 抛。
+     */
+    fun refreshLocalVoiceStatus() {
+        viewModelScope.launch {
+            val store = localVoicePackStore
+            val voiceId = try {
+                rolePackLoader?.effectiveRolePack()?.voice?.local?.voiceId?.takeIf { it.isNotBlank() }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("SettingsViewModel", "读取角色包本地音色声明失败", e)
+                null
+            }
+            if (store == null || voiceId == null) {
+                _localVoiceStatus.value =
+                    io.prism.voice.local.LocalVoiceStatus.NotInstalled(voiceId.orEmpty())
+                return@launch
+            }
+            _localVoiceStatus.value = try {
+                store.status(voiceId)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("SettingsViewModel", "本地音色包状态检测失败", e)
+                io.prism.voice.local.LocalVoiceStatus.NotInstalled(voiceId)
+            }
+        }
+    }
+
+    // ==================== TKN-LVC-016（ADR-056）：本地音色档位与播报模式 ====================
+
+    /** 本地音色播报档位（默认质量优先；DataStore 首读前显示默认值）。 */
+    val localVoiceTier: StateFlow<io.prism.voice.LocalVoiceTier> =
+        (voiceEnginePrefs?.localVoiceTier() ?: flowOf(io.prism.voice.LocalVoiceTier.QUALITY))
+            .stateIn(
+                viewModelScope,
+                SharingStarted.WhileSubscribed(5_000),
+                io.prism.voice.LocalVoiceTier.QUALITY
+            )
+
+    /**
+     * 保存本地音色播报档位。
+     *
+     * **运行时即时生效**：档位进 [io.prism.voice.local.localCloneCacheKey]，缓存签名一变，
+     * 下次播报即重建引擎（无需重启 App，也无"改了没效果"的静默沿用）。
+     */
+    fun setLocalVoiceTier(tier: io.prism.voice.LocalVoiceTier) {
+        viewModelScope.launch {
+            try {
+                voiceEnginePrefs?.setLocalVoiceTier(tier)
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007：不吞 CancellationException
+            } catch (e: Exception) {
+                Log.w(TAG, "保存本地音色档位失败: $tier", e)
+            }
+        }
+    }
+
+    /** 本地音色播报模式（默认连续；DataStore 首读前显示默认值）。 */
+    val localPlaybackMode: StateFlow<io.prism.voice.LocalClonePlaybackMode> =
+        (voiceEnginePrefs?.localPlaybackMode() ?: flowOf(io.prism.voice.LocalClonePlaybackMode.CONTINUOUS))
+            .stateIn(
+                viewModelScope,
+                SharingStarted.WhileSubscribed(5_000),
+                io.prism.voice.LocalClonePlaybackMode.CONTINUOUS
+            )
+
+    /** 保存本地音色播报模式（同档位：进引擎构造期参数，下次播报重建引擎即生效）。 */
+    fun setLocalPlaybackMode(mode: io.prism.voice.LocalClonePlaybackMode) {
+        viewModelScope.launch {
+            try {
+                voiceEnginePrefs?.setLocalPlaybackMode(mode)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "保存本地音色播报模式失败: $mode", e)
+            }
+        }
+    }
+
+    // ==================== TKN-LVC-016（ADR-057）：音色包导入 / 列表 / 删除 ====================
+
+    /** 已安装音色包的展示项（[ready] 为 false 时表示目录存在但校验不通过）。 */
+    data class InstalledVoicePack(
+        val voiceId: String,
+        val name: String,
+        val ttsWire: String,
+        val totalBytes: Long,
+        val ready: Boolean,
+        val problems: List<String>
+    )
+
+    private val _localVoicePacks = MutableStateFlow<List<InstalledVoicePack>>(emptyList())
+
+    /** 已安装音色包列表（null 语义不适用：空列表即"一个都没有"，由 [refreshLocalVoicePacks] 填充）。 */
+    val localVoicePacks: StateFlow<List<InstalledVoicePack>> = _localVoicePacks.asStateFlow()
+
+    private val _voicePackBusy = MutableStateFlow(false)
+
+    /** 导入/删除进行中（UI 据此禁用按钮并显示进度；取消/失败都会归零）。 */
+    val voicePackBusy: StateFlow<Boolean> = _voicePackBusy.asStateFlow()
+
+    private val _voicePackMessage = MutableStateFlow<String?>(null)
+
+    /** 一次性提示文案（成功/失败；UI 消费后调 [consumeVoicePackMessage] 清空，避免重复弹）。 */
+    val voicePackMessage: StateFlow<String?> = _voicePackMessage.asStateFlow()
+
+    /** 消费一次性提示文案。 */
+    fun consumeVoicePackMessage() {
+        _voicePackMessage.value = null
+    }
+
+    /** 待确认覆盖的导入（同 voiceId 已存在时由 [importVoicePack] 置位）。 */
+    data class PendingVoicePackOverwrite(val voiceId: String, val file: File)
+
+    private val _pendingVoicePackOverwrite = MutableStateFlow<PendingVoicePackOverwrite?>(null)
+
+    /** 待确认覆盖状态（非 null 时 UI 弹二次确认；**不静默覆盖**是 ADR-057 决策 5 的硬要求）。 */
+    val pendingVoicePackOverwrite: StateFlow<PendingVoicePackOverwrite?> =
+        _pendingVoicePackOverwrite.asStateFlow()
+
+    /**
+     * 刷新已安装音色包列表（进入/展开设置页、导入/删除后调用）。
+     *
+     * 扫描口径 = [io.prism.voice.local.LocalVoicePackStore] 的候选根（外部优先）下的**子目录**，
+     * 逐个走同一套校验（[io.prism.voice.local.LocalVoicePackStore.resolveAtDirectory]）。
+     * 校验不通过的目录也列出来（带问题原因）——否则"导入了却看不到"会让用户无从排查。
+     */
+    fun refreshLocalVoicePacks() {
+        viewModelScope.launch {
+            val store = localVoicePackStore ?: return@launch
+            _localVoicePacks.value = try {
+                withContext(Dispatchers.IO) { scanVoicePackDirs(store) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "刷新音色包列表失败", e)
+                emptyList()
+            }
+        }
+    }
+
+    private fun scanVoicePackDirs(
+        store: io.prism.voice.local.LocalVoicePackStore
+    ): List<InstalledVoicePack> {
+        val out = LinkedHashMap<String, InstalledVoicePack>()
+        for (root in store.roots) {
+            val children = runCatching { root.listFiles() }.getOrNull() ?: continue
+            for (dir in children.sortedBy { it.name }) {
+                // 目录名必须合法（`voiceId` 白名单）——`.import-*`/`.bak-*` 等临时目录据此被排除
+                if (!dir.isDirectory) continue
+                if (!io.prism.voice.local.LocalVoicePackStore.isValidVoiceId(dir.name)) continue
+                if (out.containsKey(dir.name)) continue // 外部根优先（与 store.resolve 的取根顺序一致）
+                when (val status = store.resolveAtDirectory(dir, dir.name)) {
+                    is io.prism.voice.local.LocalVoiceStatus.Ready -> out[dir.name] =
+                        InstalledVoicePack(
+                            voiceId = dir.name,
+                            name = status.pack.name,
+                            ttsWire = status.pack.tts.wire,
+                            totalBytes = status.pack.totalBytes,
+                            ready = true,
+                            problems = emptyList()
+                        )
+                    is io.prism.voice.local.LocalVoiceStatus.Incomplete -> out[dir.name] =
+                        InstalledVoicePack(
+                            voiceId = dir.name,
+                            name = dir.name,
+                            ttsWire = "",
+                            totalBytes = 0L,
+                            ready = false,
+                            problems = status.problems
+                        )
+                    is io.prism.voice.local.LocalVoiceStatus.NotInstalled -> Unit
+                }
+            }
+        }
+        return out.values.toList()
+    }
+
+    /**
+     * 导入音色包（`source` 为已落地的本地 `.voicepack` 文件——由 UI 从 SAF 流拷入 cache）。
+     *
+     * 流程：读清单声明的 voiceId → 若已安装则**转为待确认**（不落盘、不覆盖）→ 否则直接导入。
+     * `source` 的生命周期由本 VM 接管（成功/失败/取消后删除）。
+     */
+    fun importVoicePack(source: File) {
+        viewModelScope.launch {
+            val importer = localVoicePackImporter ?: run {
+                source.delete()
+                _voicePackMessage.value = "音色包导入功能不可用"
+                return@launch
+            }
+            _voicePackBusy.value = true
+            try {
+                // 清扫上一次选择遗留的暂存归档（guardrail TKN-LVC-016 F-7）：正常路径下
+                // 成功/失败/取消都会删掉自己那份，但**进程在导入中被杀**时 finally 不会执行，
+                // 缓存目录会一直堆着几百 MB 的 .voicepack（用户看不见也无从清理）。
+                withContext(Dispatchers.IO) {
+                    source.parentFile?.listFiles()
+                        ?.filter { it.name.startsWith(VOICEPACK_PICK_PREFIX) && it.name != source.name }
+                        ?.forEach { runCatching { it.delete() } }
+                }
+                val declared = withContext(Dispatchers.IO) { importer.peekVoiceId(source) }
+                if (declared == null) {
+                    source.delete()
+                    _voicePackMessage.value = "所选文件不是有效的音色包（缺少 voicepack.json 或 voiceId）"
+                    return@launch
+                }
+                val installed = _localVoicePacks.value.any { it.voiceId == declared }
+                if (installed) {
+                    // **不静默覆盖**：把文件留在手上，等用户确认（或取消时删除）
+                    _pendingVoicePackOverwrite.value = PendingVoicePackOverwrite(declared, source)
+                    return@launch
+                }
+                runImport(importer, source, declared, overwrite = false)
+            } finally {
+                _voicePackBusy.value = false
+            }
+        }
+    }
+
+    /** 确认覆盖同名音色包（UI 二次确认弹窗的"覆盖"）。 */
+    fun confirmVoicePackOverwrite() {
+        val pending = _pendingVoicePackOverwrite.value ?: return
+        _pendingVoicePackOverwrite.value = null
+        viewModelScope.launch {
+            val importer = localVoicePackImporter ?: run {
+                pending.file.delete()
+                _voicePackMessage.value = "音色包导入功能不可用"
+                return@launch
+            }
+            _voicePackBusy.value = true
+            try {
+                runImport(importer, pending.file, pending.voiceId, overwrite = true)
+            } finally {
+                _voicePackBusy.value = false
+            }
+        }
+    }
+
+    /** 取消覆盖（删除暂存的归档，不留垃圾）。 */
+    fun cancelVoicePackOverwrite() {
+        val pending = _pendingVoicePackOverwrite.value ?: return
+        _pendingVoicePackOverwrite.value = null
+        viewModelScope.launch(Dispatchers.IO) { pending.file.delete() }
+    }
+
+    /**
+     * UI 侧复制归档失败（读不到 URI / 拷贝异常）时上报，统一走同一条提示通道。
+     *
+     * 为什么不直接抛给 UI：提示文案的口径（"导入失败：…"）集中在 VM 一处，
+     * 两条入口各写一句必然漂移。
+     */
+    fun onVoicePackPickFailed(detail: String) {
+        _voicePackMessage.value = "导入失败：无法读取所选文件（${detail.take(60)}）"
+    }
+
+    private suspend fun runImport(
+        importer: io.prism.voice.local.LocalVoicePackImporter,
+        source: File,
+        declared: String,
+        overwrite: Boolean
+    ) {
+        try {
+            when (val result = importer.import(source, overwrite)) {
+                is io.prism.voice.local.LocalVoicePackImporter.Result.Success -> {
+                    _voicePackMessage.value =
+                        if (result.replaced) "已覆盖音色包：${result.name}"
+                        else "导入成功：${result.name}"
+                    refreshLocalVoicePacks()
+                }
+                is io.prism.voice.local.LocalVoicePackImporter.Result.Failure -> {
+                    _voicePackMessage.value = "导入失败：${result.reason}"
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "导入音色包异常（voice=$declared）", e)
+            _voicePackMessage.value = "导入失败（${e::class.simpleName}）"
+        } finally {
+            withContext(Dispatchers.IO) { source.delete() }
+        }
+    }
+
+    /**
+     * 删除已安装音色包。
+     *
+     * 删除的是**当前生效包**时不做特殊处理：播报链路每次取包都会重新校验，
+     * 包一消失即按"未安装"回退系统播报（无需额外的手动清选）。
+     */
+    fun deleteVoicePack(voiceId: String) {
+        viewModelScope.launch {
+            val store = localVoicePackStore ?: return@launch
+            if (!io.prism.voice.local.LocalVoicePackStore.isValidVoiceId(voiceId)) return@launch
+            _voicePackBusy.value = true
+            try {
+                val removed = withContext(Dispatchers.IO) {
+                    // 只删内部根（应用私有目录）：外部根的残留可能是侧载/调试产物，
+                    // 由用户或 PC 脚本自行清理，App 不越界删除自己不完全拥有的位置。
+                    val internalRoot = store.roots.lastOrNull() ?: return@withContext false
+                    val dir = File(internalRoot, voiceId)
+                    if (!dir.isDirectory) return@withContext false
+                    dir.deleteRecursively()
+                }
+                if (removed) {
+                    _voicePackMessage.value = "已删除音色包：$voiceId"
+                } else {
+                    // 内部根没有 ⇒ 可能装在外部队列根里。**必须给出可操作的提示**：
+                    // 早先只回"未找到该音色包"，用户会以为包已经没了，而列表里它还在
+                    // （guardrail TKN-LVC-016 AC-6.3）。
+                    val elsewhere = withContext(Dispatchers.IO) {
+                        store.roots.dropLast(1).any { File(it, voiceId).isDirectory }
+                    }
+                    _voicePackMessage.value = if (elsewhere) {
+                        "该音色包位于外部目录（侧载），请在文件管理器中删除"
+                    } else {
+                        "未找到该音色包"
+                    }
+                }
+                refreshLocalVoicePacks()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "删除音色包失败: $voiceId", e)
+                _voicePackMessage.value = "删除失败（${e::class.simpleName}）"
+            } finally {
+                _voicePackBusy.value = false
+            }
+        }
+    }
+
     /** 连通性自检状态（running + 结果文案；null = 未开始）。 */
     data class VoiceSelfCheckState(val running: Boolean, val message: String)
 
@@ -578,6 +945,170 @@ class SettingsViewModel(
         }
     }
 
+    // ==================== 批次24（ADR-051）：桌宠 ====================
+
+    private val _petConfig = MutableStateFlow(io.prism.pet.model.PetConfig.DEFAULT)
+
+    /** 桌宠配置（开关 / 形象 / 尺寸 / 不透明度 / 待机 / 减少动效 …）。 */
+    val petConfig: StateFlow<io.prism.pet.model.PetConfig> = _petConfig.asStateFlow()
+
+    private val _petAppearances = MutableStateFlow<List<io.prism.pet.model.PetAppearance>>(emptyList())
+
+    /** 已安装桌宠形象列表。 */
+    val petAppearances: StateFlow<List<io.prism.pet.model.PetAppearance>> = _petAppearances.asStateFlow()
+
+    private val _petRuntime = MutableStateFlow(io.prism.pet.PetManager.RuntimeState.STOPPED)
+
+    /** 悬浮窗运行态（设置页据此显示提示）。 */
+    val petRuntime: StateFlow<io.prism.pet.PetManager.RuntimeState> = _petRuntime.asStateFlow()
+
+    private val _petLastError = MutableStateFlow<String?>(null)
+
+    /** 最近一次桌宠失败的可读原因（无则 null）。 */
+    val petLastError: StateFlow<String?> = _petLastError.asStateFlow()
+
+    private val _petMessage = MutableStateFlow<String?>(null)
+
+    /** 最近一次导入结果提示（成功/失败均可读）。 */
+    val petMessage: StateFlow<String?> = _petMessage.asStateFlow()
+
+    init {
+        if (petConfigRepository != null) {
+            viewModelScope.launch {
+                try {
+                    petConfigRepository.config().collect { cfg -> _petConfig.value = cfg }
+                } catch (e: CancellationException) {
+                    throw e // BR-error-handling-007
+                } catch (e: Exception) {
+                    Log.w(TAG, "桌宠配置读取失败: ${e::class.simpleName}")
+                }
+            }
+        }
+        if (petManager != null) {
+            val mgr = petManager
+            viewModelScope.launch {
+                try {
+                    mgr.appearances.collect { list -> _petAppearances.value = list }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "桌宠形象列表订阅失败: ${e::class.simpleName}")
+                }
+            }
+            viewModelScope.launch {
+                try {
+                    mgr.state.collect { st -> _petRuntime.value = st }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "桌宠运行态订阅失败: ${e::class.simpleName}")
+                }
+            }
+            viewModelScope.launch {
+                try {
+                    mgr.lastError.collect { err -> _petLastError.value = err }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "桌宠错误流订阅失败: ${e::class.simpleName}")
+                }
+            }
+        }
+    }
+
+    /**
+     * 桌宠操作的统一启动包装（guardrail H-5 修复，BR-error-handling-007）。
+     *
+     * **为什么必须统一**：guardrail 在 12 处桌宠方法里查到两类违规——
+     * ① 7 处 `runCatching { … }` **完全没有失败处理**（异常被静默吞掉，用户点开关毫无反应也没有任何痕迹）；
+     * ② 5 处虽有 `onFailure` 但**不重抛 `CancellationException`**（协程取消被当成业务失败，
+     * 会污染错误提示并让 `viewModelScope` 的取消语义失真）。
+     *
+     * 被包裹的 `DataStore.edit` 是**真会长期挂起**的 suspend 调用，这不是理论风险。
+     * 本项目在 TKN-US019-RAG-GUARDRAIL-001 已把同款模式判为 HIGH 并立为 active 规则。
+     *
+     * @param what 失败时日志里用的动作名（**不含用户内容与路径**）
+     * @param onError 可选的用户可见反馈（如导入失败原因）
+     */
+    private fun launchPet(
+        what: String,
+        onError: ((Throwable) -> Unit)? = null,
+        block: suspend () -> Unit
+    ) {
+        viewModelScope.launch {
+            try {
+                block()
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007：不吞 CancellationException
+            } catch (e: Exception) {
+                Log.w(TAG, "桌宠$what 失败: ${e::class.simpleName}")
+                onError?.invoke(e)
+            }
+        }
+    }
+
+    /** 刷新形象列表（进入设置页时调用）。 */
+    fun refreshPet() {
+        launchPet("刷新形象列表") { petManager?.refreshAppearances() }
+    }
+
+    /** 打开/关闭桌宠（含服务起停；失败原因经 [petLastError] 暴露）。 */
+    fun setPetEnabled(enabled: Boolean) {
+        launchPet("开关", onError = { e ->
+            _petMessage.value = "桌宠启动失败：${e.message ?: e::class.simpleName}"
+        }) {
+            petManager?.setEnabled(enabled)
+        }
+    }
+
+    fun setPetAppearance(id: String?) {
+        launchPet("切换形象") { petManager?.selectAppearance(id) }
+    }
+
+    fun deletePetAppearance(id: String) {
+        launchPet("删除形象") { petManager?.removeAppearance(id) }
+    }
+
+    /**
+     * 导入形象。
+     *
+     * @param isPack true = `.petpack`（ZIP），false = 单张图片
+     */
+    fun importPetAsset(uri: android.net.Uri, isPack: Boolean) {
+        launchPet("导入形象", onError = { e ->
+            _petMessage.value = "导入失败：${e.message ?: e::class.simpleName}"
+        }) {
+            val mgr = petManager
+            if (mgr == null) {
+                _petMessage.value = "桌宠功能不可用"
+                return@launchPet
+            }
+            val result = if (isPack) mgr.importPack(uri) else mgr.importImage(uri)
+            result.fold(
+                onSuccess = { _petMessage.value = "已导入形象「${it.name}」" },
+                onFailure = { _petMessage.value = "导入失败：${it.message ?: it::class.simpleName}" }
+            )
+        }
+    }
+
+    fun setPetScale(scale: Float) = launchPet("设置大小") { petManager?.setScale(scale) }
+
+    fun setPetOpacity(opacity: Float) = launchPet("设置不透明度") { petManager?.setOpacity(opacity) }
+
+    fun setPetIdleEnabled(enabled: Boolean) = launchPet("设置待机") { petManager?.setIdleEnabled(enabled) }
+
+    fun setPetReduceMotion(reduce: Boolean) = launchPet("设置减少动效") { petManager?.setReduceMotion(reduce) }
+
+    fun setPetBubbleEnabled(enabled: Boolean) = launchPet("设置气泡") { petManager?.setBubbleEnabled(enabled) }
+
+    fun setPetLowPowerMode(enabled: Boolean) = launchPet("设置低功耗") { petManager?.setLowPowerMode(enabled) }
+
+    fun setPetExpressionResetSeconds(seconds: Int) =
+        launchPet("设置表情回正") { petManager?.setExpressionResetSeconds(seconds) }
+
+    /** 重置桌宠到右下默认位置（PRD US-2412 AC-1「重置位置」）。 */
+    fun resetPetPosition() = launchPet("重置位置") { petManager?.resetPosition() }
+
     /** 选择要编辑的 Provider。 */
     fun selectProvider(config: ProviderConfig?) {
         _selectedProvider.value = config
@@ -676,6 +1207,14 @@ class SettingsViewModel(
     }
 
     companion object {
+
+        private const val TAG = "SettingsViewModel"
+
+        /**
+         * SAF 选中的归档在 `cacheDir` 里的暂存文件名前缀（UI 侧拷贝时使用，与 [importVoicePack]
+         * 的清扫**必须同源**——两处各写一份字面量必然漂移，届时清扫会静默失效）。
+         */
+        internal const val VOICEPACK_PICK_PREFIX = "voicepack_import_"
         /** 供 [viewModel] initializer 使用的工厂。 */
         val Factory: ViewModelProvider.Factory = viewModelFactory {
             initializer {
@@ -702,7 +1241,14 @@ class SettingsViewModel(
                     // 批次23-A（ADR-048，A4）：语音引擎手选仓库（ASR/TTS 云端双轨）
                     voiceEnginePrefs = app.voiceEnginePrefs,
                     // 批次23-C（ADR-048）：角色包加载器（导入/列表/切换/删除）
-                    rolePackLoader = app.rolePackLoader
+                    rolePackLoader = app.rolePackLoader,
+                    // 批次24（ADR-051）：桌宠门面 + 配置仓库
+                    petManager = app.petManager,
+                    petConfigRepository = app.petConfigRepository,
+                    // LVC-1（ADR-053）：本地音色包仓库（设置页展示安装状态 + 选项门控）
+                    localVoicePackStore = app.localVoicePackStore,
+                    // TKN-LVC-016（ADR-057）：音色包导入器（设置页「导入音色包」）
+                    localVoicePackImporter = app.localVoicePackImporter
                 )
             }
         }
