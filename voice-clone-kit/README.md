@@ -124,10 +124,11 @@ assets/minimax/cyrene-clone-prompt.wav + assets/transcripts/cyrene-clone-prompt-
 | --- | --- |
 | VITS epoch-100 基线 | 已导出并验证可被 sherpa-onnx 加载合成中文（`build-out/vits/listening/vits-export-verify.json`） |
 | VITS epoch-500（TKN-LVC-016 续训） | 已产出 `onnx-output-e500/vits-cyrene/`；A/B 对拍脚本 `tools/ab-vits-e100-vs-e500.py` |
-| 续训进程 | ⚠️ **可能仍在运行**：`build-out/vits/toolchain/.../models/vits-cyrene/` 内有 `G_4475.pth` / `D_4475.pth` / `G_latest.pth` 等检查点，**不要移动或改写该目录** |
-| 试听样本 | `build-out/vits/listening/vits-cyrene-sample-{fp32,int8}.wav` 与 `...-e500-{fp32,int8}.wav`（16 kHz，5 句） |
+| VITS 续训（500 → **1000 epoch**） | ✅ **已完成**（2026-09-25 03:16，exit 0；跑到 epoch 1000 / step 8990）。逐 step 损失在 `.../models/vits-cyrene/train.log`（**不是** stdout 重定向的那个 log），字段序 `[disc, gen, fm, mel, dur, kl, step, lr]` ⇒ **mel 是下标 3**。mel：e100 17.2211 → e500~600 均值 11.9734 → e900~999 均值 10.6968（n=90）|
+| ⚠️ 检查点目录 | `build-out/vits/toolchain/.../models/vits-cyrene/` 是**唯一训练事实来源**（`G_latest.pth` 已更新为 e1000 权重，哈希 `FB4FA7DF…`，与 e500 备份 `309A0CAB…` 不同而同尺寸）——**不要移动或改写该目录** |
+| 试听样本 | 现位于 **`build-out/vits/listening/`**：`vits-cyrene-sample-{fp32,int8}.wav`（epoch-100 基线）与 `...-e500-{fp32,int8}.wav`（16 kHz，5 句）。<br>⚠️ **路径已变更**：2026-09-24 整理前是 `voice-clone-kit/vits-listening-samples/`。**历史报告（ADR-055、批次验收报告、proposal、progress）仍沿用旧路径**，看到旧路径请按此表换算——这些一次性报告按 rules/05 §12.6 作历史记录保留，不逐一改写 |
 | ZipVoice RTF | PC 侧归因脚本 `tools/bench-zipvoice.py`（绝对值不可外推到端侧，比值可） |
-| 已知遗留缺陷 | `tools/sweep-vits-arms.py:329` 有未转义引号导致的 `SyntaxError`（**既有问题，非本次整理引入**），该脚本当前无法运行 |
+| 脚本可运行性 | ✅ **18 个 kit `.py` 全部 `py_compile` 通过**（含 `tools/sweep-vits-arms.py`，已实跑产出 19 臂样本）；8 个 `.ps1` 全部 `ParseErrors=0` 且带 UTF-8 BOM。~~`sweep-vits-arms.py:329` SyntaxError~~ 该行**已不成立**（2026-09-25 实测），此行原记录为过期信息，已更正 |
 
 ## 7. 哪些目录可安全删除
 
