@@ -73,4 +73,3 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 | **PIXI 的资源路径解析语义** | **URL 语义（非 path 语义）** ⇒ 模型内以**相对路径**书写的引用（如 `motions/动作%236_0.motion3.json`）会被正确拼到模型 URL 所在目录下 | 反编译 vendored `pixi.min.js`：`url` 对象的 `get resolve(){return ku}`，而 `ku=us.resolve=Ku`，`function Ku(i,t){return fs(i,!1,!0).resolve(t)}` 即 Node `url.resolve` 实现（`resolveObject`）。**这决定了"引用不必写成根相对路径"这一前提成立**——否则全部 motion/expression/纹理都会 404 |
 | **`#` 必须百分号编码** | 成立 | 同一 bundle 内存在 `removeUrlParams = url.split("?")[0].split("#")[0]`；`动作#6_0.motion3.json` 若不以 `%23` 编码，后缀会被整段吃掉 ⇒ 4/5 个 motion 静默 404。安装期 `encodeModelReferences` 已处理，且 `PetContractTest` 有回归 |
 | **虚拟源路由与引用编码的一致性** | 成立 | `PetAssetRoutes.resolvePetFile` 用自实现的 `percentDecode`（**不把 `+` 当空格**）解码后再净化 + canonicalPath 双校验；`PetContractTest`「含井号的资产名可被路由命中」覆盖 |
-

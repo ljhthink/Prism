@@ -42,7 +42,7 @@
 }
 ```
 
-3. 保存文件后交回开发，重新导入设备即可生效。导入后设备语音将使用克隆音色而非默认的 `female-shaonv`。
+1. 保存文件后交回开发，重新导入设备即可生效。导入后设备语音将使用克隆音色而非默认的 `female-shaonv`。
 
 ## 二·B、素材扩充与重新克隆（提升相似度，2026-09-10 增补）
 
@@ -153,5 +153,3 @@ conda run -n vits38 python -m pip install torch==2.4.1 torchaudio==2.4.1 --index
 ② 工具链三个底模配置的 `sampling_rate` **都是 16000** 且 `data_utils` 不重采样 ⇒ 语料必须 16 kHz，
 **产物也就是 16 kHz**（低于 ZipVoice 的 24 kHz，取舍须人工判听）；
 ③ `LOCAL.md` 的 `finetune_speaker_v2.py` CLI 在本 fork **不可用**（签名不匹配）⇒ 用 `run-vits-finetune.py`。
-
-

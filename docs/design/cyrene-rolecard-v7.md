@@ -5,12 +5,14 @@
 > 维护方式：改本文件 → 重跑生成脚本 → 校验 → 真机导入。**不要直接手改 JSON。**
 >
 > 设计依据（均为一手取证）：
+>
 > - `Playa-0v0/Cyrene-Agent` @ `1ce59f20`（2026-09-12）`prompts/` 全部 23 个文件实拉实读
 > - `docs/reports/2026-09-12-roleplay-fidelity-research.md`（角色保真度调研）
 > - `docs/reports/2026-09-13-cyrene-rolecard-v7-sourcing.md`（本次真机取证的缺陷定性）
 > - ADR-049（作用域化）、ADR-052（本次角色卡重构）
 >
 > **相对 v6 的增删口径**（防止"简略版"）：
+>
 > - **只删三类**：① `tool_usage.md` 全文移植（参考实现明确声明 Chat 模式不注入该文件）；
 >   ② Prism 工具清单手工副本（与 `mergeSystemPrompt` 各能力层重复）；
 >   ③ 写给维护者的工程记账语言（"全文移植""（*重要*）""最高优先级，覆盖前面一切……"）。

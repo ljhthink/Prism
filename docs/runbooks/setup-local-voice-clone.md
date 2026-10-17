@@ -27,7 +27,7 @@
 ```
 
 > 该目录为**应用专属外部目录**：无需运行时权限、`adb` 可直接写入、卸载应用即清除。
-
+>
 > ⚠️ **2026-09-20 真机实测修正（重要）**：首次真机部署时发现——`adb push` 到外部目录后，
 > **从应用 uid 视角（`adb shell run-as io.prism`）读取该目录会 `Permission denied`**（上传目录
 > 属主为 `shell:ext_data_rw`、模式 `770`）。外部目录能否被 App 自身读取**未经证实**，而音色包
@@ -136,6 +136,7 @@ powershell -ExecutionPolicy Bypass -File pack-voicepack.ps1 -VoiceId cyrene-vits
 | 正式包（release）里本地音色"总是系统音" | 检查 `app/proguard-rules.pro` 是否仍保有 `io.prism.voice.local.SherpaZipVoiceSynthesizer` 与 `LocalCloneSampleCallback` 的 keep（缺 keep 会被 R8 改名/删除 → 静默回退，不崩） |
 
 ### 5.1 崩溃指纹（2026-09-20 真机实证，保留原样便于检索）
+
 ```
 F libc    : Fatal signal 6 (SIGABRT), code -1 (SI_QUEUE) in tid 6623 (DefaultDispatch), pid 32269 (io.prism)
 Abort message: 'JNI DETECTED ERROR IN APPLICATION: JNI NewFloatArray called with pending exception
@@ -177,6 +178,7 @@ Abort message: 'JNI DETECTED ERROR IN APPLICATION: JNI NewFloatArray called with
 | S7 | **不回归** | 短句（<16 字）播报、设置页切换引擎、降级到系统播报 | 全部与改造前一致 |
 
 抓日志：
+
 ```powershell
 adb logcat -c ; adb logcat -s "LocalClone" "LocalClone/ZipVoice"
 ```
@@ -224,6 +226,7 @@ adb logcat -c ; adb logcat -s "LocalClone" "LocalClone/ZipVoice"
 | V6 | **不回归** | 切回 ZipVoice 包播报、短句、降级系统播报 | 与改造前一致（**`tts` 缺省即 ZipVoice**，旧包无需改动） |
 
 抓日志：
+
 ```powershell
 adb logcat -c ; adb logcat -s "LocalClone" "LocalClone/ZipVoice" "LocalClone/Vits"
 ```
@@ -239,8 +242,6 @@ adb logcat -c ; adb logcat -s "LocalClone" "LocalClone/ZipVoice" "LocalClone/Vit
 | C2 | AC-A7 的 9 个场景中 8 个有用例，**仅 release 在途**缺 | 同上（同一根因） | 同上 |
 | C4 | **无性能基线**，未做性能回退对比（`perf/baselines/` 不存在，`docs/reports/perf/` 无 LVC 条目） | 本项目既有约定；本改动不引入新的热路径调用（仅改变写入时机） | RTF 由 S1/S6 的日志给出 |
 | C5 | 分块边界"无爆音"的依据是 **PC 波形分析**（最大跳变 0.0186 ≈ −34.6dB），**非真机可闻性** | 证据分级如实标注；不为此背书 | 是——S2/S3 的听测即为该证据的补强 |
-
-
 
 ### 6.5 TKN-LVC-016（播报管线双模 / 合成档位 / 应用内导入）专项验收 —— **待用户真机执行**
 
@@ -267,7 +268,6 @@ adb logcat -c ; adb logcat -s "LocalClone" "LocalClone/ZipVoice" "LocalClone/Vit
 > 但"是否值得替换"必须由你听完两组样本定论。若判定 500 反而不如 100，
 > 用 `build-vits-voicepack.ps1`（缺省 `-OnnxSubDir` 即 epoch-100 目录）重建即可回退。
 | T10 | 删除刚导入的音色包 | 列表消失；`files/voicepack/<id>` 被删除 | — |
-
 
 ## 7. 版权与合规
 
@@ -344,5 +344,3 @@ adb logcat -c ; adb logcat -s "LocalClone/ZipVoice" "LocalClone"
 | 响度 | 官方无 loudnorm 步骤；`target_rms` 是**单向**提升 | 保留 `loudnorm I=-16:TP=-1.5`（实测无削波） |
 | 文本 | 必须与音频**逐字一致** | 78/78 官方台词覆盖 ✓ |
 | 去 BGM/混响 | 官方不做；若源带 BGM/混响则相似度受损 | **未做**（源为游戏语音 mp3） |
-
-

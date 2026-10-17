@@ -22,13 +22,13 @@
 导出 **fp32 RTF 0.10–0.11、int8 RTF 0.90–1.00**（**端上应选 fp32**，与本模型 int8 反而更慢）；
 端侧资产合计 **≈132MB**。
 
-
 ## 0. 目标
 
 把「端侧 ZipVoice 零样本克隆」的相似度从 **0.8079**（同人天花板 0.9104）往 **≥0.88** 提，
 同时把真机 RTF 从 **3.67** 压到尽可能低（ZipVoice 真机 RTF>1 是"听一句等很久"的根因，见 ADR-054）。
 
 **验收口径（沿用既有裁判，只换引擎）**：
+
 - 客观：CAM++ 说话人嵌入余弦 **目标 ≥0.88**；
 - 主观：真机听感（自然度、"机器感"）；
 - 成本：RTF 与峰值内存（VITS 预期明显低于 ZipVoice）；
@@ -68,7 +68,7 @@ Copy-Item build-out/vits/dataset/sampled_audio4ft.txt "$repo/training_data/short
 
 > ⚠️ **不要**把语料放进 `training_data/sampled_audio4ft/`：那是仓库自带的**辅助数据集**（1092 条 `N.wav`，
 > 供 `--add_auxiliary_data True` 使用），混放会让"辅助数据"与"角色数据"边界不清。
-
+>
 > 若改用 `raw_audio/`（长音频路径）则**必须**走 Whisper 转写，本批不用。
 
 ### 2.2 文本/特征预处理
@@ -114,12 +114,13 @@ python ..\..\run-vits-finetune.py --max-epochs 100 --batch-size 8 --continue-tra
 > 另：检查点里 `optimizer` 字段为 `None`（该脚本设计上不落盘 Adam 状态，续训用新鲜优化器）；
 > `G_latest.pth` 与同轮 `G_<n>.pth` 的**字节哈希可能不同（torch 容器层差异）**，
 > 判断"是不是同一个训练状态"要看**逐张量哈希 + `iteration` 字段**，不要只看文件哈希/体积。
-
+>
 > ❌ **不要**按上方"原文"用 `finetune_speaker_v2.py`（签名不匹配，见顶部更正表 #2）。
 > 建议先把 `training_data/configs/modified_finetune_speaker.json` 的 `train.eval_interval`
 > 从 100 调到 **25**，否则 12 step/epoch 的语料要 ~9 个 epoch 才落一次检查点。
 
 显存峰值：
+
 ```powershell
 nvidia-smi --query-gpu=memory.used,memory.total --format=csv -l 5
 ```
@@ -135,6 +136,7 @@ conda run -n vits38 python finetune_speaker_v2.py -m ./OUTPUT_MODEL --max_epochs
 ```
 
 显存峰值：
+
 ```powershell
 nvidia-smi --query-gpu=memory.used,memory.total --format=csv -l 5
 ```
@@ -164,6 +166,7 @@ $py = "C:\Users\ljh\.conda\envs\vits38\python.exe"
 修复后隔离子进程实测 `rc=0 / CONSTRUCTED sample_rate=16000 / SYNTH_OK`。
 
 **端侧字段映射（AAR 字节码实证）**：
+
 - `OfflineTtsVitsModelConfig(model, lexicon, tokens, dataDir, dictDir, noiseScale, noiseScaleW, lengthScale)`
   —— **没有 fst 字段**；
 - `*.fst` 必须走 **`OfflineTtsConfig.ttsRuleFsts`**（官方 CLI 是 `--tts-rule-fsts=date.fst,number.fst,...`）；

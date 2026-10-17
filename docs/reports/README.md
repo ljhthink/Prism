@@ -103,4 +103,3 @@
 - [2026-09-24-batch28-realdevice-checklist.md](2026-09-24-batch28-realdevice-checklist.md) —— 真机手动测试清单（主 Agent；A 设置页 UI / B 音色包切换 / C VITS 听感 / D 性能 / E 回归）
 - 19 臂扫参产物（gitignored，`tmp/voice/sweep-20260924/`）：`README.md`（人读）、`sweep-report.json`（全数字）、`determinism-probe.json`、19 个 wav；脚本 `voice-clone-kit/tools/sweep-vits-arms.py`、`probe-vits-determinism.py`
 - 调研与取证（gitignored，`tmp/research-20260924/`）：`R1-voicebox-evaluation.md`、`R2-zipvoice-quality-speed.md`、`R3-vits-quality-diagnosis.md`、`T-tidy-completion.md`、`T-tidy-completion-r2.md`
-
