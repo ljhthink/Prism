@@ -21,7 +21,7 @@ exclude = [
   "AGENTS\\.md$",
   "CLAUDE\\.md$",
   "docs/progress\\.md$",
-  "^rules/",
+  "rules/",
   "docs/decisions",
   "docs/PRD\\.md$",
   "docs/prd-",
