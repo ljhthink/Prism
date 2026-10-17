@@ -251,6 +251,34 @@ class UserProfileManagerTest {
         assertTrue("显式偏好应注入原句", result.contains("我喜欢简洁的回复（显式）"))
     }
 
+    /**
+     * TASK-20260912-001（ADR-049，guardrail R1 M3 / 规则 BR-testing-014）：L3 前缀**语义钉子**。
+     *
+     * 背景：本轮为该常量移除"由系统…自动维护"这句**技术元叙述**（角色会话出戏源），
+     * 同时声明"批次19 的行为指令逐字保留"。guardrail 指出：该层承载**行为契约**
+     * （必须当作记忆、身份类提问不得声称没有记忆），若只靠散文声明保留、不落断言，
+     * 后续轮次极易被无声侵蚀——而现有断言只钉了 `startsWith("关于用户的长期记忆")` 一个锚点。
+     *
+     * 本用例把三个锚点**全部**钉住（缺任一即失败），并把"技术元叙述已移除"作为**负向**断言，
+     * 防止它被重新引入：
+     * ①`关于用户的长期记忆`（记忆化标题）②`不是普通配置`（必须当记忆、而非配置）
+     * ③`不要声称没有记忆`（身份类提问必须引用本节）
+     */
+    @Test
+    fun formatProfilesAsContext_prefix_keeps_batch19_semantic_anchors_and_drops_meta_narration() {
+        manager.setExplicitPreference("language", "中文")
+        val result = manager.formatProfilesAsContext()
+        assertNotNull(result)
+
+        assertTrue("锚点①记忆化标题", result!!.startsWith("关于用户的长期记忆"))
+        assertTrue("锚点②必须当作记忆而非配置", result.contains("不是普通配置"))
+        assertTrue("锚点③身份类提问不得声称没有记忆", result.contains("不要声称没有记忆"))
+        assertFalse(
+            "负向：技术元叙述『由系统…自动维护』不得复现（角色会话出戏源）",
+            result.contains("由系统") || result.contains("自动维护")
+        )
+    }
+
     @Test
     fun formatProfilesAsContext_includes_category_label() {
         manager.setExplicitPreference("language", "中文")

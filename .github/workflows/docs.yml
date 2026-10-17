@@ -5,6 +5,7 @@ on:
     paths:
       - '**/*.md'
       - 'scripts/consistency-check.js'
+      - 'lychee.toml'
       - '.github/workflows/docs.yml'
   push:
     branches: [main]

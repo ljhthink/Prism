@@ -45,6 +45,13 @@ enum class PrismButtonVariant { Primary, Ghost, Danger }
  * | [PrismButtonVariant.Primary] | `primary` 实底 + 白字，按压 scale .98 |
  * | [PrismButtonVariant.Ghost]   | `surface` 底 + `line` 描边 + `text-dim` 字 |
  * | [PrismButtonVariant.Danger]  | 玫红透明底 + 玫红描边 + 玫红字 |
+ *
+ * **`fillWidth` 存在的理由（BUG-20260924-001）**：本组件内部**无条件** `.fillMaxWidth()`，
+ * 放进 `Row` 会吃掉"可用宽度的全部"。Compose 的 `Row` **先**测量非 `weight` 子项，于是同一行里
+ * `Modifier.weight(1f)` 的兄弟被压成 **0 宽**——真机现象：设置页"本地音色包"列表只剩一个占满
+ * 整行的"删除"按钮、包名完全不可见；标题与"导入音色包"被挤在同一行。
+ * 故新增 `fillWidth`：**默认 `true` 保持既有 70 处调用点行为不变**；同一行内需要与兄弟共享
+ * 宽度时显式传 `false`，并自行给 `Modifier.weight(...)` 或固定宽。
  */
 @Composable
 fun PrismButton(
@@ -53,7 +60,8 @@ fun PrismButton(
     modifier: Modifier = Modifier,
     variant: PrismButtonVariant = PrismButtonVariant.Primary,
     enabled: Boolean = true,
-    leadingIcon: (@Composable () -> Unit)? = null
+    leadingIcon: (@Composable () -> Unit)? = null,
+    fillWidth: Boolean = true
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -81,7 +89,7 @@ fun PrismButton(
 
     Row(
         modifier = modifier
-            .fillMaxWidth()
+            .then(if (fillWidth) Modifier.fillMaxWidth() else Modifier)
             .graphicsLayer {
                 scaleX = if (pressed) 0.98f else 1f
                 scaleY = if (pressed) 0.98f else 1f

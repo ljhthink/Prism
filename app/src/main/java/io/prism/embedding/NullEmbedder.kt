@@ -28,11 +28,13 @@ class NullEmbedder : Embedder {
     /**
      * 返回空向量（长度为 0）。
      *
-     * **M-02 修复后**（guardrail TKN-M7-GUARDRAIL-001）：[io.prism.ui.chat.ConversationViewModel.buildRagPlan]
-     * 在 `ragTopK <= 0` 时短路返回 [io.prism.ui.chat.RagBuildResult.NormalChat]，不会调用本方法。
-     * 仅在 FULL/STANDARD 档（embedder 为真实 OnnxEmbedder）时 embed 被调用。
-     * 本方法作为防御性占位实现保留，若被意外调用，下游 [io.prism.data.KnowledgeBaseRepository.search]
-     * 的 `require(query.size == 384)` 会抛 IllegalArgumentException，被 buildRagPlan catch 块兜底降级。
+     * **ADR-050（TASK-20260912-002）后**：客户端不再按轮自动检索知识库（正文只经 LLM 主动调用
+     * `knowledge_base__*` 工具进入上下文），本方法的生产调用方只剩记忆层（L2 跨会话向量化）。
+     * 低端档（`ragTopK <= 0`）下知识库能力整体不暴露（不注入工具、不注入能力声明），
+     * 故知识库路径不会调用本方法。
+     *
+     * 本方法作为防御性占位实现保留：若被意外调用，下游 [io.prism.data.KnowledgeBaseRepository.search]
+     * 的 `require(query.size == 384)` 会抛 IllegalArgumentException，由调用方 catch 兜底降级。
      *
      * @param text 原始文本（忽略，不进行任何编码）
      * @return 空 [FloatArray]（长度为 0）

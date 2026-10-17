@@ -333,8 +333,9 @@ class OpenAICompatibleProviderTest {
     }
 
     @Test
-    fun `buildRequestBody omits thinking fields when thinkingEnabled false`() {
-        // 问题 8a（ADR-020）：关闭时不得发送 DeepSeek 专有参数（向后兼容所有端点）
+    fun `buildRequestBody sends explicit disabled thinking when thinkingEnabled false`() {
+        // BUG-20260909-003：关闭时必须**显式下发** thinking={"type":"disabled"}——
+        // 原实现省略字段，默认开启思考的端点（如 GLM）无视开关始终思考（假开关）
         val config = ProviderConfig(
             name = "OpenAI", baseUrl = "https://api.openai.com/v1",
             apiKeyRef = "openai", models = listOf("gpt-4o")
@@ -345,13 +346,16 @@ class OpenAICompatibleProviderTest {
 
         val body = provider.buildRequestBody(config, messages, thinkingEnabled = false, reasoningEffort = "high")
 
-        assertFalse("关闭时不应包含 thinking 字段", body.contains("thinking"))
+        assertTrue("关闭时应显式禁用思考", body.contains("\"thinking\":{\"type\":\"disabled\"}"))
         assertFalse("关闭时不应包含 reasoning_effort 字段", body.contains("reasoning_effort"))
     }
 
     @Test
-    fun `buildRequestBody omits thinking fields when thinkingEnabled default false`() {
-        // 向后兼容：不传 thinkingEnabled（默认 false）时与旧行为一致
+    fun `buildRequestBody omits thinking field when thinkingEnabled null`() {
+        // TASK-20260911-001 三态：默认（null）= 不注入 thinking 字段——适配不支持该字段的
+        // 端点（MiniMax M2-her 角色路由），防未知字段 400。
+        // BUG-20260909-003 的显式双态语义由上方显式 false 用例 + UI 开关链路保持
+        // （sendMessage 从 DataStore 读非空 Boolean，显式 false 仍下发 disabled）。
         val config = ProviderConfig(
             name = "Ollama", baseUrl = "http://localhost:11434/v1",
             apiKeyRef = "", models = listOf("llama3")
@@ -360,10 +364,10 @@ class OpenAICompatibleProviderTest {
             ChatMessage(id = 0, role = Role.USER, content = "hi", timestamp = 0)
         )
 
-        val body = provider.buildRequestBody(config, messages)
+        val body = provider.buildRequestBody(config, messages, thinkingEnabled = null)
 
-        assertFalse("默认不应包含 thinking 字段", body.contains("thinking"))
-        assertFalse("默认不应包含 reasoning_effort 字段", body.contains("reasoning_effort"))
+        assertFalse("null 时不应包含 thinking 字段", body.contains("\"thinking\""))
+        assertFalse("null 时不应包含 reasoning_effort 字段", body.contains("reasoning_effort"))
     }
 
     @Test

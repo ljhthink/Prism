@@ -51,6 +51,19 @@ function exists(rel) {
   return fs.existsSync(path.join(ROOT, rel));
 }
 
+// 本地专属文档（rules/05 §12.6，2026-09-11）：被 .gitignore 排除、不推送远程，
+// CI 检出树中不存在。README 索引对它们的链接：本地存在时仍校验存在性（本地门禁不放松），
+// 本地缺失时（即 CI 环境）跳过，保证远程仓库缺这些文件时不阻塞代码 PR。
+const LOCAL_ONLY_LINKS = [
+  /^AGENTS\.md$/,
+  /^CLAUDE\.md$/,
+  /^rules\/.+\.md$/,
+  /^docs\/progress\.md$/,
+  /^docs\/PRD\.md$/,
+  /^docs\/prd-[^/]+\.md$/,
+  /^docs\/decisions\//,
+];
+
 // 1. README 相对链接检查
 function checkReadmeLinks() {
   const readme = path.join(ROOT, 'README.md');
@@ -68,6 +81,9 @@ function checkReadmeLinks() {
     // 可能被 .gitignore 排除而不在 git 中，但 README 仍需链接它们作为本地索引。
     // 跳过这些链接的文件存在性检查，只检查命名规范（第 4 项检查负责）。
     if (/^docs\/reports\/[^/]+\.md$/.test(link) && link !== 'docs/reports/README.md') {
+      continue;
+    }
+    if (!exists(link) && LOCAL_ONLY_LINKS.some((re) => re.test(link))) {
       continue;
     }
     if (!exists(link)) {

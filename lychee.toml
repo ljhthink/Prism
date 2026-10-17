@@ -16,6 +16,15 @@ exclude = [
   ".gradle",
   "app/src",
   "reports/",
+  # 本地专属文档链接目标（rules/05 §12.6，2026-09-11）：不推送远程，CI 检出树中缺失，
+  # 链接存在性由本地 consistency-check.js 的 LOCAL_ONLY_LINKS 覆盖
+  "AGENTS\\.md$",
+  "CLAUDE\\.md$",
+  "docs/progress\\.md$",
+  "rules/",
+  "docs/decisions",
+  "docs/PRD\\.md$",
+  "docs/prd-",
 ]
 
 # 排除路径（文件系统）

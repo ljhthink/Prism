@@ -27,8 +27,8 @@ android {
         applicationId = "io.prism"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.0.0"
+        versionCode = 10
+        versionName = "1.1"
         // M3 引入 Apache POI（poi-ooxml）后方法数/引用数可能超限，启用 Multidex（ADR-007 5.3）
         multiDexEnabled = true
         // M7 设备适配（ADR-017 4.8）：仅打包 arm64-v8a + armeabi-v7a 两个 ABI，
@@ -86,6 +86,16 @@ android {
 
     buildFeatures {
         compose = true
+        // 批次21（SZ-001，ADR-046）：Shizuku UserService AIDL（shell 身份命令通道）
+        aidl = true
+    }
+
+    // 批次22（SZ-201，ADR-047）：sherpa-onnx 条件集成——libs 存在 AAR 时才编译 Sherpa 源集
+    //（AAR/模型由 docs/runbooks/setup-sherpa-voice.md 的脚本放置；缺失时自动降级 SystemAsrEngine）
+    val sherpaAar = file("libs/sherpa-onnx-android.aar")
+    if (sherpaAar.exists()) {
+        sourceSets["main"].kotlin.srcDir("src/sherpa/kotlin")
+        dependencies { implementation(files("libs/sherpa-onnx-android.aar")) }
     }
 
     // 性能基准可复跑（DEF-02）：默认跳过；传 -PignorePerformanceTests=false 时注入系统属性使基准运行。
@@ -127,6 +137,16 @@ android {
         resources {
             excludes += "META-INF/DEPENDENCIES"
         }
+        // 批次22 crash-fix（TKN-B22-CRASH-001，2026-09-06）：**禁止对 libonnxruntime.so 使用
+        // pickFirsts**——曾选中 sherpa 自带裁剪版 ORT（缺 OrtGetApiBase 导出）→ RAG 嵌入器
+        // OrtEnvironment <clinit> 毒化 → 聊天页主线程 NoClassDefFoundError FATAL 循环崩溃。
+        // 现已换用 sherpa static-link 变体 AAR（arm 系不含 libonnxruntime.so，见
+        // docs/runbooks/setup-sherpa-voice.md），arm64-v8a/armeabi-v7a 无冲突。
+        // x86 ABI：sherpa static 变体仍捆绑共享 ORT（仅 arm 系静态化）→ 合并期与
+        // onnxruntime-android 撞 x86 副本；x86 本就不在 abiFilters（仅 x86_64 可选），整组排除。
+        jniLibs {
+            excludes += "lib/x86/libonnxruntime.so"
+        }
     }
 }
 
@@ -163,6 +183,10 @@ dependencies {
     // v1 US-302（方案 B OCR 兜底）：ML Kit 文字识别（bundled 中文，离线，不依赖 GMS/Firebase，
     // F-Droid 友好）。minSdk 23 满足（项目 26）。体积 +~8MB（2 ABI）。
     implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
+    // 批次21（ADR-046）：Shizuku——shell 身份执行受控命令（am start --display / input -d /
+    // am force-stop），解锁后台化完整能力（绕过 untrusted virtual display 硬限制）。免费开源 Apache-2.0。
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
     // M4 Skills（ADR-013 5.2）：SKILL.md frontmatter YAML 解析（snakeyaml-engine-kmp，Apache 2.0）
     implementation(libs.snakeyaml.engine.kmp)
     implementation(libs.markdown.renderer.m3)

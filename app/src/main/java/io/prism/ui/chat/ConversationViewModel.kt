@@ -69,12 +69,12 @@ import java.util.concurrent.atomic.AtomicLong
  * **US-006**：构造注入 [ProviderConfigRepository] + [ChatStreamProvider]，
  * [sendMessage] 由 Mock 替换为真实 SSE 流式请求（ADR-004 4.5）。
  *
- * **US-019 RAG 集成**（ADR-012）：
- * - 构造额外注入 [Embedder] + [KnowledgeBaseRepository]
- * - [sendMessage] 在 [RagTarget] 非 [Off][RagTarget.Off] 时执行：embed(query) → search → 阈值过滤 →
- *   RagContextBuilder 拼 system prompt + context → provider.streamChat(..., systemPrompt, ragContext)
- * - 引用来源在检索阶段就附在 AI 占位消息上（用户更早看到引用，无需等 Done）
- * - 失败降级三级（ADR-012 5.5）：embed 失败 / search 失败或空 / 整个 RAG 异常 → 退化为普通对话
+ * **US-019 RAG 集成 → ADR-050（2026-09-12）知识库能力暴露**：
+ * - 构造额外注入 [Embedder] + [KnowledgeBaseRepository]（后者仍用于 init 恢复指定库时的存在性校验）
+ * - [sendMessage] 在 [RagTarget] 非 [RagTarget.Off] 且 `ragTopK > 0` 时仅拼入**能力声明**
+ *   （[Companion.buildRagPromptFor] → systemPrompt 的 RAG 层）；**不再自动检索/注入知识库正文**
+ * - 知识库正文只经 LLM 主动调用 `knowledge_base__*` 工具进入上下文（role=tool），
+ *   引用来源由工具结果解析（[parseKnowledgeBaseCitations]）
  * - [_messages] 改用 [update] 原子 CAS（修复 R-5，BR-concurrency-004）
  *
  * **US-026 Skill 工具执行回路集成**（ADR-014 5.4，M4 Phase D）：
@@ -178,7 +178,13 @@ class ConversationViewModel(
      *
      * - FULL 档：5（标准批次）
      * - STANDARD 档：3（小批次，4-6GB 设备约束）
-     * - MINIMAL / CHAT_ONLY 档：0（RAG 禁用，值不使用，因 [buildRagPlan] 在 RagTarget.Off 时短路）
+     * - MINIMAL / CHAT_ONLY 档：0（RAG 禁用）
+     *
+     * **ADR-050（TASK-20260912-002）语义收窄**：客户端已不再按轮自动检索注入，故本值不再
+     * 用作"注入片段数"；当前生产用途是**档位能力信号**——`ragTopK <= 0` 表示该档位不加载
+     * 嵌入模型（[io.prism.embedding.NullEmbedder]），据此对低端档关闭知识库**能力暴露**
+     * （不注入 `knowledge_base__*` 工具、不注入能力声明，对齐 ADR-017 档位约束）。
+     * 工具实际返回片段数由调用参数 `topK` 决定（见 [io.prism.network.KnowledgeBaseLocalToolExecutor]）。
      *
      * 默认 [DEFAULT_RAG_TOP_K]=3（向后兼容既有测试，未注入时按 STANDARD 行为）。
      * 生产环境由 [Factory] 从 [io.prism.tier.TierManager.currentTier.ragTopK] 注入。
@@ -266,6 +272,18 @@ class ConversationViewModel(
      */
     private val todoLocalToolExecutor: io.prism.skill.TodoLocalToolExecutor? = null,
     /**
+     * 批次24（ADR-051 D8）：桌宠动作工具执行器（`pet__play_action`）。
+     *
+     * 非 null 时把 `pet__play_action` 注入 [buildTools]，使角色能对自己的桌面形象下达
+     * 动作/表情指令。**是否真的会播**由执行器内部判定（桌宠关闭/无形象时返回可读说明，
+     * 不抛异常），因此这里只做"是否暴露工具"的门控，不做"桌宠是否开启"的门控——
+     * 否则开关桌宠会让工具集在会话中途变化，破坏 provider 前缀缓存的稳定性。
+     *
+     * null 时降级为不注册该工具（向后兼容既有测试）。
+     * 生产环境由 [Factory] 从 [PrismApplication.petLocalToolExecutor] 注入。
+     */
+    private val petLocalToolExecutor: io.prism.pet.PetLocalToolExecutor? = null,
+    /**
      * v1 US-301/302（方案 B 纯文本模型识图）：视觉旁路编排器。
      *
      * 主 Provider 为纯文本模型（图片直传 400 + 视觉不支持信号）时，编排「云端视觉旁路
@@ -306,7 +324,35 @@ class ConversationViewModel(
      * null 时降级为不发完成通知（向后兼容既有测试）。
      * 生产环境由 [Factory] 从 [PrismApplication.phoneControlCompletionNotifier] 注入。
      */
-    private val phoneControlCompletionNotifier: io.prism.phonecontrol.PhoneControlCompletionNotifier? = null
+    private val phoneControlCompletionNotifier: io.prism.phonecontrol.PhoneControlCompletionNotifier? = null,
+    /**
+     * 批次20（BG-005，ADR-045）：后台操控会话级开关（「后台操控」chip）。
+     *
+     * 生产由 [Factory] 传入 [PrismApplication.backgroundControlEnabled]（同一 MutableStateFlow
+     * 实例：VM/UI 写、phone_control 执行器守卫读，单一数据源）。默认新实例（向后兼容既有测试）。
+     */
+    private val bgControlEnabledFlow: kotlinx.coroutines.flow.MutableStateFlow<Boolean> = kotlinx.coroutines.flow.MutableStateFlow(false),
+    /**
+     * 批次23-B（ADR-048）：RolePack 角色包加载器。
+     *
+     * **装配语义**（TASK-20260910-001 扩展）：语音与文本轮次统一生效——用户已导入并选中
+     * 角色包（[io.prism.voice.rolepack.RolePackLoader.effectiveRolePack] 非出厂 B0）时，
+     * 角色包的 persona 区块**替代**设置页「用户规则」（关于我/如何回答）层注入
+     * systemPrompt——即设置页字段被 RolePack 值替代的优先级关系（详见
+     * [resolveRolePackPersonaSection]）。出厂态（未导入/未选中）行为完全不变。
+     *
+     * null 时降级为无角色包注入（向后兼容既有测试）。
+     * 生产环境由 [Factory] 从 [io.prism.PrismApplication.rolePackLoader] 注入。
+     */
+    private val rolePackLoader: io.prism.voice.rolepack.RolePackLoader? = null,
+    /**
+     * TASK-20260910-001：文本聊天播报管理器——AI 回复「播放」按钮后端。
+     * 引擎跟随语音通话设置（MINIMAX 点击时才构建，不提前消耗云端额度）。
+     *
+     * null 时降级为无播放按钮（向后兼容既有测试）。
+     * 生产环境由 [Factory] 从 [io.prism.PrismApplication] 注入；[onCleared] 调用 release。
+     */
+    val textPlayback: io.prism.voice.TextPlaybackController? = null
 ) : ViewModel() {
 
     /**
@@ -367,9 +413,6 @@ class ConversationViewModel(
      * 本标志使流 finally 跳过 isTyping 复位，旁路结束（成功重发 / 失败回退）后复位。
      */
     private val bypassInProgress = java.util.concurrent.atomic.AtomicBoolean(false)
-
-    /** UX-001 问题 2（ADR-022）：用户是否手动切换过深度思考开关（防 init 竞态覆盖）。 */
-    private var thinkingToggledByUser = false
 
     /** UXR8 Bug1（ADR-028）：用户是否手动切换过 RAG 模式（防 init 竞态覆盖，对齐 thinking 模式）。 */
     private var ragTargetToggledByUser = false
@@ -564,9 +607,11 @@ class ConversationViewModel(
     /**
      * UXR6 问题 3a：当前是否正在执行 RAG 检索（反映「本消息」的检索活动）。
      *
-     * [launchAnswer] 的 [buildRagPlan] 前置 true、完成/降级后置 false。
-     * UI 据此决定是否显示「正在检索知识库…」指示，替代旧「ragTarget 开关 + 全局 ragDone」
-     * 推断（旧逻辑对每条消息无条件显示检索画面）。
+     * **ADR-050（TASK-20260912-002）后恒为 false**：知识库正文不再由客户端按轮自动检索注入
+     * （检索改由 LLM 主动调用 `knowledge_base__*` 工具触发），故本流不再有置位路径。
+     * 保留字段与 UI 接线（[io.prism.ui.chat.ConversationScreen] 的 `TypingIndicator(isRagOn=…)`）
+     * 是为了让"知识库检索中"这一**用户可见状态**继续可用——将来若需要基于工具事件驱动该指示
+     * （例如 knowledge_base__search 执行期间置 true），无需改动 UI 侧契约。
      */
     private val _ragRetrieving = MutableStateFlow(false)
     val ragRetrieving: StateFlow<Boolean> = _ragRetrieving.asStateFlow()
@@ -610,20 +655,17 @@ class ConversationViewModel(
     val thinkingEnabled: StateFlow<Boolean> = _thinkingEnabled.asStateFlow()
 
     init {
-        // UX-001 问题 5（ADR-021）+ 问题 2（ADR-022 二次反馈）：初始化深度思考开关状态。
-        // 竞态修复：异步读 DataStore 期间用户可能已点击开关（setThinkingEnabled 已写内存），
-        // 若 init 完成后用 DataStore 旧值覆盖会"点了没反应"。用 [thinkingToggledByUser] 标记：
-        // 用户手动切换过则不再应用 init 读取值。
+        // BUG-20260909-003：深度思考开关改为**持续收集** DataStore flow——原实现仅 init 一次性
+        // 读取，设置页切换对已存在的会话 VM 永不生效（跨 VM 不同步）。flow 为唯一事实来源：
+        // 本 VM setThinkingEnabled 落盘后 flow 会重发同值（幂等），原 thinkingToggledByUser
+        // 竞态标记随之失去存在意义，一并移除。
         viewModelScope.launch {
             try {
-                val stored = thinkingConfigRepository?.getThinkingEnabled()
-                if (!thinkingToggledByUser) {
-                    stored?.let { _thinkingEnabled.value = it }
-                }
+                thinkingConfigRepository?.thinkingEnabled()?.collect { _thinkingEnabled.value = it }
             } catch (e: CancellationException) {
                 throw e // BR-error-handling-007
             } catch (e: Exception) {
-                Log.w(TAG, "init thinkingEnabled failed: ${e::class.simpleName}")
+                Log.w(TAG, "collect thinkingEnabled failed: ${e::class.simpleName}")
             }
         }
         // UXR8 Bug1（ADR-028）：初始化 RAG 检索目标为持久化值（用户上次选择的模式）。
@@ -681,6 +723,12 @@ class ConversationViewModel(
      */
     private val _webSearchEnabled = MutableStateFlow(webSearchEnabled)
     val webSearchEnabledFlow: StateFlow<Boolean> = _webSearchEnabled.asStateFlow()
+
+    /**
+     * 批次20（BG-005，ADR-045）：后台操控开关（与 [bgControlEnabledFlow] 同一实例；
+     * phone_control 执行器经 PrismApplication.backgroundControlEnabled.value 秒读守卫）。
+     */
+    val backgroundControlEnabledFlow: StateFlow<Boolean> = bgControlEnabledFlow
 
     /**
      * 当前会话 ID（M5 Phase E，US-035）。
@@ -764,8 +812,6 @@ class ConversationViewModel(
      * 仓库为 null 时仅更新内存状态（降级场景）。
      */
     fun setThinkingEnabled(enabled: Boolean) {
-        // UX-001 问题 2（ADR-022）：标记用户已手动切换（防 init 异步读取覆盖竞态）
-        thinkingToggledByUser = true
         _thinkingEnabled.value = enabled
         val repo = thinkingConfigRepository
         if (repo != null) {
@@ -788,6 +834,13 @@ class ConversationViewModel(
      */
     fun setWebSearchEnabled(enabled: Boolean) {
         _webSearchEnabled.value = enabled
+    }
+
+    /**
+     * 批次20（BG-005）：切换后台操控开关（会话级；执行器守卫与 UI 共用同一 StateFlow）。
+     */
+    fun setBackgroundControlEnabled(enabled: Boolean) {
+        bgControlEnabledFlow.value = enabled
     }
 
     /**
@@ -1071,11 +1124,10 @@ class ConversationViewModel(
      * **流程**：
      * 1. trim 输入 → 追加用户消息（[nextId] 原子自增）→ 追加空 AI 占位消息 → isTyping=true
      * 2. 取激活 Provider；无则追加错误提示
-     * 3. **RAG 注入**（若 [ragTarget] 非 [Off][RagTarget.Off]）：
-     *    - IO 协程执行 embed(query) → search → 阈值过滤
-     *    - 拼 system prompt + ragContext
-     *    - 引用来源 [io.prism.ui.model.Citation] 列表附在 AI 占位消息上
-     *    - 失败按 [RagBuildResult] 三态降级（ADR-012 5.5），不阻断对话
+     * 3. **知识库能力声明**（ADR-050：若 [ragTarget] 非 [RagTarget.Off] 且 `ragTopK > 0`）：
+     *    - 仅拼入**能力声明**（[Companion.buildRagPromptFor]，稳定文本）到 system prompt
+     *    - **不再**自动检索/注入知识库正文（正文只经 LLM 主动调用 `knowledge_base__*` 工具进入）
+     *    - 客户端侧不再产生引用来源（`sources` 由工具结果解析得到）
      * 4. **M5 Phase E：会话启动**（[startSessionIfNeeded]）—— 首条消息生成 sessionId +
      *    L2 检索（retrieveRelevantMemories）+ L3 画像加载（formatProfilesAsContext）
      * 5. **M4 Phase D：构建 tools**（[Companion.buildTools]）
@@ -1093,10 +1145,9 @@ class ConversationViewModel(
      * **状态原子性**：所有 [_messages] 写入均通过 [update] CAS（BR-concurrency-004），
      * 避免 RAG 检索协程与 stream collect 协程并发写导致 lost update（修复 R-5）。
      *
-     * **降级提示策略**（ADR-012 5.5 + G-02/G-03 修复 + M5 Phase E 记忆降级）：
-     * - [RagBuildResult.Success] → 附 citations，注入 systemPrompt + ragContext
-     * - [RagBuildResult.EmbedFailed] → appendDelta 简短提示（项目暂无 Toast 基建，ADR-012 5.5 备注）
-     * - [RagBuildResult.NormalChat] → 主动关闭 / search 空 / 阈值过滤空 / RAG 异常，用户无感
+     * **降级策略**（ADR-050 更新 + M5 Phase E 记忆降级）：
+     * - 知识库：不再有"检索失败降级"路径（客户端不检索）；能力声明按 [ragTarget]/档位门控，
+     *   不满足时传 null 跳过该层
      * - L1/L2/L3 任一失败 → 降级为 null（用户无感，不阻断对话）
      *
      * **M4 Phase D 已知限制**（R-5，ADR-014 5.7 偏差）：
@@ -1392,54 +1443,21 @@ class ConversationViewModel(
                 return@launch
             }
 
-            // UXR6 问题 3a：RAG 检索开始 —— UI 显示「正在检索知识库…」（仅真实检索期间）
-            _ragRetrieving.value = true
-            // RAG 注入（IO 协程，BR-concurrency-002 全程持锁，禁止 Main）
-            // Bug fix（UXR8-R3）：先做轻量级需求预判，避免问候/闲聊/确认类消息
-            // 也触发昂贵的 embed+search（知识库片段无条件注入污染 LLM 上下文）。
-            // 判定规则见 [needsRagRetrieval]（整句归一化精确匹配，无长度/前缀过滤）。
-            val ragResult = if (needsRagRetrieval(userText)) {
-                runCatching { buildRagPlan(userText) }
-                    .getOrElse { e ->
-                        if (e is CancellationException) throw e
-                        Log.w(TAG, "RAG injection failed: ${e::class.simpleName}, degrading to normal chat")
-                        RagBuildResult.NormalChat
-                    }
-            } else {
-                RagBuildResult.NormalChat
-            }
-            // UXR6 问题 3a：RAG 检索结束（无论成功/降级，避免「检索知识库」指示残留）
-            _ragRetrieving.value = false
-
-            // G-02 修复：按 RagBuildResult 三态差异化处理用户感知
-            val ragPlan: RagPlan? = when (ragResult) {
-                is RagBuildResult.Success -> {
-                    // v1 批次18（可观测性）：RAG 注入成功补结构化日志——此前注入无任何日志，
-                    // 真机 RCA「未请求知识库却被注入」时无法确认注入发生与注入规模。
-                    // guardrail P3：target 用可读文本（避免 data object toString 噪音）
-                    val targetDesc = when (val t = _ragTarget.value) {
-                        is RagTarget.SpecificLibrary -> "SpecificLibrary(kbId=${t.kbId})"
-                        else -> t::class.simpleName ?: "unknown"
-                    }
-                    Log.i(
-                        TAG,
-                        "RAG injected: target=$targetDesc citations=${ragResult.plan.citations.size}"
-                    )
-                    // 引用来源在检索阶段就附在 AI 占位消息上（用户更早看到引用，无需等 Done，ADR-012 5.3）
-                    if (ragResult.plan.citations.isNotEmpty()) {
-                        _messages.update { msgs ->
-                            msgs.map { if (it.id == aiId) it.copy(sources = ragResult.plan.citations) else it }
-                        }
-                    }
-                    ragResult.plan
-                }
-                RagBuildResult.EmbedFailed -> {
-                    // embed 失败 → 提示用户（ADR-012 5.5：项目暂无 Toast，用 appendDelta 简短提示）
-                    // 末尾空行分隔后续 AI 流式回复，避免「对话」「回复」直接拼接
-                    appendDelta(aiId, "⚠️ 知识库检索失败，已降级为普通对话\n\n")
-                    null
-                }
-                RagBuildResult.NormalChat -> null  // 主动关闭 / search 空 / 阈值过滤空 / RAG 异常，无提示
+            // ADR-050（TASK-20260912-002）：知识库**不再自动注入内容**。
+            // 原实现每轮无条件 embed+search 并把命中片段作为独立 user 消息塞进请求体
+            // （与 LLM 是否调用工具无关），是"知识库内容在 LLM 未调用时进入上下文"的根因
+            // （详见 docs/reports/2026-09-12-kb-auto-injection-archaeology.md）。
+            // 现仅注入**能力声明**（稳定文本，随配置变化，不随轮次变化——对前缀缓存友好），
+            // 正文一律经 LLM 主动调用 knowledge_base__* 工具进入上下文（按需检索）。
+            //
+            // guardrail G-5 修复：**只读一次** target，供「能力声明 / 工具定义门控 / 决策日志」
+            // 三处复用——三者必须同源，否则中途切换 RAG 模式会出现"声明了但没给工具"
+            // （或反之）的自相矛盾请求。
+            val kbTarget = _ragTarget.value
+            val ragPrompt: String? = Companion.buildRagPromptFor(kbTarget, ragTopK).also { prompt ->
+                // BR-observability-002：能力声明与工具注入两条路径均留痕（不含 query 正文），
+                // 供真机验证"本轮是否声明了知识库能力"，与工具调用日志共同构成可追溯链路。
+                Log.i(TAG, "KB capability declared: target=${describeRagTarget(kbTarget)} declared=${prompt != null}")
             }
 
             // M5 Phase E（US-035）：会话启动 —— 首条消息生成 sessionId + L2 检索 + L3 画像加载
@@ -1461,19 +1479,22 @@ class ConversationViewModel(
                 // PRD MCP/API 增强（US-002）：今日热榜工具（hotlist__get，按 VM 开关注入）
                 hotListEnabled = hotListEnabled,
                 // v1 批次17（US-1702）：TODO 任务规划工具（todo_write，恒启用，纯本地能力）
-                todoWriteEnabled = todoLocalToolExecutor != null
+                todoWriteEnabled = todoLocalToolExecutor != null,
+                // 批次24（ADR-051 D8）：桌宠动作工具（pet__play_action，恒启用，纯本地能力；
+                // 桌宠未开启时执行器返回可读说明，不改变工具集 → 不破坏 provider 前缀缓存）
+                petActionEnabled = petLocalToolExecutor != null
             )
-            // UXR4 问题 2/3（ADR-024）：知识库工具在 **RAG 开启 + 嵌入可用** 时注入
-            //（LLM 可主动枚举/检索/读取知识库，解决 RAG 仅自动注入、LLM 无知识库感知能力的问题）。
-            // 语义对齐：RAG 关闭（RagTarget.Off）或低端档（ragTopK<=0，NullEmbedder）时
-            // LLM 不应感知知识库能力（与 buildRagPlan 短路一致 + guardrail Q2 能力对齐）。
-            val kbTools = if (_ragTarget.value is RagTarget.Off || ragTopK <= 0) {
+            // UXR4 问题 2/3（ADR-024）+ ADR-050：知识库工具在 **能力开启 + 嵌入可用** 时注入
+            //（LLM 可主动枚举/检索/读取知识库）。ADR-050 后这是知识库正文进入上下文的**唯一通道**，
+            // 故门控必须与能力声明（[Companion.buildRagPromptFor]）严格一致：
+            // RAG 关闭（RagTarget.Off）或低端档（ragTopK<=0，NullEmbedder）时两者都不注入
+            //（LLM 既拿不到工具也看不到声明，与 guardrail Q2 能力对齐一致）。
+            val kbTools = if (kbTarget is RagTarget.Off || ragTopK <= 0) {
                 emptyList()
             } else {
                 io.prism.network.KnowledgeBaseLocalToolExecutor.buildToolDefinitions()
             }
-            val mcpServers = mcpServerRepository?.servers?.value ?: emptyList()
-            // DEF-008（Bug-3）：注入已启用 MCP Server 的工具（带 mcp_ 命名空间前缀，支持多 server 精确路由）。
+            val mcpServers = mcpServerRepository?.servers?.value ?: emptyList()            // DEF-008（Bug-3）：注入已启用 MCP Server 的工具（带 mcp_ 命名空间前缀，支持多 server 精确路由）。
             // describeTools 失败降级为空（不阻断对话），命名空间由 SkillExecutor.stripNamespace/selectMcpServer 处理。
             // M-2 修复（guardrail TKN-P17-GUARDRAIL-001）：原 runCatching 会吞 CancellationException，
             // 违反 BR-error-handling-007。改为显式 try-catch 重抛 CancellationException。
@@ -1529,10 +1550,13 @@ class ConversationViewModel(
                     .filter { isLegalToolName(it.function.name) }
             }
 
-            // 问题 8a（ADR-020）+ UX-001 问题 5（ADR-021）：深度思考开关由 UI 状态驱动。
-            // 关闭时 thinkingEnabled=false，不发送 thinking/reasoning_effort 字段（向后兼容所有端点）。
+            // 问题 8a（ADR-020）+ UX-001 问题 5（ADR-021）+ BUG-20260909-003：
+            // 1) 语音轮次（正文带 VOICE_TURN_PREFIX 前缀）**强制快速模式**——保语音及时性，
+            //    思考延迟会显著拉长语音轮次响应；
+            // 2) 关闭深度思考时由 Provider 显式下发 thinking={"type":"disabled"}（原实现
+            //    不发送任何字段——默认开启思考的端点（如 GLM）会无视开关始终思考，开关成假实现）。
             val thinkingConfig = thinkingConfigRepository
-            val thinkingEnabled = _thinkingEnabled.value
+            val thinkingEnabled = _thinkingEnabled.value && !userText.startsWith(VOICE_TURN_PREFIX)
             val reasoningEffort = thinkingConfig
                 ?.takeIf { thinkingEnabled }
                 ?.getReasoningEffort()
@@ -1575,6 +1599,15 @@ class ConversationViewModel(
             // 最高优先级层（persona 之后、RAG 之前）。读取失败/未配置 → null 跳过注入（降级）。
             // BR-error-handling-007：suspend DataStore 读取禁止 runCatching（会吞 CancellationException），
             // 必须显式 try-catch 重抛（对齐同文件 L1069+/L1113+ 既有模式）。
+            // 批次23-B（ADR-048）+ TASK-20260910-001（语音/文本轮次统一注入）+ TASK-20260912-001
+            // （通话专用段按轮次隔离）：用户已启用角色包时，userRules 层被 RolePack persona 区块
+            // **替代**（设置页字段被角色包值替代的优先级关系，见 resolveRolePackPersonaSection
+            // KDoc）——优先级：RolePack.persona > 设置页用户规则。
+            // 角色轮次判定（TASK-20260912-001，ADR-049 D3）：语音通话轮次（正文带 🎙 前缀）
+            // 才允许追加角色包的通话专用收紧段；文本聊天轮次不注入——修复"通话规则泄漏到
+            // 文本聊天导致回复过短"的真机缺陷（同前缀语义见上方 thinkingEnabled）。
+            val isVoiceTurn = userText.startsWith(Companion.VOICE_TURN_PREFIX)
+            val rolePackPersonaSection = resolveRolePackPersonaSection(voiceCall = isVoiceTurn)
             val userRulesSection = try {
                 userRulesConfigRepository?.getRules()?.toSystemPromptSection()
             } catch (e: CancellationException) {
@@ -1584,34 +1617,61 @@ class ConversationViewModel(
                 Log.w(TAG, "read userRules failed: ${e::class.simpleName}")
                 null
             }
+            // TASK-20260911-001 身份重排：rolepack 选中时，角色包 persona 直陈身份作为
+            // **基础身份层**（basePersona 置首），userRules 层传 null（替代语义不变）；
+            // 未选中时维持出厂行为（DEFAULT_PERSONA 基础身份 + 设置页用户规则层）。
+            val effectiveUserRulesSection: String?
+            val effectiveBasePersona: String
+            val worldbookSection: String?
+            if (rolePackPersonaSection != null) {
+                effectiveBasePersona = rolePackPersonaSection
+                effectiveUserRulesSection = null
+                // TASK-20260912-001（ADR-049 D4）：背景设定按关键词命中注入（仅角色包选中时）
+                worldbookSection = resolveRolePackWorldbookSection(baseHistory, userText)
+            } else {
+                effectiveBasePersona = Companion.DEFAULT_PERSONA
+                effectiveUserRulesSection = userRulesSection
+                worldbookSection = null
+            }
 
             // 合并 systemPrompt（ADR-015 决策4 + ADR-030 顺序：用户规则 → RAG → L1 摘要 → L2 跨会话 → L3 画像 → Skill）
+            // ADR-050：ragPrompt 仅为**知识库能力声明**（null = 不声明），不再携带任何知识库正文。
             val mergedSystemPrompt = Companion.mergeSystemPrompt(
-                ragPrompt = ragPlan?.systemPrompt,
+                ragPrompt = ragPrompt,
                 l1Summary = memoryContext.l1Summary,
                 l2Memories = memoryContext.l2Memories,
                 l3Profiles = memoryContext.l3Profiles,
-                userRules = userRulesSection,
+                userRules = effectiveUserRulesSection,
                 // v1 US-202：手机操控启用时注入 UI 文本不可信声明（安全层）
                 phoneControlGuidance = if (phoneControlEnabled) Companion.PHONE_CONTROL_GUIDANCE else null,
                 // v1 批次9（US-904）：热榜启用时注入能力声明（LLM 感知 hotlist__get）
                 hotListGuidance = if (hotListEnabled) Companion.HOTLIST_GUIDANCE else null,
                 // v1 批次17（US-1702）：TODO 任务规划指引（todo_write 接线时注入）
                 todoGuidance = if (todoLocalToolExecutor != null) Companion.TODO_GUIDANCE else null,
-                enabledSkills = enabledSkills
+                enabledSkills = enabledSkills,
+                // TASK-20260911-001：基础身份层重排（rolepack 直陈身份置首）
+                basePersona = effectiveBasePersona,
+                // TASK-20260912-001：背景设定层（紧随基础身份层，见 mergeSystemPrompt 层序）
+                worldbookSection = worldbookSection,
+                // TASK-20260912-001（ADR-049 D6）：角色轮次追加风格尾部强化（近因位置）
+                styleTail = if (rolePackPersonaSection != null) Companion.ROLE_STYLE_TAIL else null
             )
 
             // 分支策略（R-1）：tools 非空且 skillExecutor 非空 → executeLoop + onEvent 回调；
             // 否则 → 普通流式 streamChat + collect（保持无 Skill 场景零开销）
             // M5 Phase E：history 替换为 memoryContext.recentHistory（L1 滑动窗口处理后的近期消息）
             // 问题 8a（ADR-020）：深度思考参数透传给两条分支
+            // TASK-20260912-001（ADR-049 D1）：撤销 TASK-20260911-001 的 M2-her 静默自动路由——
+            // 角色轮次与普通轮次统一使用用户当前激活的 Provider（理由与真机证据见 ADR-049）。
             if (tools.isNotEmpty() && skillExecutor != null) {
                 executeWithToolLoop(
                     aiId = aiId,
                     active = active,
                     history = sanitizedHistory,
                     mergedSystemPrompt = mergedSystemPrompt,
-                    ragContext = ragPlan?.ragContext,
+                    // ADR-050：客户端不再自动注入知识库正文——恒 null（保留形参以兼容
+                    // 协议层既有能力；知识库正文只经 knowledge_base__* 工具结果进入上下文）。
+                    ragContext = null,
                     tools = tools,
                     mcpServers = mcpServers,
                     thinkingEnabled = thinkingEnabled,
@@ -1623,11 +1683,107 @@ class ConversationViewModel(
                     active = active,
                     history = sanitizedHistory,
                     systemPrompt = mergedSystemPrompt,
-                    ragContext = ragPlan?.ragContext,
+                    // ADR-050：同上，恒 null。
+                    ragContext = null,
                     thinkingEnabled = thinkingEnabled,
                     reasoningEffort = reasoningEffort
                 )
             }
+        }
+    }
+
+    /**
+     * 批次23-B（ADR-048）：解析当前轮次应注入的角色包 persona 区块（不适用时 null）。
+     *
+     * **作用域**（TASK-20260910-001 扩展）：**语音轮次与文本轮次统一注入**——原实现仅
+     * 语音轮次（VOICE_TURN_PREFIX 前缀），用户导入并选中角色包即明确表达"用该角色对话"
+     * 的意图，文本聊天保持默认助手会造成体验割裂（且文本聊天播放按钮以角色音色播报
+     * 默认助手文本，角色体验不完整）。文字会话在未选中角色包时行为完全不变。
+     *
+     * **优先级关系**（写入 KDoc 供后续批次遵循）：现有"设置页自由文本"机制即
+     * [userRulesConfigRepository]（关于我/如何回答，ADR-030）；角色包启用 = 该设置页字段
+     * 被 RolePack 值**替代**（非叠加、非并存）——即 `RolePack.persona > 设置页用户规则`。
+     * **TASK-20260911-001 重排后更新**：本区块在 [Companion.mergeSystemPrompt] 中作为
+     * **basePersona（基础身份层）置首**，替代 DEFAULT_PERSONA 的"你是 Prism AI 助手"位——
+     * 消除"助手在扮演角色"的层级矛盾（Q3"替代品感"根因）；DEFAULT_PERSONA 第 6 条语音
+     * 转写纠错指引由 [RolePack.toPersonaSystemPromptSection] 尾部的去身份化功能条目等价
+     * 承接（防同音字误执行不可逆操作的防线不丢失）。出厂态本方法恒返回 null，行为不变。
+     *
+     * **生效条件**：[rolePackLoader] 非空 && 当前选中角色包非出厂 B0
+     * （[io.prism.voice.rolepack.RolePack.isBuiltin]）——出厂态（未导入/未选中）恒返回 null，
+     * 行为与批次22 完全一致。
+     *
+     * **场景化**（TASK-20260912-001，ADR-049 D3）：[voiceCall]=true 时追加角色包的
+     * `persona.callSystemPrompt`（电话场景收紧），文本轮次不追加。修复真机缺陷：v5 把通话
+     * 专用收紧规则（"句子要短""不总结不收尾"）并进 persona 后，文本聊天回复被全局压短
+     * （真机取证 47/62/52 字）。
+     *
+     * **降级**：读取失败（IO/解析）降级为 null（不注入，不阻断对话）；对齐
+     * BR-error-handling-007：显式 catch 重抛 CancellationException。
+     *
+     * @param voiceCall 本轮是否为语音通话轮次（决定是否追加 `callSystemPrompt`）
+     */
+    private suspend fun resolveRolePackPersonaSection(voiceCall: Boolean): String? {
+        val loader = rolePackLoader ?: return null
+        return try {
+            loader.effectiveRolePack()
+                .takeIf { !it.isBuiltin }
+                ?.toPersonaSystemPromptSection(voiceCall = voiceCall)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "read rolePack failed: ${e::class.simpleName}")
+            null
+        }
+    }
+
+    /**
+     * TASK-20260912-001（ADR-049 D4）：解析本轮应注入的**背景设定**区块（不适用时 null）。
+     *
+     * **扫描窗口**（[WORLDBOOK_SCAN_TURNS] 条近期消息 + 本轮用户输入）：背景设定命中的是
+     * **对话里出现过的话题**，而非仅当前这一句——用户先问"翁法罗斯是什么"，下一句问"那里的人呢"，
+     * 第二句不含关键词但话题仍在延续。窗口过大会引入无关条目命中（预算浪费），故取较小常数。
+     *
+     * **降级**：读取失败 → null（不注入，不阻断对话）；对齐 BR-error-handling-007
+     * （显式 catch 重抛 CancellationException）。
+     *
+     * @param history 本轮请求历史（**已排除**当前 AI 占位消息）
+     * @param currentUserText 本轮用户输入正文
+     */
+    private suspend fun resolveRolePackWorldbookSection(
+        history: List<ChatMessage>,
+        currentUserText: String
+    ): String? {
+        val loader = rolePackLoader ?: return null
+        return try {
+            val entries = loader.effectiveRolePack()
+                .takeIf { !it.isBuiltin }
+                ?.worldbook
+                ?.takeIf { it.isNotEmpty() }
+                ?: return null
+            val scanText = buildString {
+                history.filter { !it.isSystemNotice && it.content.isNotBlank() }
+                    .takeLast(Companion.WORLDBOOK_SCAN_TURNS)
+                    .forEach { append(it.content).append('\n') }
+                append(currentUserText)
+            }
+            val selection = io.prism.voice.rolepack.RolePackWorldbook
+                .select(entries, scanText)
+            // BR-observability-001：预算丢弃必须留痕（仅条数，不含正文——CWE-532 / rules/07 §19.3）。
+            // 静默丢弃是排障盲区：单条正文超 MAX_CHARS 会让整轮零注入而外部毫无痕迹。
+            if (selection.droppedByBudget > 0) {
+                Log.w(
+                    TAG,
+                    "rolepack worldbook dropped ${selection.droppedByBudget} entries by budget " +
+                        "(picked=${selection.picked.size})"
+                )
+            }
+            io.prism.voice.rolepack.RolePackWorldbook.toSystemPromptSection(selection.picked)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "read rolePack worldbook failed: ${e::class.simpleName}")
+            null
         }
     }
 
@@ -1773,8 +1929,19 @@ class ConversationViewModel(
      */
     override fun onCleared() {
         super.onCleared()
+        textPlayback?.release()  // TASK-20260910-001：文本播报引擎与协程释放
         persistSession()
         persistSessionMemories("onCleared")
+    }
+
+    /** TASK-20260910-001：文本播报状态（控制器 null 时恒 Idle——UI 据此隐藏播放按钮逻辑分支）。 */
+    val textPlaybackState: kotlinx.coroutines.flow.StateFlow<io.prism.voice.TextPlaybackController.State> =
+        textPlayback?.state
+            ?: kotlinx.coroutines.flow.MutableStateFlow(io.prism.voice.TextPlaybackController.State.Idle)
+
+    /** 切换文本播报（AI 回复「播放」按钮；同条点击=停止）。 */
+    fun toggleTextPlayback(messageId: Long, text: String) {
+        textPlayback?.toggle(messageId, text)
     }
 
     /**
@@ -1890,7 +2057,10 @@ class ConversationViewModel(
         ragContext: String?,
         tools: List<ToolDefinition>,
         mcpServers: List<io.prism.data.McpServerConfig>,
-        thinkingEnabled: Boolean,
+        // TASK-20260911-001：可空——null 语义为"端点不支持 thinking 字段，不注入"
+        // （ADR-049 D1 撤销 M2-her 路由后，当前调用方恒传非空 Boolean；能力本身保留，
+        //  见 [io.prism.network.OpenAICompatibleProvider.buildRequestBody] 三态 KDoc）
+        thinkingEnabled: Boolean?,
         reasoningEffort: String?
     ) {
         // UXR4 问题 7/10（ADR-024）：进入工具回路 —— 期间 handleStreamEvent 的 Done 不清除
@@ -1975,7 +2145,10 @@ class ConversationViewModel(
         history: List<ChatMessage>,
         systemPrompt: String?,
         ragContext: String?,
-        thinkingEnabled: Boolean,
+        // TASK-20260911-001：可空——null 语义为"端点不支持 thinking 字段，不注入"
+        // （ADR-049 D1 撤销 M2-her 路由后，当前调用方恒传非空 Boolean；能力本身保留，
+        //  见 [io.prism.network.OpenAICompatibleProvider.buildRequestBody] 三态 KDoc）
+        thinkingEnabled: Boolean?,
         reasoningEffort: String?
     ) {
         try {
@@ -2122,7 +2295,11 @@ class ConversationViewModel(
                 // UX-001 问题 7（ADR-022）：工具调用状态可视化 —— 记录活动工具名，
                 // UI 展示「正在调用工具: xxx」（对齐 Claude Code 工具进度模型）。
                 // 工具名去命名空间前缀展示（如 web_search__search → search）。
-                _activeTool.value = event.toolName.substringAfterLast(SkillExecutor.NAMESPACE_SEPARATOR)
+                // ADR-050（TASK-20260912-002）：知识库工具单独映射为「正在查知识库」——
+                // 撤除自动注入后，"知识库检索中"的唯一可见通道就是工具调用指示，
+                // 而 `substringAfterLast("__")` 会把它显示为泛化的 search/list_documents，
+                // 用户无法分辨是否在查自己的资料（考古 §3 缺口）。
+                _activeTool.value = describeActiveTool(event.toolName)
                 // v1 批次16（US-1605）：记录本轮使用过手机操控工具——回复完成后
                 // App 在后台时发完成回报通知（用户在其它 App 也能知道任务结束）。
                 if (event.toolName.startsWith("phone_control__")) phoneControlUsedThisTurn = true
@@ -2133,7 +2310,7 @@ class ConversationViewModel(
                 //（继续展示「正在调用工具: xxx」）+ 置 isTyping=true，使工具执行阶段有进行中指示，
                 // 而非 Done 后立即清除导致执行期空白。
                 _isTyping.value = true
-                _activeTool.value = event.toolName.substringAfterLast(SkillExecutor.NAMESPACE_SEPARATOR)
+                _activeTool.value = describeActiveTool(event.toolName)
             }
             is StreamEvent.AskUser -> {
                 // UXR8 N2 Phase 2（ADR-030）：LLM 主动反问 → 设置待答问题供 UI 展示提问卡片。
@@ -2241,9 +2418,11 @@ class ConversationViewModel(
      * @param failedAiId 失败的 AI 占位 id（移除）
      */
     private fun relaunchAnswerWithImageDescription(lastUser: ChatMessage, prefixedDesc: String, failedAiId: Long) {
-        // guardrail 提交前审计（TKN-PREPUSH-V1-B1B7-001，#1）：launchAnswer 的 RAG 检索 query /
-        // needsRagRetrieval 以描述文本为入参，必须与存储层一致地用净化版（长度上限 + 控制字符过滤），
-        // 避免图片内嵌文本经视觉模型转述后绕过 MAX_VISION_INJECT_CHARS / ISO 控制字符过滤。
+        // guardrail 提交前审计（TKN-PREPUSH-V1-B1B7-001，#1）：视觉描述文本进入 user 消息前必须与
+        // 存储层一致地用净化版（长度上限 MAX_VISION_INJECT_CHARS + 控制字符过滤），避免图片内嵌
+        // 文本经视觉模型转述后把超长/控制字符带进上下文。
+        // （ADR-050 更新：本处原注释还提到"launchAnswer 的 RAG 检索 query / needsRagRetrieval 以
+        //  描述文本为入参"——该自动检索链路已撤除，相关符号不存在，故删去该半句以免悬空引用。）
         val sanitizedDesc = sanitizeVisionText(prefixedDesc)
         _messages.update { list ->
             list.filter { it.id != failedAiId }.map { msg ->
@@ -2403,81 +2582,12 @@ class ConversationViewModel(
     }
 
     /**
-     * 构建 RAG 注入结果（system prompt + ragContext + citations 或降级标记）。
-     *
-     * **必须**在 IO 协程调用（[Embedder.embed] 串行持锁 ~100ms + [KnowledgeBaseRepository.search]
-     * 同步阻塞，BR-concurrency-002）。
-     *
-     * **降级策略**（ADR-012 5.5 + G-01/G-02 修复）：
-     * - [RagTarget.Off] → [RagBuildResult.NormalChat]（普通对话，无提示）
-     * - embed 失败 → [RagBuildResult.EmbedFailed]（普通对话 + appendDelta 提示）
-     * - search 失败或结果为空 → [RagBuildResult.NormalChat]（普通对话，无提示，AI 自然回答）
-     * - search 有结果但阈值过滤后为空 → [RagBuildResult.NormalChat]（普通对话，无提示）
-     * - 成功 → [RagBuildResult.Success]
-     *
-     * **G-01 修复**（guardrail TKN-US019-RAG-GUARDRAIL-001，BR-error-handling-007 提议）：
-     * 内层禁用 `runCatching { }.getOrElse { }`（会吞 CancellationException 破坏结构化并发），
-     * 改用显式 try-catch，先 `catch (e: CancellationException) { throw e }` 再 `catch (e: Exception)`。
-     *
-     * @param queryText 用户查询文本
-     * @return RAG 构建结果（成功或降级标记），调用方按 [RagBuildResult] 三态决定用户感知
+     * ADR-050（TASK-20260912-002）：RagTarget 的**可读文本**（结构化日志用，避免 data object
+     * toString 噪音——沿用 v1 批次18 既有约定）。
      */
-    private suspend fun buildRagPlan(queryText: String): RagBuildResult {
-        val target = _ragTarget.value
-        if (target is RagTarget.Off) return RagBuildResult.NormalChat
-        // M-02 修复（guardrail TKN-M7-GUARDRAIL-001，BR-error-handling-004）：
-        // MINIMAL/CHAT_ONLY 档 ragTopK=0，NullEmbedder 返回空 FloatArray(0) 会导致下游
-        // KnowledgeBaseRepository.search 的 require(query.size == 384) 抛 IllegalArgumentException。
-        // 虽被外层 catch 兜住降级为 NormalChat，但异常路径成为热路径且无 Log.w 违反
-        // BR-error-handling-004（不吞异常）。此处短路返回 NormalChat，避免异常路径。
-        if (ragTopK <= 0) return RagBuildResult.NormalChat
-
-        // IO 协程执行 embed + search（全程阻塞，禁止 Main）
-        return withContext(ioDispatcher) {
-            // 1. embed(query) —— BR-concurrency-002 全程持锁 ~100ms
-            // G-01 修复：显式 try-catch，重抛 CancellationException（BR-error-handling-007）
-            val queryVector = try {
-                embedder.embed(queryText)
-            } catch (e: CancellationException) {
-                throw e  // 协程取消必须传播，禁止吞掉
-            } catch (e: Exception) {
-                return@withContext RagBuildResult.EmbedFailed  // embed 失败 → 提示降级
-            }
-
-            // 2. search —— 同步阻塞，kbId 由 RagTarget 决定
-            // G-04 修复：RagTarget.SpecificLibrary init 已校验 kbId > 0，此处无需重复校验
-            val kbId = when (target) {
-                is RagTarget.AllLibraries -> null
-                is RagTarget.SpecificLibrary -> target.kbId
-                RagTarget.Off -> return@withContext RagBuildResult.NormalChat  // 理论不可达，防御
-            }
-            val results = try {
-                knowledgeBaseRepository.search(queryVector, k = ragTopK, knowledgeBaseId = kbId)
-            } catch (e: CancellationException) {
-                throw e  // G-01 修复：协程取消必须传播
-            } catch (e: Exception) {
-                // M-02 修复（BR-error-handling-004）：search 失败记录警告日志，不静默吞异常
-                Log.w("ConversationViewModel", "RAG search 失败，降级为普通对话", e)
-                return@withContext RagBuildResult.NormalChat  // search 失败 → 自然降级
-            }
-
-            // 3. 相似度阈值过滤（R-6，调用方责任，ADR-012 5.6）
-            val filtered = results.filter { it.similarity >= RAG_SIMILARITY_THRESHOLD }
-            if (filtered.isEmpty()) return@withContext RagBuildResult.NormalChat  // 无相关结果 → 自然降级
-
-            // UXR9 US-901 AC-4：限制注入片段条数（top-2），控制上下文膨胀。
-            // 必须在 buildContext/buildCitations 前截断，保证 [来源N] 编号与 UI 引用一致。
-            val capped = filtered.take(RAG_MAX_INJECTED)
-
-            // 4. 拼接 system prompt + ragContext + citations
-            RagBuildResult.Success(
-                RagPlan(
-                    systemPrompt = RagContextBuilder.SYSTEM_PROMPT,
-                    ragContext = RagContextBuilder.buildContext(capped),
-                    citations = RagContextBuilder.buildCitations(capped)
-                )
-            )
-        }
+    private fun describeRagTarget(target: RagTarget): String = when (target) {
+        is RagTarget.SpecificLibrary -> "SpecificLibrary(kbId=${target.kbId})"
+        else -> target::class.simpleName ?: "unknown"
     }
 
     /** 将增量 token 追加到指定 AI 消息末尾（原子 CAS，BR-concurrency-004）。 */
@@ -2508,7 +2618,46 @@ class ConversationViewModel(
      *（swipes 语义：全部版本保留可切换）；regenTargetId 置位保证幂等（markCompleted
      * 会被 finally 兜底多次调用，仅首次追加）。
      */
+    /**
+     * 批次24（ADR-051 D8 / PRD US-2408）：把本轮助手回复正文广播给桌宠气泡。
+     *
+     * **只广播正文**：思考链（`thinkingChain`）、工具调用结果、引用来源都不进气泡——
+     * 气泡是"角色在说话"，不是"界面在展示调试信息"。
+     *
+     * **同一消息只广播一次**（guardrail L-10）：`markCompleted` 是**幂等**函数，
+     * 正常完成、错误兜底、用户终止等**多条完成路径**都可能对同一个 `aiId` 调用它。
+     * 不去重会让气泡重复出现并不断重置 6 秒计时 —— 用户感知为"气泡赖着不走"。
+     * 用一个小容量 LinkedHashSet 记住已广播过的 id（**上限 [PET_BUBBLE_DEDUPE_LIMIT]，
+     * 清空发生在加入之前**，见其 KDoc）。
+     *
+     * **无消费者时零成本**：[io.prism.pet.PetActionBus.emit] 是非挂起的 `tryEmit`，
+     * 桌宠未开启时事件直接落在缓冲区并被丢弃，不影响会话主链路。
+     */
+    private fun publishPetBubble(aiId: Long) {
+        // 清空要在**加入之前**做（guardrail R3-B 的 N-4）：写成 `add` 之后再判超限清空，
+        // 会把**刚刚加进去的 id 一起清掉** —— 去重出现周期性空窗，
+        // "气泡重复显示"的症状只是被推迟到第 LIMIT+1 次而不是被消除。
+        if (petBubblePublished.size >= PET_BUBBLE_DEDUPE_LIMIT) petBubblePublished.clear()
+        if (!petBubblePublished.add(aiId)) return
+        val text = _messages.value
+            .lastOrNull { it.id == aiId && it.role == Role.ASSISTANT }
+            ?.content
+            ?.trim()
+            .orEmpty()
+        if (text.isEmpty()) return
+        io.prism.pet.PetActionBus.emit(io.prism.pet.PetActionBus.Event.Bubble(text))
+    }
+
+    /** 已广播过气泡的助手消息 id（guardrail L-10 去重；见 [publishPetBubble]）。 */
+    private val petBubblePublished = LinkedHashSet<Long>()
+
     private fun markCompleted(aiId: Long) {
+        // 批次24（ADR-051 D8 / PRD US-2408）：本轮助手回复完成 → 广播给桌宠气泡。
+        // 收口在此是刻意的：markCompleted 是**所有完成路径**（正常结束 / 用户终止 / 错误兜底 /
+        // 视觉兜底 / 重试…）共用的唯一私有函数，逐条分支挂钩必然漏挂，
+        // 而漏挂的表现是"有时有气泡有时没有"。
+        // （刻意不写死调用点条数——计数会随重构漂移，而漂移后无人会回来改这句话。）
+        publishPetBubble(aiId)
         _streamingIds.update { it - aiId }
         if (regenTargetId == aiId) {
             regenTargetId = -1L
@@ -2556,6 +2705,15 @@ class ConversationViewModel(
          */
         internal const val MAX_VARIANTS = 10
 
+        /**
+         * 桌宠气泡去重集合的上限（guardrail L-10）。
+         *
+         * 达到上限即整体清空而非逐个淘汰：这是纯粹的**近期重复抑制**，
+         * 清空后最坏结果是"很久以前的那条消息若再次 markCompleted 会重播一次气泡"，
+         * 代价可忽略，换来的是无需维护 LRU 结构。
+         */
+        private const val PET_BUBBLE_DEDUPE_LIMIT = 32
+
         /** v1 US-301（guardrail M-2）：视觉描述/OCR 文本注入 user 消息的字符上限（防上下文撑爆）。 */
         internal const val MAX_VISION_INJECT_CHARS = 2000
 
@@ -2566,106 +2724,102 @@ class ConversationViewModel(
         internal const val REQUEST_RESUME_TIMEOUT_MS = 15_000L
 
         /**
-         * RAG 注入片段条数上限（UXR9 US-901 AC-4）。
+         * ADR-050（TASK-20260912-002）：构建本轮要注入 systemPrompt 的**知识库能力声明**。
          *
-         * buildRagPlan 阈值过滤后再截断为 top-2 注入 LLM 上下文与引用来源，
-         * 控制上下文膨胀（多语言模型相关片段实测 0.58~0.66，2 条足够作为事实依据）。
+         * **背景（为什么不再有"自动注入"）**：原实现（ADR-012 起）在 [launchAnswer] 中对**每条**
+         * 用户消息无条件执行 embed + top-k 检索，把命中片段拼成 `ragContext` 作为独立 user 消息
+         * 插入请求体——与 LLM 是否调用知识库工具**完全无关**。历次修复（调阈值 / 加寒暄黑名单 /
+         * 改默认开关 / 文档前缀跳过）均只改判据而保留范式，故反复复发（详见
+         * docs/reports/2026-09-12-kb-auto-injection-archaeology.md 与
+         * docs/reports/2026-09-12-kb-injection-fix-history.md）。ADR-050 决定：
+         * **正文一律经 LLM 主动调用 `knowledge_base__*` 工具进入上下文**，本函数只产出
+         * **能力声明**（告诉模型"你有这个能力、该在什么时候用"），不再产出任何知识库正文。
+         *
+         * **纯函数**（BR-testing-004）：无 IO、无状态，可被任意协程并发调用。
+         *
+         * **门控与工具注入保持语义一致**（同一开关同时决定"能力声明"与"工具定义"）：
+         * - [RagTarget.Off] → null（用户关闭知识库：不声明、不注入工具）
+         * - `ragTopK <= 0`（MINIMAL / CHAT_ONLY 档，embedder 为 [io.prism.embedding.NullEmbedder]）
+         *   → null（低端档不提供知识库检索能力，对齐 ADR-017 档位约束）
+         * - 其余 → 能力声明文本（[io.prism.rag.RagContextBuilder.buildToolGuidance]）
+         *
+         * **前缀缓存友好**：返回值只随配置（RagTarget / 档位）变化，不随轮次变化，消除
+         * "每轮注入内容不同"导致的 prompt 前缀失效。
+         *
+         * @param target 当前知识库检索目标（[RagTarget]）
+         * @param ragTopK 当前档位的 RAG top-k（<=0 表示该档位禁用嵌入检索）
+         * @return 能力声明文本；不声明时返回 null
          */
-        internal const val RAG_MAX_INJECTED = 2
-
-        /**
-         * RAG 相似度阈值（ADR-012 5.6，过滤无关结果污染 context）。
-         *
-         * UXR3 问题 6（ADR-023）：0.3 → 0.5。用户反馈「打开知识库检索功能后第一份资料必被塞入」，
-         * 根因是阈值过低：库中仅有的片段（无论与问题是否相关）都会命中并注入上下文。
-         * 提高阈值过滤低相关片段，只有足够相关的资料才进入 context 与引用来源。
-         *
-         * **UXR9 实测校准**（ChineseSimilarityDiagnosticTest，多语言 MiniLM qint8 + Unigram）：
-         * 0.5 在多语言模型下仍是最优分隔点——相关中文句对 0.582/0.655，无关中文句对
-         * 最大 0.322（旧英文模型无关片段 0.4~0.7 是 RAG 污染结构性根因，已换模型根治）。
-         */
-        private const val RAG_SIMILARITY_THRESHOLD = 0.5
-
-        /**
-         * 纯确认/寒暄/无实质内容消息的**整句**短语集（命中即跳过 RAG 检索）。
-         *
-         * Bug fix（UXR8-R3，guardrail H-1 修复）：**禁止前缀匹配**。此前用
-         * `startsWith` 匹配使"你好，帮我查一下xxx""谢谢，请总结一下…"等真实查询被
-         * 整句跳过（误伤面比长度过滤更广）。现改为**整句归一化精确匹配**：
-         * - [needsRagRetrieval] 先对消息 lower-case + 剥离空白/标点归一化
-         * - 归一化结果**整句**命中本集合才跳过（如"好的，谢谢"→"好的谢谢"）
-         * - 含实际查询内容的消息归一化后不在集合内 → 照常走相似度阈值过滤
-         *
-         * 不替代 [buildRagPlan] 的相似度防线，两者叠加（先按需、再按相关度）。
-         */
-
-        /**
-         * UXR11 U1（ADR-033）：文档内容直发消息前缀（与 ConversationScreen.extractDocumentText
-         * 的 `【文档：$displayName】` 包装一致）。以此前缀开头的用户消息 = R5「＋→文件」上传的
-         * 文档内容（+ 用户需求合并），跳过 RAG 自动注入（见 [needsRagRetrieval]）。
-         */
-        internal const val DOCUMENT_MESSAGE_PREFIX = "【文档："
-
-        /**
-         * RAG 需求预判跳过短语集（UXR8-R3，ADR-028；UXR11 U1 扩展）。
-         *
-         * 以下消息**整句**（归一化后）命中 → [needsRagRetrieval] 返回 false，跳过 embed+search：
-         * - 寒暄/问候、确认/回应、礼貌回应、结束/离开
-         *
-         * 不替代 [buildRagPlan] 的相似度防线，两者叠加（先按需、再按相关度）。
-         */
-        private val RAG_SKIP_PHRASES = setOf(
-            // 寒暄/问候
-            "你好", "您好", "hi", "hello", "嗨", "哈喽", "在吗", "早上好", "下午好", "晚上好",
-            // 确认/回应
-            "好", "好的", "好的好的", "好吧", "行", "行吧", "嗯", "嗯嗯", "哦", "哦哦", "啊",
-            "明白", "明白了", "知道", "知道了", "了解", "了解了", "收到", "ok", "okay", "okok",
-            "对", "对的", "没错", "同意", "没问题", "可以", "可以的",
-            // 礼貌回应
-            "谢谢", "谢谢你", "感谢", "辛苦了", "多谢", "thanks", "thankyou",
-            // 结束/离开
-            "再见", "拜拜", "晚安",
-            // 复合确认语（归一化后整句）
-            "好的谢谢", "谢谢好的", "好谢谢", "好的没问题", "没问题谢谢", "明白了谢谢", "知道了谢谢",
-            "嗯嗯好的", "好的了解", "收到谢谢", "好嘞", "好嘞谢谢", "可以的谢谢",
-            // 中英混合确认语
-            "ok谢谢", "ok好的", "谢谢ok", "好的ok"
-        )
-
-        /**
-         * 归一化 RAG 预判输入：lower-case + 仅保留字母/数字（剥离空白与中文标点）。
-         * 如"好的，谢谢。"→"好的谢谢"。纯函数（BR-testing-004）。
-         */
-        private fun normalizeRagText(text: String): String =
-            text.lowercase().filter { it.isLetterOrDigit() }
-
-        /**
-         * 判断一条用户消息是否有检索知识库的需求（纯函数，BR-testing-004）。
-         *
-         * Bug fix（UXR8-R3，TKN-UXR8-R3-ARCHAEOLOGY-001 根因）：`buildRagPlan` 对**每条**
-         * 用户消息无条件执行 embed+search，导致问候/闲聊/确认类消息也触发知识库片段注入，
-         * 污染 LLM 上下文。本函数做轻量级需求预判：
-         * - 消息归一化后**整句**命中 [RAG_SKIP_PHRASES] → 跳过（纯确认/寒暄，无检索意图）
-         * - UXR11 U1（ADR-033）：**文件内容直发消息**（R5「＋→文件」上传，文本以
-         *   [DOCUMENT_MESSAGE_PREFIX]「【文档：」包裹）→ 跳过 RAG 自动注入 —— 文档本身
-         *   就是本轮上下文，无需知识库检索；且长文档作为 query 会让多语言嵌入模型检索出
-         *   无关片段注入 LLM 上下文（真机实测：上传文件后即使无检索需求，知识库资料仍被注入）。
-         *   用户如需知识库关联，可显式用 knowledge_base__search 工具（RAG 开启时已注入）。
-         * - 其余消息（包括短查询如"查询"，以及含查询内容的长句）照常走相似度阈值过滤
-         *
-         * 启发式是**保守过滤器**：仅拦截明显无需求的消息，其余照常走相似度阈值过滤。
-         * 不替代 [buildRagPlan] 的相似度防线，两者叠加（先按需、再按相关度）。
-         *
-         * @param queryText 已 trim 的用户消息
-         * @return true=应尝试 RAG 检索；false=跳过
-         */
-        internal fun needsRagRetrieval(queryText: String): Boolean {
-            // 空白消息无检索需求
-            if (queryText.isBlank()) return false
-            // UXR11 U1（ADR-033）：文档内容直发消息跳过 RAG 自动注入
-            if (queryText.startsWith(DOCUMENT_MESSAGE_PREFIX)) return false
-            return normalizeRagText(queryText) !in RAG_SKIP_PHRASES
+        internal fun buildRagPromptFor(target: RagTarget, ragTopK: Int): String? {
+            if (target is RagTarget.Off) return null
+            if (ragTopK <= 0) return null
+            return RagContextBuilder.buildToolGuidance(
+                scope = when (target) {
+                    is RagTarget.SpecificLibrary -> "指定知识库（knowledgeBaseId=${target.kbId}）"
+                    else -> "全部知识库"
+                }
+            )
         }
+
+        /**
+         * ADR-050（TASK-20260912-002）：把工具名转换为 UI 展示文本（纯函数，BR-testing-004）。
+         *
+         * 默认沿用 UX-001 问题 7（ADR-022）的约定——去掉命名空间前缀（`web_search__search` → `search`）；
+         * 知识库工具（`knowledge_base__*`）单独映射为「查知识库」：撤除自动注入后，"正在检索知识库"
+         * 的唯一可见通道就是这个工具指示（`ConversationScreen` 的 `ToolCallIndicator`），
+         * 泛化的 `search`/`list_documents` 会让用户无法分辨是否在查自己的资料。
+         */
+        internal fun describeActiveTool(toolName: String): String =
+            if (toolName.startsWith(KnowledgeBaseLocalToolExecutor.NAMESPACE_PREFIX)) {
+                "查知识库"
+            } else {
+                toolName.substringAfterLast(SkillExecutor.NAMESPACE_SEPARATOR)
+            }
+
+        /**
+         * 批次23-B（ADR-048）：语音轮次消息正文前缀（[io.prism.voice.VoiceSessionController]
+         * 发送语音转写时附加，PRD VC-005「🎙 语音」标记）。
+         *
+         * [resolveRolePackPersonaSection] 据此判定角色包作用域（TASK-20260910-001 扩展为
+         * 语音/文本轮次统一注入）——选中角色包的会话 persona 全场景生效。与 DEFAULT_PERSONA
+         * 第 6 条的"正文带 🎙 前缀"描述共用同一标记。
+         */
+        internal const val VOICE_TURN_PREFIX = "🎙 "
+
+        /**
+         * TASK-20260912-001（ADR-049 D4）：背景设定关键词扫描窗口（近期消息条数）。
+         *
+         * 取 4：既覆盖"上一轮问了 A 主题、这一轮承接"的连续话题，又不让久远话题持续命中
+         * 无关条目（预算浪费 + 稀释当前指令）。与 [RolePackWorldbook.MAX_ENTRIES] /
+         * [RolePackWorldbook.MAX_CHARS] 共同构成注入预算。
+         */
+        internal const val WORLDBOOK_SCAN_TURNS = 4
+
+        /**
+         * TASK-20260912-001（ADR-049 D6）：角色轮次的**风格尾部强化**（systemPrompt 最末层）。
+         *
+         * **依据**（上游调研 docs/reports/2026-09-12-roleplay-fidelity-research.md §B-2）：
+         * 角色扮演社区实证"长度范式由最早出现的表达主导、已有历史后仅改中段主提示词效果有限"，
+         * 通行解法是把**最关键的表达约束复述到提示词末尾**（SillyTavern `Post-History
+         * Instructions` 的同构降级形态）——利用近因位置把"长度随情境"与"不做动作旁白"两条
+         * 压过庞大人设正文的注意力衰减。
+         *
+         * **长度控制**：全文约 90 字（≈60 token），且**正向表述优先**——调研结论指出负向
+         * 禁用词单列时失败率高（属 priming），必须紧跟正向替代；同时提示词指令密度越高
+         * 整体遵循率越低（IFScale），故此处只保留两条最关键的约束，不重复人设正文内容。
+         *
+         * **框架级通用文案**（不含任何具体第三方角色内容，ADR-048 边界不变）：任何角色包
+         * 生效时都注入；出厂态（未选中角色包）不注入，`DEFAULT_PERSONA` 行为不变。
+         *
+         * **作用域声明**（guardrail R2 P3-D）：本常量在**文本轮与通话轮都注入**——它约束的是
+         * "长度随情境自适应"与"不做动作旁白"两条**跨场景**表达纪律，与通话专用收紧段
+         * （`persona.callSystemPrompt`，仅通话轮）不冲突：后者收紧的是**通话语感**，
+         * 前者禁止的是"为求短而省略必要信息"与"叙述化旁白"，二者叠加正是通话轮的期望行为。
+         */
+        internal const val ROLE_STYLE_TAIL: String =
+            "【回复方式】长度跟着情境走：一句话能答完的就短；需要解释、分析、给步骤或对方想深入聊时，" +
+                "就把话说完整——不要因为\"要简短\"而省略必要信息，也不要为凑长度注水。" +
+                "直接说你要说的话，不要描写自己的动作、神态或周围环境。"
 
         /**
          * 默认通用 persona（ADR-018，综合 DeepSeek/Claude 最佳实践）。
@@ -2678,6 +2832,17 @@ class ConversationViewModel(
          *
          * 始终作为 [mergeSystemPrompt] 的基础身份注入，即使无 RAG/记忆/Skill，
          * 避免默认状态无 system message 导致 LLM 行为不可预测或遭残留 Skill 污染。
+         *
+         * **角色包场景下的退位**（TASK-20260911-001）：选中角色包时本常量**完全不注入**，
+         * 由角色包直陈身份占据基础身份位；其第 6 条（语音转写纠错）的**覆盖维度**由
+         * [io.prism.voice.rolepack.RolePack.toPersonaSystemPromptSection] 尾部的
+         * 去身份化条目等价承接（等价性要求见该处注释与 BR-safety-001）。
+         *
+         * **"不改变你的基础身份"一句的口径**（guardrail R2 P3-A 澄清）：本段第 3 条原则中的
+         * 该从句是**出厂助手场景的有意措辞**（约束 Skill 不得改写助手身份），**不是过时残留**
+         * ——角色会话不注入本常量，故不存在身份冲突；角色会话的身份约束由角色包
+         * `persona.forbidden`（元词汇禁令）承载。被移除的只是 [mergeSystemPrompt] 中
+         * **skill 索引行**的同名从句（那一处追加在角色身份之后，构成同层矛盾，见 BR-interface-032）。
          */
         internal const val DEFAULT_PERSONA: String = """你是 Prism AI 助手，一个通用、诚实、乐于助人的 AI 助手。
 原则：
@@ -2685,7 +2850,8 @@ class ConversationViewModel(
 2. 遵循用户的语言与表达偏好，保持回复清晰、结构化、易读
 3. 当用户需求匹配下方列出的技能时，按需使用对应能力（不改变你的基础身份）
 4. 不做超出能力范围的承诺，必要时说明限制
-5. （UXR8 N2 Phase 1，ADR-030）当用户需求存在实体/版本/标准等歧义、且缺失信息会实质改变答案时，先向用户澄清追问（一次一问、给出建议选项），不要反复用同义词重试搜索"""
+5. （UXR8 N2 Phase 1，ADR-030）当用户需求存在实体/版本/标准等歧义、且缺失信息会实质改变答案时，先向用户澄清追问（一次一问、给出建议选项），不要反复用同义词重试搜索
+6. （批次22 修复轮四）用户输入可能来自**语音转写**（正文带 🎙 前缀的为纯语音转写）——转写含同音字/近音字错误（如人名"李锦东"→"李进东"）：执行涉及人名、联系人、专有名词的操作时，若候选存在歧义，先向用户确认或用 take_over 交还；不要基于疑似转写错误的实体直接执行不可逆操作"""
 
         /**
          * v1 US-202（LLM 操控手机）：手机操控安全声明 —— 手机操控启用时注入 systemPrompt。
@@ -2702,7 +2868,12 @@ class ConversationViewModel(
 4. 当 get_ui_state 提示"无法通过 UI 树读取/自动切视觉兜底"（微信/WebView/Flutter 等对无障碍树屏蔽），**不要反复重试 get_ui_state**，应立即调用 screenshot 获取当前屏幕：
    - 截图会附带【屏幕文字（OCR，编号+坐标）】与【屏幕图标区域】；
    - 用 **tap(text="目标文字")** 精确点击（系统自动定位，最可靠）；无文字目标（纯图标）用 tap(x,y) 按编号/坐标点击；
-   - 若截图后仍无法判断目标，再考虑 wait 或 take_over，不要盲目点击。"""
+   - 若截图后仍无法判断目标，再考虑 wait 或 take_over，不要盲目点击。
+【后台操控模式】（mode=background，用户已开启「后台操控」开关时可用）：
+5. **用户开启「后台操控」开关后，你的所有手机操控调用默认自动走后台虚拟屏（执行器已兜底），你无需传 mode 也会在后台执行**；仅当你确需主屏手势/全局动作（滑动、长按、双击、back/home）时，才对该次调用显式传 mode="foreground" 临时切回主屏执行。
+6. 后台模式能力取决于 Shizuku 状态：**Shizuku 就绪时全能力**（launch/坐标 tap/滑动/长按/back/home/type 全部经 shell 注入到虚拟屏）；**Shizuku 未就绪时仅节点操作**（get_ui_state / tap(text=.../node_id) / type / launch_app / screenshot），坐标手势（tap x/y）、swipe、long_press、double_tap、back/home 会被拒绝——收到拒绝文案即按其指引处理，不要反复重试。
+7. 后台模式流程：launch_app → get_ui_state → tap/type。需视觉确认时用 screenshot。某步骤被拒绝时改用节点等价操作或对该次调用显式传 mode="foreground"，不要反复重试被拒操作。
+8. **launch_app 在后台被系统拒绝（提示 untrusted display/SecurityException）属未安装 Shizuku 设备的硬限制**：收到该错误后**立即**对该次调用显式传 mode="foreground" 在主屏继续执行任务（不要重试 background、不要询问用户），并在最终汇报中说明"该设备未启用 Shizuku，已在前台完成"。"""
 
         /**
          * v1 批次9（US-904）：热榜能力声明（注入 systemPrompt 供 LLM 感知 hotlist__get）。
@@ -3057,7 +3228,9 @@ class ConversationViewModel(
             phoneControlEnabled: Boolean = false,
             hotListEnabled: Boolean = false,
             // v1 批次17（US-1702）：TODO 任务规划工具（默认 false 向后兼容既有测试）
-            todoWriteEnabled: Boolean = false
+            todoWriteEnabled: Boolean = false,
+            // 批次24（ADR-051 D8）：桌宠动作工具（pet__play_action，默认 false 向后兼容既有测试）
+            petActionEnabled: Boolean = false
         ): List<ToolDefinition> {
             val skillTools = enabledSkills.flatMap { entry ->
                 (entry.manifest.tools ?: emptyList()).map { toolDecl ->
@@ -3111,16 +3284,44 @@ class ConversationViewModel(
             } else {
                 emptyList()
             }
-            return skillTools + crossAppTools + webSearchTools + documentTools + askUserTools + phoneControlTools + hotListTools + todoTools
+            // 批次24（ADR-051 D8）：桌宠动作工具（pet__play_action，让角色用形象配合表达）
+            val petTools = if (petActionEnabled) {
+                listOf(io.prism.pet.PetLocalToolExecutor.buildToolDefinition())
+            } else {
+                emptyList()
+            }
+            return skillTools + crossAppTools + webSearchTools + documentTools + askUserTools +
+                phoneControlTools + hotListTools + todoTools + petTools
         }
+
+        /**
+         * TASK-20260912-001（ADR-049 D1）：M2-her 静默自动路由**已撤销**。
+         *
+         * **撤销理由（真机 + 官方文档双证据）**：
+         * 1. 官方 M2-her 专页明确该模型"specifically optimized for brevity / rejecting
+         *    verbosity"（针对简洁性专门优化）——路由后文本回复被压到 47/62/52 字
+         *    （真机取证：安装含路由的构建后首次会话，聊天记录 ObjectBox 实证）；
+         * 2. 官方同时以 **Narrative Bridging（用叙述推进剧情）** 为奖励行为——路由后 3/3 回复
+         *    出现「（眨眨眼，俏皮地笑了笑）」式动作旁白，而昔涟的原作风格明确禁止动作旁白，
+         *    属风格反向优化；
+         * 3. M2-her 未见 function calling 支持：路由对**工具轮**同样生效且当时**无失败回退**
+         *    （仅 KDoc 承诺），一旦不支持即导致搜索/手机操控/知识库等基础能力在角色会话中失效
+         *    ——违反"不破坏项目基础功能"约束。
+         *
+         * 角色轮次与普通轮次统一使用用户当前激活的 Provider（[active]）。若日后需重新引入
+         * 角色特化模型，必须同时满足：显式用户开关 + 工具轮不路由 + 失败按轮回退 + 费用提示
+         * （见 ADR-049「后续可选增强」）。
+         */
 
         /**
          * 合并多层 system prompt（M4 Phase D R-6 膨胀控制 + M5 Phase E ADR-015 决策4 六层合并 + ADR-018 渐进式加载）。
          *
-         * **合并顺序**（ADR-015 决策4 + ADR-018 + ADR-030）：
-         * 0. [DEFAULT_PERSONA] 默认 persona（始终作为基础身份，ADR-018）
+         * **合并顺序**（ADR-015 决策4 + ADR-018 + ADR-030 + TASK-20260911-001 重排）：
+         * 0. [basePersona] 基础身份层——出厂默认 [DEFAULT_PERSONA]；rolepack 选中时为
+         *    角色包直陈身份（"你就是X"），替代助手身份位（Q3"替代品感"根修）
          * 0.5. 用户规则 [userRules]（UXR8 N1，ADR-030：persona 之后、RAG 之前，
-         *      **除安全限制外最高优先级**——语义对齐 Claude Code 分层记忆：用户显式规则 > 自动记忆 > 通用 persona）
+         *      **除安全限制外最高优先级**——语义对齐 Claude Code 分层记忆：用户显式规则 > 自动记忆 > 通用 persona；
+         *      rolepack 场景传 null——角色包值替代设置页用户规则的优先级关系不变）
          * 1. RAG grounding rules（防幻觉约束）
          * 2. L1 早期对话摘要（[SlidingWindowResult.toSummarySystemPromptSection]，格式 `[早期对话摘要] ...`）
          * 3. L2 跨会话记忆（[CrossSessionMemoryManager.formatMemoriesAsContext]，格式 `相关历史对话：...`）
@@ -3141,11 +3342,19 @@ class ConversationViewModel(
          * @param l2Memories L2 跨会话记忆 section（M5 Phase E，默认 null 向后兼容）
          * @param l3Profiles L3 用户画像 section（M5 Phase E，默认 null 向后兼容）
          * @param userRules 用户显式规则 section（UXR8 N1，ADR-030：persona 之后、RAG 之前，
-         *     **除安全限制外最高优先级**；默认 null 向后兼容既有测试）
+         *     **除安全限制外最高优先级**；默认 null 向后兼容既有测试。
+         *     批次23-B（ADR-048）+ TASK-20260910-001/20260911-001：用户启用角色包时，
+         *     本层传 null——RolePack persona 区块已上移至 [basePersona] 基础身份位（替代关系见
+         *     ConversationViewModel.resolveRolePackPersonaSection））
          * @param phoneControlGuidance 手机操控安全声明（v1 US-202：UI 文本视为不可信数据源 +
          *     phone_control__* 工具使用边界；默认 null 向后兼容）
          * @param enabledSkills 已启用的 Skill 列表（已过滤 isEnabled && isInstalled）
-         * @return 合并后的 systemPrompt；**始终非空**（至少含 [DEFAULT_PERSONA]）
+         * @param basePersona 基础身份层（TASK-20260911-001：rolepack 直陈身份置首；默认
+         *     [DEFAULT_PERSONA] 向后兼容）
+         * @param worldbookSection 背景设定层（TASK-20260912-001，ADR-049 D4：角色包 worldbook
+         *     关键词命中后的区块，紧随 [basePersona]——它是"角色自己的世界"，属于身份的一部分，
+         *     必须排在任何外部资料（RAG/记忆）之前；默认 null 向后兼容既有测试）
+         * @return 合并后的 systemPrompt；**始终非空**（至少含 [basePersona]，出厂态即 [DEFAULT_PERSONA]）
          */
         internal fun mergeSystemPrompt(
             ragPrompt: String?,
@@ -3157,7 +3366,24 @@ class ConversationViewModel(
             hotListGuidance: String? = null,
             // v1 批次17（US-1702）：TODO 任务规划使用指引（默认 null 向后兼容既有测试）
             todoGuidance: String? = null,
-            enabledSkills: List<SkillRegistry.SkillEntry>
+            enabledSkills: List<SkillRegistry.SkillEntry>,
+            /**
+             * 基础身份层（TASK-20260911-001 重排）：rolepack 选中时传入角色包 persona 区块
+             * （[RolePack.toPersonaSystemPromptSection]，直陈式"你就是X"）置于 systemPrompt
+             * **最前**，替代 [DEFAULT_PERSONA] 的"你是 Prism AI 助手"位——消除"助手在扮演
+             * 角色"的层级矛盾（Q3"替代品感"根因）。默认 [DEFAULT_PERSONA] 向后兼容既有测试。
+             * userRules 层在 rolepack 场景传 null（由调用方 [resolveRolePackPersonaSection]
+             * 的替代语义保证，见 KDoc"优先级关系"）。
+             */
+            basePersona: String = DEFAULT_PERSONA,
+            /** 背景设定层（紧随基础身份层；见 @param worldbookSection） */
+            worldbookSection: String? = null,
+            /**
+             * 风格尾部强化（TASK-20260912-001，ADR-049 D6：角色轮次传 [ROLE_STYLE_TAIL]，
+             * 追加在**全部层之后**——近因位置对抗长人设正文的注意力衰减；默认 null 不注入，
+             * 出厂路径逐字节不变）
+             */
+            styleTail: String? = null
         ): String {
             val hasUserRules = !userRules.isNullOrBlank()
             val hasRag = !ragPrompt.isNullOrBlank()
@@ -3167,6 +3393,8 @@ class ConversationViewModel(
             val hasPhoneGuidance = !phoneControlGuidance.isNullOrBlank()
             val hasHotListGuidance = !hotListGuidance.isNullOrBlank()
             val hasTodoGuidance = !todoGuidance.isNullOrBlank()
+            val hasWorldbook = !worldbookSection.isNullOrBlank()
+            val hasStyleTail = !styleTail.isNullOrBlank()
             // ADR-018：轻量 Skill 索引（name + description），不注入完整 systemPrompt。
             // description 缺失时回退为 name（仍可感知能力存在）。
             val skillIndex = enabledSkills.mapNotNull { entry ->
@@ -3176,8 +3404,15 @@ class ConversationViewModel(
             }
 
             return buildString {
-                // ADR-018：默认 persona 始终作为基础身份
-                append(DEFAULT_PERSONA)
+                // ADR-018 + TASK-20260911-001：基础身份层——出厂默认 DEFAULT_PERSONA；
+                // rolepack 选中时为角色包直陈身份（置首，替代助手身份，见 basePersona KDoc）
+                append(basePersona)
+                // TASK-20260912-001（ADR-049 D4）：背景设定层——角色自己的世界与经历，
+                // 紧随基础身份层（同属"我是谁"），排在用户规则/外部资料（RAG/记忆）之前。
+                if (hasWorldbook) {
+                    append("\n\n")
+                    append(worldbookSection)
+                }
                 // ADR-030：用户规则（除安全限制外最高优先级）—— persona 之后、RAG 之前
                 if (hasUserRules) {
                     append("\n\n")
@@ -3222,9 +3457,17 @@ class ConversationViewModel(
                 if (skillIndex.isNotEmpty()) {
                     append("\n\n")
                     // DEF-007（Bug-5 次根因）：强化措辞 —— 用户明确点名技能名/能力时必须执行，
-                    // 否则按需使用、不改变基础身份。降低 LLM 忽略索引的概率。
-                    append("可用技能（用户明确提到技能名或对应能力时必须按对应规则执行；否则按需使用，不改变你的基础身份）：")
+                    // 否则按需使用。降低 LLM 忽略索引的概率。
+                    // TASK-20260912-001（ADR-049 决策 D2）：删去尾句"不改变你的基础身份"——
+                    // 该身份断言追加在 persona 层之后，与角色包直陈身份同层矛盾（该从句在
+                    // ADR-018 停用整份 Skill systemPrompt 注入后已无实际防线作用，属残留）。
+                    append("可用技能（用户明确提到技能名或对应能力时必须按对应规则执行；否则按需使用）：")
                     append(skillIndex.joinToString("、"))
+                }
+                // TASK-20260912-001（ADR-049 D6）：风格尾部强化——置于**最后**（近因位置）
+                if (hasStyleTail) {
+                    append("\n\n")
+                    append(styleTail)
                 }
             }.trim()
         }
@@ -3290,38 +3533,22 @@ class ConversationViewModel(
                     hotListEnabled = true,
                     // v1 真机二次修复（Issue 5）：手机操控高危确认通知（后台作答消费）
                     phoneControlAskUserNotifier = app.phoneControlAskUserNotifier,
-                    phoneControlCompletionNotifier = app.phoneControlCompletionNotifier
+                    phoneControlCompletionNotifier = app.phoneControlCompletionNotifier,
+                    // 批次20（BG-005，ADR-045）：后台操控会话级开关（VM/UI 写、执行器守卫读同一 StateFlow）
+                    bgControlEnabledFlow = app.backgroundControlEnabled,
+                    // 批次23-B（ADR-048）+ TASK-20260910-001：RolePack 角色包（语音/文本轮次统一 persona 注入）
+                    rolePackLoader = app.rolePackLoader,
+                    // 批次24（ADR-051 D8）：桌宠动作工具（pet__play_action）
+                    petLocalToolExecutor = app.petLocalToolExecutor,
+                    // TASK-20260910-001：文本聊天播报管理器（播放按钮；引擎跟随语音通话设置）
+                    textPlayback = io.prism.voice.TextPlaybackController(
+                        app,
+                        app.voiceEnginePrefs,
+                        app.apiKeyRepository,
+                        app.rolePackLoader
+                    )
                 )
             }
         }
     }
 }
-
-/**
- * RAG 构建结果（G-01/G-02 修复，ADR-012 5.5 三级降级差异化感知）。
- *
- * 调用方 [ConversationViewModel.sendMessage] 按 [when] 分支决定是否提示用户：
- * - [Success] → 注入 systemPrompt + ragContext + citations
- * - [EmbedFailed] → appendDelta 简短提示（ADR-012 5.5：项目暂无 Toast 基建）
- * - [NormalChat] → 主动关闭 / search 空 / 阈值过滤空 / 整个 RAG 异常，用户无感
- */
-private sealed interface RagBuildResult {
-    /** RAG 检索成功，注入 [plan]。 */
-    data class Success(val plan: RagPlan) : RagBuildResult
-
-    /** embed 失败，降级为普通对话，调用方应 appendDelta 提示用户。 */
-    object EmbedFailed : RagBuildResult
-
-    /**
-     * 普通对话（无提示）：RAG 主动关闭 / search 失败或空 / 阈值过滤后空 / 整个 RAG 注入异常。
-     * 整个 RAG 异常时，调用方已通过 [Log.w] 记录 simpleName（G-03 修复），用户侧无感。
-     */
-    object NormalChat : RagBuildResult
-}
-
-/** RAG 注入计划（system prompt + context + citations）。 */
-private data class RagPlan(
-    val systemPrompt: String,
-    val ragContext: String,
-    val citations: List<io.prism.ui.model.Citation>
-)

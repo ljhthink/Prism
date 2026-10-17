@@ -246,3 +246,38 @@
 -dontwarn org.tukaani.xz.MemoryLimitException
 -dontwarn org.tukaani.xz.SingleXZInputStream
 -dontwarn org.tukaani.xz.XZInputStream
+
+# 批次21（ADR-046）：Shizuku UserService——仅以字符串组件名经 Shizuku 反射实例化，
+# R8 混淆会整体删除/改名导致正式包 Shizuku 全能力静默失效（guardrail P1-1）
+-keep class io.prism.phonecontrol.bg.ShizukuUserService { *; }
+-keep class io.prism.phonecontrol.bg.IShizukuUserService { *; }
+-keep class io.prism.phonecontrol.bg.IShizukuUserService$Stub { *; }
+-keepclassmembers class * implements android.os.IInterface { *; }
+# Shizuku API 自身的混淆保护（官方依赖自带 consumer rules，此条为双保险）
+-dontwarn rikka.shizuku.**
+
+# 批次22（SZ-201，ADR-047）：sherpa-onnx 端侧流式 ASR——
+# 1) SherpaAsrEngine 仅以字符串经 AsrEngineFactory 反射创建，R8 缺 keep 会整体删除
+#    （正式包静默回落系统引擎——批次21 Shizuku UserService 同款坑）；
+# 2) com.k2fsa.sherpa.onnx 配置类字段（encoder/decoder/tokens 等）经 JNI 按名访问，
+#    混淆改名会导致 native 层取不到配置（模型加载失败）。
+-keep class io.prism.voice.SherpaAsrEngine { *; }
+-keep class com.k2fsa.sherpa.onnx.** { *; }
+
+# LVC-1/LVC-3（ADR-053/055，TKN-LVC-002 H-1 / TKN-LVC-015）：
+# 1) 合成器仅以字符串经 LocalCloneEngineFactory 反射创建（`Class.forName`），
+#    R8 缺 keep 会整体改名/删除 → **正式包静默回退系统播报**（批次21 Shizuku / 批次22 ASR 同款坑）；
+# 2) LocalCloneSampleCallback 是传给 sherpa JNI 的生成回调，JNI 按**运行时类**查找
+#    `invoke([F)Ljava/lang/Integer;`（offline-tts.cc::CallCallback）→ 改名/内联/删除同样会导致失败。
+#    该描述符已在 debug 下实证：lambda 形态直接 SIGABRT（真机 2026-09-20）。
+#
+# **按通配而非逐类列举**（TKN-LVC-016 修正）：TKN-LVC-015 曾逐类写
+# `-keep ...SherpaVitsSynthesizer`，而当时已有的写法**按类名**只覆盖了 ZipVoice 那一类 ⇒
+# 新增 VITS 时漏 keep，**仅正式包**静默失效（debug 全绿）。逐类 keep 天然对新类失效，
+# 是"同一缺陷反复复发"的根因 ⇒ 此处改为 `Sherpa*Synthesizer` 通配：新增任何
+# `io.prism.voice.local.SherpaXxxSynthesizer` 自动被覆盖，无需再改本文件。
+-keep class io.prism.voice.local.Sherpa*Synthesizer { *; }
+-keep class io.prism.voice.local.LocalCloneSampleCallback { *; }
+
+# pdfbox-android 可选 JPEG2000 编解码器（运行时不存在的可选依赖，pdfbox 自行降级）
+-dontwarn com.gemalto.jp2.JP2Decoder

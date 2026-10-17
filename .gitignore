@@ -39,8 +39,14 @@ Thumbs.db
 node_modules/
 
 # 运行时产物（CLAUDE.md 第二十节）
-logs/
+# 2026-09-24 资产整理：所有临时/一次性产物统一收敛到 tmp/（职责与清理规则见 tmp/README.md），
+# 故 logs/、.tmp-cyrene/、.tmp_research/、.research-cache/ 等分散条目已合并为下面这一条。
+# ⚠️ 若 tmp/ 下出现需长期保留的资产，正确做法是先迁出到正式目录，而不是改本文件绕过。
 tmp/
+# ⚠️ 保留 `logs/`（独立审查 L-5）：合并当时仓库内已无 logs/ 目录、app/src 也无写 logs/ 的代码（0 命中），
+# 但只要将来有运行时/第三方库写出任意层级的 `logs/`，没有这一条就会变成未跟踪文件，
+# 有被 `git add -A` 误纳入的风险（且这正是上一条注释所述那类"un-ignore 副作用"的反面）。
+logs/
 temp/
 .coverage/
 .nyc_output/
@@ -78,3 +84,52 @@ docs/reports/logcat/
 docs/reports/*.xml
 docs/reports/*.txt
 docs/reports/*.png
+
+# 批次22（SZ-201，ADR-047）：sherpa-onnx AAR 与流式语音模型（大二进制不入库）——
+# 由 docs/runbooks/setup-sherpa-voice.md 指引放置；缺失时条件集成自动降级 SystemAsrEngine
+app/libs/*.aar
+app/src/main/assets/models/streaming-zipformer-*/
+
+# 用户角色包与克隆音频素材（ADR-048：用户角色包不入 APK/assets/公开仓库；
+# voice-clone-kit 为个人克隆音色素材，guardrail TKN-VOICE-BUGFIX-002 D1）
+cyrene.rolepack
+# ⚠️ 2026-09-24（ADR-060）收窄：原先整体忽略 `voice-clone-kit/`，导致**能复算出生产的
+# 工具链脚本（含音频参数的唯一事实来源，如 build-local-voicepack.ps1 的 $SilenceScale）
+# 完全不在版本控制内** —— 即"改了什么参数无从追溯、也进不了代码审查"。
+# 现改为：只忽略不可再生的素材与体积产物，脚本/文档/清单纳入版本控制。
+voice-clone-kit/assets/
+voice-clone-kit/build-out/
+voice-clone-kit/**/__pycache__/
+
+# ============================================================
+# 一次性文档与规则体系本地专属（rules/05 §12.6，用户指示 2026-09-11）
+# 以下文档仅在本地维护，禁止通过任何通道推送至 GitHub 远程仓库。
+# 已跟踪的历史文件需执行 git rm --cached 移出版本控制。
+# ============================================================
+
+# 规则文件体系（入口 + 模块 + harness 适配）
+/AGENTS.md
+/CLAUDE.md
+/rules/
+/.trae/
+
+# 项目进展文档（原 AGENTS.md 进度内容，rules/03 §5.7）
+/docs/progress.md
+
+# PRD（一次性需求文档）
+/docs/PRD.md
+/docs/prd-*.md
+/prd.json
+
+# ADR（架构决策记录）
+/docs/decisions/
+
+# 联网调研的正文抓取缓存（一次工件，供引文复核；不入库）
+# 2026-09-24 起实际位置为 /tmp/research/cache/，已被上面的 tmp/ 一条覆盖
+
+# codegraph 工具索引（本地生成，43MB+，不入库）
+/.codegraph/
+
+# 批次24（ADR-051）：桌宠形象资产（用户私有资产，不入 Git、不入 APK）
+# 与 cyrene.rolepack 同一边界；重生成：node tmp/build-cyrene-petpack.js
+*.petpack

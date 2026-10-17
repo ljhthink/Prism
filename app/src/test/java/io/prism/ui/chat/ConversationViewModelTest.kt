@@ -326,50 +326,49 @@ class ConversationViewModelTest {
     }
 
     /**
-     * US-019 AC：RAG 开启但 embedder 抛异常时，降级为普通对话，不阻断。
-     * 验证 ADR-012 5.5 三级降级之「embed 失败」分支。
+     * ADR-050（TASK-20260912-002）：embedder 异常不再影响对话——知识库不再被自动检索。
      *
-     * **G-02 修复后行为**（TKN-US019-RAG-GUARDRAIL-001）：embed 失败 → appendDelta 提示用户
-     * 「⚠️ 知识库检索失败，已降级为普通对话」+ AI 流式回复。提示在前，回复在后。
+     * 原用例（US-019 AC「embed 失败 → appendDelta 提示降级」）验证的是已撤除的自动注入范式中的
+     * 「三级降级」分支。ADR-050 后客户端不做自动 embed，故 embedder 抛异常也不影响本轮请求，
+     * 更不会向用户插入"知识库检索失败"提示（消除无意义噪音）。
+     * 本用例保留"注入 StubEmbedderImpl(throwOnEmbed = true)"以证伪"仍存在自动 embed 调用"。
      */
     @Test
-    fun `rag on with embedder failure degrades to normal chat`() = runTest(mainDispatcher) {
+    fun `rag on with embedder failure no longer degrades nor notifies user`() = runTest(mainDispatcher) {
         val repo = ProviderConfigRepository(boxStore)
         val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
         repo.save(active)
         repo.setActive(repo.findByName(active.name)!!.id)
 
-        val provider = RecordingChatStreamProvider(listOf(StreamEvent.Delta("降级回复"), StreamEvent.Done))
+        val provider = RecordingChatStreamProvider(listOf(StreamEvent.Delta("正常回复"), StreamEvent.Done))
         val vm = ConversationViewModel(
             repo, provider,
-            StubEmbedderImpl(throwOnEmbed = true),  // embed 抛异常
+            StubEmbedderImpl(throwOnEmbed = true),  // 若被调用即抛异常（ADR-050 下不应被调用）
             KnowledgeBaseRepository(boxStore),
-            ioDispatcher = mainDispatcher  // 注入 test dispatcher，避免 withContext(IO) 脱离 test scheduler
+            ioDispatcher = mainDispatcher
         ).apply { setRagTarget(RagTarget.AllLibraries) }
 
         vm.sendMessage("查询一下知识库内容")
         advanceUntilIdle()
 
-        // ADR-018：embed 失败降级时 systemPrompt 为默认 persona
-        assertEquals("embed 失败应降级，systemPrompt 为默认 persona", ConversationViewModel.DEFAULT_PERSONA, provider.receivedSystemPrompts.single())
-        assertTrue("embed 失败应降级，ragContext 为 null", provider.receivedRagContexts.single() == null)
-        // G-02 修复：embed 失败应 appendDelta 提示 + AI 流式回复
+        // 能力声明仍在（systemPrompt = persona + 能力声明），但无正文注入
+        val sp = provider.receivedSystemPrompts.single()
+        assertTrue("systemPrompt 应以默认 persona 开头", sp!!.startsWith(ConversationViewModel.DEFAULT_PERSONA))
+        assertTrue("systemPrompt 应含知识库能力声明", sp.contains("【知识库能力】"))
+        assertTrue("ragContext 恒为 null", provider.receivedRagContexts.single() == null)
+        // 不再有"知识库检索失败"降级提示（不再自动检索）
         val content = vm.messages.value[1].content
-        assertTrue("应包含降级提示", content.contains("知识库检索失败"))
-        assertTrue("应包含降级提示文案", content.contains("已降级为普通对话"))
-        assertTrue("应包含 AI 流式回复", content.contains("降级回复"))
-        assertTrue("降级时不应附引用来源", vm.messages.value[1].sources.isEmpty())
-        // G-02 修复配套：降级提示消息不应进请求历史（aiId 过滤）
-        val sent = provider.receivedMessages.single()
-        assertTrue("请求历史不应包含降级提示消息", sent.none { it.content.contains("知识库检索失败") })
+        assertFalse("不应再出现自动检索降级提示", content.contains("知识库检索失败"))
+        assertEquals("正常回复", content)
+        assertTrue("不应附自动填充的引用来源", vm.messages.value[1].sources.isEmpty())
     }
 
     /**
-     * US-019 AC：RAG 开启但知识库为空（search 返回空）时，降级为普通对话。
-     * 验证 ADR-012 5.5 三级降级之「search 失败或空结果」分支。
+     * ADR-050：知识库为空时同样不自动检索、不注入——能力声明仍注入（模型可主动调用工具查询，
+     * 由工具返回"知识库暂无资料/未找到相关片段"）。
      */
     @Test
-    fun `rag on with empty knowledgebase degrades to normal chat`() = runTest(mainDispatcher) {
+    fun `rag on with empty knowledgebase still declares capability only`() = runTest(mainDispatcher) {
         val repo = ProviderConfigRepository(boxStore)
         val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
         repo.save(active)
@@ -379,16 +378,16 @@ class ConversationViewModelTest {
         val vm = ConversationViewModel(
             repo, provider,
             DefaultStubEmbedder,  // embed 正常
-            KnowledgeBaseRepository(boxStore),  // 空库，search 返回空
+            KnowledgeBaseRepository(boxStore),  // 空库
             ioDispatcher = mainDispatcher
         ).apply { setRagTarget(RagTarget.AllLibraries) }
 
         vm.sendMessage("查询一下知识库内容")
         advanceUntilIdle()
 
-        // ADR-018：空库降级时 systemPrompt 为默认 persona
-        assertEquals("空库应降级，systemPrompt 为默认 persona", ConversationViewModel.DEFAULT_PERSONA, provider.receivedSystemPrompts.single())
-        assertTrue("空库应降级，ragContext 为 null", provider.receivedRagContexts.single() == null)
+        val sp = provider.receivedSystemPrompts.single()
+        assertTrue("空库时仍声明能力（模型可主动调用工具）", sp!!.contains("【知识库能力】"))
+        assertTrue("空库时 ragContext 为 null", provider.receivedRagContexts.single() == null)
         assertEquals("空库回复", vm.messages.value[1].content)
         assertTrue("空库时不应附引用来源", vm.messages.value[1].sources.isEmpty())
     }
@@ -524,14 +523,14 @@ class ConversationViewModelTest {
     // 以下测试补齐 guardrail TKN-US019-RAG-GUARDRAIL-001 G-05/G-07 发现的覆盖缺口。
 
     /**
-     * US-019 AC-3 核心验证（G-05 修复）：RAG 开启 + embed 成功 + search 返回结果 +
-     * 阈值过滤通过 → systemPrompt + ragContext + citations 均正确注入。
+     * ADR-050 核心回归（原 US-019 AC-3 / G-05）：**即便知识库中存在与 query 完全匹配的片段
+     * （similarity=1.0），客户端也不再自动注入正文**。
      *
-     * 构造方式：向默认库（kbId=0L）插入一条 chunk，embedding 与 StubEmbedderImpl 返回值一致
-     * （FloatArray(384){0.5f}），COSINE 距离=0 → similarity=1.0，通过 0.3 阈值。
+     * 构造方式保持不变（默认库插入 embedding 与 StubEmbedder 一致的 2 条 chunk，修复前必注入），
+     * 断言改为新契约：ragContext 恒 null、sources 不由客户端预填、systemPrompt 只含能力声明。
      */
     @Test
-    fun `rag on with matching chunks injects system prompt rag context and citations`() = runTest(mainDispatcher) {
+    fun `rag on with matching chunks no longer auto injects content`() = runTest(mainDispatcher) {
         val repo = ProviderConfigRepository(boxStore)
         val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
         repo.save(active)
@@ -542,7 +541,7 @@ class ConversationViewModelTest {
         kbRepo.addChunk(KnowledgeChunk(
             title = "文档A.pdf#1",
             content = "这是文档A的第一个片段，含关键信息。",
-            embedding = FloatArray(384) { 0.5f },  // 与 DefaultStubEmbedder 返回值一致
+            embedding = FloatArray(384) { 0.5f },  // 与 DefaultStubEmbedder 返回值一致（修复前 similarity=1.0）
             knowledgeBaseId = 0L
         ))
         kbRepo.addChunk(KnowledgeChunk(
@@ -563,53 +562,45 @@ class ConversationViewModelTest {
         vm.sendMessage("查询关键信息")
         advanceUntilIdle()
 
-        // ADR-018：systemPrompt 注入 = 默认 persona + RAG SYSTEM_PROMPT
+        // 1. systemPrompt = 默认 persona + 知识库能力声明（**无 RAG grounding rules、无正文**）
         val sysPrompt = provider.receivedSystemPrompts.single()
-        assertNotNull("RAG 成功时 systemPrompt 不应为 null", sysPrompt)
+        assertNotNull("systemPrompt 不应为 null", sysPrompt)
         val sp = sysPrompt!!
         assertTrue("systemPrompt 应以默认 persona 开头", sp.startsWith(ConversationViewModel.DEFAULT_PERSONA))
-        assertTrue("systemPrompt 应包含 RAG grounding rules", sp.contains(RagContextBuilder.SYSTEM_PROMPT))
+        assertTrue("systemPrompt 应包含知识库能力声明", sp.contains("【知识库能力】"))
+        assertFalse("systemPrompt 不应包含【知识库片段】正文块", sp.contains("【知识库片段】"))
+        assertFalse("systemPrompt 不应包含文档正文", sp.contains("这是文档A的第一个片段"))
+
+        // 2. ragContext 恒为 null —— 知识库正文只在 LLM 主动调用工具后进入上下文
+        assertTrue("ADR-050：ragContext 恒为 null", provider.receivedRagContexts.single() == null)
+
+        // 3. 请求历史中不得出现任何知识库正文
+        val sent = provider.receivedMessages.single()
         assertTrue(
-            "persona 应在 RAG rules 之前",
-            sp.indexOf(ConversationViewModel.DEFAULT_PERSONA) < sp.indexOf(RagContextBuilder.SYSTEM_PROMPT)
+            "ADR-050：请求历史不得含知识库正文",
+            sent.none { it.content.contains("这是文档A的第一个片段") || it.content.contains("文档B的第三个片段") }
         )
 
-        // 2. ragContext 注入：应含【知识库片段】头 + [来源N] 编号 + 文件信息
-        val ragCtx = provider.receivedRagContexts.single()
-        assertNotNull("ragContext 不应为 null", ragCtx)
-        assertTrue("ragContext 应以【知识库片段】开头", ragCtx!!.startsWith("【知识库片段】"))
-        assertTrue("ragContext 应含 [来源1]", ragCtx.contains("[来源1]"))
-        assertTrue("ragContext 应含文档A", ragCtx.contains("文档A.pdf"))
-        assertTrue("ragContext 应含片段=1", ragCtx.contains("片段=1"))
-
-        // 3. citations 附着：AI 消息 sources 非空，编号与 context 对齐
+        // 4. 客户端不再预填引用来源（工具路径由 parseKnowledgeBaseCitations* 从工具结果解析）
         val aiMsg = vm.messages.value[1]
-        assertTrue("AI 消息应附引用来源", aiMsg.sources.isNotEmpty())
-        assertEquals("top-k=3 但只有 2 条 chunk，应返回 2 条 citation", 2, aiMsg.sources.size)
-        assertEquals("第 1 条 citation index=1", 1, aiMsg.sources[0].index)
-        assertEquals("第 1 条 citation documentTitle", "文档A.pdf", aiMsg.sources[0].documentTitle)
-        assertEquals("第 1 条 citation chunkIndex=1", 1, aiMsg.sources[0].chunkIndex)
-        assertEquals("第 2 条 citation index=2", 2, aiMsg.sources[1].index)
+        assertTrue("ADR-050：不应由客户端预填引用来源", aiMsg.sources.isEmpty())
 
-        // 4. AI 流式回复正常追加
+        // 5. AI 流式回复正常追加
         assertTrue("应包含 AI 流式回复", aiMsg.content.contains("基于知识库回复"))
     }
 
     /**
-     * G-07 修复：search 返回非空但全部 similarity < 0.3 阈值 → 降级为普通对话，无引用。
-     *
-     * 构造方式：chunk embedding 与 query embedding 正交（点积为 0），COSINE 距离=1 → similarity=0，
-     * 低于 0.3 阈值，全部被过滤。
+     * ADR-050：similarity 低于任何阈值的无关片段同样不可能被注入（改为断言"任何相似度都不注入"）。
      */
     @Test
-    fun `rag on with below threshold results degrades to normal chat`() = runTest(mainDispatcher) {
+    fun `rag on with below threshold results never injects anything`() = runTest(mainDispatcher) {
         val repo = ProviderConfigRepository(boxStore)
         val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
         repo.save(active)
         repo.setActive(repo.findByName(active.name)!!.id)
 
         val kbRepo = KnowledgeBaseRepository(boxStore)
-        // chunk embedding 全 0，与 query embedding（全 0.5）正交，similarity = 1 - 1 = 0 < 0.3
+        // chunk embedding 全 0，与 query embedding（全 0.5）正交，similarity = 0
         kbRepo.addChunk(KnowledgeChunk(
             title = "无关文档.txt#1",
             content = "无关内容",
@@ -628,36 +619,32 @@ class ConversationViewModelTest {
         vm.sendMessage("查询")
         advanceUntilIdle()
 
-        // 阈值过滤后为空 → NormalChat 降级，无 systemPrompt / ragContext / citations
-        // ADR-018：阈值过滤空降级时 systemPrompt 为默认 persona
-        assertEquals("阈值过滤空应降级，systemPrompt 为默认 persona", ConversationViewModel.DEFAULT_PERSONA, provider.receivedSystemPrompts.single())
-        assertTrue("阈值过滤空应降级，ragContext 为 null", provider.receivedRagContexts.single() == null)
+        assertTrue("ragContext 恒为 null", provider.receivedRagContexts.single() == null)
         assertEquals("普通回复", vm.messages.value[1].content)
-        assertTrue("阈值过滤空不应附引用来源", vm.messages.value[1].sources.isEmpty())
+        assertTrue("不应附引用来源", vm.messages.value[1].sources.isEmpty())
+        assertFalse("无关内容不得进入 systemPrompt",
+            provider.receivedSystemPrompts.single()!!.contains("无关内容"))
     }
 
     /**
-     * T-3 边界（guardrail 补充）：similarity ∈ [0.3, 0.5) 时应被过滤（UXR3 问题 6 阈值 0.3→0.5）。
-     *
-     * 构造方式：query 为 [1,0,0,...]（单位向量），chunk 为 [0.4, √0.84, 0,...]（单位向量），
-     * COSINE 相似度 = 0.4（点积），similarity=0.4。此值 ≥ 旧阈值 0.3 但 < 新阈值 0.5，
-     * 应被过滤 → 降级为普通对话（证明阈值已提高）。
+     * ADR-050：similarity ∈ [0.5, 0.7) 的"部分相关"片段（旧阈值下会被注入）同样不注入 ——
+     * 这是真机污染的实际形态（语料同质时 0.5~0.7 命中率极高）。
      */
     @Test
-    fun `rag on with similarity between old and new threshold is filtered`() = runTest(mainDispatcher) {
+    fun `rag on with partially relevant chunks is never auto injected`() = runTest(mainDispatcher) {
         val repo = ProviderConfigRepository(boxStore)
         val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
         repo.save(active)
         repo.setActive(repo.findByName(active.name)!!.id)
 
         val kbRepo = KnowledgeBaseRepository(boxStore)
-        // chunk = [0.4, √0.84, 0...]，与 query = [1,0,0...] 的 COSINE 相似度 = 0.4
+        // chunk = [0.6, √0.64, 0...]，与 query = [1,0,0...] 的 COSINE 相似度 = 0.6（旧阈值 0.5 通过）
         val chunkEmb = FloatArray(384)
-        chunkEmb[0] = 0.4f
-        chunkEmb[1] = kotlin.math.sqrt(0.84).toFloat()
+        chunkEmb[0] = 0.6f
+        chunkEmb[1] = kotlin.math.sqrt(0.64).toFloat()
         kbRepo.addChunk(KnowledgeChunk(
-            title = "中相关文档.txt#1",
-            content = "中相关内容",
+            title = "部分相关文档.txt#1",
+            content = "部分相关内容",
             embedding = chunkEmb,
             knowledgeBaseId = 0L
         ))
@@ -673,14 +660,11 @@ class ConversationViewModelTest {
         vm.sendMessage("查询")
         advanceUntilIdle()
 
-        // similarity=0.4 < 0.5 新阈值 → 应被过滤 → 降级为普通对话
-        assertEquals(
-            "0.4 相似度（≥旧0.3 <新0.5）应被过滤，systemPrompt 为默认 persona",
-            ConversationViewModel.DEFAULT_PERSONA,
-            provider.receivedSystemPrompts.single()
-        )
-        assertTrue("0.4 相似度应过滤，ragContext 为 null", provider.receivedRagContexts.single() == null)
-        assertTrue("0.4 相似度不应附引用来源", vm.messages.value[1].sources.isEmpty())
+        assertTrue("0.6 相似度（旧阈值下必注入）在 ADR-050 下不再注入",
+            provider.receivedRagContexts.single() == null)
+        assertFalse("部分相关内容不得进入 systemPrompt",
+            provider.receivedSystemPrompts.single()!!.contains("部分相关内容"))
+        assertTrue("不应附引用来源", vm.messages.value[1].sources.isEmpty())
     }
 
     /**
@@ -689,15 +673,21 @@ class ConversationViewModelTest {
      * 不调用 embedder.embed()（若 embed 被调用，StubEmbedderImpl(throwOnEmbed=true) 会抛异常
      * 触发 EmbedFailed 降级，AI 消息内容会含 "⚠️" 前缀）。
      */
+    /**
+     * ADR-050 + M-02：MINIMAL/CHAT_ONLY 档（ragTopK=0）——**低端档不暴露知识库能力**：
+     * 既不注入能力声明（systemPrompt 仅默认 persona），也不注入知识库工具，且不调用 embed。
+     *
+     * （原用例验证"buildRagPlan 短路"，ADR-050 后 buildRagPlan 已删除，语义由能力门控承接。）
+     */
     @Test
-    fun `ragTopK zero short circuits to normal chat without calling embed`() = runTest(mainDispatcher) {
+    fun `ragTopK zero hides kb capability without calling embed`() = runTest(mainDispatcher) {
         val repo = ProviderConfigRepository(boxStore)
         val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
         repo.save(active)
         repo.setActive(repo.findByName(active.name)!!.id)
 
         val kbRepo = KnowledgeBaseRepository(boxStore)
-        // 插入匹配 chunk（若短路失败会执行 search 并可能返回结果）
+        // 插入匹配 chunk（若仍自动检索会命中并注入）
         kbRepo.addChunk(KnowledgeChunk(
             title = "匹配文档.txt#1",
             content = "匹配内容",
@@ -708,7 +698,7 @@ class ConversationViewModelTest {
         val provider = RecordingChatStreamProvider(listOf(StreamEvent.Delta("普通回复"), StreamEvent.Done))
         val vm = ConversationViewModel(
             repo, provider,
-            StubEmbedderImpl(throwOnEmbed = true),  // 若 embed 被调用会抛异常 → EmbedFailed
+            StubEmbedderImpl(throwOnEmbed = true),  // 若 embed 被调用会抛异常
             kbRepo,
             ioDispatcher = mainDispatcher,
             ragTopK = 0  // MINIMAL/CHAT_ONLY 档
@@ -717,22 +707,18 @@ class ConversationViewModelTest {
         vm.sendMessage("查询")
         advanceUntilIdle()
 
-        // ragTopK=0 短路 → NormalChat（embed 未被调用，无 ⚠️ 前缀）
-        // ADR-018：ragTopK=0 短路时 systemPrompt 为默认 persona
-        assertEquals("ragTopK=0 应短路返回 NormalChat，systemPrompt 为默认 persona",
+        assertEquals("低端档不应声明知识库能力，systemPrompt 仅默认 persona",
             ConversationViewModel.DEFAULT_PERSONA, provider.receivedSystemPrompts.single())
-        assertTrue("ragTopK=0 应短路返回 NormalChat，ragContext 为 null",
-            provider.receivedRagContexts.single() == null)
-        assertEquals("ragTopK=0 短路内容应为纯回复（无 EmbedFailed 提示）",
-            "普通回复", vm.messages.value[1].content)
-        assertTrue("ragTopK=0 不应附引用来源", vm.messages.value[1].sources.isEmpty())
+        assertTrue("ragContext 恒为 null", provider.receivedRagContexts.single() == null)
+        assertEquals("内容应为纯回复（无降级提示）", "普通回复", vm.messages.value[1].content)
+        assertTrue("不应附引用来源", vm.messages.value[1].sources.isEmpty())
     }
 
     /**
-     * M-02 防御性验证：ragTopK 负值也应短路返回 NormalChat（<= 0 条件覆盖负数）。
+     * ADR-050 防御性验证：ragTopK 负值同样不暴露能力（<= 0 条件覆盖负数）。
      */
     @Test
-    fun `ragTopK negative also short circuits to normal chat`() = runTest(mainDispatcher) {
+    fun `ragTopK negative also hides kb capability`() = runTest(mainDispatcher) {
         val repo = ProviderConfigRepository(boxStore)
         val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
         repo.save(active)
@@ -750,10 +736,9 @@ class ConversationViewModelTest {
         vm.sendMessage("查询")
         advanceUntilIdle()
 
-        assertEquals("ragTopK 负值应短路，内容为纯回复",
+        assertEquals("ragTopK 负值内容为纯回复",
             "安全回复", vm.messages.value[1].content)
-        // ADR-018：ragTopK 负值短路时 systemPrompt 为默认 persona
-        assertEquals("ragTopK 负值应短路，systemPrompt 为默认 persona",
+        assertEquals("ragTopK 负值不应声明知识库能力",
             ConversationViewModel.DEFAULT_PERSONA, provider.receivedSystemPrompts.single())
     }
 
@@ -773,24 +758,24 @@ class ConversationViewModelTest {
     }
 
     /**
-     * G-04 修复验证：SpecificLibrary(kbId > 0) 指定库检索，命中该库 chunk。
+     * ADR-050：SpecificLibrary 模式的**能力声明范围**——声明中携带该库 id（供 LLM 调用工具时
+     * 指定 knowledgeBaseId），且不再有任何库内容被自动注入。
      */
     @Test
-    fun `rag on with specific library retrieves only that library chunks`() = runTest(mainDispatcher) {
+    fun `rag on with specific library declares scoped capability only`() = runTest(mainDispatcher) {
         val repo = ProviderConfigRepository(boxStore)
         val active = ProviderConfig(name = "OpenAI", baseUrl = "https://api.openai.com/v1", apiKeyRef = "openai", models = listOf("gpt-4o"))
         repo.save(active)
         repo.setActive(repo.findByName(active.name)!!.id)
 
         val kbRepo = KnowledgeBaseRepository(boxStore)
-        // 自建库 id=1，插入匹配 chunk
+        // 自建库 id=1 + 默认库各插入匹配 chunk（修复前 SpecificLibrary 会只注入自建库片段）
         kbRepo.addChunk(KnowledgeChunk(
             title = "自建库文档.pdf#1",
             content = "自建库内容",
             embedding = FloatArray(384) { 0.5f },
             knowledgeBaseId = 1L
         ))
-        // 默认库 kbId=0L，插入匹配 chunk（不应被 SpecificLibrary(1L) 检索到）
         kbRepo.addChunk(KnowledgeChunk(
             title = "默认库文档.pdf#1",
             content = "默认库内容",
@@ -809,55 +794,18 @@ class ConversationViewModelTest {
         vm.sendMessage("查询")
         advanceUntilIdle()
 
-        // 应只命中自建库 chunk，不命中默认库 chunk
-        val ragCtx = provider.receivedRagContexts.single()
-        assertNotNull(ragCtx)
-        assertTrue("应含自建库文档", ragCtx!!.contains("自建库文档.pdf"))
-        assertFalse("不应含默认库文档", ragCtx.contains("默认库文档.pdf"))
-        assertEquals("应只返回 1 条 citation", 1, vm.messages.value[1].sources.size)
-        assertEquals("自建库文档.pdf", vm.messages.value[1].sources[0].documentTitle)
+        val sp = provider.receivedSystemPrompts.single()!!
+        assertTrue("能力声明应含库范围", sp.contains("knowledgeBaseId=1"))
+        assertFalse("不得自动注入任何库正文", sp.contains("自建库内容") || sp.contains("默认库内容"))
+        assertTrue("ragContext 恒为 null", provider.receivedRagContexts.single() == null)
+        assertTrue("不应由客户端预填引用来源", vm.messages.value[1].sources.isEmpty())
     }
 
-    // ===== Bug fix（UXR8-R3）：RAG 按需检索预判（needsRagRetrieval 纯函数） =====
-
-    @Test
-    fun `needsRagRetrieval skips greetings and confirmations`() {
-        // 寒暄/确认类消息：无检索需求，应跳过
-        assertFalse("你好 应跳过", ConversationViewModel.needsRagRetrieval("你好"))
-        assertFalse("好的 应跳过", ConversationViewModel.needsRagRetrieval("好的"))
-        assertFalse("谢谢 应跳过", ConversationViewModel.needsRagRetrieval("谢谢"))
-        assertFalse("嗯 应跳过", ConversationViewModel.needsRagRetrieval("嗯"))
-        assertFalse("hello 应跳过", ConversationViewModel.needsRagRetrieval("hello"))
-        assertFalse("hi 应跳过", ConversationViewModel.needsRagRetrieval("hi"))
-        // 前缀命中（如"好的，谢谢"）也应跳过
-        assertFalse("好的，谢谢 应跳过", ConversationViewModel.needsRagRetrieval("好的，谢谢"))
-    }
-
-    @Test
-    fun `needsRagRetrieval keeps short queries and real questions`() {
-        // 短但明确的查询：不应被过滤（Bug fix：不能因消息短就跳过检索）
-        assertTrue("查询 应保留", ConversationViewModel.needsRagRetrieval("查询"))
-        assertTrue("总结 应保留", ConversationViewModel.needsRagRetrieval("总结"))
-        assertTrue("搜索 应保留", ConversationViewModel.needsRagRetrieval("搜索"))
-        // 正常问题消息应保留
-        assertTrue("普通问题应保留", ConversationViewModel.needsRagRetrieval("Prism 支持哪些平台？"))
-        assertTrue("查询知识库内容应保留", ConversationViewModel.needsRagRetrieval("查询一下知识库内容"))
-    }
-
-    @Test
-    fun `needsRagRetrieval greeting prefix with real query must not be skipped`() {
-        // guardrail H-1 回归：寒暄/确认前缀 + 真实查询内容 = 有检索需求（禁止前缀匹配整句跳过）
-        assertTrue("你好+查询应保留", ConversationViewModel.needsRagRetrieval("你好，帮我查一下知识库"))
-        assertTrue("谢谢+总结应保留", ConversationViewModel.needsRagRetrieval("谢谢，请总结一下要点"))
-        assertTrue("了解+查询应保留", ConversationViewModel.needsRagRetrieval("了解一下 Prism 架构"))
-        assertTrue("前缀命中但含疑问应保留", ConversationViewModel.needsRagRetrieval("对这个问题你怎么看"))
-    }
-
-    @Test
-    fun `needsRagRetrieval blank message returns false`() {
-        assertFalse("空白消息应跳过", ConversationViewModel.needsRagRetrieval(""))
-        assertFalse("纯空白应跳过", ConversationViewModel.needsRagRetrieval("   "))
-    }
+    // ===== ADR-050（2026-09-12）：RAG 自动注入预判用例已随范式撤除一并移除 =====
+    // 原 4 个 `needsRagRetrieval` 用例（寒暄黑名单 / 短查询保留 / 前缀不误伤 / 空白）
+    // 验证的是"用启发式短语黑名单决定是否自动检索"这一被撤除的范式。
+    // 新契约（不自动注入 + 能力声明 + 工具按需检索）由
+    // `ConversationViewModelKnowledgeBaseInjectionTest` 覆盖。
 
     // ===== UXR3 问题 13（ADR-023）：消息编辑重发 =====
 

@@ -37,6 +37,13 @@ class PhoneControlKeepAliveService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 修复轮八：通知栏「关闭后台虚拟屏」动作——用户手动立即释放（不必等 120s 空闲）
+        if (intent?.action == ACTION_RELEASE_DISPLAY) {
+            Log.i(TAG, "用户请求关闭后台虚拟屏（通知栏动作）")
+            releaseDisplayAsync()
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(NOTIFICATION_ID, buildNotification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
@@ -44,6 +51,29 @@ class PhoneControlKeepAliveService : Service() {
         }
         Log.i(TAG, "手机操控保活前台服务已启动")
         return START_NOT_STICKY
+    }
+
+    /**
+     * 修复轮八（Problem B：叠加小窗滞留扰民）：用户在最近任务划掉 Prism 时立即释放后台
+     * 虚拟屏并停止保活——浅杀（划单个 Task）时进程存活，onTaskRemoved 可靠回调；深杀
+     * （清理按钮杀进程）时回调可能不执行，由 VirtualDisplayManager.reconcileStaleOverlay
+     * （下次进程启动对账）兜底。参照 rustdesk #15753 双路径清理模式。
+     */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        Log.i(TAG, "用户移除应用任务（onTaskRemoved）→ 释放后台虚拟屏")
+        releaseDisplayAsync()
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
+    }
+
+    /** 后台线程释放虚拟屏（Shizuku force-stop/设置清除单条最长 5s，防主线程 ANR）。 */
+    private fun releaseDisplayAsync() {
+        Thread {
+            runCatching {
+                io.prism.phonecontrol.bg.VirtualDisplayManager.releaseDisplay(applicationContext)
+            }
+            PhoneControlSessionManager.reset()
+        }.start()
     }
 
     override fun onDestroy() {
@@ -58,11 +88,19 @@ class PhoneControlKeepAliveService : Service() {
                 NotificationChannel(CHANNEL_ID, CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW)
             )
         }
+        // 修复轮八：加「关闭后台虚拟屏」动作——用户可手动立即关闭叠加小窗
+        val releaseIntent = Intent(this, PhoneControlKeepAliveService::class.java)
+            .setAction(ACTION_RELEASE_DISPLAY)
+        val releasePending = android.app.PendingIntent.getService(
+            this, REQUEST_RELEASE, releaseIntent,
+            android.app.PendingIntent.FLAG_IMMUTABLE
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_manage)
             .setContentTitle("Prism 正在操控手机")
             .setContentText("执行 LLM 操控手机任务中，请勿强制停止")
             .setOngoing(true)
+            .addAction(0, "关闭后台虚拟屏", releasePending)
             .build()
     }
 
@@ -72,6 +110,10 @@ class PhoneControlKeepAliveService : Service() {
         private const val CHANNEL_ID = "prism_phone_keepalive"
         private const val CHANNEL_NAME = "手机操控保活"
         private const val NOTIFICATION_ID = 2001
+
+        /** 修复轮八：通知动作 action（用户手动释放后台虚拟屏）。 */
+        private const val ACTION_RELEASE_DISPLAY = "io.prism.phonecontrol.ACTION_RELEASE_DISPLAY"
+        private const val REQUEST_RELEASE = 2002
 
         /** 启动保活前台服务（容错：权限未授予/被系统限制时静默降级，不阻断主流程）。 */
         fun start(context: Context) {

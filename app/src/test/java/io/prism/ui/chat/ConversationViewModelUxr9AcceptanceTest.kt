@@ -77,13 +77,13 @@ class ConversationViewModelUxr9AcceptanceTest {
         return repo
     }
 
-    // ==================== US-901 AC-4：buildContext 注入片段 top-2 上限 ====================
+    // ==================== ADR-050：注入条数上限的范式级替代 ====================
 
     @Test
-    fun `rag injection caps at top-2 when 3 chunks pass threshold`() = runTest(mainDispatcher) {
+    fun `rag no longer auto injects even when 3 chunks pass threshold`() = runTest(mainDispatcher) {
         val repo = providerRepo()
         val kbRepo = KnowledgeBaseRepository(boxStore)
-        // 3 条 chunk 与 stub embedder 向量完全一致（相似度 1.0，全部通过 0.5 阈值）
+        // 3 条 chunk 与 stub embedder 向量完全一致（修复前 similarity=1.0，全部通过 0.5 阈值）
         repeat(3) { i ->
             kbRepo.addChunk(KnowledgeChunk(
                 title = "文档$i.md#1",
@@ -101,17 +101,14 @@ class ConversationViewModelUxr9AcceptanceTest {
         vm.sendMessage("查询相关内容")
         advanceUntilIdle()
 
-        val ragCtx = provider.receivedRagContexts.single()
-        assertTrue("应注入 ragContext", ragCtx != null)
-        assertTrue("应含来源1", ragCtx!!.contains("[来源1]"))
-        assertTrue("应含来源2", ragCtx.contains("[来源2]"))
-        assertFalse("top-2 上限：不应出现 [来源3]", ragCtx.contains("[来源3]"))
-        // citations 同样 ≤2（编号与 context 对齐）
+        // ADR-050：不再有客户端自动注入 → 条数上限问题（原 top-2 截断）不再存在，
+        // 改为断言"一条都不注入"，条数控制下移到工具层（KnowledgeBaseLocalToolExecutor.MAX_INJECTED）。
+        assertTrue("ADR-050：不得自动注入 ragContext", provider.receivedRagContexts.single() == null)
+        val sp = provider.receivedSystemPrompts.single()!!
+        assertFalse("不应出现任何来源编号", sp.contains("[来源1]"))
+        assertTrue("应声明知识库能力", sp.contains("【知识库能力】"))
         val aiMsg = vm.messages.value[1]
-        assertTrue("AI 消息应附引用来源", aiMsg.sources.isNotEmpty())
-        assertTrue("citations 应 ≤ 2（top-2 上限）", aiMsg.sources.size <= 2)
-        assertTrue("systemPrompt 应含 RAG grounding rules",
-            provider.receivedSystemPrompts.single()!!.contains(RagContextBuilder.SYSTEM_PROMPT))
+        assertTrue("不应由客户端预填引用来源", aiMsg.sources.isEmpty())
     }
 
     // ==================== US-903 AC-4：图片编码失败不触发 LLM ====================

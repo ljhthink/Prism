@@ -53,6 +53,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
@@ -105,6 +106,7 @@ import io.prism.ui.components.PrismSheet
 import io.prism.ui.components.PrismSheetHost
 import io.prism.ui.components.PrismTopBar
 import io.prism.ui.components.PrismTopBarAction
+import io.prism.voice.VoiceCallOverlay
 import io.prism.ui.model.ChatMessage
 import io.prism.ui.model.Role
 import io.prism.ui.model.SearchResult
@@ -174,7 +176,13 @@ fun ConversationScreen(
     val providers by viewModel.providers.collectAsState()
     val ragTarget by viewModel.ragTarget.collectAsState()
     val thinkingEnabled by viewModel.thinkingEnabled.collectAsState()
+    // TASK-20260910-001：文本播报状态（AI 回复「播放」按钮渲染 ▶/⏹）
+    val textPlaybackState by viewModel.textPlaybackState.collectAsState()
     val webSearchEnabled by viewModel.webSearchEnabledFlow.collectAsState()
+    // 批次20（BG-005，ADR-045）：后台操控会话级开关
+    val backgroundControlEnabled by viewModel.backgroundControlEnabledFlow.collectAsState()
+    // 批次20（VC-005，ADR-044）：语音通话覆盖层可见性
+    var voiceCallVisible by remember { mutableStateOf(false) }
     // UXR8 N2 Phase 2（ADR-030）：LLM 反问/澄清待答问题（null = 无待答问题，不显示卡片）
     val pendingAskUser by viewModel.pendingAskUser.collectAsState()
     // v1 批次17（US-1703）：TODO 任务清单卡片状态（todo_write 更新，空清单不渲染卡片）
@@ -325,6 +333,12 @@ fun ConversationScreen(
                 title = "Prism",
                 subtitle = "深空 AI · ${activeProvider?.name ?: "未配置"}",
                 actions = {
+                    // 批次20（VC-005，ADR-044）：语音通话入口（全屏覆盖层，轮次进同一会话）
+                    PrismTopBarAction(
+                        icon = { Icon(Icons.Filled.Mic, null, tint = PrismTextDim) },
+                        contentDescription = "语音通话",
+                        onClick = { voiceCallVisible = true }
+                    )
                     // UX-001 问题 4（ADR-021）：历史会话入口（顶栏按钮，null 时隐藏）
                     if (onOpenHistory != null) {
                         PrismTopBarAction(
@@ -379,6 +393,7 @@ fun ConversationScreen(
                         message = message,
                         // UXR3 问题 13（ADR-023）：复制 / 编辑
                         onCopy = { copyToClipboard(context, message.content) },
+                        onPlayText = { viewModel.toggleTextPlayback(message.id, message.content) },
                         onEdit = { id, original ->
                             // 编辑：回填输入框 + 标记待编辑消息 id（发送时走编辑重发）
                             editingMessageId = id
@@ -393,6 +408,10 @@ fun ConversationScreen(
                         onRegenerate = { viewModel.regenerateLastAiMessage() },
                         onSwitchVariant = { id, index -> viewModel.switchVariant(id, index) },
                         isLastMessage = message.id == messages.lastOrNull()?.id,
+                        // TASK-20260910-001：本条消息正在播报（按钮渲染 ⏹ 停止）
+                        isPlayingText = textPlaybackState.let {
+                            it is io.prism.voice.TextPlaybackController.State.Playing && it.messageId == message.id
+                        },
                         // UXR4 问题 1/4/6（ADR-024）：思考区展示受深度思考开关控制
                         //（协议层 reasoning_content 回传不受此影响，见 ADR-024 子决策 A）
                         showThinking = thinkingEnabled,
@@ -411,10 +430,10 @@ fun ConversationScreen(
                     item { ToolCallIndicator(toolName) }
                 }
                 if (isTyping) {
-                    // UXR6 问题 3a（替代 UXR3 问题 7 的全局 ragDone 推断）：是否显示「正在检索
-                    // 知识库…」由**真实检索状态**（ragRetrieving）驱动 —— 仅当前消息实际执行 RAG
-                    // 检索期间显示；检索完成/降级后切换为「正在生成回答…」。修复旧逻辑
-                    // 「ragTarget 非 Off + 全局 ragDone」导致无论问题是否相关都显示检索画面。
+                    // ADR-050（2026-09-12）：知识库**不再自动检索**——`ragRetrieving` 因此恒为 false
+                    // （ConversationViewModel 侧已无置位路径，字段保留以备将来接工具事件），
+                    // 本指示事实上恒显示「正在思考…」。"正在查资料"的可见性改由上方工具调用
+                    // 指示（activeTool → ToolCallIndicator）承载：知识库工具会显示为「查知识库」。
                     item { TypingIndicator(isRagOn = ragRetrieving) }
                 }
             }
@@ -428,12 +447,14 @@ fun ConversationScreen(
             Column(modifier = Modifier) {
                 // v1 批次17（US-1703）：TODO 任务清单卡片（todo_write 维护，空清单不渲染）
                 TodoCard(state = todoListState)
-                // UX-001 问题 5（ADR-021）：能力开关行置于输入框上方（联网搜索 / 深度思考）
+                // UX-001 问题 5（ADR-021）：能力开关行置于输入框上方（联网搜索 / 深度思考 / 后台操控）
                 CapabilityToggleRow(
                     thinkingEnabled = thinkingEnabled,
                     webSearchEnabled = webSearchEnabled,
+                    backgroundControlEnabled = backgroundControlEnabled,
                     onThinkingChange = { viewModel.setThinkingEnabled(it) },
-                    onWebSearchChange = { viewModel.setWebSearchEnabled(it) }
+                    onWebSearchChange = { viewModel.setWebSearchEnabled(it) },
+                    onBackgroundControlChange = { viewModel.setBackgroundControlEnabled(it) }
                 )
 
                 MessageInputBar(
@@ -589,6 +610,16 @@ fun ConversationScreen(
                 )
             }
         }
+
+        // 批次20（VC-005，ADR-044）：语音通话全屏覆盖层（共享本页 ConversationViewModel，
+        // 语音轮次与文字轮次同会话同历史；挂断即关闭覆盖层）
+        if (voiceCallVisible) {
+            VoiceCallOverlay(
+                conversation = viewModel,
+                onDismiss = { voiceCallVisible = false },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
     }
 }
 
@@ -602,8 +633,10 @@ fun ConversationScreen(
 private fun CapabilityToggleRow(
     thinkingEnabled: Boolean,
     webSearchEnabled: Boolean,
+    backgroundControlEnabled: Boolean,
     onThinkingChange: (Boolean) -> Unit,
-    onWebSearchChange: (Boolean) -> Unit
+    onWebSearchChange: (Boolean) -> Unit,
+    onBackgroundControlChange: (Boolean) -> Unit
 ) {
     Row(
         modifier = Modifier
@@ -622,6 +655,13 @@ private fun CapabilityToggleRow(
             checked = thinkingEnabled,
             label = "深度思考",
             onCheckedChange = onThinkingChange,
+            modifier = Modifier.weight(1f)
+        )
+        // 批次20（BG-005，ADR-045）：后台操控（手机操控在虚拟屏后台执行，用户可同时使用手机）
+        CapabilityToggleChip(
+            checked = backgroundControlEnabled,
+            label = "后台操控",
+            onCheckedChange = onBackgroundControlChange,
             modifier = Modifier.weight(1f)
         )
     }
@@ -699,16 +739,23 @@ private fun ProviderChip(name: String?, onClick: () -> Unit, modifier: Modifier 
 }
 
 /**
- * RAG 模式切换胶囊（US-019，ADR-012 5.2/5.8）。
+ * 知识库模式切换胶囊（US-019，ADR-012 5.2/5.8）。
  *
- * 三态显示：全库（默认，薄荷色）/ 指定库（薄荷色 + 库 id）/ 关闭（灰色）。
+ * 三态显示：全库（薄荷色）/ 指定库（薄荷色 + 库 id）/ 关闭（灰色）。
+ *
+ * **ADR-050（2026-09-12）语义**：本开关控制的是"是否向 AI 暴露知识库检索能力"，
+ * **不再**表示"每条消息都自动检索知识库"（该范式已撤除）。出厂默认值为「关闭」（v1 批次18 opt-in）。
+ *
+ * **术语统一（guardrail D-6 / R3-N2，2026-09-12）**：标签由「RAG 关 / RAG 全库 / RAG #id」改为
+ * 「知识库关 / 知识库 / 知识库 #id」，与弹层（`知识库检索模式` / `关闭知识库`）统一为同一术语，
+ * 消除"同一控件两套术语"；真机清单 A1/B1/B4/B5/C1 的描述已同步。
  */
 @Composable
 private fun RagModeChip(target: RagTarget, onClick: () -> Unit) {
     val (label, accent) = when (target) {
-        RagTarget.Off -> "RAG 关" to PrismTextFaint
-        RagTarget.AllLibraries -> "RAG 全库" to PrismMint
-        is RagTarget.SpecificLibrary -> "RAG #${target.kbId}" to PrismMint
+        RagTarget.Off -> "知识库关" to PrismTextFaint
+        RagTarget.AllLibraries -> "知识库" to PrismMint
+        is RagTarget.SpecificLibrary -> "知识库 #${target.kbId}" to PrismMint
     }
     Row(
         modifier = Modifier
@@ -734,7 +781,7 @@ private fun RagModeChip(target: RagTarget, onClick: () -> Unit) {
     }
 }
 
-/** RAG 模式切换弹层（US-019，ADR-012 5.2）。 */
+/** RAG 模式切换弹层（US-019，ADR-012 5.2；语义按 ADR-050 收窄为"知识库能力开关"）。 */
 @Composable
 private fun RagModeSelectorSheet(
     current: RagTarget,
@@ -742,19 +789,19 @@ private fun RagModeSelectorSheet(
     onClose: () -> Unit
 ) {
     PrismSheet(
-        title = "RAG 检索模式",
-        subtitle = "对话时检索知识库并标注引用来源（默认全库检索）"
+        title = "知识库检索模式",
+        subtitle = "开启后 AI 可主动检索你的知识库并在回答中标注引用来源；不该查时不会查"
     ) {
         RagModeOption(
             label = "全库检索",
-            description = "跨所有知识库检索 top-3 片段",
+            description = "AI 需要时可在全部知识库中检索并引用",
             selected = current is RagTarget.AllLibraries,
             onClick = { onSelect(RagTarget.AllLibraries) }
         )
         Spacer(Modifier.height(8.dp))
         RagModeOption(
-            label = "关闭 RAG",
-            description = "普通对话，不检索知识库",
+            label = "关闭知识库",
+            description = "AI 不检索知识库，按普通对话回答",
             selected = current is RagTarget.Off,
             onClick = { onSelect(RagTarget.Off) }
         )
@@ -876,6 +923,10 @@ private fun MessageBubble(
     onSwitchVariant: (Long, Int) -> Unit = { _, _ -> },
     /** v1 批次17（US-1708）：是否为会话最后一条消息（重试/切换器仅末条可用）。 */
     isLastMessage: Boolean = false,
+    /** TASK-20260910-001：切换文本播报（AI 消息「播放/停止」按钮）。 */
+    onPlayText: () -> Unit = {},
+    /** TASK-20260910-001：本条消息是否正在播报（按钮渲染 ⏹ 停止）。 */
+    isPlayingText: Boolean = false,
     /** UXR4 问题 1/4/6（ADR-024）：是否展示「深度思考」折叠区。协议层仍回传 reasoning_content，UI 展示由开关控制。 */
     showThinking: Boolean,
     /** UXR5 问题 1（ADR-024 遗留）：该消息是否为当前正在流式生成的 AI 回复（流式期间用纯文本渲染）。 */
@@ -927,6 +978,9 @@ private fun MessageBubble(
                         canEditAi = isAi && !isStreaming,
                         canRollback = isUser,
                         canRegenerate = isAi && isLastMessage && !isStreaming,
+                        canPlay = isAi && !isStreaming,
+                        isPlaying = isPlayingText,
+                        onPlay = onPlayText,
                         onCopy = onCopy,
                         onEdit = { onEdit(message.id, message.content) },
                         onEditAi = { onEditAi(message) },
@@ -955,11 +1009,17 @@ private fun MessageActionRow(
     canEditAi: Boolean = false,
     canRollback: Boolean = false,
     canRegenerate: Boolean = false,
+    /** TASK-20260910-001：AI 消息可播报（播放按钮）。 */
+    canPlay: Boolean = false,
+    /** TASK-20260910-001：本条消息正在播报（按钮渲染 ⏹ 停止）。 */
+    isPlaying: Boolean = false,
     onCopy: () -> Unit,
     onEdit: () -> Unit,
     onEditAi: () -> Unit = {},
     onRollback: () -> Unit = {},
-    onRegenerate: () -> Unit = {}
+    onRegenerate: () -> Unit = {},
+    /** TASK-20260910-001：切换播报（点击正在播 = 停止）。 */
+    onPlay: () -> Unit = {}
 ) {
     Row(
         modifier = Modifier
@@ -968,6 +1028,9 @@ private fun MessageActionRow(
         horizontalArrangement = Arrangement.End,
         verticalAlignment = Alignment.CenterVertically
     ) {
+        if (canPlay) {
+            ActionText(if (isPlaying) "⏹ 停止" else "▶ 播放", onClick = onPlay)
+        }
         ActionText("复制", onClick = onCopy)
         if (canEdit) {
             ActionText("编辑", onClick = onEdit)
@@ -1887,7 +1950,10 @@ private fun CollapsibleSourcesCard(sources: List<io.prism.ui.model.Citation>) {
 /**
  * AI 打字指示 —— 三点呼吸 + 状态文案（US-019 文案修正，ADR-012 5.8 修复 R-7）。
  *
- * @param isRagOn RAG 是否开启；true 显示「正在检索知识库…」，false 显示「正在思考…」
+ * @param isRagOn 知识库检索指示；true 显示「正在检索知识库…」，false 显示「正在思考…」。
+ *   **ADR-050 后恒为 false**（自动检索已撤除，`ragRetrieving` 无置位路径），故本分支当前不可达；
+ *   **有意保留**：待 ADR-050 备选方案 B（用户手势显式注入）或"按工具事件驱动指示"落地时可直接复用
+ *   （guardrail G-7 / 验收报告 D-7）。
  */
 @Composable
 private fun TypingIndicator(isRagOn: Boolean) {

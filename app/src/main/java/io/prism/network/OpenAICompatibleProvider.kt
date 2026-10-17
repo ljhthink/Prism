@@ -107,8 +107,10 @@ class OpenAICompatibleProvider(
      * @param ragContext RAG context 文本（可选，知识库片段拼接）；null 时不注入
      * @param tools 工具定义列表（M4，null 时不序列化 tools 字段，向后兼容）
      * @param toolChoice 工具选择策略（M4，null 时不序列化 tool_choice 字段）
-     * @param thinkingEnabled 是否开启深度思考（问题 8a，DeepSeek thinking 模式；null/true 时注入
-     *        `thinking={"type":"enabled"}`；false/null 时不注入，向后兼容所有端点）
+     * @param thinkingEnabled 是否开启深度思考（问题 8a，DeepSeek/GLM thinking 模式；
+     *        **三态**（TASK-20260911-001）：null 不注入该字段（严格端点逃生口，见 buildRequestBody 三态 KDoc）；
+     *        true 注入 `thinking={"type":"enabled"}`，false 注入 `{"type":"disabled"}`——
+     *        BUG-20260909-003 显式双态，防默认思考端点无视开关）
      * @param reasoningEffort 思考强度（问题 8a，low/high/max；仅 [thinkingEnabled] 为 true 时注入）
      * @return [StreamEvent] 流：增量 [StreamEvent.Delta] / 思考过程 [StreamEvent.ReasoningDelta] /
      *         工具调用事件 / 结束 [StreamEvent.Done] / 错误 [StreamEvent.Error]
@@ -164,7 +166,9 @@ class OpenAICompatibleProvider(
                         ragContext = ragContext,
                         tools = tools,
                         toolChoice = toolChoice,
-                        thinkingEnabled = thinkingEnabled ?: false,
+                        // TASK-20260911-001：三态直传——null（严格端点逃生口，勿删）不注入 thinking；
+                        // false 仍显式 disabled（BUG-20260909-003 对 thinking 端点的语义不变）
+                        thinkingEnabled = thinkingEnabled,
                         reasoningEffort = reasoningEffort
                     )
                 )
@@ -358,9 +362,24 @@ class OpenAICompatibleProvider(
      * @param tools 工具定义（null 时不序列化 tools 字段，向后兼容）
      * @param toolChoice 工具选择策略（null 时不序列化 tool_choice 字段）
      * @param stream 是否流式请求（默认 true，向后兼容；M5 Phase B 非流式路径传 false）
-     * @param thinkingEnabled 是否开启深度思考（问题 8a；默认 false，仅 true 时注入 thinking 字段，
-     *        避免向 OpenAI/Claude/Ollama 等不兼容端点发送 DeepSeek 专有参数返回 400）
-     * @param reasoningEffort 思考强度（问题 8a；仅 thinkingEnabled 为 true 时注入）
+     * @param thinkingEnabled thinking 三态（TASK-20260911-001 由双态扩为三态）：
+     *        - **null → 不注入 thinking 字段**——适配不接受该字段的严格端点（逃生口，**勿删**），
+     *          防未知字段 400；
+     *        - **false → 显式注入 `{"type":"disabled"}`**——BUG-20260909-003 显式双态保持：
+     *          关闭时不再省略字段，防默认开启思考的端点（如 GLM）无视缺省始终思考；
+     *        - **true → 注入 `{"type":"enabled"}`**。
+     *        注意：对拒绝未知字段的严格端点（OpenAI 官方）false 关闭态会 400，属已知取舍；
+     *        此类端点应由调用方传 null（不注入）。
+     *
+     *        **当前生产调用点**（TASK-20260912-001，ADR-049 D1）：撤销 M2-her 角色路由后，
+     *        `ConversationViewModel` 的两条生产路径（`executeWithToolLoop` / `executePlainStream`）
+     *        与 `SkillExecutor` **恒传非空 Boolean**——`null` 分支**当前无生产调用方**。
+     *        保留它的理由（guardrail R1 专项判定）：①`null` 是本字段的**默认值**，也是严格端点
+     *        的唯一正确形态；②该分支已被 `OpenAICompatibleProviderTest` 契约用例钉住，是**已验证
+     *        的真实行为**而非投机分支；③删除会把签名回退为 `Boolean`，使未来新增旁路调用点
+     *        在缺省时落回"显式 disabled"——**正是 BUG-20260909-003 的原始失效模式**。
+     *        故按"能力保留 + 标注无生产调用点"处置，而非删除。
+     * @param reasoningEffort 思考强度（问题 8a；仅 [thinkingEnabled] 为 true 时注入）
      */
     internal fun buildRequestBody(
         config: ProviderConfig,
@@ -370,7 +389,7 @@ class OpenAICompatibleProvider(
         tools: List<ToolDefinition>? = null,
         toolChoice: ToolChoice? = null,
         stream: Boolean = true,
-        thinkingEnabled: Boolean = false,
+        thinkingEnabled: Boolean? = null,
         reasoningEffort: String? = null
     ): String {
         val requestMessages = buildList {
@@ -398,11 +417,17 @@ class OpenAICompatibleProvider(
             toolChoice = toolChoice?.let { toolChoiceToJson(it) },
             // strict mode 需 parallel_tool_calls=false（OpenAI 限制），且减少并行幻觉
             parallelToolCalls = if (tools != null) false else null,
-            // 问题 8a（ADR-020）：仅 thinkingEnabled 时注入 DeepSeek thinking 模式参数
+            // 问题 8a（ADR-020）+ BUG-20260909-003 + TASK-20260911-001：thinking **三态**下发——
+            // null：不注入（严格端点逃生口，勿删）；false：显式 disabled
+            // （防默认思考端点如 GLM 无视开关）；true：显式 enabled。
             // S-3（guardrail TKN-P8-GUARDRAIL-001）：reasoningEffort 纵深防御白名单，
             // 非法值忽略而非发送（避免向 Provider 传无效 effort 返回 400）
-            thinking = if (thinkingEnabled) buildJsonObject { put("type", "enabled") } else null,
-            reasoningEffort = if (thinkingEnabled) {
+            thinking = when (thinkingEnabled) {
+                null -> null
+                true -> buildJsonObject { put("type", "enabled") }
+                false -> buildJsonObject { put("type", "disabled") }
+            },
+            reasoningEffort = if (thinkingEnabled == true) {
                 reasoningEffort?.takeIf { it in VALID_EFFORTS }
             } else {
                 null

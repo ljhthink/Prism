@@ -47,6 +47,10 @@ import java.io.File
  *
  * Bug 1 输入边界（安全检查）：超长 / 全标点 / 全数字 / 表情消息不崩溃（CWE-20 输入边界）。
  *
+ * **ADR-050（TASK-20260912-002，2026-09-12）更新**：知识库自动注入已撤除（正文只经 LLM 主动
+ * 调用 `knowledge_base__*` 工具进入上下文），本文件的 Bug 1 用例断言由"哪些消息触发自动检索"
+ * 改为"任何消息都不触发"，见类内 Bug 1 区块。
+ *
  * 依赖注入与 [ConversationViewModelTest] 一致（UnconfinedTestDispatcher + 临时 ObjectBox）。
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -82,14 +86,16 @@ class ConversationViewModelUxr8R3EdgeCaseTest {
     }
 
     // =====================================================================
-    // Bug 1：RAG 需求预判门控 —— 可观测性（embed 调用计数）与防误伤
+    // ADR-050（TASK-20260912-002）：知识库不再按轮自动注入（范式级契约）
+    // 断言从"哪些消息会/不会触发自动检索"改为"任何消息都不会自动送正文进上下文"，
+    // 且 embed 调用数恒为 0（正文只经 LLM 主动调用 knowledge_base__* 工具进入）。
     // =====================================================================
 
     @Test
-    fun `greeting message does not trigger embed or rag injection`() = runTest(mainDispatcher) {
+    fun `no message triggers kb auto injection even when chunks match exactly`() = runTest(mainDispatcher) {
         val repo = providerRepo()
         val kbRepo = KnowledgeBaseRepository(boxStore)
-        // 库中存在与 DefaultStubEmbedder 完全一致的 chunk（修复前必命中注入）
+        // 库中存在与 DefaultStubEmbedder 完全一致的 chunk（ADR-050 之前「问候轮」也会命中注入）
         kbRepo.addChunk(KnowledgeChunk(
             title = "问候文档.txt#1", content = "问候相关片段",
             embedding = FloatArray(384) { 0.5f }, knowledgeBaseId = 0L
@@ -104,8 +110,8 @@ class ConversationViewModelUxr8R3EdgeCaseTest {
         vm.sendMessage("你好")
         advanceUntilIdle()
 
-        assertEquals("问候消息不应调用 embed（可观测性：embed 调用数应为 0）", 0, embedder.embedCount)
-        assertEquals("问候消息不应注入 ragContext", null, provider.receivedRagContexts.single())
+        assertEquals("ADR-050：不自动检索 → embed 调用数应为 0", 0, embedder.embedCount)
+        assertEquals("ADR-050：不自动注入 ragContext", null, provider.receivedRagContexts.single())
         val sysPrompt = provider.receivedSystemPrompts.single()
         assertNotNull(sysPrompt)
         assertFalse("问候消息 systemPrompt 不应含 RAG grounding rules",
@@ -114,7 +120,7 @@ class ConversationViewModelUxr8R3EdgeCaseTest {
     }
 
     @Test
-    fun `real query still triggers rag injection after the gate`() = runTest(mainDispatcher) {
+    fun `real query no longer auto injects kb content but declares capability`() = runTest(mainDispatcher) {
         val repo = providerRepo()
         val kbRepo = KnowledgeBaseRepository(boxStore)
         kbRepo.addChunk(KnowledgeChunk(
@@ -131,16 +137,16 @@ class ConversationViewModelUxr8R3EdgeCaseTest {
         vm.sendMessage("查询一下真实文档的关键信息")
         advanceUntilIdle()
 
-        assertEquals("真实查询应调用 embed（不被需求预判误伤）", 1, embedder.embedCount)
-        val ragCtx = provider.receivedRagContexts.single()
-        assertNotNull("真实查询应注入 ragContext", ragCtx)
-        assertTrue("ragContext 应以【知识库片段】开头", ragCtx!!.startsWith("【知识库片段】"))
-        assertTrue("真实查询 systemPrompt 应含 RAG grounding rules",
-            provider.receivedSystemPrompts.single()!!.contains(RagContextBuilder.SYSTEM_PROMPT))
+        assertEquals("ADR-050：真实查询同样不自动检索（embed 数 0）", 0, embedder.embedCount)
+        assertEquals("ADR-050：真实查询同样不自动注入正文", null, provider.receivedRagContexts.single())
+        // 能力声明仍注入：体系提示模型"你有知识库工具、何时该用"
+        assertTrue("真实查询 systemPrompt 应含知识库能力声明",
+            provider.receivedSystemPrompts.single()!!.contains("【知识库能力】"))
+        assertTrue("AI 消息不应附自动填充的引用来源", vm.messages.value[1].sources.isEmpty())
     }
 
     @Test
-    fun `greeting then query only query triggers embed`() = runTest(mainDispatcher) {
+    fun `multi turn conversation never auto injects kb content`() = runTest(mainDispatcher) {
         val repo = providerRepo()
         val kbRepo = KnowledgeBaseRepository(boxStore)
         kbRepo.addChunk(KnowledgeChunk(
@@ -164,35 +170,48 @@ class ConversationViewModelUxr8R3EdgeCaseTest {
         vm.sendMessage("总结一下文档C的知识")
         advanceUntilIdle()
 
-        assertEquals("两轮中仅真实查询触发 embed（问候轮 embed 数 0）", 1, embedder.embedCount)
-        // 第一轮（问候）无 RAG 注入，第二轮（查询）注入
-        assertEquals("第 1 轮 ragContext 应为 null（问候跳过）", null, provider.receivedRagContexts[0])
-        assertNotNull("第 2 轮 ragContext 应注入（查询）", provider.receivedRagContexts[1])
+        assertEquals("ADR-050：两轮均不自动检索（embed 数 0）", 0, embedder.embedCount)
+        assertEquals("第 1 轮 ragContext 应为 null", null, provider.receivedRagContexts[0])
+        assertEquals("第 2 轮 ragContext 也应为 null（不再有「查询轮注入」）", null, provider.receivedRagContexts[1])
     }
 
     // =====================================================================
-    // Bug 1 输入边界（安全）：超长 / 全标点 / 全数字 / 表情消息不崩溃
+    // ADR-050 输入边界（安全）：任意输入（超长 / 标点 / emoji / 空白）都不触发自动检索
     // =====================================================================
 
     @Test
-    fun `needsRagRetrieval extreme inputs do not crash`() {
-        val longText = "好".repeat(10_000) + "请总结知识库"
-        // 超长消息（含 '好' 前缀，归一化后不整句命中）→ 应保留（保守）
-        assertTrue("超长消息不应崩溃且应保留", ConversationViewModel.needsRagRetrieval(longText))
-        // 全标点 / 全空白 → 归一化后为空串，不崩溃
-        assertTrue("全标点消息不应崩溃", ConversationViewModel.needsRagRetrieval("！！！？？？。。。"))
-        assertFalse("全空白消息返回 false", ConversationViewModel.needsRagRetrieval(" \t\n "))
-        // 表情 / emoji（非字母数字）→ 归一化空串，不崩溃
-        assertTrue("纯 emoji 消息不应崩溃", ConversationViewModel.needsRagRetrieval("😀😀👍"))
-        // 全数字 → 保留
-        assertTrue("全数字消息应保留", ConversationViewModel.needsRagRetrieval("123456789"))
-        // 大小写混合英文确认语 → 归一化后命中（整句精确）
-        assertFalse("OK 大写应归一化命中", ConversationViewModel.needsRagRetrieval("OK"))
-        assertFalse("Hello 混合大小写应命中", ConversationViewModel.needsRagRetrieval("HeLLo"))
-        // 确认语 + 真实查询内容（归一化后非整句命中）→ 保留（不误伤）
-        assertTrue("确认语+查询应保留", ConversationViewModel.needsRagRetrieval("好，帮我查一下知识库"))
-        // 独立整句确认语 "好" → 正常跳过（在 RAG_SKIP_PHRASES 集合内）
-        assertFalse("独立整句确认语应跳过", ConversationViewModel.needsRagRetrieval("好"))
+    fun `extreme inputs never trigger auto retrieval`() = runTest(mainDispatcher) {
+        val repo = providerRepo()
+        val kbRepo = KnowledgeBaseRepository(boxStore)
+        kbRepo.addChunk(KnowledgeChunk(
+            title = "边界文档.txt#1", content = "边界片段",
+            embedding = FloatArray(384) { 0.5f }, knowledgeBaseId = 0L
+        ))
+        val provider = MultiRoundRecordingProvider(
+            List(5) { listOf(StreamEvent.Delta("回"), StreamEvent.Done) }
+        )
+        val embedder = CountingEmbedder()
+        val vm = ConversationViewModel(
+            repo, provider, embedder, kbRepo,
+            ioDispatcher = mainDispatcher
+        ).apply { setRagTarget(RagTarget.AllLibraries) }
+
+        listOf(
+            "好".repeat(10_000) + "请总结知识库",  // 超长
+            "！！！？？？。。。",                    // 全标点
+            "😀😀👍",                              // 纯 emoji
+            "123456789",                            // 全数字
+            "帮我查一下知识库里的资料"                 // 明确查询
+        ).forEach { text ->
+            vm.sendMessage(text)
+            advanceUntilIdle()
+        }
+
+        assertEquals("ADR-050：任意输入都不触发自动检索（embed 数 0）", 0, embedder.embedCount)
+        assertTrue(
+            "ADR-050：任意输入的 ragContext 都应为 null",
+            provider.receivedRagContexts.all { it == null }
+        )
     }
 
     // =====================================================================
