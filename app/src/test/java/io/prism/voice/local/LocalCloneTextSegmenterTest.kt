@@ -61,6 +61,36 @@ class LocalCloneTextSegmenterTest {
     }
 
     @Test
+    fun `规则6 —— 短文本也能按句末标点切分（不丢字符、每段不超上限）`() {
+        val t = "第一句。第二句。第三句。"
+        val segs = segmentForSynthesis(t, max, splitSentences = true)
+        assertEquals(listOf("第一句。", "第二句。", "第三句。"), segs)
+        assertEquals("切段不得丢字符", t, segs.joinToString(""))
+        for (s in segs) assertTrue("段长 ${s.length} 不得超过 $max：$s", s.length <= max)
+    }
+
+    @Test
+    fun `规则6 —— 关闭时短文本行为与既有逐字相同（回归门，防误伤既有音色包）`() {
+        val t = "第一句。第二句。第三句。"
+        assertEquals(listOf(t), segmentForSynthesis(t, max))
+        assertEquals(listOf(t), segmentForSynthesis(t, max, splitSentences = false))
+    }
+
+    @Test
+    fun `规则6 —— 短文本无句末标点时仍为单段（不得因此被硬切）`() {
+        val t = "先别急着说正事，慢慢来"
+        assertEquals(listOf(t), segmentForSynthesis(t, max, splitSentences = true))
+    }
+
+    @Test
+    fun `规则6 —— 代理对安全（句末标点后切分不劈开代理对）`() {
+        val t = "\uD834\uDD1E第一句。\uD834\uDD1E第二句。"
+        val segs = segmentForSynthesis(t, max, splitSentences = true)
+        assertEquals("切段不得丢字符（含代理对）", t, segs.joinToString(""))
+        assertEquals(2, segs.size)
+    }
+
+    @Test
     fun `默认段长常量必须落在看门狗阈值内可完成的范围`() {
         // 首段上限必须显著小于常规上限（N1：首声延迟 = 首段合成时间）
         assertTrue("首段上限应远小于常规上限", FIRST_SEGMENT_CHARS < DEFAULT_SEGMENT_CHARS)

@@ -807,6 +807,69 @@ class LocalCloneTtsEngineTest {
     }
 
     @Test
+    fun `短文本也切句 - 门控接线：sentenceGapMs 大于 0 才切、等于 0 恒不切（接线钉子）`() = runBlocking {
+        // 规则 6 的**接线**验证。`LocalCloneTextSegmenterTest` 里的 4 条只证明 `splitAtSentenceEnds`
+        // **纯函数**正确，**不能**证明引擎真的把 `config.sentenceGapMs > 0` 传了下去
+        // （本项目已登记教训："纯函数有牙齿 ≠ 接线被覆盖"）。
+        // 本条**同时钉死两个方向**：门控被写死 true 或写死 false，都必有一条断言变红。
+        val shortText = "第一句。第二句。" // 6 字 ≤ 40，含**句中**句末标点
+        assertEquals(
+            "前置：纯函数在默认关闭时必须仍是单段（否则本用例测不到门控）",
+            1,
+            segmentForSynthesis(shortText, DEFAULT_SEGMENT_CHARS, FIRST_SEGMENT_CHARS).size
+        )
+
+        // ① 开启（400ms > 0）⇒ 短文本应被切成 2 段 ⇒ 2 次合成
+        val synthOn = FakeSynth()
+        val listenerOn = RecListener()
+        val engineOn = concurrentEngine(
+            synthOn, FakePlayer(),
+            LocalCloneConfig(timeoutMs = 5_000L, sentenceGapMs = 400)
+        )
+        engineOn.speak(shortText, listenerOn)
+        assertTrue("开启臂必须播完", awaitUntil(8_000) { listenerOn.events.contains("done") })
+        assertEquals(
+            "sentenceGapMs>0 时短文本必须按句末标点切成 2 段 ⇒ 2 次合成",
+            2,
+            synthOn.synthCalls.get()
+        )
+        engineOn.release()
+
+        // ② 关闭（0）⇒ 必须仍是单段（既有音色包行为逐字不变）
+        val synthOff = FakeSynth()
+        val listenerOff = RecListener()
+        val engineOff = concurrentEngine(
+            synthOff, FakePlayer(),
+            LocalCloneConfig(timeoutMs = 5_000L, sentenceGapMs = 0)
+        )
+        engineOff.speak(shortText, listenerOff)
+        assertTrue("关闭臂必须播完", awaitUntil(8_000) { listenerOff.events.contains("done") })
+        assertEquals(
+            "sentenceGapMs=0 时短文本必须仍是单段 ⇒ 1 次合成",
+            1,
+            synthOff.synthCalls.get()
+        )
+        engineOff.release()
+
+        // ③ 越界（5000，直接构造未经 sanitize）⇒ `silenceSamples` 会因超上限返 0（**不插静音**），
+        //    故门控必须**同为假** ⇒ 仍是单段。否则就是"切了段却不插静音"的外观异常（guardrail F4）。
+        val synthOver = FakeSynth()
+        val listenerOver = RecListener()
+        val engineOver = concurrentEngine(
+            synthOver, FakePlayer(),
+            LocalCloneConfig(timeoutMs = 5_000L, sentenceGapMs = 5_000)
+        )
+        engineOver.speak(shortText, listenerOver)
+        assertTrue("越界臂必须播完", awaitUntil(8_000) { listenerOver.events.contains("done") })
+        assertEquals(
+            "sentenceGapMs 越界（不插静音）时不得切段 ⇒ 1 次合成（门控与实际插静音同源）",
+            1,
+            synthOver.synthCalls.get()
+        )
+        engineOver.release()
+    }
+
+    @Test
     fun `看门狗无进展到点后 - 取消探针绝不得变真（G-1 真正守卫，C-1）`() = runBlocking {
         // ⚠️ 本用例**必须注入时基**：`isReturnDefaultValues = true` 使 `SystemClock.elapsedRealtime()`
         // 在 JVM 单测恒 0 ⇒ 不注入时看门狗停滞分支永不触发，用例会退化成空断言

@@ -440,7 +440,20 @@ class LocalCloneTtsEngine(
                     }
                     // 长文本**切段**（TKN-LVC-012 / BUG-20260920-006）：单次无界合成会让"合成期间完全没
                     // 声音"并把内存/耗时推到系统容忍线外（真机被 SIGKILL）。切段后每段有界。
-                    val segments = segmentForSynthesis(text, DEFAULT_SEGMENT_CHARS, FIRST_SEGMENT_CHARS)
+                    // 规则 6 门控（TKN-LVC-016 续）：**仅当该 pack 显式配置了段间停顿**时才让短文本也按
+                    // 句末标点切分。没有停顿配置时切段只会增加合成次数、**不会插任何静音**
+                    // （`gapMsFor` 在 baseGapMs ≤ 0 时恒返 0），属于"外观正常但行为变了"。
+                    // ⚠️ 门控必须与"**实际会插静音**"的条件**逐字等价**（guardrail F4）：`silenceSamples`
+                    // 在 `gapMs > MAX_SENTENCE_GAP_MS` 时同样返 0 ⇒ 只判 `> 0` 会让"越界值切了段却不插静音"。
+                    // 生产路径经 `create()`→`sanitized()` 已回落，此处是**纵深防御**（覆盖直接调构造器的场景）。
+                    // 既有 pack 均未配置该字段（默认 0）⇒ **行为逐字不变**。
+                    val segments = segmentForSynthesis(
+                        text,
+                        DEFAULT_SEGMENT_CHARS,
+                        FIRST_SEGMENT_CHARS,
+                        splitSentences = config.sentenceGapMs in
+                            1..LocalCloneConfig.MAX_SENTENCE_GAP_MS
+                    )
                     // 流式能力探测（LVC-2）：**四个条件同时成立**才走流式 ——
                     // ① 合成器能声明采样率；② 播放器支持常开音轨；③ `silenceScale == 1`；
                     // ④ 播报模式为**连续**（TKN-LVC-016：WHOLE 模式的语义就是"全部合成完再播"，
