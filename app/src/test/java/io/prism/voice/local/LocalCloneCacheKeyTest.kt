@@ -77,6 +77,26 @@ class LocalCloneCacheKeyTest {
     }
 
     @Test
+    fun `总静音上界必须参与缓存键（批次30：代码常量改值也要失效旧缓存）`() {
+        // 该值是**代码常量**，改它不会改动任何 config 字段 ⇒ 若没进键，**同一进程内**会继续复用
+        // 按旧上界构建的引擎实例，表现为"改了没效果"（与 sentenceGapMs 同一类坑）。
+        // ⚠️ 本键**不持久化**（仅 TextPlaybackController 的内存字段 localCloneSig）⇒ 不存在磁盘缓存残留。
+        val keyText = key()
+        // 编码约定见 appendField：<tag>=<value长度>:<value>;
+        val capValue = LocalCloneSegmentGap.MAX_TOTAL_GAP_MS.toString()
+        assertTrue(
+            "键里必须出现带长度前缀的 maxTotalGapMs 字段",
+            keyText.contains("maxTotalGapMs=${capValue.length}:$capValue;")
+        )
+        // 与"只改 sentenceGapMs"必须可区分（两者是不同维度，不能互相掩盖）
+        assertNotEquals(
+            "maxTotalGapMs 不得与 sentenceGapMs 合并成一个字段",
+            key(config = LocalCloneConfig(sentenceGapMs = 400)),
+            key()
+        )
+    }
+
+    @Test
     fun `每一个生成参数都必须参与缓存键（漏一个就会"改了没效果"）`() {
         // 逐字段构造"只改这一个字段"的配置；若某字段没进键，对应断言立刻变红
         val variants = listOf(

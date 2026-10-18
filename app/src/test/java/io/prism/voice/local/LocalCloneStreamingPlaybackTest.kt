@@ -111,6 +111,12 @@ class LocalCloneStreamingPlaybackTest {
         val playCalls = AtomicInteger(0)
         val written = mutableListOf<FloatArray>()
 
+        /**
+         * 整段播放（非流式）路径每次 `play` 的样本块。
+         * 用途：两路直连对照用例要比较**非流式**实际播出的块序列（AC-4）。
+         */
+        val played = mutableListOf<FloatArray>()
+
         @Volatile
         var openedSampleRate = 0
 
@@ -119,6 +125,7 @@ class LocalCloneStreamingPlaybackTest {
 
         override fun play(samples: FloatArray, sampleRate: Int, isCancelled: () -> Boolean) {
             playCalls.incrementAndGet()
+            played.add(samples.copyOf())
         }
 
         override fun openStream(sampleRate: Int, isCancelled: () -> Boolean): LocalCloneStreamSession? {
@@ -462,7 +469,136 @@ class LocalCloneStreamingPlaybackTest {
         assertEquals("应正常播完", listOf("start", "close", "done"), events)
     }
 
+    /**
+     * 批次30 / AC-4：**封顶触发时，流式路径必须与非流式路径消费同一份计划**。
+     *
+     * 为什么单独立这一条：上面那条流式用例 `gapMs = 400`、文本仅 3 段 ⇒ **根本没触到 20s 封顶**，
+     * 故它无法区分"走 `gapPlanFor`"与"退回旧的 `gapMsFor` 逐边界实现"。guardrail 第一轮
+     * F1 已证实在**短文本**上两条实现**结果完全相同**（不可区分）。这里用 120 句 × `gapMs=2000`
+     * 让封顶**必然生效**，把流式这一路的接线也钉住（否则可能只改好非流式、漏掉流式）。
+     */
+    @Test
+    fun `流式 - 封顶触发时写入的静音总量等于计划（AC-4 接线钉子）`() = runBlocking {
+        val events = mutableListOf<String>()
+        val synth = StreamSynth(chunksPerCall = 3)
+        val player = StreamPlayer(events = events)
+        val gapMs = LocalCloneConfig.MAX_SENTENCE_GAP_MS // 2000ms：少量段即触封顶
+        val text = "第一句话。".repeat(120)
+        val config = LocalCloneConfig(sentenceGapMs = gapMs)
+
+        val segments = segmentForSynthesis(text, DEFAULT_SEGMENT_CHARS, FIRST_SEGMENT_CHARS)
+        assertTrue("前提：必须切成足够多的段（实际 ${segments.size}）", segments.size >= 12)
+
+        val cappedPlan = LocalCloneSegmentGap.gapPlanFor(segments, gapMs, 24_000)
+        val uncappedTotal = segments.dropLast(1).sumOf {
+            LocalCloneSegmentGap.silenceSamples(
+                LocalCloneSegmentGap.gapMsFor(it, gapMs), 24_000
+            )
+        }
+        assertTrue(
+            "前提：本用例必须让封顶真的生效（未封顶 $uncappedTotal vs 封顶 ${cappedPlan.sum()}）",
+            uncappedTotal > cappedPlan.sum()
+        )
+
+        val engine = engine(synth, player, config)
+        engine.speak(text, RecListener(events))
+
+        assertEquals("必须走流式路径", 1, player.openCalls.get())
+        assertEquals("流式路径不得再调用整段播放", 0, player.playCalls.get())
+
+        val silences = player.written.filter { it.isNotEmpty() && it.all { s -> s == 0f } }
+        val plannedNonZero = cappedPlan.filter { it > 0 }
+        assertEquals(
+            "流式写入的静音块数必须等于封顶后计划里非 0 的边界数",
+            plannedNonZero.size,
+            silences.size
+        )
+        assertEquals(
+            "流式写入的每块静音长度必须与计划**逐项相同**（顺序也相同）",
+            plannedNonZero,
+            silences.map { it.size }
+        )
+        assertTrue(
+            "实际静音总量必须 ≤ 上界（否则封顶没生效）",
+            // ⚠️ 采样率必须是 24_000：此处曾误写 `24`，导致上界被算成 480 样本
+            // （24000*24/1000），干净树上必然失败（guardrail r2 的 F7）。
+            silences.sumOf { it.size } <= LocalCloneSegmentGap.MAX_TOTAL_GAP_MS * 24_000 / 1000
+        )
+        assertFalse(
+            "末段之后不得插静音",
+            player.written.last().all { s -> s == 0f }
+        )
+        assertEquals("应正常播完", listOf("start", "close", "done"), events)
+    }
+
+    /**
+     * 批次30 / AC-4（**两路直连对照**，验收 C2）：同一输入、同一 `gapMs`，**流式与非流式实际输出的
+     * 静音块序列必须逐项相同**。
+     *
+     * 为什么"两路各自对同一份 `gapPlanFor` 断言"**不算满足 AC-4**（验收方驳回了主 Agent 的原判断）：
+     * 1. 两路的**采样率来源不同**——流式用 `synth.sampleRate()`（引擎 `:470`），非流式用
+     *    `audio.sampleRate`（`:663`）；若来源不一致，折算出的样本数就会不同。
+     * 2. 非流式那条 F1 用例只断言**总样本数**，不断言每个静音块的**位置与顺序**；
+     *    若某一路把计划错位消费，它自己那条用例仍可能绿。
+     * ⇒ 必须让两路的**真实输出**互相对照。
+     *
+     * 实现方式：`StreamSynth(rate = 0)` 会让引擎退回整段播放（见上面那条兼容性用例），
+     * 故同一个 player 类可以分别录到"流式写入"与"整段播放"两种块序列。
+     *
+     * ⚠️ **本用例能力的诚实边界**（guardrail r4 的 F17）：`a==计划 ∧ b==计划 ⇒ a==b` 由传递性给出，
+     * 故"两路相等"那条断言**增量检测力为 0**；本用例真正的增量是"**非流式实际播出的静音块序列
+     * == 计划**"（此前 F1 只断言总样本数）。另外它只比较**静音块的序列**，**不校验静音块与音频块的
+     * 交错位置**——变异"计划索引整体后移一段"下本用例仍会绿（那种错误由 `LocalCloneTtsEngineTest`
+     * 的既有停顿用例兜住）。若要真正互证，需断言交错位置或让两路使用不同的声明采样率（未做）。
+     */
+    @Test
+    fun `两路直连对照 - 同一输入下流式与非流式的静音块序列必须逐项相同（AC-4）`() = runBlocking {
+        val gapMs = LocalCloneConfig.MAX_SENTENCE_GAP_MS // 2000ms：让封顶必然生效
+        val text = "第一句话。".repeat(120)
+        val config = LocalCloneConfig(sentenceGapMs = gapMs)
+
+        // ---- 第一路：流式（synth 声明 24k ⇒ 走 openStream） ----
+        val streamEvents = mutableListOf<String>()
+        val streamPlayer = StreamPlayer(events = streamEvents)
+        engine(StreamSynth(chunksPerCall = 3), streamPlayer, config)
+            .speak(text, RecListener(streamEvents))
+        assertEquals("第一路必须走流式", 1, streamPlayer.openCalls.get())
+        assertEquals("流式路径不得整段播放", 0, streamPlayer.playCalls.get())
+
+        // ---- 第二路：非流式（synth 声明 rate=0 ⇒ 退回整段播放） ----
+        val wholeEvents = mutableListOf<String>()
+        val wholePlayer = StreamPlayer(events = wholeEvents)
+        engine(StreamSynth(rate = 0, chunksPerCall = 2), wholePlayer, config)
+            .speak(text, RecListener(wholeEvents))
+        assertEquals("第二路必须退回整段播放", 0, wholePlayer.openCalls.get())
+        assertTrue("整段播放必须至少被调用一次", wholePlayer.playCalls.get() >= 1)
+
+        // ---- 抽取两路的"静音块"（全零且非空） ----
+        fun silenceSizes(blocks: List<FloatArray>) = blocks
+            .filter { it.isNotEmpty() && it.all { s -> s == 0f } }
+            .map { it.size }
+
+        val streamSilences = silenceSizes(streamPlayer.written)
+        val wholeSilences = silenceSizes(wholePlayer.played)
+        assertTrue(
+            "前置：两路都必须真的插入静音（流式 $streamSilences / 非流式 $wholeSilences）",
+            streamSilences.isNotEmpty() && wholeSilences.isNotEmpty()
+        )
+        // 核心断言：两路真实输出的静音块序列**逐项相同**（数量 + 每块长度 + 顺序）
+        assertEquals(
+            "流式与非流式实际输出的静音块序列必须完全相同（数量/长度/静音块之间的相对次序；不含与音频块的交错位置）",
+            streamSilences,
+            wholeSilences
+        )
+        // 且都必须等于同一份计划里非 0 的项
+        val segments = segmentForSynthesis(text, DEFAULT_SEGMENT_CHARS, FIRST_SEGMENT_CHARS)
+        val planned = LocalCloneSegmentGap.gapPlanFor(segments, gapMs, 24_000).filter { it > 0 }
+        assertEquals("流式静音序列必须等于计划", planned, streamSilences)
+        assertEquals("非流式静音序列必须等于计划", planned, wholeSilences)
+    }
+
     private companion object {
+
         /** 每块样本数（仅需非零，用于 framesWritten 与顺序断言）。 */
         const val CHUNK_SAMPLES = 8
 
