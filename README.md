@@ -239,6 +239,9 @@ Prism/
 - [docs/prd-v1-b24-rolepack-pet.md](docs/prd-v1-b24-rolepack-pet.md) —— 批次24 PRD（角色包桌宠 US-2401~US-2413，ADR-051，本地专属）
 - [docs/decisions/ADR-051-rolepack-pet-live2d.md](docs/decisions/ADR-051-rolepack-pet-live2d.md) —— 桌宠架构与 Live2D 移动端渲染选型（本地专属）
 - [docs/prd-local-voice-clone.md](docs/prd-local-voice-clone.md) —— 端侧本地音色克隆 PRD（US-001~US-004、AC0~AC8，ADR-053，本地专属）
+- [docs/prd-qq-burner-account.md](docs/prd-qq-burner-account.md) —— QQ 小号端侧控制 PRD（后台代发消息 / 换头像 / 改签名 / 随机定时主动消息；US-3101~US-3108，ADR-062、ADR-063，本地专属）
+- [docs/decisions/ADR-062-qq-burner-account-android-control.md](docs/decisions/ADR-062-qq-burner-account-android-control.md) —— QQ 小号端侧控制路线选型（端侧 UI 自动化为主、Termux + NapCat 为备选，本地专属）
+- [docs/decisions/ADR-063-proactive-message-scheduling.md](docs/decisions/ADR-063-proactive-message-scheduling.md) —— 随机定时主动消息的调度机制选型（前台服务心跳 + AlarmManager 精确闹钟兜底，本地专属）
 - [docs/decisions/ADR-053-local-voice-clone-ondevice.md](docs/decisions/ADR-053-local-voice-clone-ondevice.md) —— 端侧本地音色克隆（ZipVoice）与音色包侧载分发（本地专属）
 - [docs/decisions/ADR-054-local-clone-streaming-playback.md](docs/decisions/ADR-054-local-clone-streaming-playback.md) —— 本地音色**流式播放**（合成回调分块 → 常开音轨逐块写入，本地专属）
 - [docs/decisions/ADR-055-ondevice-vits-voicepack.md](docs/decisions/ADR-055-ondevice-vits-voicepack.md) —— 端侧**微调 VITS** 音色包与 ZipVoice 并存切换（Proposed，本地专属）
@@ -252,6 +255,30 @@ Prism/
 - [docs/reports/2026-09-20-vits-finetune-verification.md](docs/reports/2026-09-20-vits-finetune-verification.md) —— 中文 VITS 微调全链路验证（训练/导出/加载崩溃根因/RTF 实测，一次性报告）
 - [docs/reports/2026-09-20-local-voice-clone-streaming-measurement.md](docs/reports/2026-09-20-local-voice-clone-streaming-measurement.md) —— 流式播放机制核实与一手实测（TKN-LVC-013，一次性报告）
 - [docs/reports/2026-09-20-voice-clone-vits-route-research.md](docs/reports/2026-09-20-voice-clone-vits-route-research.md) —— 中文 VITS 微调→sherpa-onnx ONNX 路线一手核查（一次性报告）
+- [docs/reports/2026-10-18-qq-wechat-persona-im-research.md](docs/reports/2026-10-18-qq-wechat-persona-im-research.md) —— QQ/微信拟人化跨 IM 能力（发消息/动态/头像/签名）调研（一次性报告，本地专属）
+- [docs/reports/2026-10-18-qq-burner-account-android-control-research.md](docs/reports/2026-10-18-qq-burner-account-android-control-research.md) —— QQ 小号在纯 Android 端由 Prism 后台控制（发消息/换头像/改签名）专项调研（一次性报告，本地专属）
+- [docs/reports/2026-10-18-qq-proactive-scheduled-messaging-research.md](docs/reports/2026-10-18-qq-proactive-scheduled-messaging-research.md) —— QQ 随机定时主动消息（拟人化）补充调研（Android 定时机制/随机化算法/先例，一次性报告，本地专属）
+- [docs/reports/2026-10-18-qq-control-archaeology.md](docs/reports/2026-10-18-qq-control-archaeology.md) —— QQ 小号控制功能集成点源码考古（工具接入链路/手机操控执行面/保活/设置页/持久化范式，一次性报告，本地专属）
+- [docs/reports/2026-10-19-qq-m0-poc.md](docs/reports/2026-10-19-qq-m0-poc.md) —— QQ 小号端侧控制 M0 真机 PoC（会话页/资料页节点可定位，结论通过，一次性报告，本地专属）
+- [docs/reports/2026-10-19-qq-executor-guardrail.md](docs/reports/2026-10-19-qq-executor-guardrail.md) —— QQ 执行器批次 guardrail 审查（B-01/H-01 阻断轮，一次性报告，本地专属）
+- [docs/reports/2026-10-19-qq-executor-guardrail-r2.md](docs/reports/2026-10-19-qq-executor-guardrail-r2.md) —— QQ 执行器批次 guardrail 复审（通过，一次性报告，本地专属）
+- [docs/reports/2026-10-19-qq-executor-acceptance.md](docs/reports/2026-10-19-qq-executor-acceptance.md) —— QQ 执行器批次验收测试（通过，一次性报告，本地专属）
+- [docs/reports/2026-10-19-qq-bg-executor-archaeology.md](docs/reports/2026-10-19-qq-bg-executor-archaeology.md) —— QQ 小号后台虚拟屏化 + 双向对话源码考古（改造点/调用链/风险，一次性报告，本地专属）
+- [docs/reports/2026-10-19-qq-bg-executor-guardrail.md](docs/reports/2026-10-19-qq-bg-executor-guardrail.md) —— QQ 后台虚拟屏化 + 双向对话 guardrail 审查（有条件通过：H-01 等已闭合，一次性报告，本地专属）
+- [docs/reports/2026-10-19-qq-bg-executor-acceptance.md](docs/reports/2026-10-19-qq-bg-executor-acceptance.md) —— QQ 后台虚拟屏化 + 双向对话验收测试（一次性报告，本地专属）
+- [docs/reports/2026-10-19-qq-bg-executor-followup-research.md](docs/reports/2026-10-19-qq-bg-executor-followup-research.md) —— QQ 小号助手真机 5 项问题诊断与深度调研（DEF-118~122，一次性报告，本地专属）
+- [docs/reports/2026-10-21-qq-protocol-archaeology.md](docs/reports/2026-10-21-qq-protocol-archaeology.md) —— QQ 小号助手改 OneBot 11 协议端路线的现状考古（模块复用/替换边界/风险，TKN-QQ-PROTOCOL-001，一次性报告，本地专属）
+- [docs/reports/2026-10-21-qq-onebot-opencyvis-plan.md](docs/reports/2026-10-21-qq-onebot-opencyvis-plan.md) —— QQ 小号助手「OneBot 11 协议端 + OpenCyvis 隐藏执行面」落地方案（TKN-QQ-PROTOCOL-002，一次性报告，本地专属）
+- [docs/reports/2026-10-21-qq-protocol-guardrail.md](docs/reports/2026-10-21-qq-protocol-guardrail.md) —— 协议端改造 guardrail 审查（首轮：有条件通过，TKN-QQ-PROTOCOL-003，一次性报告，本地专属）
+- [docs/reports/2026-10-21-qq-protocol-guardrail-r2.md](docs/reports/2026-10-21-qq-protocol-guardrail-r2.md) —— 协议端改造 guardrail 复审（B-01/H-01/H-03 闭合，H-05 等已修复待三审，TKN-QQ-PROTOCOL-004，一次性报告，本地专属）
+- [docs/reports/2026-10-21-qq-protocol-guardrail-r3.md](docs/reports/2026-10-21-qq-protocol-guardrail-r3.md) —— 协议端改造 guardrail 三审（H-05 闭合，H-06/M-18/M-19 待修，TKN-QQ-PROTOCOL-005，一次性报告，本地专属）
+- [docs/reports/2026-10-21-qq-protocol-guardrail-r4.md](docs/reports/2026-10-21-qq-protocol-guardrail-r4.md) —— 协议端改造 guardrail 四审（无阻断/无高危；M-19 计时器语义 + M-20 测试缺口待闭合，TKN-QQ-PROTOCOL-006，一次性报告，本地专属）
+- [docs/reports/2026-10-21-qq-protocol-guardrail-r5.md](docs/reports/2026-10-21-qq-protocol-guardrail-r5.md) —— 协议端改造 guardrail 五审收尾（**通过**；M-19/M-20/L-27~L-30 闭合，遗留 R-01 与 L-31~L-35 已登记，TKN-QQ-PROTOCOL-007，一次性报告，本地专属）
+- [docs/reports/2026-10-21-qq-voice-guardrail.md](docs/reports/2026-10-21-qq-voice-guardrail.md) —— QQ 语音消息（US-3113）+ r5 遗留修复 guardrail 六审（**有条件通过**；R-01/L-31~L-34 闭合，语音链路无阻断/无高危，M-01~M-08 待闭合，TKN-QQ-PROTOCOL-008，一次性报告，本地专属）
+- [docs/reports/2026-10-21-qq-voice-guardrail-r2.md](docs/reports/2026-10-21-qq-voice-guardrail-r2.md) —— QQ 语音消息 C1~C5 收尾 guardrail 七审（**有条件通过**；C2/C4/M-04/M-07/M-08 闭合，C1/C3/C5 实现已改、验证未满，M-09~M-11 待闭合，TKN-QQ-PROTOCOL-009，一次性报告，本地专属）
+- [docs/reports/2026-10-21-qq-voice-guardrail-r3.md](docs/reports/2026-10-21-qq-voice-guardrail-r3.md) —— QQ 语音消息 M-09/M-10/M-11 闭合核验 guardrail 八审（**通过**；三项中危闭合，无阻断/无高危，遗留 L-23~L-29 低危，可进入 ac-verifier，TKN-QQ-PROTOCOL-010，一次性报告，本地专属）
+- [docs/reports/2026-10-21-qq-protocol-acceptance.md](docs/reports/2026-10-21-qq-protocol-acceptance.md) —— QQ 双轨改造批次验收（US-3110/3111/3112/3113/3115；**PARTIAL**：复验后代码层 PASS、P-01 关闭、D-01~D-09/R-02 闭合，真机端到端仍 BLOCKED，TKN-QQ-PROTOCOL-011，一次性报告，本地专属）
+- [docs/reports/2026-10-21-qq-protocol-guardrail-r6.md](docs/reports/2026-10-21-qq-protocol-guardrail-r6.md) —— QQ 双轨当前快照 guardrail 六审（**通过**；覆盖 P-01 当前快照，D-01~D-09/R-02 闭合，无阻断/无高危；M-01 已由 `QqRuntimeStateRepositoryTest` 补齐，TKN-QQ-PROTOCOL-011，一次性报告，本地专属）
 - [docs/runbooks/setup-local-voice-clone.md](docs/runbooks/setup-local-voice-clone.md) —— 本地音色包侧载与启用 Runbook（含真机验收清单）
 - [docs/runbooks/finetune-vits-zh-cyrene.md](docs/runbooks/finetune-vits-zh-cyrene.md) —— 中文 VITS 微调（昔涟音色）→ sherpa-onnx 端侧 Runbook（TKN-LVC-014，**已按实测更正**）
 - [docs/runbooks/searxng-selfhost.md](docs/runbooks/searxng-selfhost.md) —— SearXNG 自建搜索接入 Runbook

@@ -7,6 +7,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import java.io.File
@@ -479,5 +480,45 @@ class ProviderConfigRepositoryTest {
             listOf("First", "Second"),
             repository.providers.value.map { it.name }
         )
+    }
+
+    // ==================== ADR-064 H-06 / guardrail M-20：明文 http 持久化守卫 ====================
+
+    @Test
+    fun save_rejects_remote_cleartext_base_url_without_persisting() {
+        // H-06 持久化层守卫：远端明文 http 必须拒绝，且不得留下半写入记录
+        val before = repository.getAll().size
+        try {
+            repository.save(
+                ProviderConfig(name = "Remote", baseUrl = "http://api.example.com/v1", apiKeyRef = "remote")
+            )
+            fail("远端明文 http 应被拒绝保存")
+        } catch (e: IllegalArgumentException) {
+            assertTrue("错误信息应说明明文策略", e.message.orEmpty().contains("明文"))
+        }
+        assertEquals("被拒绝的配置不得入库", before, repository.getAll().size)
+    }
+
+    @Test
+    fun save_rejects_uppercase_cleartext_scheme() {
+        // guardrail L-33：scheme 大小写不敏感，`HTTP://remote` 同样不得入库
+        try {
+            repository.save(
+                ProviderConfig(name = "Upper", baseUrl = "HTTP://api.example.com/v1", apiKeyRef = "upper")
+            )
+            fail("大写 HTTP:// 远端地址应被拒绝保存")
+        } catch (_: IllegalArgumentException) {
+            // 预期
+        }
+        assertTrue("被拒绝的配置不得入库", repository.getAll().isEmpty())
+    }
+
+    @Test
+    fun save_allows_private_cleartext_base_url() {
+        // 本机/私网 http 是协议端（PC LAN）的合法场景，不得误拒
+        val id = repository.save(
+            ProviderConfig(name = "LAN", baseUrl = "http://192.168.1.10:8080/v1", apiKeyRef = "lan")
+        )
+        assertTrue("私网明文端点应允许保存", id > 0)
     }
 }

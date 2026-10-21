@@ -195,6 +195,14 @@ object ShizukuShell {
     }
 
     /**
+     * 读取系统通知摘要（**仅用于 QQ 新消息轻量探测**，PRD US-3111 AC-4）。
+     *
+     * 固定命令、不接受任何自由输入（无注入面）；shell 持有 DUMP 权限，可看到全用户通知。
+     * 输出可能较大，调用方必须限频（默认 90s）并只做散列比对，不解析具体内容。
+     */
+    fun notificationSnapshot(): String? = execOutput("dumpsys", "notification")
+
+    /**
      * 读当前 `overlay_display_devices` 设置值（修复轮八启动对账用）。
      *
      * @return 设置值（trim 后）；未设置/读取失败返回 null
@@ -217,6 +225,46 @@ object ShizukuShell {
      */
     fun amStartOnDisplay(component: String, displayId: Int): Boolean =
         exec(*buildAmStartCommand(component, displayId))
+
+    /**
+     * 以 shell 身份在指定**用户**下启动应用（QQ 小号助手，ADR-062：MIUI 应用双开运行于
+     * XSpace 用户 999，App 自身无跨用户启动能力，shell 的 `am start --user` 可达——M0 实证）。
+     *
+     * **安全边界**：与 [amStartOnDisplay] 同一白名单范式——component 仅由调用方代码拼装
+     * （QQ 主 Activity 常量），userId 为 Int，不接收任何自由文本。
+     *
+     * @param component 形如 `com.tencent.mobileqq/.activity.SplashActivity`
+     * @param userId 目标用户 id（XSpace=999）
+     */
+    fun amStartForUser(component: String, userId: Int): Boolean =
+        exec("am", "start", "--user", userId.toString(), "-n", component)
+
+    /**
+     * 以 shell 身份在指定**用户**下把目标 App 启动到指定**虚拟屏**（ADR-062 QQ 小号助手：
+     * 小号运行在 XSpace 用户 999，且须在**后台副屏**执行——既有 [amStartForUser]（无 display）
+     * 与 [amStartOnDisplay]（无 user）都无法同时跨用户 + 跨屏，App 自身的 `setLaunchDisplayId`
+     * 亦只能作用于当前用户）。
+     *
+     * **forceStopFirst 的必要性**（2026-10-19 真机 PoC）：目标 App 若已在其它 display 上有窗口，
+     * `am start --display` 只会把该既有实例拉到其**原 display** 前台（真机实证 "delivered to
+     * currently running top-most instance"），不会迁移到目标副屏——那样小号会落到主屏（占用
+     * 用户前台，正是本改造要消除的问题）。加 `-S`（force-stop 后重启）可确保以小号在**目标副屏**
+     * 顶层重新渲染（真机实证：display 0 运行中的小号被成功迁至副屏）。
+     *
+     * **安全边界**：与既有白名单范式一致——component 仅由调用方代码拼装，userId / displayId
+     * 均为 Int，forceStopFirst 为布尔，不接收任何自由文本。
+     *
+     * @param component 形如 `com.tencent.mobileqq/.activity.SplashActivity`
+     * @param userId 目标用户 id（XSpace=999）
+     * @param displayId 目标虚拟屏 displayId
+     * @param forceStopFirst 启动前 force-stop 目标 App（确保迁至目标屏，见上）
+     */
+    fun amStartForUserOnDisplay(
+        component: String,
+        userId: Int,
+        displayId: Int,
+        forceStopFirst: Boolean = false
+    ): Boolean = exec(*buildAmStartForUserOnDisplayCommand(component, userId, displayId, forceStopFirst))
 
     /**
      * 以 shell 身份向指定虚拟屏注入触摸（tap/swipe；long_press=慢速 swipe、
@@ -304,6 +352,24 @@ object ShizukuShell {
      */
     fun buildAmStartCommand(component: String, displayId: Int): Array<String> =
         arrayOf("am", "start", "--display", displayId.toString(), "-n", component)
+
+    /**
+     * 拼装 `am start --user <uid> --display <id> [-S] -n <component>` 命令数组（纯函数可测；
+     * [amStartForUserOnDisplay] 的命令体）。`am start` 使用长短选项均可（与 `input` 的 `-d`
+     * 约束不同，本方法按 AOSP am 用法使用 `--user`/`--display` 长选项）。
+     */
+    fun buildAmStartForUserOnDisplayCommand(
+        component: String,
+        userId: Int,
+        displayId: Int,
+        forceStopFirst: Boolean = false
+    ): Array<String> = buildList {
+        add("am"); add("start")
+        add("--user"); add(userId.toString())
+        add("--display"); add(displayId.toString())
+        if (forceStopFirst) add("-S")
+        add("-n"); add(component)
+    }.toTypedArray()
 
     /**
      * 拼装 `input -d tap` 命令数组（纯函数可测）。

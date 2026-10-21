@@ -272,6 +272,16 @@ class ConversationViewModel(
      */
     private val todoLocalToolExecutor: io.prism.skill.TodoLocalToolExecutor? = null,
     /**
+     * QQ 小号助手（ADR-062）：`qq__*` 工具执行器。
+     *
+     * 非 null 时把 `qq__send_message` / `qq__set_signature` / `qq__schedule_message` 注入
+     * [buildTools]（工具是否真的可执行由执行器内部判定——未开启时返回可读说明，
+     * 不改变工具集 → 不破坏 provider 前缀缓存；与桌宠同范式）。
+     * null 时降级为不注册（向后兼容既有测试）。
+     * 生产环境由 [Factory] 从 [PrismApplication.qqLocalToolExecutor] 注入。
+     */
+    private val qqToolExecutor: io.prism.qq.QqLocalToolExecutor? = null,
+    /**
      * 批次24（ADR-051 D8）：桌宠动作工具执行器（`pet__play_action`）。
      *
      * 非 null 时把 `pet__play_action` 注入 [buildTools]，使角色能对自己的桌面形象下达
@@ -1482,7 +1492,9 @@ class ConversationViewModel(
                 todoWriteEnabled = todoLocalToolExecutor != null,
                 // 批次24（ADR-051 D8）：桌宠动作工具（pet__play_action，恒启用，纯本地能力；
                 // 桌宠未开启时执行器返回可读说明，不改变工具集 → 不破坏 provider 前缀缓存）
-                petActionEnabled = petLocalToolExecutor != null
+                petActionEnabled = petLocalToolExecutor != null,
+                // QQ 小号助手（ADR-062）：qq__* 工具（未开启时执行器返回可读说明，同上范式）
+                qqToolsEnabled = qqToolExecutor != null
             )
             // UXR4 问题 2/3（ADR-024）+ ADR-050：知识库工具在 **能力开启 + 嵌入可用** 时注入
             //（LLM 可主动枚举/检索/读取知识库）。ADR-050 后这是知识库正文进入上下文的**唯一通道**，
@@ -3230,7 +3242,9 @@ class ConversationViewModel(
             // v1 批次17（US-1702）：TODO 任务规划工具（默认 false 向后兼容既有测试）
             todoWriteEnabled: Boolean = false,
             // 批次24（ADR-051 D8）：桌宠动作工具（pet__play_action，默认 false 向后兼容既有测试）
-            petActionEnabled: Boolean = false
+            petActionEnabled: Boolean = false,
+            // QQ 小号助手（ADR-062）：qq__* 工具（默认 false 向后兼容既有测试）
+            qqToolsEnabled: Boolean = false
         ): List<ToolDefinition> {
             val skillTools = enabledSkills.flatMap { entry ->
                 (entry.manifest.tools ?: emptyList()).map { toolDecl ->
@@ -3290,8 +3304,14 @@ class ConversationViewModel(
             } else {
                 emptyList()
             }
+            // QQ 小号助手（ADR-062）：qq__send_message / set_signature / schedule_message
+            val qqTools = if (qqToolsEnabled) {
+                io.prism.qq.QqLocalToolExecutor.buildToolDefinitions()
+            } else {
+                emptyList()
+            }
             return skillTools + crossAppTools + webSearchTools + documentTools + askUserTools +
-                phoneControlTools + hotListTools + todoTools + petTools
+                phoneControlTools + hotListTools + todoTools + petTools + qqTools
         }
 
         /**
@@ -3540,6 +3560,8 @@ class ConversationViewModel(
                     rolePackLoader = app.rolePackLoader,
                     // 批次24（ADR-051 D8）：桌宠动作工具（pet__play_action）
                     petLocalToolExecutor = app.petLocalToolExecutor,
+                    // QQ 小号助手（ADR-062）：qq__* 工具（发送/签名/定时）
+                    qqToolExecutor = app.qqLocalToolExecutor,
                     // TASK-20260910-001：文本聊天播报管理器（播放按钮；引擎跟随语音通话设置）
                     textPlayback = io.prism.voice.TextPlaybackController(
                         app,

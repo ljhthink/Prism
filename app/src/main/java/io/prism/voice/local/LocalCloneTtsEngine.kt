@@ -164,6 +164,20 @@ interface LocalCloneStreamSession {
 }
 
 /**
+ * 可导出合成的最小契约（PRD US-3113）：把文本合成为 PCM 而不播放。
+ *
+ * 抽成接口的目的：QQ 语音链路可注入假引擎做 JVM 测试，不必实例化 native 合成器
+ * （guardrail M-11）。
+ */
+interface ExportableTtsEngine {
+    /** @return 合成音频；失败/未就绪/采样率未知时为 null */
+    suspend fun synthesizeForExport(text: String): LocalCloneAudio?
+
+    /** 释放 native 资源（幂等）。 */
+    fun release()
+}
+
+/**
  * LVC-1（ADR-053 决策 3）：端侧本地音色克隆 TTS 引擎（实现既有 [TtsEngine] 接口，**接口零改动**）。
  *
  * **语义对齐**（考古报告「不可破坏的不变量」）：
@@ -246,7 +260,7 @@ class LocalCloneTtsEngine(
      * **永不触发**，相关用例会退化为**空断言**（已被封口复审用变异 M1 实证）。
      */
     private val nowMs: () -> Long = { SystemClock.elapsedRealtime() }
-) : TtsEngine {
+) : TtsEngine, ExportableTtsEngine {
 
     private val idCounter = AtomicLong(0)
 
@@ -371,6 +385,72 @@ class LocalCloneTtsEngine(
             } finally {
                 scope.cancel()
             }
+        }
+    }
+
+    /**
+     * 导出合成（PRD US-3113 AC-2）：把文本合成为 PCM 样本**但不播放**，供 QQ 语音消息等
+     * 需要音频文件的场景使用。
+     *
+     * **与 [speak] 的区别**：不经过播放器、不回调监听器、不参与「取代在途播报」状态机；
+     * 但**共用** [engineAccess] 单飞闸与同一 native 合成器（并发 `generate` 是未定义行为）。
+     *
+     * **取消**：无用户级取消入口；`release()` 后返回 null。native 调用不可中断，看门狗在此不启用
+     * （它只告警、不取消，对导出没有价值）。
+     *
+     * @return 合成音频（采样率来自引擎）；失败/无参考/未选择音色包时返回 null
+     */
+    override suspend fun synthesizeForExport(text: String): LocalCloneAudio? {
+        if (released) return null
+        val normalized = LocalCloneTextNormalizer.normalize(text)
+        if (normalized.isBlank()) return null
+        val reference: LocalReference? = if (pack.tts == LocalTtsKind.ZIPVOICE) {
+            LocalReferenceSelector.select(normalized, pack.references) ?: return null
+        } else {
+            null
+        }
+        return try {
+            engineAccess.withLock {
+                withContext(ioDispatcher) {
+                    val synth = ensureSynthesizer() ?: return@withContext null
+                    val rate = synth.sampleRate()
+                    if (rate <= 0) return@withContext null
+                    // 长文本切段与播报路径一致（避免单次无界合成的内存/耗时尖峰）；
+                    // 导出不插段间静音（语音消息应连续）。
+                    val segments = segmentForSynthesis(
+                        normalized,
+                        DEFAULT_SEGMENT_CHARS,
+                        FIRST_SEGMENT_CHARS,
+                        splitSentences = false
+                    )
+                    val pieces = ArrayList<FloatArray>(segments.size)
+                    var total = 0
+                    for (segment in segments) {
+                        val audio = synth.synthesize(segment, reference, config, { released })
+                        if (audio.samples.isEmpty() || audio.truncated) return@withContext null
+                        // guardrail M-04：分段采样率不一致不得拼接（按错误采样率导出 = 变调变速）
+                        if (audio.sampleRate != rate) {
+                            Log.w(TAG, "导出合成分段采样率不一致（${audio.sampleRate} != $rate），放弃本次导出")
+                            return@withContext null
+                        }
+                        pieces += audio.samples
+                        total += audio.samples.size
+                    }
+                    if (total == 0) return@withContext null
+                    val merged = FloatArray(total)
+                    var pos = 0
+                    for (chunk in pieces) {
+                        chunk.copyInto(merged, pos)
+                        pos += chunk.size
+                    }
+                    LocalCloneAudio(merged, rate)
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.w(TAG, "导出合成失败：${e::class.simpleName}")
+            null
         }
     }
 

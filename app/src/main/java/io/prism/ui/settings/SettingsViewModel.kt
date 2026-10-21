@@ -92,6 +92,15 @@ class SettingsViewModel(
     /** 当前编辑的 Provider（null 表示未选中）。 */
     val selectedProvider: StateFlow<ProviderConfig?> = _selectedProvider.asStateFlow()
 
+    private val _providerSaveError = MutableStateFlow<String?>(null)
+    /** Provider 保存被安全策略拒绝时的可读错误（guardrail L-28）；null 表示无错误。 */
+    val providerSaveError: StateFlow<String?> = _providerSaveError.asStateFlow()
+
+    /** 清除 Provider 保存错误提示（弹层重开/用户确认后调用）。 */
+    fun clearProviderSaveError() {
+        _providerSaveError.value = null
+    }
+
     private val _apiKeyLoading = MutableStateFlow(false)
     /** API Key 读取中状态。 */
     val apiKeyLoading: StateFlow<Boolean> = _apiKeyLoading.asStateFlow()
@@ -1184,11 +1193,17 @@ class SettingsViewModel(
 
     /** 选择要编辑的 Provider。 */
     fun selectProvider(config: ProviderConfig?) {
+        _providerSaveError.value = null
         _selectedProvider.value = config
     }
 
-    /** 保存 Provider 配置（id=0 新建，id>0 更新）。@return 保存后的 id（新建时用于后续激活） */
-    fun saveProvider(config: ProviderConfig): Long {
+    /**
+     * 保存 Provider 配置（id=0 新建，id>0 更新）。
+     *
+     * @return 保存后的 id（新建时用于后续激活）；被安全策略拒绝时返回 null，
+     *   原因写入 [providerSaveError]（guardrail L-28：非 UI 路径的明文 http 拒绝不再直接崩溃 UI）
+     */
+    fun saveProvider(config: ProviderConfig): Long? {
         // v1 批次13（B，D16b）：按模型名自动启用视觉能力（开箱即用）——用户配了 glm-4.6v-flash
         // 等视觉模型时无需知道要去手动开关 supportsVision，截图即以图片注入会话（发挥多模态）。
         // **仅当用户未显式设置过**（supportsVisionSet=false）才自动提示并落标记；用户已显式触碰
@@ -1200,7 +1215,14 @@ class SettingsViewModel(
             config.supportsVision = true
             config.supportsVisionSet = true
         }
-        val id = providerRepository.save(config)
+        _providerSaveError.value = null
+        val id = try {
+            providerRepository.save(config)
+        } catch (e: IllegalArgumentException) {
+            // guardrail L-28：持久化层 Fail-Fast 的明文 http 拒绝转为可读错误，不使 UI 崩溃
+            _providerSaveError.value = e.message ?: "Provider 配置不合法，无法保存"
+            return null
+        }
         // v1 真机二次修复（Issue 3）：把某 Provider 标记为「视觉旁路 Provider」本身即用户"把图片
         // 外发到该端点"的明确意图 → 同步写入云端旁路授权 consent，避免用户"激活了视觉模型却
         // 仍只见 OCR"（原误解：isBypassAvailable 因 consent 默认 false 恒不过，Cloud 从不执行）。
@@ -1230,6 +1252,7 @@ class SettingsViewModel(
      * 复用 [ProviderEditSheet] 的编辑界面完成手填创建。
      */
     fun newCustomProvider() {
+        _providerSaveError.value = null
         _selectedProvider.value = ProviderConfig(
             name = "",
             baseUrl = "",

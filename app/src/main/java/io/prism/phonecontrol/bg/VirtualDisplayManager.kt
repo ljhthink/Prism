@@ -61,6 +61,14 @@ object VirtualDisplayManager {
     private val lock = Any()
 
     /**
+     * 后台执行面互斥（guardrail H-01，2026-10-19）：无障碍服务的 `executionDisplayId` 是**全局
+     * 单值**，多个调用方（交互工具 / QQ 后台循环 / 手机操控后台工具）并发切换会相互覆盖——
+     * 一方的 finally 还原会把另一方正在使用的执行面清成 null，后续节点查询回落主屏活动窗口，
+     * 可能误操作用户当前前台界面。所有 `setExecutionDisplay` 使用方必须持此锁串行化。
+     */
+    val executionFaceMutex = kotlinx.coroutines.sync.Mutex()
+
+    /**
      * 批次22 修复轮六：当前执行面是否为**系统模拟副屏（trusted）**——true 时截图走
      * a11y takeScreenshotForDisplay（无 ImageReader），合成输入可用。
      */
@@ -331,36 +339,7 @@ object VirtualDisplayManager {
             val component = intent.component?.flattenToString()
                 ?: return "错误：未找到应用 $packageName 的启动组件"
             return try {
-                val started = ShizukuShell.amStartOnDisplay(component, displayId)
-                if (!started) {
-                    Log.w(TAG, "shell am start --display 失败（$packageName）")
-                    return "错误：shell 启动失败（am start 非零退出）。请确认 Shizuku 状态后重试，" +
-                        "或显式传 mode=\"foreground\" 在主屏继续"
-                }
-                // 轮询窗口就绪（最多 6s；虚拟屏顶层窗口包名 == 目标包名才算渲染成功）
-                var rendered = false
-                var topPkg: String? = null
-                repeat(12) {
-                    Thread.sleep(500)
-                    topPkg = io.prism.phonecontrol.PhoneControlAccessibilityService
-                        .instance?.backgroundWindowPackage(displayId)
-                    if (topPkg == packageName) {
-                        rendered = true
-                        return@repeat
-                    }
-                }
-                if (rendered) {
-                    synchronized(launchedPackages) { launchedPackages.add(packageName) }
-                    Log.i(TAG, "已在虚拟屏渲染 $packageName（displayId=$displayId）")
-                    "已在后台虚拟屏启动应用 $packageName（窗口已就绪）。" +
-                        "注意：主屏上出现的「叠加视图」小窗是后台执行面（用户可见），任务结束后约 2 分钟自动关闭，" +
-                        "也可在通知栏「Prism 正在操控手机」通知上点「关闭后台虚拟屏」立即关闭——可向用户说明"
-                } else {
-                    Log.w(TAG, "直启后虚拟屏无目标窗口（actual=$topPkg）→ 诚实判定拒绝渲染")
-                    "错误：应用 $packageName 未能渲染到后台虚拟屏（当前虚拟屏顶层=${topPkg ?: "无窗口"}）。" +
-                        "该 App 大概率拒绝在非物理屏运行（启动期检测），重试后台启动无效——" +
-                        "请改用 mode=foreground（会短暂占用主屏，先告知用户）或 take_over"
-                }
+                shellLaunchAndVerify(component, packageName, userId = null)
             } catch (e: Exception) {
                 Log.w(TAG, "后台直启失败：${e::class.simpleName}: ${e.message}")
                 "错误：后台启动应用失败（${e::class.simpleName}: ${e.message}）。请重试，或显式传 mode=\"foreground\" 在主屏继续"
@@ -384,6 +363,80 @@ object VirtualDisplayManager {
             Log.w(TAG, "launchApp(后台) 失败：${e::class.java.name}: ${e.message}")
             "错误：后台启动应用被系统拒绝（${e::class.java.simpleName}: ${e.message}）。" +
                 "请对该次调用显式传 mode=\"foreground\" 在主屏继续执行任务"
+        }
+    }
+
+    /**
+     * shell 直启 + 窗口验证（[launchApp] 与 [launchAppForUser] 共用）。
+     *
+     * @param component 启动组件（"pkg/.Activity"）
+     * @param packageName 目标包名（顶层窗口校验用）
+     * @param userId 目标用户（null=当前用户 → [ShizukuShell.amStartOnDisplay]；
+     *   非 null → [ShizukuShell.amStartForUserOnDisplay]，且 force-stop 确保迁至目标副屏）
+     * @return 可读结果文案（成功含回收说明；失败含诊断与降级引导）
+     */
+    private fun shellLaunchAndVerify(component: String, packageName: String, userId: Int?): String {
+        val started = if (userId == null) {
+            ShizukuShell.amStartOnDisplay(component, displayId)
+        } else {
+            // 跨用户启动：目标 App 若已在其它屏有窗口，须 force-stop 才能迁到本副屏（真机 PoC）
+            ShizukuShell.amStartForUserOnDisplay(component, userId, displayId, forceStopFirst = true)
+        }
+        if (!started) {
+            Log.w(TAG, "shell am start 失败（$packageName user=${userId ?: "current"}）")
+            return "错误：shell 启动失败（am start 非零退出）。请确认 Shizuku 状态后重试，" +
+                "或显式传 mode=\"foreground\" 在主屏继续"
+        }
+        // 轮询窗口就绪（最多 6s；虚拟屏顶层窗口包名 == 目标包名才算渲染成功）
+        var rendered = false
+        var topPkg: String? = null
+        repeat(12) {
+            Thread.sleep(500)
+            topPkg = io.prism.phonecontrol.PhoneControlAccessibilityService
+                .instance?.backgroundWindowPackage(displayId)
+            if (topPkg == packageName) {
+                rendered = true
+                return@repeat
+            }
+        }
+        if (rendered) {
+            synchronized(launchedPackages) { launchedPackages.add(packageName) }
+            Log.i(TAG, "已在虚拟屏渲染 $packageName（displayId=$displayId, user=${userId ?: "current"}）")
+            return "已在后台虚拟屏启动应用 $packageName（窗口已就绪）。" +
+                "注意：主屏上出现的「叠加视图」小窗是后台执行面（用户可见），任务结束后约 2 分钟自动关闭，" +
+                "也可在通知栏「Prism 正在操控手机」通知上点「关闭后台虚拟屏」立即关闭——可向用户说明"
+        }
+        Log.w(TAG, "直启后虚拟屏无目标窗口（actual=$topPkg）→ 诚实判定拒绝渲染")
+        return "错误：应用 $packageName 未能渲染到后台虚拟屏（当前虚拟屏顶层=${topPkg ?: "无窗口"}）。" +
+            "该 App 大概率拒绝在非物理屏运行（启动期检测），重试后台启动无效——" +
+            "请改用 mode=foreground（会短暂占用主屏，先告知用户）或 take_over"
+    }
+
+    /**
+     * 在虚拟屏上启动**指定用户**下的目标应用（ADR-062 QQ 小号助手：小号在 XSpace 用户 999，
+     * 与主号同包名但不同用户——必须在副屏内以正确用户启动，否则会拉到主屏占用用户前台）。
+     *
+     * 与 [launchApp] 同一范式（shell 直启 + 窗口验证 + 诚实降级），但走
+     * [ShizukuShell.amStartForUserOnDisplay]（`--user` + `--display` + force-stop）。
+     * **必须 Shizuku 就绪**——纯 App 的 `setLaunchDisplayId` 只能作用于当前用户，无法跨用户。
+     *
+     * @param userId 目标用户 id（XSpace=999）
+     * @return 成功/失败描述文案（含诊断）
+     */
+    fun launchAppForUser(context: Context, packageName: String, userId: Int): String {
+        if (!isCreated) return "错误：后台虚拟屏未创建"
+        if (!ShizukuShell.isReady()) {
+            return "错误：跨用户后台启动需要 Shizuku（已安装并激活）——App 自身无法把其它用户的应用启动到副屏"
+        }
+        val intent = context.packageManager.getLaunchIntentForPackage(packageName)
+            ?: return "错误：未找到应用 $packageName 的启动入口"
+        val component = intent.component?.flattenToString()
+            ?: return "错误：未找到应用 $packageName 的启动组件"
+        return try {
+            shellLaunchAndVerify(component, packageName, userId)
+        } catch (e: Exception) {
+            Log.w(TAG, "launchAppForUser 失败：${e::class.simpleName}: ${e.message}")
+            "错误：后台启动应用失败（${e::class.simpleName}: ${e.message}）"
         }
     }
 

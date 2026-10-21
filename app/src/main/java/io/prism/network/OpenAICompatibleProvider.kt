@@ -125,6 +125,16 @@ class OpenAICompatibleProvider(
         thinkingEnabled: Boolean?,
         reasoningEffort: String?
     ): Flow<StreamEvent> = flow {
+        // ADR-064 H-06：远端明文 http 运行时拒绝（存量配置同样拦截）
+        if (!io.prism.network.PrivateNetwork.isCleartextAllowed(config.baseUrl)) {
+            emit(
+                StreamEvent.Error(
+                    "当前 Provider 使用远端明文 http，已被安全策略拒绝；请改用 https，" +
+                        "或使用本机/私网地址"
+                )
+            )
+            return@flow
+        }
         val endpoint = buildEndpoint(config.baseUrl)
         val apiKey = if (config.apiKeyRef.isNotBlank()) {
             apiKeyRepository.readApiKeyOnce(config.apiKeyRef)
@@ -276,6 +286,12 @@ class OpenAICompatibleProvider(
         thinkingEnabled: Boolean?,
         reasoningEffort: String?
     ): String? {
+        // ADR-064 H-06：base-config 允许明文后，存量远端 http 配置会重新可用并明文外发 API Key。
+        // 运行时二次校验（持久化层也校验，防存量脏数据）。
+        if (!io.prism.network.PrivateNetwork.isCleartextAllowed(config.baseUrl)) {
+            android.util.Log.w(TAG, "拒绝远端明文 http Provider（baseUrl 非本机/私网）")
+            return null
+        }
         val endpoint = buildEndpoint(config.baseUrl)
         val apiKey = if (config.apiKeyRef.isNotBlank()) {
             apiKeyRepository.readApiKeyOnce(config.apiKeyRef)

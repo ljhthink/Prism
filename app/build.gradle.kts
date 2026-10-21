@@ -168,6 +168,8 @@ dependencies {
     implementation(libs.ktor.client.core)
     implementation(libs.ktor.client.okhttp)
     implementation(libs.ktor.client.content.negotiation)
+    // ADR-064：OneBot 11 正向 WebSocket 事件通道（与 ktor 同版本，无版本漂移）
+    implementation(libs.ktor.client.websockets)
     implementation(libs.ktor.serialization.kotlinx.json)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.mcp.kotlin.sdk.client)

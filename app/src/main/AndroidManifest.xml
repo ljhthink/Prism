@@ -21,6 +21,9 @@
     <!-- 批次22 修复轮七：后台任务回收 killBackgroundProcesses 所需（normal 级权限；
          lint MissingPermission——批次20 起缺失，releaseDisplay 的非 Shizuku 回收路径必需）。 -->
     <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
+    <!-- QQ 小号助手（ADR-063）：随机定时主动消息的精确闹钟兜底。Android 12+ 需用户在系统
+         「闹钟与提醒」中授权；未授予时运行时检测并降级为仅前台服务心跳调度（PRD US-3108 AC-6）。 -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <application
         android:name=".PrismApplication"
@@ -92,6 +95,17 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="用户主动开启的桌面宠物悬浮窗显示（可在应用内随时收起）" />
+        </service>
+
+        <!-- QQ 小号助手（ADR-063）：随机定时主动消息调度服务（前台服务心跳 + AlarmManager 精确闹钟兜底）。
+             与保活/桌宠同一 specialUse 范式；由用户在设置页开启「定时主动消息」后显式启动。 -->
+        <service
+            android:name=".qq.ProactiveScheduleService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="在用户设定的时段内随机触发 LLM 主动消息（可在应用内随时停止）" />
         </service>
 
         <!-- 批次21（SZ-001，ADR-046）：Shizuku Provider——shell 命令通道的授权与绑定入口 -->

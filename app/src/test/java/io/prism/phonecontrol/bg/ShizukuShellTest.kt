@@ -26,6 +26,23 @@ class ShizukuShellTest {
     }
 
     @Test
+    fun `amStartForUserOnDisplay 命令拼装 - 跨用户+跨屏（ADR-062 QQ 小号）`() {
+        assertArrayEquals(
+            arrayOf("am", "start", "--user", "999", "--display", "4", "-n", "com.tencent.mobileqq/.activity.SplashActivity"),
+            ShizukuShell.buildAmStartForUserOnDisplayCommand("com.tencent.mobileqq/.activity.SplashActivity", 999, 4)
+        )
+    }
+
+    @Test
+    fun `amStartForUserOnDisplay 命令拼装 - forceStopFirst 追加 -S（迁屏必需）`() {
+        val cmd = ShizukuShell.buildAmStartForUserOnDisplayCommand(
+            "com.tencent.mobileqq/.activity.SplashActivity", 999, 4, forceStopFirst = true
+        )
+        assertTrue("forceStopFirst=true 必须含 -S：${cmd.toList()}", cmd.contains("-S"))
+        assertEquals("-S 必须出现在 -n 之前（am 选项先于组件）", "am start", "${cmd[0]} ${cmd[1]}")
+    }
+
+    @Test
     fun `buildPmGrantCommand 命令拼装 - 4 token 数组（SZ-101 验收项）`() {
         assertArrayEquals(
             arrayOf("pm", "grant", "com.google.android.googlequicksearchbox", "android.permission.RECORD_AUDIO"),

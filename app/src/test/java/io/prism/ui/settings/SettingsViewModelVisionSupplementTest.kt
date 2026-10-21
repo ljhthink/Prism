@@ -174,7 +174,7 @@ class SettingsViewModelVisionSupplementTest {
                 apiKeyRef = "k1", models = listOf("glm-4.6v-flash")
             )
         )
-        val saved = io.prism.data.ProviderConfigRepository(boxStore).get(id)
+        val saved = io.prism.data.ProviderConfigRepository(boxStore).get(id!!)
         assertTrue("glm-4.6v-flash 保存后应自动启用 supportsVision", saved!!.supportsVision)
         assertTrue("自动启用应落 supportsVisionSet 标记（防后续被覆盖）", saved.supportsVisionSet)
     }
@@ -189,7 +189,7 @@ class SettingsViewModelVisionSupplementTest {
                 apiKeyRef = "k2", models = listOf("deepseek-chat")
             )
         )
-        val saved = io.prism.data.ProviderConfigRepository(boxStore).get(id)
+        val saved = io.prism.data.ProviderConfigRepository(boxStore).get(id!!)
         assertFalse("deepseek-chat 不应自动启用视觉", saved!!.supportsVision)
     }
 
@@ -206,7 +206,7 @@ class SettingsViewModelVisionSupplementTest {
                 supportsVisionSet = true
             )
         )
-        val saved = io.prism.data.ProviderConfigRepository(boxStore).get(id)
+        val saved = io.prism.data.ProviderConfigRepository(boxStore).get(id!!)
         assertFalse("用户显式关闭时保存不应覆盖", saved!!.supportsVision)
     }
 }

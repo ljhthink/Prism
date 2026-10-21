@@ -84,8 +84,11 @@ class LocalCloneTtsEngineTest {
         private val ignoreProbeMs: Long = 0L,
         private val blockMs: Long = 0L,
         private val onEnter: (() -> Unit)? = null,
+        private val reportedSampleRate: Int = 0,
         private val audioProvider: () -> LocalCloneAudio = { LocalCloneAudio(floatArrayOf(0.25f, -0.25f), 24_000) }
     ) : LocalCloneSynthesizer {
+
+        override fun sampleRate(): Int = reportedSampleRate
         val synthCalls = AtomicInteger(0)
         val releaseCalls = AtomicInteger(0)
         val concurrent = AtomicInteger(0)
@@ -1212,6 +1215,87 @@ class LocalCloneTtsEngineTest {
 
         assertTrue("两轮应都被处理", awaitUntil(4_000) { synth.synthCalls.get() >= 2 })
         assertEquals("不得并发进入 native 合成", 1, synth.maxConcurrent.get())
+        engine.release()
+    }
+
+    // ==================== US-3113：导出合成（不播放） ====================
+
+    @Test
+    fun `导出合成返回拼接音频且不触发播放`() = runBlocking {
+        val synth = FakeSynth(
+            reportedSampleRate = 24_000,
+            audioProvider = { LocalCloneAudio(floatArrayOf(0.5f, -0.5f), 24_000) }
+        )
+        val player = FakePlayer()
+        val engine = syncEngine(synth, player)
+
+        val audio = engine.synthesizeForExport("你好，世界")
+
+        assertTrue("应产出音频", audio != null && audio.samples.isNotEmpty())
+        assertEquals("采样率来自引擎", 24_000, audio!!.sampleRate)
+        assertEquals("导出不得触发播放", 0, player.playCalls.get())
+        engine.release()
+    }
+
+    @Test
+    fun `导出合成 - 合成失败返回 null 而不抛异常`() = runBlocking {
+        val engine = syncEngine(
+            FakeSynth(reportedSampleRate = 24_000, failure = IllegalStateException("boom")),
+            FakePlayer()
+        )
+        assertEquals(null, engine.synthesizeForExport("失败用例"))
+        engine.release()
+    }
+
+    @Test
+    fun `导出合成 - 分段采样率不一致时放弃（guardrail M-04）`() = runBlocking {
+        // 引擎声明 24k，但合成器实际回报 16k → 不得拼接导出（会变调变速）
+        val engine = syncEngine(
+            FakeSynth(
+                reportedSampleRate = 24_000,
+                audioProvider = { LocalCloneAudio(floatArrayOf(0.1f), 16_000) }
+            ),
+            FakePlayer()
+        )
+        assertEquals(null, engine.synthesizeForExport("采样率不一致"))
+        engine.release()
+    }
+
+    @Test
+    fun `导出合成 - 合成器不声明采样率时返回 null`() = runBlocking {
+        val engine = syncEngine(FakeSynth(reportedSampleRate = 0), FakePlayer())
+        assertEquals(null, engine.synthesizeForExport("无采样率"))
+        engine.release()
+    }
+
+    @Test
+    fun `导出合成 - 分段被标记 truncated 时放弃`() = runBlocking {
+        val engine = syncEngine(
+            FakeSynth(
+                reportedSampleRate = 24_000,
+                audioProvider = { LocalCloneAudio(floatArrayOf(0.1f), 24_000, truncated = true) }
+            ),
+            FakePlayer()
+        )
+        assertEquals(null, engine.synthesizeForExport("被中止的分段"))
+        engine.release()
+    }
+
+    @Test
+    fun `导出合成 - 引擎已释放时返回 null`() = runBlocking {
+        val engine = syncEngine(FakeSynth(reportedSampleRate = 24_000), FakePlayer())
+        engine.release()
+        assertEquals(null, engine.synthesizeForExport("释放后"))
+    }
+
+    @Test
+    fun `导出合成 - 空参考集（VITS 语义外的 ZIPVOICE）返回 null`() = runBlocking {
+        val engine = syncEngine(
+            FakeSynth(reportedSampleRate = 24_000),
+            FakePlayer(),
+            refs = emptyList()
+        )
+        assertEquals(null, engine.synthesizeForExport("无参考"))
         engine.release()
     }
 }

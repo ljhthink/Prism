@@ -4,6 +4,7 @@ import android.util.Log
 import io.prism.skill.AskUserLocalToolExecutor
 import io.prism.skill.LocalToolExecutor
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -243,26 +244,31 @@ class PhoneControlLocalToolExecutor(
                     return blocked("后台操控开关未开启（聊天输入框上方「后台操控」）。请开启后重试，或去掉 mode 参数改用前台模式")
                 }
                 backgroundGuard()?.let { return it }
-                // 批次21 真机修复 R3（RCA 问题2 续）：bg 工具路径统一先 ensureDisplay（幂等）——
-                // 真机实证 LLM 首个 bg 操作若不是 launch_app（如直接 get_ui_state/screenshot），
-                // 虚拟屏不存在 → 工具失败 → LLM 误判"后台不可用"而显式切 foreground（占用前台）。
-                // 上下文经服务的 applicationContext（服务实例即 bg 执行上下文持有者）。
-                withServiceOrNull { svc ->
-                    // guardrail Q2（修复轮七）：中断类异常必须透传（恢复中断位 + 转 Cancellation）
-                    // ——原 runCatching 会静默吞掉 InterruptedException 后带 INVALID displayId
-                    // 继续执行工具；其余异常维持既有语义（创建失败走工具层诚实报错）
-                    try {
-                        io.prism.phonecontrol.bg.VirtualDisplayManager.ensureDisplay(svc.applicationContext)
-                    } catch (e: InterruptedException) {
-                        Thread.currentThread().interrupt()
-                        throw java.util.concurrent.CancellationException("ensureDisplay interrupted")
-                    } catch (e: java.util.concurrent.CancellationException) {
-                        throw e
-                    } catch (_: Exception) {
-                        // 创建失败：后续工具按"虚拟屏未创建"诚实报错
+                // guardrail H-01（2026-10-19）：后台执行面（executionDisplayId）为全局单值，
+                // 须与 QQ 后台循环等其它切换方串行化——整段（ensureDisplay + 执行面切换 + 工具）
+                // 持 [VirtualDisplayManager.executionFaceMutex]，避免并发切换相互覆盖执行面。
+                return io.prism.phonecontrol.bg.VirtualDisplayManager.executionFaceMutex.withLock {
+                    // 批次21 真机修复 R3（RCA 问题2 续）：bg 工具路径统一先 ensureDisplay（幂等）——
+                    // 真机实证 LLM 首个 bg 操作若不是 launch_app（如直接 get_ui_state/screenshot），
+                    // 虚拟屏不存在 → 工具失败 → LLM 误判"后台不可用"而显式切 foreground（占用前台）。
+                    // 上下文经服务的 applicationContext（服务实例即 bg 执行上下文持有者）。
+                    withServiceOrNull { svc ->
+                        // guardrail Q2（修复轮七）：中断类异常必须透传（恢复中断位 + 转 Cancellation）
+                        // ——原 runCatching 会静默吞掉 InterruptedException 后带 INVALID displayId
+                        // 继续执行工具；其余异常维持既有语义（创建失败走工具层诚实报错）
+                        try {
+                            io.prism.phonecontrol.bg.VirtualDisplayManager.ensureDisplay(svc.applicationContext)
+                        } catch (e: InterruptedException) {
+                            Thread.currentThread().interrupt()
+                            throw java.util.concurrent.CancellationException("ensureDisplay interrupted")
+                        } catch (e: java.util.concurrent.CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                            // 创建失败：后续工具按"虚拟屏未创建"诚实报错
+                        }
                     }
+                    withBackgroundExecution { dispatchTool(tool, arguments) }
                 }
-                return withBackgroundExecution { dispatchTool(tool, arguments) }
             }
             dispatchTool(tool, arguments)
         } catch (e: CancellationException) {

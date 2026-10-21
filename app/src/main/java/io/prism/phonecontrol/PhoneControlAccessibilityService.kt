@@ -356,6 +356,45 @@ class PhoneControlAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * QQ 小号助手（ADR-062；2026-10-19 真机 E2E DEF-112）：按节点 bounds 中心**经 Shizuku shell**
+     * 注入点击（后台执行面）。
+     *
+     * **为什么需要它**（真机取证）：后台执行面对**跨用户副屏**（XSpace user 999）窗口调用节点
+     * `ACTION_CLICK` **返回成功但页面不跳转**（日志 `tap=已点击节点 [7]` 但会话页 `id/input` 恒
+     * 不出现）——疑似框架对"服务所在用户 ≠ 窗口所属用户"的节点动作静默丢弃。真实触摸经
+     * shell `input -d <id> tap` 对副屏焦点窗口有效（ADR-046），故后台导航统一走本方法。
+     *
+     * 前台执行面下等价于普通按 bounds 点击（不影响既有语义）。
+     *
+     * @param nid 节点序号（[findNodeByTextNid]/[findNodeByViewIdNid] 契约）
+     * @return 结果文案（成功/可读失败）
+     */
+    fun performTapNodeBoundsShell(nid: Int): String {
+        val node = findNodeByNid(nid) ?: return "错误：节点 [$nid] 不存在（页面可能已变化）"
+        val bounds = Rect().also { node.getBoundsInScreen(it) }
+        if (bounds.isEmpty) return "错误：节点 [$nid] 无可用 bounds"
+        // guardrail N-5（纵深防御）：与 [performTap] 一致的落点敏感复检——节点自身文本含
+        // 支付/密码/验证码等敏感内容时硬拦截（永不执行）
+        val nodeText = listOfNotNull(node.text?.toString(), node.contentDescription?.toString())
+            .joinToString(" ").trim()
+        if (PhoneControlSecurity.isSensitiveTargetText(nodeText)) {
+            return "错误：目标节点含敏感内容（${nodeText.take(30)}），已硬拦截"
+        }
+        val cx = bounds.centerX()
+        val cy = bounds.centerY()
+        if (!isBackgroundExecution) {
+            return if (dispatchTap(cx, cy)) "已点击节点 [$nid]（bounds 中心 $cx,$cy）" else "错误：手势点击失败"
+        }
+        if (!io.prism.phonecontrol.bg.ShizukuShell.isReady()) return bgGestureBlocked("坐标点击")
+        val displayId = executionDisplayId ?: return bgGestureBlocked("坐标点击")
+        return if (io.prism.phonecontrol.bg.ShizukuShell.inputTap(displayId, cx, cy)) {
+            "已点击节点 [$nid]（bounds 中心 $cx,$cy shell 注入）"
+        } else {
+            "错误：后台手势注入失败（Shizuku 命令执行异常）"
+        }
+    }
+
+    /**
      * v1 批次11（坐标吸附）：把目标坐标吸附到最近的可点击节点中心。
      *
      * **背景（真机 + 调研）**：LLM 基于 OCR/截图给的坐标常偏离真实可点击中心（OCR 识别框不居中、
@@ -545,6 +584,159 @@ class PhoneControlAccessibilityService : AccessibilityService() {
             }
         }
         return bestNid
+    }
+
+    /**
+     * QQ 小号助手（ADR-062，M0 PoC 结论）：按 **viewIdResourceName 尾段** 定位节点 nid（BFS）。
+     *
+     * M0 真机实证 QQ 暴露稳定 resource-id（`id/input`、`id/send_btn`），id 定位比文本锚点
+     * 更抗版本漂移（QQ 文案可能变，控件 id 在版本内稳定）。nid 契约与 [findNodeByNid] /
+     * [findNodeByTextNid] 一致（全节点 BFS 序号）。
+     *
+     * @param viewId resource-id 尾段（如 `input`、`send_btn`；匹配 `pkg:id/<viewId>`）
+     * @return 命中节点 nid；无命中返回 null
+     */
+    fun findNodeByViewIdNid(viewId: String): Int? {
+        if (viewId.isBlank()) return null
+        val root = executionRoot() ?: return null
+        val compat = AccessibilityNodeInfoCompat.wrap(root)
+        val queue = ArrayDeque<AccessibilityNodeInfoCompat>()
+        queue.add(compat)
+        var idx = 0
+        while (queue.isNotEmpty()) {
+            val n = queue.removeFirst()
+            val rid = n.viewIdResourceName
+            if (rid != null && rid.substringAfterLast('/') == viewId) {
+                return idx
+            }
+            idx++
+            for (i in 0 until n.childCount) {
+                queue.addLast(n.getChild(i) ?: continue)
+            }
+        }
+        return null
+    }
+
+    /**
+     * 读取当前执行面树中**最后一条消息气泡**的方向与文本（ADR-062 双向对话；2026-10-19 真机
+     * 结构实证）。
+     *
+     * 判据（QQ 真机实证）：消息文本节点 resource-id 尾段 = `mjn`（class=TextView），**收到的
+     * 消息（对方）左对齐**（气泡左侧留白小），**发出的消息（自己）右对齐**；取 bounds.bottom
+     * 最大（最靠下 = 时间上最后一条）的气泡为"最后一条"。方向按左右留白比较判（对任意宽度成立）。
+     *
+     * @param messageViewId 消息文本节点 resource-id 尾段（QQ=`mjn`）
+     * @return (incoming 是否对方发来, 文本)；无消息/树不可读返回 null
+     */
+    fun lastMessageBubble(messageViewId: String): Pair<Boolean, String>? {
+        if (messageViewId.isBlank()) return null
+        val root = executionRoot() ?: return null
+        try {
+            val rootBounds = Rect().also { root.getBoundsInScreen(it) }
+            val leftMarginRef = rootBounds.left
+            val rightMarginRef = rootBounds.right
+            var bestBottom = Int.MIN_VALUE
+            var bestIncoming = false
+            var bestText: String? = null
+            val queue = ArrayDeque<AccessibilityNodeInfoCompat>()
+            queue.add(AccessibilityNodeInfoCompat.wrap(root))
+            while (queue.isNotEmpty()) {
+                val n = queue.removeFirst()
+                val rid = n.viewIdResourceName
+                val text = n.text?.toString()?.trim().orEmpty()
+                if (rid != null && rid.substringAfterLast('/') == messageViewId && text.isNotEmpty()) {
+                    val b = Rect().also { n.getBoundsInScreen(it) }
+                    if (b.bottom > bestBottom) {
+                        // 方向判据（guardrail M-05）：按**左右留白**判而非中心点——宽气泡（长文本）
+                        // 中心可越过中线被误判"自己"。收到（对方）气泡左侧留白小、右侧留白大；
+                        // 发出（自己）反之。对任意宽度都成立。
+                        val leftMargin = b.left - leftMarginRef
+                        val rightMargin = rightMarginRef - b.right
+                        bestBottom = b.bottom
+                        bestIncoming = leftMargin < rightMargin
+                        bestText = text
+                    }
+                }
+                for (i in 0 until n.childCount) queue.addLast(n.getChild(i) ?: continue)
+            }
+            val t = bestText ?: return null
+            return bestIncoming to t
+        } catch (e: Exception) {
+            Log.w(TAG, "lastMessageBubble 失败：${e::class.simpleName}")
+            return null
+        } finally {
+            // executionRoot 返回自持硬引用，用毕回收（杜绝句柄泄漏）
+            runCatching { root.recycle() }
+        }
+    }
+
+    /**
+     * QQ 小号助手（ADR-062；2026-10-19 真机 E2E DEF-114）：按节点**自身**文本 / contentDescription
+     * **精确**定位（BFS 取最深命中），避免 [findNodeByTextNid] 子树聚合带来的"命中大容器"。
+     *
+     * **背景（真机取证）**：[findNodeByTextNid] 对可点击节点用**子树聚合**文本匹配——大容器会
+     * 聚合其下所有会话项文本，同样满足"包含查询"（0.95）且 BFS 更早 → 返回容器 nid，点击落点
+     * 为空隙（真机实测：`tap=已点击节点 [7]` 中心 (360,780) 却未跳转）。
+     *
+     * @param query 目标文本（如"消息"）：匹配节点**自身** text 或 contentDescription 完全相等
+     * @param descPrefix 非 null 时改为匹配"contentDescription **以该前缀开头**"（QQ 会话项格式
+     *   "<备注名>, ,[N条未读,]preview,time"）
+     * @return BFS 中最深命中节点的 nid；无命中返回 null
+     */
+    fun findNodeByOwnTextNid(query: String, descPrefix: String? = null): Int? {
+        val root = executionRoot() ?: return null
+        try {
+            val queue = ArrayDeque<AccessibilityNodeInfoCompat>()
+            queue.add(AccessibilityNodeInfoCompat.wrap(root))
+            var idx = 0
+            var best: Int? = null
+            while (queue.isNotEmpty()) {
+                val n = queue.removeFirst()
+                val ownText = n.text?.toString()?.trim().orEmpty()
+                val desc = n.contentDescription?.toString()?.trim().orEmpty()
+                val hit = if (descPrefix != null) {
+                    descPrefix.isNotBlank() && desc.startsWith(descPrefix)
+                } else {
+                    query.isNotBlank() && (ownText == query || desc == query)
+                }
+                if (hit) best = idx // BFS 越靠后越深/越具体 → 取最后命中
+                idx++
+                for (i in 0 until n.childCount) queue.addLast(n.getChild(i) ?: continue)
+            }
+            return best
+        } catch (e: Exception) {
+            Log.w(TAG, "findNodeByOwnTextNid 失败：${e::class.simpleName}")
+            return null
+        } finally {
+            runCatching { root.recycle() }
+        }
+    }
+
+    /**
+     * QQ 小号助手（ADR-062）：定位当前执行面树中**第一个可编辑节点**（EditText）的 nid（BFS）。
+     *
+     * 用于个签编辑页等"输入框无稳定 viewId/text"的场景（M0 PoC：QQ 个签编辑框 resource-id
+     * 未知，但页面通常只有一个 EditText）。nid 契约同 [findNodeByNid]。
+     *
+     * @return 第一个可编辑节点 nid；无命中返回 null
+     */
+    fun findEditableNid(): Int? {
+        val root = executionRoot() ?: return null
+        val compat = AccessibilityNodeInfoCompat.wrap(root)
+        val queue = ArrayDeque<AccessibilityNodeInfoCompat>()
+        queue.add(compat)
+        var idx = 0
+        while (queue.isNotEmpty()) {
+            val n = queue.removeFirst()
+            if (n.isEditable || n.className?.toString()?.contains("EditText") == true) {
+                return idx
+            }
+            idx++
+            for (i in 0 until n.childCount) {
+                queue.addLast(n.getChild(i) ?: continue)
+            }
+        }
+        return null
     }
 
     /**
