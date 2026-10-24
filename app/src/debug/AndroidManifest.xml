@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    ADR-065（US-3114）真机验收专用调试清单 —— 仅存在于 debug 构建，release 不含此组件。
+    用途：经 `adb shell am broadcast` 驱动生产代码路径（隐藏虚拟屏创建/启动/截图/释放），
+    以便在没有 LLM 会话的情况下采集真机证据。不要在 debug 构建中安装于非测试设备。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <receiver
+            android:name="io.prism.debug.HiddenVdDebugReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="io.prism.DEBUG_HIDDEN_VD" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

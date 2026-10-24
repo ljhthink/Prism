@@ -197,12 +197,17 @@ class PhoneControlLocalToolExecutor(
             // 屏 touch NONE，系统直接丢弃合成输入，"重试/重新定位"对它完全无效（真机取证
             // DeepSeek 会话：LLM 连续 6 次盲试坐标），必须明确劝阻并指向 foreground/take_over。
             val bgHint = if (PhoneControlAccessibilityService.instance?.isBackgroundExecution == true) {
-                if (io.prism.phonecontrol.bg.VirtualDisplayManager.isOverlayMode) {
-                    "\n【后台模式诊断】虚拟屏注入可能受息屏/焦点限制（亮屏锁已在会话期保持，若用户仍处于息屏状态请先亮屏）。" +
-                        "若多次尝试仍无变化，说明目标 App/显示面不接受合成输入——改用 mode=foreground 或 take_over"
-                } else {
-                    "\n【后台模式诊断】当前执行面为**自建虚拟屏（untrusted，touch NONE）**——系统会丢弃指向它的合成输入（tap/type 均无效，重试无意义）。" +
-                        "请改用 mode=foreground 或 take_over；结束本会话后重新发起任务（Shizuku 就绪时将优先创建系统模拟副屏 trusted，输入可用）"
+                when {
+                    // ADR-065：隐藏虚拟屏（shell 自建 PUBLIC+TRUSTED，主屏零窗口）——输入可用
+                    io.prism.phonecontrol.bg.VirtualDisplayManager.isHiddenMode ->
+                        "\n【后台模式诊断】当前执行面为隐藏虚拟屏（trusted，主屏无小窗）。" +
+                            "若多次尝试仍无变化，说明目标 App/显示面不接受合成输入——改用 mode=foreground 或 take_over"
+                    io.prism.phonecontrol.bg.VirtualDisplayManager.isOverlayMode ->
+                        "\n【后台模式诊断】虚拟屏注入可能受息屏/焦点限制（亮屏锁已在会话期保持，若用户仍处于息屏状态请先亮屏）。" +
+                            "若多次尝试仍无变化，说明目标 App/显示面不接受合成输入——改用 mode=foreground 或 take_over"
+                    else ->
+                        "\n【后台模式诊断】当前执行面为**自建虚拟屏（untrusted，touch NONE）**——系统会丢弃指向它的合成输入（tap/type 均无效，重试无意义）。" +
+                            "请改用 mode=foreground 或 take_over；结束本会话后重新发起任务（Shizuku 就绪时将优先创建隐藏虚拟屏 trusted，输入可用）"
                 }
             } else {
                 "请先用 get_ui_state 或 screenshot 确认当前屏幕，若仍未变化可尝试：换一个更精确的目标（tap(text=...) 或 node_id）、" +
@@ -659,7 +664,18 @@ class PhoneControlLocalToolExecutor(
     /** 人工接管：返回 ask_user 标记 + 载荷，触发提问卡片 + StopAtTools。 */
     private suspend fun runTakeOver(arguments: Map<String, Any?>): String {
         val reason = parseString(arguments, "reason") ?: "遇到需要人工处理的步骤"
-        return manualConfirm("需要人工接管：$reason。请手动完成该步骤。")
+        // ADR-065（US-3114 AC-4）：后台执行时把目标应用临时迁到主屏，便于用户真正接管
+        // （下次后台操作由 VirtualDisplayManager 自动迁回执行面并恢复 Agent）。
+        val migration = runCatching {
+            val ctx = appContext
+            if (ctx != null && io.prism.phonecontrol.bg.VirtualDisplayManager.isCreated) {
+                io.prism.phonecontrol.bg.VirtualDisplayManager.takeOverToMainScreen(ctx)
+            } else {
+                null
+            }
+        }.getOrNull()
+        val note = migration?.let { "\n$it" } ?: ""
+        return manualConfirm("需要人工接管：$reason。请手动完成该步骤。$note")
     }
 
     // ==================== 批次20 后台执行面（BG-001/002/004，ADR-045） ====================

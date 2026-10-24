@@ -1,4 +1,4 @@
-﻿package io.prism.ui.settings
+package io.prism.ui.settings
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -106,6 +106,10 @@ fun SettingsScreen(
     // v1 US-301（方案 B 识图）：视觉旁路授权 + 自动开关
     val visionConsent by viewModel.visionConsent.collectAsState()
     val visionAutoBypass by viewModel.visionAutoBypass.collectAsState()
+    // ADR-065（US-3114）：隐藏执行面开关（DataStore 持久化）
+    val hiddenDisplayEnabled by viewModel.hiddenDisplayEnabled.collectAsState()
+    // guardrail r1 Q-08：保存失败必须可见（否则开关"弹回"却无原因）
+    val hiddenDisplaySaveError by viewModel.hiddenDisplaySaveError.collectAsState()
     // v1 真机反馈（Issue 4）：云端视觉旁路需一个被标记为视觉回退的 Provider；
     // 未配置时向用户明示（用户此前误以为"在设置里没有显示"、功能不可用）。
     val visionFallbackName = providers.firstOrNull { it.isVisionFallback }?.name
@@ -146,6 +150,10 @@ fun SettingsScreen(
     // 批次21（SZ-004，ADR-046）：Shizuku 四态（未安装/已装未激活/未授权/就绪）——轮询刷新；未授权点击请求授权。
     // 真机修复 R3：用户装了 Shizuku App 但未激活 server 时，原三态误报"未安装"——拆分 NOT_RUNNING 并给激活指引。
     var shizukuState by remember { mutableStateOf(io.prism.phonecontrol.bg.ShizukuShell.currentState()) }
+    // ADR-065（US-3114）：执行面形态说明 / Watch 运行态（轮询刷新，组合期快照会过期）
+    var backendNote by remember { mutableStateOf(io.prism.phonecontrol.bg.VirtualDisplayManager.lastBackendNote) }
+    var watchRunning by remember { mutableStateOf(io.prism.phonecontrol.bg.DisplayWatchOverlay.isRunning) }
+    var watchError by remember { mutableStateOf("") }
     val shizukuSubtitle = when (shizukuState) {
         io.prism.phonecontrol.bg.ShizukuShell.State.NOT_INSTALLED ->
             "未安装 Shizuku（免费开源）· 完整后台化需安装并激活：shizuku.rikka.app"
@@ -157,6 +165,19 @@ fun SettingsScreen(
             "Shizuku 就绪 · 后台模式全能力（手势/滑动/返回均可用）"
     }
 
+    // ADR-065（US-3114）：Watch 开关（运行时；关闭只移除悬浮窗，不中断执行）
+    val toggleWatch: (Boolean) -> Unit = { enabled ->
+        if (enabled) {
+            val result = io.prism.phonecontrol.bg.DisplayWatchOverlay.start(context)
+            watchRunning = io.prism.phonecontrol.bg.DisplayWatchOverlay.isRunning
+            watchError = if (result.startsWith("错误")) result else ""
+        } else {
+            io.prism.phonecontrol.bg.DisplayWatchOverlay.stop()
+            watchRunning = false
+            watchError = ""
+        }
+    }
+
     // v1 US-201：UI 侧轮询无障碍服务连接状态（用户在系统设置开关后返回本页自动刷新引导）。
     // VM 侧无循环（避免 JVM 单测 runTest 调度器挂起），轮询放 Composable LaunchedEffect。
     LaunchedEffect(Unit) {
@@ -166,6 +187,9 @@ fun SettingsScreen(
             canDrawOverlays = android.provider.Settings.canDrawOverlays(context)
             // 批次21（SZ-004）：同步刷新 Shizuku 三态
             shizukuState = io.prism.phonecontrol.bg.ShizukuShell.currentState()
+            // ADR-065（US-3114）：同步执行面回落说明与 Watch 运行态
+            backendNote = io.prism.phonecontrol.bg.VirtualDisplayManager.lastBackendNote
+            watchRunning = io.prism.phonecontrol.bg.DisplayWatchOverlay.isRunning
             kotlinx.coroutines.delay(PHONE_CONTROL_POLL_MS)
         }
     }
@@ -593,13 +617,67 @@ fun SettingsScreen(
                 SetRow(
                     icon = "🪟",
                     iconColor = PrismIndigo,
-                    title = "后台操控（虚拟屏）",
-                    subtitle = "聊天页开启「后台操控」后，AI 把应用启动到后台虚拟屏执行，你可同时使用手机。" +
-                        if (canDrawOverlays) "悬浮窗权限：已授权" else "悬浮窗权限：未授权（后台启动需要，点此去授权）",
+                    title = "后台操控（执行面）",
+                    subtitle = buildString {
+                        append(
+                            if (hiddenDisplayEnabled) "隐藏虚拟屏：主屏不出现小窗（需 Shizuku）"
+                            else "兼容模式：overlay 小窗可能出现在主屏"
+                        )
+                        append(" · ")
+                        append(if (canDrawOverlays) "悬浮窗权限已授权" else "悬浮窗权限未授权（点此去授权）")
+                        backendNote?.let { append("\n最近回落：").append(it) }
+                    },
                     onClick = {
                         if (!canDrawOverlays) {
                             openOverlaySettings()
                         }
+                    }
+                )
+            }
+            // ADR-065（US-3114 AC-1/AC-5）：隐藏执行面开关（默认开；失败自动回落兼容模式）
+            item {
+                SetRow(
+                    icon = "👁",
+                    iconColor = PrismIndigo,
+                    title = "隐藏执行面",
+                    subtitle = if (hiddenDisplaySaveError != null) {
+                        hiddenDisplaySaveError ?: ""
+                    } else if (hiddenDisplayEnabled) {
+                        "开启 · 优先 shell 隐藏虚拟屏；创建失败自动回落兼容模式（主屏可能出现小窗）"
+                    } else {
+                        "关闭 · 使用兼容模式（overlay / 自建虚拟屏，主屏可能出现可见小窗）"
+                    },
+                    trailing = {
+                        PrismSwitch(
+                            checked = hiddenDisplayEnabled,
+                            onCheckedChange = { viewModel.setHiddenDisplayEnabled(it) }
+                        )
+                    },
+                    onClick = { viewModel.setHiddenDisplayEnabled(!hiddenDisplayEnabled) }
+                )
+            }
+            // ADR-065（US-3114 AC-3）：Watch 悬浮窗（≤2fps；关闭不中断执行）
+            item {
+                SetRow(
+                    icon = "📺",
+                    iconColor = PrismIndigo,
+                    title = "观看 AI 操作（Watch）",
+                    subtitle = when {
+                        watchError.isNotEmpty() -> watchError
+                        !canDrawOverlays -> "需要「显示在其他应用上层」权限（点此去授权）"
+                        watchRunning -> "已开启 · 悬浮窗实时显示执行面（≤2fps，画面会显示在屏幕上、可能被录屏）；关闭不影响执行"
+                        else -> "关闭 · 开启后可在悬浮窗实时查看 AI 在后台做什么（画面会显示在屏幕上）"
+                    },
+                    trailing = {
+                        PrismSwitch(
+                            checked = watchRunning,
+                            onCheckedChange = { on ->
+                                if (on && !canDrawOverlays) openOverlaySettings() else toggleWatch(on)
+                            }
+                        )
+                    },
+                    onClick = {
+                        if (!watchRunning && !canDrawOverlays) openOverlaySettings() else toggleWatch(!watchRunning)
                     }
                 )
             }

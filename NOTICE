@@ -1,0 +1,13 @@
+Prism
+Copyright 2026 Prism contributors
+
+This product includes software developed at opencyvis/opencyvis-phone
+(https://github.com/opencyvis/opencyvis-phone), licensed under the
+Apache License, Version 2.0.
+
+The hidden virtual display implementation in
+app/src/main/java/io/prism/phonecontrol/bg/ShizukuShell.kt and
+app/src/main/java/io/prism/phonecontrol/bg/DisplayBackend.kt is derived
+from the OpenCyvis virtual display approach (privileged virtual display
+creation and its flag-degradation ladder). No OpenCyvis product shell or
+unrelated source is included.

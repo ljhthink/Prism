@@ -77,7 +77,12 @@ class SettingsViewModel(
      * TKN-LVC-016（ADR-057）：音色包导入器（`.voicepack` 归档 → 应用私有目录）；
      * null 时导入入口降级为不可用（向后兼容且保持 JVM 可测）。
      */
-    private val localVoicePackImporter: io.prism.voice.local.LocalVoicePackImporter? = null
+    private val localVoicePackImporter: io.prism.voice.local.LocalVoicePackImporter? = null,
+    /**
+     * ADR-065（US-3114）：执行面后端偏好仓库（隐藏执行面开关）；
+     * null 时按默认开启（向后兼容且保持 JVM 可测）。
+     */
+    private val displayBackendConfigRepository: io.prism.config.DisplayBackendConfigRepository? = null
 ) : ViewModel() {
 
     /** Provider 已配置列表。 */
@@ -123,6 +128,31 @@ class SettingsViewModel(
     val reasoningEffort: StateFlow<String> =
         (thinkingConfigRepository?.reasoningEffort() ?: flowOf(ThinkingConfigRepository.DEFAULT_EFFORT))
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ThinkingConfigRepository.DEFAULT_EFFORT)
+
+    /**
+     * ADR-065（US-3114）：隐藏执行面开关（默认开启）。
+     * 关闭后走 legacy 兼容后端（overlay/自建虚拟屏，主屏可能出现小窗）。
+     */
+    val hiddenDisplayEnabled: StateFlow<Boolean> =
+        (displayBackendConfigRepository?.hiddenDisplayEnabled()
+            ?: flowOf(io.prism.config.DisplayBackendConfigRepository.DEFAULT_HIDDEN_ENABLED))
+            .stateIn(
+                viewModelScope,
+                SharingStarted.WhileSubscribed(5_000),
+                io.prism.config.DisplayBackendConfigRepository.DEFAULT_HIDDEN_ENABLED
+            )
+
+    /**
+     * ADR-065（US-3114）：隐藏执行面开关保存失败提示（guardrail r1 Q-08：写失败必须可读，
+     * 不能只让开关"弹回"）。null=无错误；成功保存后清空。
+     */
+    private val _hiddenDisplaySaveError = MutableStateFlow<String?>(null)
+    val hiddenDisplaySaveError: StateFlow<String?> = _hiddenDisplaySaveError.asStateFlow()
+
+    /** 清除隐藏执行面保存错误提示。 */
+    fun clearHiddenDisplaySaveError() {
+        _hiddenDisplaySaveError.value = null
+    }
 
     /**
      * v1 US-301：视觉旁路授权（用户明示：图片可外发到视觉 Provider）。默认 false。
@@ -229,6 +259,22 @@ class SettingsViewModel(
                 throw e // BR-error-handling-007：不吞 CancellationException
             } catch (e: Exception) {
                 Log.w("SettingsViewModel", "设置思考强度失败: $effort", e)
+            }
+        }
+    }
+
+    /** ADR-065（US-3114）：切换隐藏执行面（持久化，运行期即时生效——下次建屏生效）。 */
+    fun setHiddenDisplayEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            try {
+                displayBackendConfigRepository?.setHiddenDisplayEnabled(enabled)
+                _hiddenDisplaySaveError.value = null
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // guardrail r1 Q-08：写失败给用户可见原因（UI 行内展示）
+                _hiddenDisplaySaveError.value = "保存失败（${e::class.simpleName}）：开关可能未生效"
+                Log.w("SettingsViewModel", "设置隐藏执行面失败: $enabled", e)
             }
         }
     }
@@ -1344,7 +1390,9 @@ class SettingsViewModel(
                     // LVC-1（ADR-053）：本地音色包仓库（设置页展示安装状态 + 选项门控）
                     localVoicePackStore = app.localVoicePackStore,
                     // TKN-LVC-016（ADR-057）：音色包导入器（设置页「导入音色包」）
-                    localVoicePackImporter = app.localVoicePackImporter
+                    localVoicePackImporter = app.localVoicePackImporter,
+                    // ADR-065（US-3114）：执行面后端偏好（隐藏执行面开关）
+                    displayBackendConfigRepository = app.displayBackendConfigRepository
                 )
             }
         }

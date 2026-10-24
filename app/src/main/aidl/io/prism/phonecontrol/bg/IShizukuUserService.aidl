@@ -22,4 +22,29 @@ interface IShizukuUserService {
      * @return stdout+stderr 合并输出（命令失败/异常返回 null）
      */
     String execWithOutput(in String[] commands);
+
+    /**
+     * ADR-065（US-3114）：在本 shell 进程内创建**隐藏虚拟屏**（DisplayBackend 默认后端）。
+     *
+     * 必须在创建者进程内自持 ImageReader surface——跨进程传 Surface 不可靠；因此本方法
+     * 不接收 Surface，由服务自行创建并持有。尺寸/DPI 由调用方指定（与执行面规格一致）。
+     *
+     * @return `OK:<displayId>:<flagsHex>` 或 `ERR:<异常类名>:<消息>`（错误文案用于诚实降级）
+     */
+    String createHiddenDisplay(int width, int height, int density);
+
+    /**
+     * 释放 [createHiddenDisplay] 创建的隐藏虚拟屏（幂等；未创建返回 OK）。
+     *
+     * @return `OK` 或 `ERR:<异常类名>:<消息>`
+     */
+    String releaseHiddenDisplay();
+
+    /**
+     * 取隐藏虚拟屏最新帧（PNG 字节；无帧/编码失败返回 null）。
+     * 帧只能由创建者进程的 ImageReader 获取（`screencap -d` 对非 owner 无效，PoC 实证）。
+     *
+     * @param maxWidth 预览最大宽度（0=原始尺寸；Watch 传 360 以降低 Binder/GC/编码压力）
+     */
+    byte[] captureHiddenFramePng(int maxWidth);
 }

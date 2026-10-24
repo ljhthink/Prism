@@ -40,8 +40,9 @@ object ShizukuShell {
     const val EXEC_TIMEOUT_MS = 5_000L
 
     /** UserService 版本（实现变更时递增以触发 Shizuku 重启该进程）。
-     *  修复轮八：+execWithOutput（AIDL 新方法）→ 升 2。 */
-    private const val USER_SERVICE_VERSION = 2
+     *  修复轮八：+execWithOutput（AIDL 新方法）→ 升 2。
+     *  ADR-065（US-3114）：+隐藏虚拟屏三方法 → 升 3；guardrail r1 C-4：截屏加 maxWidth → 升 4。 */
+    private const val USER_SERVICE_VERSION = 4
 
     private val bindLock = Any()
 
@@ -345,6 +346,86 @@ object ShizukuShell {
     fun buildPmGrantCommand(packageName: String, permission: String): Array<String> =
         arrayOf("pm", "grant", packageName, permission)
 
+    // ==================== 隐藏虚拟屏（ADR-065 / US-3114） ====================
+
+    /** 隐藏虚拟屏创建结果（[createHiddenDisplay] 返回值的解析产物）。 */
+    sealed class HiddenDisplayResult {
+        /** 创建成功：displayId + 实际生效的 flags（用于诊断哪一级降级命中）。 */
+        data class Ok(val displayId: Int, val flags: Int) : HiddenDisplayResult()
+
+        /** 创建失败：可读原因（由 shell 进程回传，含异常类名与消息）。 */
+        data class Error(val message: String) : HiddenDisplayResult()
+    }
+
+    /**
+     * 在 shell 进程内创建隐藏虚拟屏（ADR-065 默认后端；PoC 配方见
+     * docs/reports/2026-10-21-qq-hidden-vd-poc.md）。
+     *
+     * 关键约束（PoC 实证）：必须由创建者进程自持 ImageReader surface、Context 包名必须与
+     * calling uid 一致（shell = com.android.shell）；这些均由 [ShizukuUserService] 内部完成。
+     *
+     * @return 成功含 displayId/flags；失败含可读原因（调用方回落 overlay 并如实报告）
+     */
+    fun createHiddenDisplay(width: Int, height: Int, density: Int): HiddenDisplayResult {
+        val svc = ensureUserService()
+            ?: return HiddenDisplayResult.Error("Shizuku 未就绪（shell 进程不可用）")
+        val raw = try {
+            svc.createHiddenDisplay(width, height, density)
+        } catch (e: Exception) {
+            synchronized(bindLock) { userService = null }
+            Log.w(TAG, "createHiddenDisplay 异常：${e::class.simpleName}")
+            return HiddenDisplayResult.Error("Binder 调用失败（${e::class.simpleName}）")
+        }
+        return parseHiddenDisplayResult(raw)
+    }
+
+    /**
+     * 解析 [createHiddenDisplay] 的响应（纯函数可测）。
+     *
+     * 协议：`OK:<displayId>:0x<flagsHex>` / `ERR:<异常类名>:<消息>`。
+     * displayId 必须为正数（0=主屏、-1=INVALID；隐藏屏不可能是这些值，出现即视为失败）。
+     */
+    fun parseHiddenDisplayResult(raw: String?): HiddenDisplayResult {
+        if (raw.isNullOrBlank()) return HiddenDisplayResult.Error("空响应")
+        if (raw.startsWith("OK:")) {
+            val parts = raw.split(':', limit = 3)
+            val id = parts.getOrNull(1)?.toIntOrNull()
+                ?: return HiddenDisplayResult.Error("响应格式非法：${raw.take(120)}")
+            if (id <= 0) return HiddenDisplayResult.Error("非法 displayId=$id")
+            val flags = parts.getOrNull(2)?.removePrefix("0x")?.toIntOrNull(16) ?: 0
+            return HiddenDisplayResult.Ok(id, flags)
+        }
+        return HiddenDisplayResult.Error(raw.removePrefix("ERR:").ifBlank { raw })
+    }
+
+    /** 释放隐藏虚拟屏（幂等；失败返回 false）。 */
+    fun releaseHiddenDisplay(): Boolean {
+        val svc = ensureUserService() ?: return false
+        return try {
+            svc.releaseHiddenDisplay() == "OK"
+        } catch (e: Exception) {
+            Log.w(TAG, "releaseHiddenDisplay 异常：${e::class.simpleName}")
+            synchronized(bindLock) { userService = null }
+            false
+        }
+    }
+
+    /**
+     * 取隐藏虚拟屏最新帧 PNG 字节（无帧/失败返回 null）。
+     *
+     * @param maxWidth 预览最大宽度（0=原始尺寸；Watch 传 360 降低编码/Binder/GC 压力）
+     */
+    fun captureHiddenFramePng(maxWidth: Int = 0): ByteArray? {
+        val svc = ensureUserService() ?: return null
+        return try {
+            svc.captureHiddenFramePng(maxWidth)
+        } catch (e: Exception) {
+            Log.w(TAG, "captureHiddenFramePng 异常：${e::class.simpleName}")
+            synchronized(bindLock) { userService = null }
+            null
+        }
+    }
+
     // ==================== 纯函数（可测） ====================
 
     /**
@@ -460,5 +541,285 @@ class ShizukuUserService(private val context: android.content.Context?) : IShizu
             runCatching { process.destroyForcibly() }
             null
         }
+    }
+
+    // ==================== 隐藏虚拟屏（ADR-065 / US-3114） ====================
+    // Derived from opencyvis/opencyvis-phone (Apache-2.0)：
+    // 特权进程建屏范式 + flag 逐级降级（见 NOTICE 与 ADR-065）。未引入其产品壳。
+
+    private val hiddenLock = Any()
+
+    @Volatile
+    private var hiddenDisplay: android.hardware.display.VirtualDisplay? = null
+
+    @Volatile
+    private var hiddenReader: android.media.ImageReader? = null
+
+    @Volatile
+    private var hiddenThread: android.os.HandlerThread? = null
+
+    /** 最新帧缓存（监听线程写、Binder 线程读；换帧与取帧同 [hiddenLock]）。 */
+    @Volatile
+    private var hiddenFrame: android.graphics.Bitmap? = null
+
+    override fun createHiddenDisplay(width: Int, height: Int, density: Int): String {
+        // guardrail r1 Q-11：AIDL 是跨进程契约，必须有上界（当前调用方是常量，但契约面
+        // 不允许 100000x100000 让 shell 进程 OOM）。Long 乘法防溢出。
+        if (width <= 0 || height <= 0 || density <= 0 ||
+            width > HIDDEN_MAX_DIMENSION || height > HIDDEN_MAX_DIMENSION ||
+            width.toLong() * height.toLong() > HIDDEN_MAX_PIXELS
+        ) {
+            return "ERR:IllegalArgumentException:尺寸/DPI 非法（$width x $height @ $density）"
+        }
+        synchronized(hiddenLock) {
+            hiddenDisplay?.let {
+                return "OK:${it.display?.displayId ?: -1}:0x0"
+            }
+            var reader: android.media.ImageReader? = null
+            var thread: android.os.HandlerThread? = null
+            var vd: android.hardware.display.VirtualDisplay? = null
+            var committed = false
+            return try {
+                // PoC 实证：Context 包名必须与 calling uid 一致（shell=com.android.shell），
+                // 系统 Context 的包名 android（uid 1000）必抛 SecurityException。
+                val shellCtx = hiddenShellContext()
+                    ?: return "ERR:SecurityException:无法取得 com.android.shell 上下文"
+                val dm = shellCtx.getSystemService(android.content.Context.DISPLAY_SERVICE)
+                    as android.hardware.display.DisplayManager
+                reader = android.media.ImageReader.newInstance(
+                    width, height, android.graphics.PixelFormat.RGBA_8888, HIDDEN_MAX_IMAGES
+                )
+                thread = android.os.HandlerThread("prism-hidden-vd").apply { start() }
+                reader.setOnImageAvailableListener(hiddenDrainListener, android.os.Handler(thread.looper))
+                var createdFlags = 0
+                var lastError: Throwable? = null
+                // OpenCyvis flag 阶梯：完整组合优先，逐级剥离 TRUSTED/扩展位（CHANGELOG 2.0.0）
+                for (flags in HiddenDisplayFlags.LADDER) {
+                    try {
+                        vd = dm.createVirtualDisplay(
+                            HIDDEN_DISPLAY_NAME, width, height, density, reader.surface, flags
+                        )
+                        if (vd != null) {
+                            createdFlags = flags
+                            break
+                        }
+                    } catch (t: Throwable) {
+                        lastError = t
+                    }
+                }
+                val created = vd
+                if (created == null) {
+                    val err = lastError
+                    return "ERR:${err?.javaClass?.name ?: "Unknown"}:${err?.message ?: "createVirtualDisplay 返回 null"}"
+                }
+                val id = created.display?.displayId ?: -1
+                if (id <= 0) {
+                    return "ERR:IllegalStateException:非法 displayId=$id"
+                }
+                // 全部成功后才提交状态（成对不变量：display/reader/thread 同时生效）
+                hiddenDisplay = created
+                hiddenReader = reader
+                hiddenThread = thread
+                committed = true
+                reader = null
+                thread = null
+                vd = null
+                android.util.Log.i(
+                    "ShizukuUserService",
+                    "隐藏虚拟屏已创建 displayId=$id ${width}x$height@$density flags=0x${Integer.toHexString(createdFlags)}"
+                )
+                "OK:$id:0x${Integer.toHexString(createdFlags)}"
+            } catch (t: Throwable) {
+                "ERR:${t.javaClass.name}:${t.message ?: ""}"
+            } finally {
+                // guardrail r1 Q-01：未提交（含"已创建但后续失败"）统一清理并复位，
+                // 保证下一次 create 不会命中已死 displayId。
+                if (!committed) {
+                    runCatching { reader?.setOnImageAvailableListener(null, null) }
+                    thread?.let { t ->
+                        runCatching { t.quitSafely() }
+                        runCatching { t.join(2_000L) }
+                    }
+                    runCatching { vd?.release() }
+                    runCatching { reader?.close() }
+                    hiddenDisplay = null
+                    hiddenReader = null
+                    hiddenThread = null
+                }
+            }
+        }
+    }
+
+    override fun releaseHiddenDisplay(): String {
+        // guardrail r1 Q-01：先在锁内**摘除并复位**字段，再做拆卸——即使拆卸抛异常，
+        // 状态也不会残留为"已就绪"，杜绝复用已死 displayId。
+        val display: android.hardware.display.VirtualDisplay?
+        val reader: android.media.ImageReader?
+        val thread: android.os.HandlerThread?
+        val frame: android.graphics.Bitmap?
+        synchronized(hiddenLock) {
+            if (hiddenDisplay == null && hiddenReader == null) return "OK"
+            display = hiddenDisplay
+            reader = hiddenReader
+            thread = hiddenThread
+            frame = hiddenFrame
+            hiddenDisplay = null
+            hiddenReader = null
+            hiddenThread = null
+            hiddenFrame = null
+        }
+        return try {
+            // 拆卸顺序同 VirtualDisplayManager（防 native use-after-close SIGSEGV）：
+            // ①摘监听 → ②停线程 join → ③release display / close reader → ④回收帧缓存
+            runCatching { reader?.setOnImageAvailableListener(null, null) }
+            thread?.let { t ->
+                runCatching { t.quitSafely() }
+                runCatching { t.join(2_000L) }
+            }
+            runCatching { display?.release() }
+            runCatching { reader?.close() }
+            frame?.recycle()
+            android.util.Log.i("ShizukuUserService", "隐藏虚拟屏已释放")
+            "OK"
+        } catch (t: Throwable) {
+            "ERR:${t.javaClass.name}:${t.message ?: ""}"
+        }
+    }
+
+    override fun captureHiddenFramePng(maxWidth: Int): ByteArray? {
+        val source = synchronized(hiddenLock) {
+            hiddenFrame?.copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+        } ?: return null
+        var scaled: android.graphics.Bitmap? = null
+        return try {
+            // guardrail r1 Q-04：Watch 预览降采样（默认 360 宽），降低 shell 端 PNG 编码、
+            // Binder 传输与 App 端解码/GC 压力；截图（maxWidth=0）保持原始分辨率。
+            val target = if (maxWidth > 0 && source.width > maxWidth) {
+                val h = (source.height.toLong() * maxWidth / source.width).toInt().coerceAtLeast(1)
+                android.graphics.Bitmap.createScaledBitmap(source, maxWidth, h, true).also { scaled = it }
+            } else {
+                source
+            }
+            java.io.ByteArrayOutputStream().use { out ->
+                target.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
+                out.toByteArray().takeIf { it.size <= HIDDEN_MAX_FRAME_BYTES }
+            }
+        } catch (t: Throwable) {
+            android.util.Log.w("ShizukuUserService", "帧编码失败：${t.javaClass.simpleName}")
+            null
+        } finally {
+            scaled?.recycle()
+            source.recycle()
+        }
+    }
+
+    /**
+     * 取与 calling uid 匹配的 Context（PoC 实证的唯一可用形态）。
+     *
+     * 策略按成本递增：Shizuku 注入的 Context（其进程即 shell uid）→ 进程内已有
+     * ActivityThread 的系统 Context → 自行 `systemMain()`（需 Looper，PoC 同路）。
+     */
+    private fun hiddenShellContext(): android.content.Context? {
+        // 隐藏 API 豁免（ActivityThread 反射用；失败不致命——注入 Context 路径不需要）。
+        // guardrail r1 Q-12：豁免收窄到 ActivityThread（不做进程级 "L" 全量豁免）。
+        runCatching {
+            val vmClass = Class.forName("dalvik.system.VMRuntime")
+            val runtime = vmClass.getMethod("getRuntime").invoke(null)
+            vmClass.getMethod("setHiddenApiExemptions", Array<String>::class.java)
+                .invoke(runtime, arrayOf("Landroid/app/ActivityThread;"))
+        }
+        runCatching {
+            context?.createPackageContext(HIDDEN_SHELL_PACKAGE, 0)?.let { return it }
+        }
+        runCatching {
+            val at = Class.forName("android.app.ActivityThread")
+            val current = at.getDeclaredMethod("currentActivityThread")
+                .apply { isAccessible = true }.invoke(null)
+            if (current != null) {
+                val sys = at.getDeclaredMethod("getSystemContext")
+                    .apply { isAccessible = true }.invoke(current) as? android.content.Context
+                sys?.createPackageContext(HIDDEN_SHELL_PACKAGE, 0)?.let { return it }
+            }
+        }
+        runCatching {
+            val at = Class.forName("android.app.ActivityThread")
+            if (android.os.Looper.getMainLooper() == null) android.os.Looper.prepareMainLooper()
+            android.util.Log.w(
+                "ShizukuUserService",
+                "隐藏屏 Context：注入 Context 与 currentActivityThread 均不可用，尝试 systemMain（高风险兼容路径）"
+            )
+            val thread = at.getDeclaredMethod("systemMain").apply { isAccessible = true }.invoke(null)
+            val sys = at.getDeclaredMethod("getSystemContext")
+                .apply { isAccessible = true }.invoke(thread) as? android.content.Context
+            sys?.createPackageContext(HIDDEN_SHELL_PACKAGE, 0)?.let { return it }
+        }
+        return null
+    }
+
+    /**
+     * ImageReader 帧监听：保持 Surface 队列流动 + 缓存最新帧供 [captureHiddenFramePng] 取用。
+     * 拆卸期（hiddenReader==null）丢弃残帧并回收，避免写已释放对象。
+     */
+    private val hiddenDrainListener =
+        android.media.ImageReader.OnImageAvailableListener { reader ->
+            try {
+                val image = reader.acquireLatestImage() ?: return@OnImageAvailableListener
+                val bitmap = try {
+                    hiddenImageToBitmap(image)
+                } finally {
+                    image.close()
+                }
+                if (bitmap != null) {
+                    var old: android.graphics.Bitmap? = null
+                    var dropped = false
+                    synchronized(hiddenLock) {
+                        if (hiddenReader == null) {
+                            dropped = true
+                        } else {
+                            old = hiddenFrame
+                            hiddenFrame = bitmap
+                        }
+                    }
+                    if (dropped) bitmap.recycle() else old?.recycle()
+                }
+            } catch (_: Throwable) {
+                // 拆卸竞态/编码异常：静默丢弃（不可让监听线程崩溃）
+            }
+        }
+
+    /** Image → Bitmap（处理 rowStride 行尾 padding，同 VirtualDisplayManager）。 */
+    private fun hiddenImageToBitmap(image: android.media.Image): android.graphics.Bitmap? {
+        val plane = image.planes[0]
+        val buffer = plane.buffer
+        val rowStride = plane.rowStride
+        val pixelStride = plane.pixelStride
+        val w = image.width
+        val h = image.height
+        if (pixelStride != 4) return null
+        return if (rowStride == w * 4) {
+            val bitmap = android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888)
+            buffer.rewind()
+            bitmap.copyPixelsFromBuffer(buffer)
+            bitmap
+        } else {
+            val strideWidth = rowStride / pixelStride
+            val padded = android.graphics.Bitmap.createBitmap(strideWidth, h, android.graphics.Bitmap.Config.ARGB_8888)
+            buffer.rewind()
+            padded.copyPixelsFromBuffer(buffer)
+            val cropped = android.graphics.Bitmap.createBitmap(padded, 0, 0, w, h)
+            padded.recycle()
+            cropped
+        }
+    }
+
+    private companion object {
+        /** PoC 实证：shell uid 对应的包上下文（packageName must match calling uid）。 */
+        const val HIDDEN_SHELL_PACKAGE = "com.android.shell"
+        const val HIDDEN_MAX_IMAGES = 2
+        /** Binder 单次事务上限 1MB；超过即诚实返回无帧（正常 UI 帧远小于此）。 */
+        const val HIDDEN_MAX_FRAME_BYTES = 900_000
+        /** 建屏尺寸上界（guardrail r1 Q-11：AIDL 契约面防 shell 进程 OOM）。 */
+        const val HIDDEN_MAX_DIMENSION = 4096
+        const val HIDDEN_MAX_PIXELS = 4_000_000L
     }
 }

@@ -279,6 +279,10 @@ Prism/
 - [docs/reports/2026-10-21-qq-voice-guardrail-r3.md](docs/reports/2026-10-21-qq-voice-guardrail-r3.md) —— QQ 语音消息 M-09/M-10/M-11 闭合核验 guardrail 八审（**通过**；三项中危闭合，无阻断/无高危，遗留 L-23~L-29 低危，可进入 ac-verifier，TKN-QQ-PROTOCOL-010，一次性报告，本地专属）
 - [docs/reports/2026-10-21-qq-protocol-acceptance.md](docs/reports/2026-10-21-qq-protocol-acceptance.md) —— QQ 双轨改造批次验收（US-3110/3111/3112/3113/3115；**PARTIAL**：复验后代码层 PASS、P-01 关闭、D-01~D-09/R-02 闭合，真机端到端仍 BLOCKED，TKN-QQ-PROTOCOL-011，一次性报告，本地专属）
 - [docs/reports/2026-10-21-qq-protocol-guardrail-r6.md](docs/reports/2026-10-21-qq-protocol-guardrail-r6.md) —— QQ 双轨当前快照 guardrail 六审（**通过**；覆盖 P-01 当前快照，D-01~D-09/R-02 闭合，无阻断/无高危；M-01 已由 `QqRuntimeStateRepositoryTest` 补齐，TKN-QQ-PROTOCOL-011，一次性报告，本地专属）
+- [docs/reports/2026-10-21-qq-hidden-vd-poc.md](docs/reports/2026-10-21-qq-hidden-vd-poc.md) —— 隐藏虚拟屏 PoC（ADR-065 M9 闸门）：**PASS**（shell 包上下文 + TRUSTED flags、主屏零窗口、user 999 QQ 渲染、`input -d` 可操作，一次性报告，本地专属）
+- [docs/reports/2026-10-24-qq-hidden-display-guardrail.md](docs/reports/2026-10-24-qq-hidden-display-guardrail.md) —— 隐藏执行面 Phase 4（US-3114）guardrail 审查（r1 **有条件通过** → **r2/r3 通过**，C-1~C-10 闭合，安全无阻断；E-01 release 真机冒烟延后，TKN-QQ-HIDDENVD-001，一次性报告，本地专属）
+- [docs/reports/2026-10-24-qq-hidden-display-acceptance.md](docs/reports/2026-10-24-qq-hidden-display-acceptance.md) —— 隐藏执行面 Phase 4（US-3114）ac-verifier 验收（**PASS**：AC-1~AC-6 单元/静态/真机通过；O-1 release 冒烟延后、D-01~D-08 残余登记，TKN-QQ-HIDDENVD-001，一次性报告，本地专属）
+- [docs/reports/2026-10-24-qq-hidden-display-milestone-audit.md](docs/reports/2026-10-24-qq-hidden-display-milestone-audit.md) —— M9 隐藏执行面里程碑功能完整性审计（**有条件通过**：AC-1~AC-6 实质通过，本阶段内部可交付；对外分发前须补 O-1 release 冒烟、O-4 10 分钟基线、D-02 资产治理与文档修正，TKN-QQ-HIDDENVD-002，一次性报告，本地专属）
 - [docs/runbooks/setup-local-voice-clone.md](docs/runbooks/setup-local-voice-clone.md) —— 本地音色包侧载与启用 Runbook（含真机验收清单）
 - [docs/runbooks/finetune-vits-zh-cyrene.md](docs/runbooks/finetune-vits-zh-cyrene.md) —— 中文 VITS 微调（昔涟音色）→ sherpa-onnx 端侧 Runbook（TKN-LVC-014，**已按实测更正**）
 - [docs/runbooks/searxng-selfhost.md](docs/runbooks/searxng-selfhost.md) —— SearXNG 自建搜索接入 Runbook

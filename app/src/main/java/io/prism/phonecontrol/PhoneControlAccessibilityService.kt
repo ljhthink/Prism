@@ -141,7 +141,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         // （ADR-041）。任务进行中防 MIUI 回收的能力保持不变。
         // 修复轮八：启动对账——清理进程死亡残留的模拟副屏设置（叠加小窗滞留兜底）；
         // 后台线程执行（Shizuku 绑定 + settings get 最长 5s，不能在主线程）。
-        Thread { runCatching { io.prism.phonecontrol.bg.VirtualDisplayManager.reconcileStaleOverlay() } }.start()
+        Thread { runCatching { io.prism.phonecontrol.bg.VirtualDisplayManager.reconcileStaleOverlay(this) } }.start()
         Log.i(TAG, "手机操控无障碍服务已连接")
     }
 

@@ -938,6 +938,20 @@ class PrismApplication : Application() {
     val backgroundControlEnabled = kotlinx.coroutines.flow.MutableStateFlow(false)
 
     /**
+     * ADR-065（US-3114）：隐藏执行面偏好（默认开启）。由 [displayBackendConfigRepository]
+     * 热更新，[io.prism.phonecontrol.bg.VirtualDisplayManager] 在每次建屏时秒读。
+     */
+    private val hiddenDisplayEnabledFlow =
+        kotlinx.coroutines.flow.MutableStateFlow(io.prism.config.DisplayBackendConfigRepository.DEFAULT_HIDDEN_ENABLED)
+
+    /**
+     * ADR-065（US-3114）：执行面后端偏好仓库（隐藏执行面开关，DataStore 持久化）。
+     */
+    val displayBackendConfigRepository: io.prism.config.DisplayBackendConfigRepository by lazy {
+        io.prism.config.DisplayBackendConfigRepository(displayBackendConfigDataStore)
+    }
+
+    /**
      * 手机操控高危动作（发送/删除/拨号）确认策略仓库（v1 真机二次修复 Issue 4b）。
      */
     val highRiskApprovalRepository: io.prism.config.HighRiskApprovalRepository by lazy {
@@ -1320,10 +1334,26 @@ class PrismApplication : Application() {
         // 批次21（ADR-046）：ShizukuShell 上下文注入（四态判定需 PackageManager 探测
         // Shizuku manager 包，区分"未安装"与"已安装未激活"）
         io.prism.phonecontrol.bg.ShizukuShell.init(this)
+        // ADR-065（US-3114）：执行面后端偏好注入（默认隐藏虚拟屏）+ DataStore 热更新。
+        // 秒读 StateFlow（工具/建屏在 IO 协程）；读取失败保持默认值，不阻断后台执行。
+        io.prism.phonecontrol.bg.VirtualDisplayManager.hiddenDisplayEnabledProvider = {
+            hiddenDisplayEnabledFlow.value
+        }
+        appScope.launch {
+            try {
+                displayBackendConfigRepository.hiddenDisplayEnabled().collect {
+                    hiddenDisplayEnabledFlow.value = it
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // DataStore 异常：保持默认（开启隐藏执行面）
+            }
+        }
         // 修复轮八：进程死亡残留对账（叠加小窗滞留兜底）——后台线程（Shizuku 绑定 +
         // settings get 最长 5s）；应用冷启动时 Shizuku 未就绪则 no-op，由 a11y 服务连接
         // 时再次对账
-        Thread { runCatching { io.prism.phonecontrol.bg.VirtualDisplayManager.reconcileStaleOverlay() } }.start()
+        Thread { runCatching { io.prism.phonecontrol.bg.VirtualDisplayManager.reconcileStaleOverlay(this) } }.start()
         boxStore = MyObjectBox.builder()
             .androidContext(this)
             .build()
@@ -1707,6 +1737,9 @@ class PrismApplication : Application() {
 
     /** QQ 小号助手（ADR-063）：配置 + 运行时状态共用同一 DataStore（单例，避免多实例崩溃）。 */
     private val Context.qqDataStore by preferencesDataStore(name = "prism_qq")
+
+    /** 执行面后端偏好 DataStore 进程级单例（ADR-065，隐藏执行面开关持久化）。 */
+    private val Context.displayBackendConfigDataStore by preferencesDataStore(name = "prism_display_backend")
 
     companion object {
         /** QQ 回复注入的记忆 section 硬上限（L2+L3 合并；guardrail M-08）。 */
