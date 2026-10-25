@@ -1,4 +1,4 @@
-﻿package io.prism.qq
+package io.prism.qq
 
 import android.util.Log
 import io.prism.phonecontrol.PhoneControlAccessibilityService
@@ -206,8 +206,10 @@ class QqLocalToolExecutor(
             if (confirmed) {
                 "已发送消息给「${contact.take(20)}」（已在校验中确认出现在聊天记录）"
             } else {
-                "⚠️ 已点击发送，但未能从聊天记录确认消息已出现（可能因屏幕刷新延迟）。" +
-                    "不要盲目重发（重复消息会显得不自然）"
+                // guardrail G-r4-05：文案必须与 QqFailureClassifier 的前缀**共用同一常量**，
+                // 否则改文案会静默失配，而失配方向正是"变回重复发送"。
+                MSG_SEND_UNCONFIRMED_PREFIX +
+                    "（可能因屏幕刷新延迟）。不要盲目重发（重复消息会显得不自然）"
             }
         }
     }
@@ -403,11 +405,21 @@ class QqLocalToolExecutor(
                 buildString {
                     append("定时主动消息状态：总开关=${cfg.enabled}，风险确认=${cfg.riskAccepted}，")
                     append("定时开关=${cfg.scheduleEnabled}，目标联系人=${cfg.targetContact.ifBlank { "未配置" }}，")
-                    append("时间窗=${cfg.windowStartMinute / 60}:${"%02d".format(cfg.windowStartMinute % 60)}-")
-                    append("${cfg.windowEndMinute / 60}:${"%02d".format(cfg.windowEndMinute % 60)}，")
-                    append("每日上限=${cfg.maxPerDay}，策略=${if (cfg.usePoisson) "泊松" else "均匀"}")
+                    append("活跃时段=${QqTimeOfDay.describe(cfg.windowStartMinute, cfg.windowEndMinute)}，")
+                    append("每日上限=${cfg.maxPerDay}，策略=${if (cfg.usePoisson) "泊松" else "均匀"}，")
+                    append("熄屏策略=${if (cfg.wakeOnScreenOff) "点亮屏幕执行" else "跳过并发通知"}")
                     if (rt != null && rt.plannedTriggerAt > 0) {
-                        append("；下次计划=${java.time.Instant.ofEpochMilli(rt.plannedTriggerAt)}")
+                        append("；下次计划=${formatEpoch(rt.plannedTriggerAt)}")
+                    }
+                    if (rt != null && rt.lastOutcome.isNotBlank()) {
+                        // G-r3-07：「未确认」= 可能已送达，不能让 LLM/用户误判为失败并补发
+                        val label = if (rt.lastOutcome.contains("SEND_UNCONFIRMED")) {
+                            "未确认（可能已送达）"
+                        } else {
+                            rt.lastOutcome
+                        }
+                        append("；上次=${formatEpoch(rt.lastOutcomeAtMs)} $label")
+                        if (rt.lastOutcomeReason.isNotBlank()) append("（${rt.lastOutcomeReason}）")
                     }
                     if (rt?.circuitOpen == true) append("；【已熔断，需在设置中恢复】")
                 }
@@ -418,19 +430,31 @@ class QqLocalToolExecutor(
                     return "错误：QQ 小号助手未开启或未完成风险确认（设置 → QQ 小号助手）。" +
                         "定时主动消息依赖该前置"
                 }
+                // 2026-10-25：接受 HH:mm（window_start/window_end）；旧参数 window_start_min 兼容
+                val startText = parseString(arguments, "window_start")?.trim()
+                val endText = parseString(arguments, "window_end")?.trim()
+                val start = if (!startText.isNullOrEmpty()) {
+                    QqTimeOfDay.parse(startText) ?: return "错误：window_start 格式非法（应形如 07:00）"
+                } else {
+                    parseInt(arguments, "window_start_min") ?: QqConfig.DEFAULT_WINDOW_START_MINUTE
+                }
+                val end = if (!endText.isNullOrEmpty()) {
+                    QqTimeOfDay.parse(endText) ?: return "错误：window_end 格式非法（应形如 22:00）"
+                } else {
+                    parseInt(arguments, "window_end_min") ?: QqConfig.DEFAULT_WINDOW_END_MINUTE
+                }
+                if (!QqTimeOfDay.isValidWindow(start, end)) {
+                    return "错误：活跃时段非法（需 0:00~24:00，且起止不能相同；跨零点请让起点大于止点）"
+                }
                 // guardrail H-01（2026-10-19）：create 是"开启无人值守自动发送"的高危授权——
                 // 必须与交互路径同受三态策略（BLOCK 全拦截 / ALLOW 放行 / ASK 询问），
                 // 否则 BLOCK 模式下 LLM 仍可绕过用户授权开启定时发送
                 val confirm = highRiskGate(
                     "创建定时主动消息",
-                    "将在设定时段无人值守地自动向「${parseString(arguments, "target_contact") ?: current.targetContact}」发消息"
+                    "将在 ${QqTimeOfDay.describe(start, end)} 时段内无人值守地自动向" +
+                        "「${parseString(arguments, "target_contact") ?: current.targetContact}」发消息"
                 )
                 if (confirm != null) return confirm
-                val start = parseInt(arguments, "window_start_min") ?: QqConfig.DEFAULT_WINDOW_START_MINUTE
-                val end = parseInt(arguments, "window_end_min") ?: QqConfig.DEFAULT_WINDOW_END_MINUTE
-                if (start < 0 || end > QqConfig.MINUTES_PER_DAY || start >= end) {
-                    return "错误：时间窗非法（0 <= start < end <= ${QqConfig.MINUTES_PER_DAY}，当日分钟）"
-                }
                 val contact = parseString(arguments, "target_contact")?.trim().orEmpty()
                 if (contact.isEmpty() && current.targetContact.isBlank()) {
                     return "错误：缺少 target_contact（小号对你的备注名），无法确定发送目标"
@@ -441,8 +465,7 @@ class QqLocalToolExecutor(
                 cfgRepo.setUsePoisson(parseString(arguments, "use_poisson")?.lowercase() == "true")
                 cfgRepo.setScheduleEnabled(true)
                 val cfg = cfgRepo.get()
-                "已创建定时主动消息：时间窗 ${cfg.windowStartMinute / 60}:${"%02d".format(cfg.windowStartMinute % 60)}-" +
-                    "${cfg.windowEndMinute / 60}:${"%02d".format(cfg.windowEndMinute % 60)}，" +
+                "已创建定时主动消息：活跃时段 ${QqTimeOfDay.describe(cfg.windowStartMinute, cfg.windowEndMinute)}，" +
                     "每日至多 ${cfg.maxPerDay} 次，发给「${cfg.targetContact}」。" +
                     "Prism 将在该时段内随机时刻主动发消息（受节流与熔断约束）"
             }
@@ -455,6 +478,16 @@ class QqLocalToolExecutor(
     }
 
     // ==================== 闸门与辅助 ====================
+
+    /** epoch 毫秒 → 本地 `MM-dd HH:mm`（仅用于状态展示；0 返回「无」）。 */
+    private fun formatEpoch(ms: Long): String {
+        if (ms <= 0L) return "无"
+        return runCatching {
+            java.time.Instant.ofEpochMilli(ms)
+                .atZone(java.time.ZoneId.systemDefault())
+                .format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm"))
+        }.getOrDefault(ms.toString())
+    }
 
     /** 配置闸门（US-3101）+ 节流闸门（US-3105）。null=通过；否则返回可读拒绝文案。 */
     private suspend fun configAndThrottleGate(): String? {
@@ -724,6 +757,14 @@ class QqLocalToolExecutor(
 
         /** 「可能已送达」的前缀（传输异常/超时）：不降级文本，但必须记账以限制重试频率。 */
         internal const val VOICE_SEND_UNCONFIRMED_PREFIX = "⚠️ 语音发送未确认"
+
+        /**
+         * 文本发送「可能已送达」的固定前缀（guardrail G-r4-05）。
+         *
+         * **必须与 [io.prism.qq.QqFailureClassifier] 的前缀表共用同一常量**——两处各写字面量时，
+         * 改文案会让分类器失配，而失配方向恰好是"把未确认当普通失败 → 重试 → 重复消息"。
+         */
+        internal const val MSG_SEND_UNCONFIRMED_PREFIX = "⚠️ 已点击发送，但未能从聊天记录确认消息已出现"
         private const val VERIFY_FRAGMENT_LEN = 10
 
         /** 联系人在日志中脱敏（guardrail L-02）。 */
@@ -786,7 +827,7 @@ class QqLocalToolExecutor(
                 "管理随机定时主动消息：status 查看状态；create 创建（在时间窗内随机时刻主动发消息）；cancel 取消。" +
                     "**无需提供消息内容**——到点触发时由你（角色）结合人设与当前时段即兴生成一条像真人的消息发出，" +
                     "这不是替用户传话，而是你主动想起对方时的问候/分享。",
-                """{"type":"object","properties":{"action":{"type":"string","enum":["status","create","cancel"]},"window_start_min":{"type":"integer","description":"时间窗起（当日分钟，如 1200=20:00）"},"window_end_min":{"type":"integer","description":"时间窗止（当日分钟，不含，如 1380=23:00）"},"max_per_day":{"type":"integer","description":"每日次数上限（1-20）"},"use_poisson":{"type":"string","enum":["true","false"],"description":"true=泊松随机间隔（更突发），false=窗内均匀采样"},"target_contact":{"type":"string","description":"create 时：小号对目标好友的备注名"}},"required":["action"]}"""
+                """{"type":"object","properties":{"action":{"type":"string","enum":["status","create","cancel"]},"window_start":{"type":"string","description":"活跃时段起（HH:mm，如 07:00）"},"window_end":{"type":"string","description":"活跃时段止（HH:mm，如 22:00）；起>止表示跨零点（如 22:00-02:00）"},"window_start_min":{"type":"integer","description":"[兼容旧参数] 时间窗起（当日分钟，如 1200=20:00）；优先使用 window_start"},"window_end_min":{"type":"integer","description":"[兼容旧参数] 时间窗止（当日分钟，如 1380=23:00）；优先使用 window_end"},"max_per_day":{"type":"integer","description":"每日次数上限（1-20）"},"use_poisson":{"type":"string","enum":["true","false"],"description":"true=泊松随机间隔（更突发），false=窗内均匀采样"},"target_contact":{"type":"string","description":"create 时：小号对目标好友的备注名"}},"required":["action"]}"""
             )
         )
 

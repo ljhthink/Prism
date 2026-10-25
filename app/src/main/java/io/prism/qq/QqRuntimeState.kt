@@ -42,7 +42,28 @@ data class QqRuntimeState(
      * 只保留最后一条会让「A→B→重复 A」再次回应；本集合保留最近 [MAX_REPLIED_IDS] 条，
      * 跨重启持久化，重复投递/重连补投在窗口内一律跳过。
      */
-    val repliedMessageIds: List<String> = emptyList()
+    val repliedMessageIds: List<String> = emptyList(),
+    /**
+     * 上次定时任务的**结果类别**（ADR-063 修订 2026-10-25；PRD US-3115 AC-6）。
+     *
+     * 取值：`SUCCESS` / `SKIP:<原因类别>` / `FAIL:<原因类别>` / 空=从未执行。
+     * 用于设置页与 `qq__schedule_message(status)` 如实展示"上次到底发生了什么"。
+     */
+    val lastOutcome: String = "",
+    /** 上次结果的可读原因（已脱敏；空=无）。 */
+    val lastOutcomeReason: String = "",
+    /** 上次结果的时刻（0=从未）。 */
+    val lastOutcomeAtMs: Long = 0L,
+    /**
+     * 「环境类跳过」重试预算所属的**窗口实例锚点**（epoch ms；0=未开始）。
+     *
+     * 用窗口实例起点而非日期作键——跨零点窗口（22:00–02:00）在午夜前后是同一实例，
+     * 用日期会在 00:00 清零预算、导致整夜反复点亮屏幕（guardrail G-r2-02）。
+     * **持久化**：服务被系统回收重启后预算不重置，"熄屏整夜"不会因重启而重来一轮。
+     */
+    val retryWindowAnchor: Long = 0L,
+    /** 当前窗口实例内已执行的「环境类跳过」重试次数（成功/换窗口清零）。 */
+    val retryCount: Int = 0
 ) {
     companion object {
         /** 幂等集合上限（防无限增长；远大于一次重连可能补投的条数）。 */

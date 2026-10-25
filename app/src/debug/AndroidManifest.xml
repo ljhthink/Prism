@@ -14,5 +14,14 @@
                 <action android:name="io.prism.DEBUG_HIDDEN_VD" />
             </intent-filter>
         </receiver>
+        <!-- 2026-10-25：QQ 链路真机探针（通道解析 / 环境守卫 / 定时立即触发 / 记录结果），仅 debug。 -->
+        <receiver
+            android:name="io.prism.debug.QqDebugReceiver"
+            android:exported="true"
+            android:permission="android.permission.DUMP">
+            <intent-filter>
+                <action android:name="io.prism.DEBUG_QQ" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

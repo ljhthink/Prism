@@ -1,4 +1,4 @@
-package io.prism.qq
+﻿package io.prism.qq
 
 import io.prism.qq.channel.QqTransport
 
@@ -66,7 +66,16 @@ data class QqConfig(
     val historyLimit: Int = DEFAULT_HISTORY_LIMIT,
 
     /** 是否把 L2/L3 记忆注入 QQ 回复（US-3112 AC-4 可关闭）。 */
-    val memoryInjectionEnabled: Boolean = true
+    val memoryInjectionEnabled: Boolean = true,
+
+    /**
+     * 熄屏时是否**临时点亮屏幕**执行定时任务（ADR-063 修订 2026-10-25；PRD US-3115 AC-6）。
+     *
+     * `true`（默认）：到点若屏幕熄灭，经 Shizuku 唤醒并保持亮屏，确保消息真的能发出；
+     * `false`：跳过本次并记录原因（适合"只要不打扰我"的用户）。
+     * 仅影响**定时主动消息**；被动回复永不唤醒屏幕。
+     */
+    val wakeOnScreenOff: Boolean = true
 ) {
 
     /** 定时链路是否整体激活：总开关 + 风险已确认 + 定时开关 + 已配置目标联系人（四闸同开）。 */
@@ -89,7 +98,8 @@ data class QqConfig(
             "oneBotBaseUrl=$oneBotBaseUrl, oneBotWsUrl=$oneBotWsUrl, " +
             "oneBotToken=${if (oneBotToken.isBlank()) "<empty>" else "***"}, " +
             "oneBotSelfId=$oneBotSelfId, oneBotTargetUserId=$oneBotTargetUserId, " +
-            "historyLimit=$historyLimit, memoryInjectionEnabled=$memoryInjectionEnabled)"
+            "historyLimit=$historyLimit, memoryInjectionEnabled=$memoryInjectionEnabled, " +
+            "wakeOnScreenOff=$wakeOnScreenOff)"
 
     /** 归一化为合法值域（读/写两侧共用）。 */
     fun clamped(): QqConfig = copy(

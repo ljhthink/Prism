@@ -30,7 +30,9 @@ class QqSchedulePlannerTest {
     @Test
     fun `窗口非法时返回 null`() {
         val now = ms(2026, 10, 18, 12, 0)
-        assertNull(QqSchedulePlanner.nextTriggerAt(now, 1380, 1200, 0L, Random(1), zone = zone))
+        // 2026-10-25：起>止 现在是**合法的跨零点**窗口（ADR-063 修订），不再判非法
+        assertNotNull(QqSchedulePlanner.nextTriggerAt(now, 1380, 1200, 0L, Random(1), zone = zone))
+        // 起止相同 → 窗口长度为 0，非法
         assertNull(QqSchedulePlanner.nextTriggerAt(now, 1200, 1200, 0L, Random(1), zone = zone))
         // 窗止超过当日分钟数
         assertNull(QqSchedulePlanner.nextTriggerAt(now, 1200, 2000, 0L, Random(1), zone = zone))
@@ -124,14 +126,113 @@ class QqSchedulePlannerTest {
     }
 
     @Test
-    fun `最小间隔超过约一天的可满足上限后退化为null（配置已钳制不触发）`() {
+    fun `最小间隔超过约一天时顺延到更晚的窗口而不是返回 null`() {
         val now = ms(2026, 10, 18, 21, 0)
-        // 48h：代码仅顺延一次，约束不可满足 → null（已知退化；配置 MAX_INTERVAL_MS_CEIL=24h 不会触达）
-        assertNull(
-            QqSchedulePlanner.nextTriggerAt(
-                now, windowStart, windowEnd, 2 * 24L * 60 * 60 * 1000, Random(1), zone = zone
-            )
+        // 48h：2026-10-25 修订后搜索 -1..+2 天窗口，约束可满足（原实现只顺延一次 → null）
+        val t = QqSchedulePlanner.nextTriggerAt(
+            now, windowStart, windowEnd, 2 * 24L * 60 * 60 * 1000, Random(1), zone = zone
         )
+        assertNotNull(t)
+        assertTrue("t=$t 应≥now+48h", t!! >= now + 2 * 24L * 60 * 60 * 1000)
+    }
+
+    // ==================== 2026-10-25 新增：跨零点窗口 ====================
+
+    @Test
+    fun `跨零点窗口在深夜落点正确`() {
+        val start = 22 * 60 // 22:00
+        val end = 2 * 60    // 次日 02:00
+        val now = ms(2026, 10, 18, 23, 0)
+        repeat(20) { i ->
+            val t = QqSchedulePlanner.nextTriggerAt(now, start, end, 0L, Random(i), zone = zone)
+            assertNotNull(t)
+            // 窗口 = 当日 22:00 → 次日 02:00
+            val dayStart = todayStartMs(now)
+            assertTrue("t=$t", t!! in now until dayStart + 26L * 60 * 60 * 1000)
+            assertTrue(
+                "t=$t 应在 22:00-02:00 区间",
+                QqSchedulePlanner.isWithinWindow(t, start, end, zone)
+            )
+        }
+    }
+
+    @Test
+    fun `跨零点窗口凌晨仍算在窗内（检查昨日开启的那一段）`() {
+        val start = 22 * 60
+        val end = 2 * 60
+        val inside = ms(2026, 10, 19, 1, 30)
+        val outside = ms(2026, 10, 19, 3, 0)
+        assertTrue(QqSchedulePlanner.isWithinWindow(inside, start, end, zone))
+        assertTrue(!QqSchedulePlanner.isWithinWindow(outside, start, end, zone))
+    }
+
+    @Test
+    fun `跨零点窗口凌晨已过则顺延到当日夜晚`() {
+        val start = 22 * 60
+        val end = 2 * 60
+        val now = ms(2026, 10, 19, 3, 0) // 凌晨段已过
+        val t = QqSchedulePlanner.nextTriggerAt(now, start, end, 0L, Random(11), zone = zone)
+        assertNotNull(t)
+        val dayStart = todayStartMs(now)
+        assertTrue("t=$t 应落在当日 22:00 之后", t!! >= dayStart + start * 60_000L)
+    }
+
+    // ==================== 2026-10-25 新增：窗口实例锚点（G-r2-02） ====================
+
+    @Test
+    fun `跨零点窗口在午夜前后是同一锚点（重试预算不会被午夜清零）`() {
+        val start = 22 * 60
+        val end = 2 * 60
+        val beforeMidnight = ms(2026, 10, 18, 23, 30)
+        val afterMidnight = ms(2026, 10, 19, 0, 30)
+        val a = QqSchedulePlanner.windowAnchor(beforeMidnight, start, end, zone)
+        val b = QqSchedulePlanner.windowAnchor(afterMidnight, start, end, zone)
+        assertEquals("跨零点窗口同一实例必须同一锚点", a, b)
+        // 锚点应为该实例的 22:00
+        assertEquals(ms(2026, 10, 18, 22, 0), a)
+    }
+
+    @Test
+    fun `普通窗口锚点为窗口起点且次日换新锚点`() {
+        val a = QqSchedulePlanner.windowAnchor(ms(2026, 10, 18, 21, 0), windowStart, windowEnd, zone)
+        assertEquals(ms(2026, 10, 18, 20, 0), a)
+        val b = QqSchedulePlanner.windowAnchor(ms(2026, 10, 19, 21, 0), windowStart, windowEnd, zone)
+        assertEquals(ms(2026, 10, 19, 20, 0), b)
+        assertTrue("不同日应换锚点", a != b)
+    }
+
+    @Test
+    fun `窗外时刻锚点稳定指向下一个窗口起点`() {
+        // 凌晨 3:00（窗口 20:00-23:00 已过）→ 应指向当日 20:00
+        val a = QqSchedulePlanner.windowAnchor(ms(2026, 10, 19, 3, 0), windowStart, windowEnd, zone)
+        assertEquals(ms(2026, 10, 19, 20, 0), a)
+        // 中午 12:00 → 同样是当日 20:00
+        val b = QqSchedulePlanner.windowAnchor(ms(2026, 10, 19, 12, 0), windowStart, windowEnd, zone)
+        assertEquals(ms(2026, 10, 19, 20, 0), b)
+    }
+
+    @Test
+    fun `窗口非法时锚点为 0（G-r3-05）`() {
+        assertEquals(0L, QqSchedulePlanner.windowAnchor(ms(2026, 10, 19, 12, 0), 1200, 1200, zone))
+        assertEquals(0L, QqSchedulePlanner.windowAnchor(ms(2026, 10, 19, 12, 0), -1, 600, zone))
+    }
+
+    @Test
+    fun `下一窗口锚点为次日窗口起点（G-r3-03）`() {
+        val anchor = QqSchedulePlanner.windowAnchor(ms(2026, 10, 19, 21, 0), windowStart, windowEnd, zone)
+        assertEquals(ms(2026, 10, 19, 20, 0), anchor)
+        val next = QqSchedulePlanner.nextWindowAnchor(anchor, zone)
+        assertEquals(ms(2026, 10, 20, 20, 0), next)
+        // 跨零点窗口：锚点 22:00 → 次日晚 22:00
+        val crossAnchor = QqSchedulePlanner.windowAnchor(ms(2026, 10, 19, 23, 30), 1320, 120, zone)
+        assertEquals(ms(2026, 10, 19, 22, 0), crossAnchor)
+        assertEquals(ms(2026, 10, 20, 22, 0), QqSchedulePlanner.nextWindowAnchor(crossAnchor, zone))
+    }
+
+    @Test
+    fun `下一窗口锚点对 0 或非法输入返回 0`() {
+        assertEquals(0L, QqSchedulePlanner.nextWindowAnchor(0L, zone))
+        assertEquals(0L, QqSchedulePlanner.nextWindowAnchor(-5L, zone))
     }
 
     @Test

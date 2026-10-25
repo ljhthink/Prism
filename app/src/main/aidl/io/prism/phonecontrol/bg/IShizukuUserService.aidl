@@ -47,4 +47,24 @@ interface IShizukuUserService {
      * @param maxWidth 预览最大宽度（0=原始尺寸；Watch 传 360 以降低 Binder/GC/编码压力）
      */
     byte[] captureHiddenFramePng(int maxWidth);
+
+    /**
+     * 2026-10-25（帧健康）：取隐藏虚拟屏最新帧的 **JPEG** 字节（自适应质量/尺寸）。
+     *
+     * 背景：PNG 全尺寸在图片/视频类界面极易超过 Binder 安全上限（900KB），原实现直接
+     * 返回 null → 工具层表现为"暂无可用画面"。JPEG 体积通常小一个数量级，且可在超限时
+     * **降质/降尺寸**而不是"没画面"。
+     *
+     * @param maxWidth 预览最大宽度（0=原始尺寸）
+     * @param quality  初始 JPEG 质量（1~100；超限时服务端自行逐级下调）
+     * @return JPEG 字节；无帧/编码失败返回 null
+     */
+    byte[] captureHiddenFrameJpeg(int maxWidth, int quality);
+
+    /**
+     * 2026-10-25（帧健康）：最新帧的元信息，用于判定"画面是否已冻结"。
+     *
+     * @return `OK:<width>:<height>:<ageMs>` 或 `ERR:<原因>`
+     */
+    String hiddenFrameInfo();
 }

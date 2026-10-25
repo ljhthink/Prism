@@ -20,8 +20,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.time.ZoneId
 import kotlin.random.Random
 
@@ -47,6 +49,49 @@ class ProactiveScheduleService : Service() {
     private var loopJob: Job? = null
     private var replyJob: Job? = null
 
+    /**
+     * 精确闹钟的**唤醒信号**（ADR-063 修订 2026-10-25）。
+     *
+     * 原实现里 `ACTION_WAKE` 只是再 `startForeground` 一次：`loopJob` 非空时不会打断正在
+     * `delay` 的心跳协程，兜底**完全无效**。现在心跳的等待改为
+     * `withTimeoutOrNull(...) { wakeSignal.receive() }`，闹钟到达即刻复评到期判定。
+     *
+     * **为什么用 `Channel.CONFLATED` 而不是 `MutableSharedFlow.tryEmit`（guardrail G-10）**：
+     * SharedFlow(replay=0) 在**暂无订阅者**时 `tryEmit` 直接返回值被丢弃（订阅者恰好不在
+     * `first()` 挂起点上，例如正在跑发送逻辑）——那一次唤醒就白发了，最坏要等 15 分钟分块。
+     * CONFLATED 保证"总有 1 个待消费信号"，且多次唤醒自动合并（不需要排队）。
+     */
+    private val wakeSignal = kotlinx.coroutines.channels.Channel<Unit>(
+        capacity = kotlinx.coroutines.channels.Channel.CONFLATED
+    )
+
+    /**
+     * 当前重试计数所属的「窗口实例锚点」（epoch ms；0=尚未计算）。
+     *
+     * 与持久化的 `QqRuntimeState.retryWindowAnchor` 保持同样语义——进程内这份只用于
+     * 「跳过通知」这类一次性提示的去重（计数本身以持久化状态为准，跨重启不重置）。
+     */
+    private var skipWindowKey: Long = 0L
+
+    /** 「熄屏跳过」通知在本窗口是否已发过（防刷屏）。 */
+    private var skipNoticeSentForWindow = false
+
+    /**
+     * 统一维护「本窗口」的进程内状态（guardrail **G-r2-04**）。
+     *
+     * 原实现里 `notifySkipped` 先读 `skipNoticeSentForWindow`、再由 `retryOrClear` 重置 →
+     * **新窗口的第一次跳过通知会被吞掉**。现在窗口切换只在 [handleDue] 开头处理一次，
+     * 通知与预算读到的必然是同一窗口的状态。
+     *
+     * @return 是否刚切换到新窗口（调用方可据此重置其它窗口级状态）
+     */
+    private fun ensureWindow(anchor: Long): Boolean {
+        if (anchor == skipWindowKey) return false
+        skipWindowKey = anchor
+        skipNoticeSentForWindow = false
+        return true
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -63,6 +108,11 @@ class ProactiveScheduleService : Service() {
             // CR-10：前台服务启动失败（系统限制）→ 立即停止，避免"无通知仍在跑"
             stopSelf()
             return START_NOT_STICKY
+        }
+        // 闹钟唤醒：必须优先于"循环已存在就不动"的分支——否则兜底形同虚设
+        if (intent?.action == ACTION_WAKE) {
+            Log.i(TAG, "精确闹钟唤醒：立即复评到期计划")
+            wakeSignal.trySend(Unit)
         }
         if (loopJob == null) loopJob = scope.launch { heartbeatLoop() }
         if (replyJob == null) replyJob = scope.launch { replyLoop() }
@@ -108,8 +158,7 @@ class ProactiveScheduleService : Service() {
 
                 // 到期判定（含进程重启后的补发；plannedTriggerAt 持久化 → 恰好一次）
                 if (rt.plannedTriggerAt in 1..now) {
-                    fireOnce(cfg)
-                    QqRuntimeStateRepositoryHolder.get()?.clearPlan()
+                    handleDue(cfg, rt, now)
                     continue
                 }
 
@@ -143,8 +192,9 @@ class ProactiveScheduleService : Service() {
                 }
                 scheduleExactAlarm(next)
                 Log.i(TAG, "下次主动消息计划于 $next（约 ${(next - now) / 60_000} 分钟后）")
-                // N-2：分块睡眠——每 ≤15 分钟回到循环顶部重读配置，使"运行期改配置"及时生效
-                delay((next - now).coerceAtLeast(0L).coerceAtMost(MAX_SLEEP_CHUNK_MS))
+                // N-2：分块睡眠——每 ≤15 分钟回到循环顶部重读配置，使"运行期改配置"及时生效。
+                // 2026-10-25：改为可被 [wakeSignal] 打断——精确闹钟到达即刻复评到期判定。
+                awaitWakeOrTimeout((next - now).coerceAtLeast(0L).coerceAtMost(MAX_SLEEP_CHUNK_MS))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -178,54 +228,257 @@ class ProactiveScheduleService : Service() {
             strategy = if (cfg.usePoisson) QqSchedulePlanner.Strategy.POISSON else QqSchedulePlanner.Strategy.UNIFORM
         )
 
-    /** 派发一次主动消息（先复查激活态 + 节流/熔断；失败按阈值熔断）。 */
-    private suspend fun fireOnce(cfg: QqConfig) {
+    /**
+     * 环境守卫阻塞原因 → 失败类别（guardrail G-07）。
+     *
+     * 顺序：先判**权限/依赖**（无障碍/Shizuku/悬浮窗 → 通道类），再判屏幕，最后才是执行面。
+     * 老的 `reason.contains("屏幕")` 会把"屏幕已熄灭（本次不允许唤醒）"与"屏幕已熄灭需要唤醒"
+     * 混为一谈，且把权限缺失误记为显示面故障。
+     */
+    private fun classifyGuardBlock(reason: String): QqFailureClassifier.Kind = when {
+        reason.contains("无障碍") || reason.contains("Shizuku") || reason.contains("悬浮窗") ->
+            QqFailureClassifier.Kind.CHANNEL_UNAVAILABLE
+        reason.contains("屏幕") -> QqFailureClassifier.Kind.SCREEN_OFF_BLOCKED
+        else -> QqFailureClassifier.Kind.DISPLAY_UNAVAILABLE
+    }
+
+    /**
+     * 「跳过并通知」（PRD US-3115 AC-6；guardrail G-07 / **G-r3-08**）。
+     *
+     * 两类情况都通知，但语义不同：
+     * - **权限/依赖类**（无障碍/Shizuku/悬浮窗）：与"熄屏策略"无关——即使开着"点亮执行"
+     *   也发不出去，用户必须知道并去修配置，否则会以为功能坏了；
+     * - **熄屏跳过类**：仅在用户显式选择"熄屏跳过"时提示（默认"点亮执行"成功不打扰）。
+     *
+     * 限频：同一窗口实例只提示一次。
+     */
+    private fun notifySkipped(cfg: QqConfig, reason: String, kind: QqFailureClassifier.Kind) {
+        val permissionLike = kind == QqFailureClassifier.Kind.CHANNEL_UNAVAILABLE
+        if (!permissionLike && cfg.wakeOnScreenOff) return
+        if (skipNoticeSentForWindow) return
+        skipNoticeSentForWindow = true
+        runCatching {
+            val nm = getSystemService(NotificationManager::class.java) ?: return@runCatching
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                nm.createNotificationChannel(
+                    NotificationChannel(
+                        SKIP_CHANNEL_ID, SKIP_CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW
+                    )
+                )
+            }
+            val n = NotificationCompat.Builder(this, SKIP_CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle("本次定时消息已跳过")
+                .setContentText(reason.take(60))
+                .setAutoCancel(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build()
+            nm.notify(SKIP_NOTIFICATION_ID, n)
+        }.onFailure { Log.w(TAG, "跳过通知发送失败（${it::class.simpleName}）") }
+    }
+
+    /** 等待 [timeoutMs] 的睡眠，可被精确闹钟的 [wakeSignal] 提前打断（ADR-063 修订）。 */
+    private suspend fun awaitWakeOrTimeout(timeoutMs: Long) {
+        if (timeoutMs <= 0L) {
+            // 到期判定由调用方紧接着做；清掉可能残留的信号，避免无谓空转一次
+            wakeSignal.tryReceive()
+            return
+        }
+        withTimeoutOrNull(timeoutMs) { wakeSignal.receive() }
+    }
+
+    /**
+     * 到期处理（**唯一发送路径**；ADR-063 修订 2026-10-25）。
+     *
+     * 顺序：节流/熔断 → 通道可用性 → **执行环境守卫** → 发送 → 结果分类 → 计划处置。
+     * 环境类阻塞（熄屏/显示面缺失/通道离线）**不计账号失败**，按退避重试若干次后放弃本窗口。
+     */
+    private suspend fun handleDue(cfg: QqConfig, state: QqRuntimeState, now: Long) {
         if (!cfg.schedulingActive) return // CR-2
         val runtimeRepo = QqRuntimeStateRepositoryHolder.get() ?: return
-        val now = System.currentTimeMillis()
-        val state = runtimeRepo.get()
+        // G-r2-04：窗口级状态（跳过通知去重）在进入业务分支**之前**统一换挡
+        val anchor = QqSchedulePlanner.windowAnchor(now, cfg.windowStartMinute, cfg.windowEndMinute)
+        ensureWindow(anchor)
+        // G-r2-02：该窗口实例的重试预算已耗尽 → 短路（不发送、不唤醒、不重排计划）。
+        // G-r3-03：**推到下一窗口起点**而不是 clearPlan()——否则心跳会在同窗口重新 planNext，
+        // 反复注册闹钟/拉起前台服务/再短路（窗口剩 3h 可空转 3~6 轮）。
+        if (state.retryWindowAnchor == anchor && state.retryCount >= MAX_TRANSIENT_RETRIES) {
+            val nextWindow = QqSchedulePlanner.nextWindowAnchor(anchor)
+            Log.i(
+                TAG,
+                "本窗口环境类重试已耗尽（${state.retryCount}/$MAX_TRANSIENT_RETRIES），" +
+                    "顺延到下一窗口（锚点 $anchor → $nextWindow）"
+            )
+            runtimeRepo.recordOutcome("SKIP:RETRY_EXHAUSTED", "本窗口重试已耗尽", now)
+            if (nextWindow > now) {
+                runtimeRepo.setPlannedTriggerAt(nextWindow)
+                scheduleExactAlarm(nextWindow)
+            } else {
+                runtimeRepo.clearPlan()
+            }
+            return
+        }
         if (state.circuitOpen) {
             // N-1：熔断后停止**定时发送**（不空转），恢复由用户在设置页重新开启开关触发 resetCircuit。
             // guardrail M-04：若双向对话仍激活则**不得整体停服**（否则连带杀死 replyLoop）。
             Log.i(TAG, "已熔断（连续失败达阈值），定时发送停止，等待用户手动恢复")
+            runtimeRepo.recordOutcome("SKIP:CIRCUIT_OPEN", "熔断中，等待用户恢复", now)
+            runtimeRepo.clearPlan()
             stopWholeServiceIfIdle()
             return
         }
         when (val d = QqThrottle.decide(cfg, state, now)) {
             is QqThrottle.Decision.Deny -> {
                 Log.i(TAG, "本次跳过：${d.reason}")
+                runtimeRepo.recordOutcome("SKIP:THROTTLE", d.reason.take(120), now)
+                runtimeRepo.clearPlan()
                 return
             }
             QqThrottle.Decision.Allow -> Unit
         }
+
         // US-3110 AC-6：通道不可用（协议端离线且无障碍不可用）→ 跳过且**不记失败**。
+        val protocolOnline = runCatching {
+            QqProactiveGateway.protocolOnlineCheck?.invoke() ?: false
+        }.getOrDefault(false)
         val online = runCatching {
             QqProactiveGateway.onlineCheck?.invoke() ?: true
         }.getOrDefault(true)
         if (!online) {
             Log.i(TAG, "当前无可用 QQ 通道（协议端离线/无障碍不可用），本次跳过（不计失败）")
+            runtimeRepo.recordOutcome("SKIP:CHANNEL_UNAVAILABLE", "协议端离线且无障碍不可用", now)
+            // G-r3-08：通道不可用属"用户需修配置"，即使开着"点亮执行"也要提示一次
+            notifySkipped(cfg, "协议端离线且无障碍不可用", QqFailureClassifier.Kind.CHANNEL_UNAVAILABLE)
+            retryOrClear(cfg, runtimeRepo, now)
             return
         }
+
+        // 执行环境守卫（ADR-063 修订）：协议端发送不需要 UI 执行面；无障碍路径必须先确认
+        // 前置条件（无障碍/Shizuku/悬浮窗）与屏幕可交互，否则注入会被系统丢弃（项目既有实证）。
+        // guardrail G-02：先做**无副作用**的前置判定，确认"唤醒后确实发得出去"才点亮屏幕；
+        // 执行面本身由发送链路惰性创建（displayId=INVALID 表示"待创建"，不是"不可用"）。
+        if (!protocolOnline) {
+            val displayId = runCatching {
+                QqProactiveGateway.executionDisplayId?.invoke() ?: android.view.Display.INVALID_DISPLAY
+            }.getOrDefault(android.view.Display.INVALID_DISPLAY)
+            val guard = QqExecutionGuard.ensureReady(
+                displayId = displayId,
+                requireDisplay = true,
+                allowWake = true // 定时任务：默认临时点亮执行（用户可切"熄屏跳过"）
+            )
+            if (guard.blocked) {
+                Log.i(TAG, "执行环境未就绪，本次跳过（不计失败）：${guard.reason}")
+                val kind = classifyGuardBlock(guard.reason)
+                runtimeRepo.recordOutcome("SKIP:$kind", guard.reason.take(120), now)
+                notifySkipped(cfg, guard.reason, kind)
+                retryOrClear(cfg, runtimeRepo, now)
+                return
+            }
+            if (guard.kind == QqExecutionGuard.Kind.WOKEN) {
+                Log.i(TAG, "已临时点亮屏幕以执行本次定时任务")
+                runtimeRepo.recordOutcome("WOKEN", "已点亮屏幕", now)
+            }
+            // 唤醒后给目标应用留出首帧时间（避免刚点亮就取到旧帧）
+            if (guard.kind == QqExecutionGuard.Kind.WOKEN) delay(GUARD_SETTLE_MS)
+        }
+
         val sender = QqProactiveGateway.sender
         if (sender == null) {
             Log.w(TAG, "主动消息发送器未装配（QQ 发送链路未就绪），本次跳过")
+            runtimeRepo.recordOutcome("SKIP:CHANNEL_UNAVAILABLE", "发送器未装配", now)
+            runtimeRepo.clearPlan()
             return
         }
-        try {
-            val result = sender()
-            if (result.startsWith("错误") || result.startsWith("⚠️")) {
-                // guardrail L-02：不回显联系人/正文
-                Log.w(TAG, "主动消息发送返回失败（已脱敏）")
-                runtimeRepo.recordFailure(QqThrottle.FAILURE_STREAK_THRESHOLD)
-            } else {
-                Log.i(TAG, "主动消息派发成功")
-                runtimeRepo.recordFired(now, QqThrottle.todayKey(now, ZoneId.systemDefault()))
-            }
+        val startedAt = System.currentTimeMillis()
+        val result = try {
+            sender()
         } catch (e: CancellationException) {
             throw e // CR-7：中断类异常必须透传，不得被吞
         } catch (e: Exception) {
             Log.w(TAG, "主动消息发送异常：${e::class.simpleName}")
             runtimeRepo.recordFailure(QqThrottle.FAILURE_STREAK_THRESHOLD)
+            runtimeRepo.recordOutcome("FAIL:${QqFailureClassifier.Kind.UNKNOWN}", e::class.simpleName ?: "异常", now)
+            runtimeRepo.clearPlan()
+            return
+        }
+        val elapsedMs = System.currentTimeMillis() - startedAt
+        if (!result.startsWith("错误") && !result.startsWith("⚠️")) {
+            Log.i(TAG, "主动消息派发成功（耗时 ${elapsedMs}ms）")
+            runtimeRepo.recordFired(now, QqThrottle.todayKey(now, ZoneId.systemDefault()))
+            runtimeRepo.recordOutcome("SUCCESS", "耗时 ${elapsedMs}ms", now)
+            runtimeRepo.resetRetry() // 成功后预算归零，下一窗口从满额开始
+            runtimeRepo.clearPlan()
+            return
+        }
+        // guardrail L-02：不回显联系人/正文，只记类别与耗时
+        val kind = QqFailureClassifier.classify(result)
+        Log.w(TAG, "主动消息发送失败：$kind（耗时 ${elapsedMs}ms）")
+        runtimeRepo.recordOutcome("FAIL:$kind", "耗时 ${elapsedMs}ms", now)
+        if (QqFailureClassifier.isUnconfirmedDelivery(kind)) {
+            // 2026-10-25 真机实证：无障碍链路"点完发送但未能读回气泡"时消息**其实已送达**。
+            // 此时若按环境失败重试 → 重复发送（用户会连续收到两条）。故：不熔断、不重试、
+            // 消耗本次计划，并在状态里如实标注"未确认"。
+            //
+            // guardrail G-r3-01：**必须仍然记账**——否则 lastFiredAt 不前进（可在最小间隔内
+            // 再发）、当日计数不增（可超每日上限），直接违反 US-3108 AC-4「不豁免频控」。
+            Log.w(TAG, "发送结果未确认（可能已送达）：不重试、不熔断，按「已发送」记账")
+            runtimeRepo.recordUnconfirmedFired(
+                now, QqThrottle.todayKey(now, ZoneId.systemDefault())
+            )
+            runtimeRepo.resetRetry()
+            runtimeRepo.clearPlan()
+            return
+        }
+        if (QqFailureClassifier.countsTowardCircuit(kind)) {
+            runtimeRepo.recordFailure(QqThrottle.FAILURE_STREAK_THRESHOLD)
+            runtimeRepo.clearPlan()
+        } else if (!QqFailureClassifier.isRetryable(kind)) {
+            // 明确被拒（SEND_REJECTED 已在上一分支熔断）或不可重试：结束本窗口
+            runtimeRepo.clearPlan()
+        } else {
+            // 环境类失败：不熔断，按退避重试（避免夜间一次熄屏就丢掉整次计划）
+            retryOrClear(cfg, runtimeRepo, now)
+        }
+    }
+
+    /**
+     * 环境类跳过后的重试处置（guardrail **G-r2-02**：预算必须是硬上限）。
+     *
+     * 三重约束缺一不可：
+     * 1. **锚点用窗口实例起点**（不是日期）——跨零点窗口午夜前后是同一实例，用日期会在
+     *    00:00 清零，导致整夜反复点亮屏幕；
+     * 2. **计数持久化**（[QqRuntimeStateRepository.recordRetry]）——服务被系统回收重启后
+     *    预算不重置，不会"重启再来一轮"；
+     * 3. **耗尽后写 `retryCount` 超限**，[handleDue] 首行短路——不会因心跳在同窗口重新
+     *    `planNext` 而再次进入发送路径。
+     */
+    private suspend fun retryOrClear(cfg: QqConfig, repo: QqRuntimeStateRepository, now: Long) {
+        // G-r3-05：窗口非法时 windowAnchor 返回 0 → 不做预算判定（直接结束本计划）
+        val anchor = QqSchedulePlanner.windowAnchor(now, cfg.windowStartMinute, cfg.windowEndMinute)
+        if (anchor == 0L) {
+            repo.clearPlan()
+            Log.w(TAG, "活跃时段非法，环境类重试不生效，本计划结束")
+            return
+        }
+        val used = repo.recordRetry(anchor)
+        val retryAt = now + TRANSIENT_RETRY_DELAY_MS
+        val withinWindow = QqSchedulePlanner.isWithinWindow(
+            retryAt, cfg.windowStartMinute, cfg.windowEndMinute
+        )
+        if (used <= MAX_TRANSIENT_RETRIES && withinWindow) {
+            repo.setPlannedTriggerAt(retryAt)
+            Log.i(
+                TAG,
+                "环境类跳过：${TRANSIENT_RETRY_DELAY_MS / 60_000} 分钟后重试" +
+                    "（本窗口第 $used/$MAX_TRANSIENT_RETRIES 次）"
+            )
+        } else {
+            repo.clearPlan()
+            Log.i(
+                TAG,
+                "环境类跳过重试耗尽（$used/$MAX_TRANSIENT_RETRIES）或已出活跃时段，" +
+                    "本窗口不再重试（锚点 $anchor）"
+            )
         }
     }
 
@@ -241,6 +494,8 @@ class ProactiveScheduleService : Service() {
     private suspend fun replyLoop() {
         // D-06：探针决策日志限频（AC-4 要求「日志可证无变化时零建屏」）
         var lastProbeLogAtMs = 0L
+        // 通道解析结论限频日志（避免每 60s 刷屏；决策变化仍会体现在下一行）
+        var lastChannelLogAtMs = 0L
         while (scope.isActive) {
             try {
                 val cfg = QqConfigRepositoryHolder.get()?.get()
@@ -248,9 +503,27 @@ class ProactiveScheduleService : Service() {
                     delay(IDLE_POLL_MS)
                     continue
                 }
-                // ADR-064 / US-3111 AC-1：协议端由 WS 事件驱动（PrismApplication 订阅），
-                // 本循环**不轮询**——否则会重新引入"无消息也建屏"的 DEF-118。
-                if (cfg.transport == io.prism.qq.channel.QqTransport.ONEBOT) {
+                // ADR-064 修订（2026-10-25）：**按能力而非按配置**判定事件/轮询。
+                // 旧实现见到 `transport==ONEBOT` 就直接跳过轮询——协议端未配置时 WS 永不连接，
+                // 于是自动回复永久静默（真机取证）。现在由 [QqChannelResolver] 给出"真正可用"的通道。
+                val resolution = runCatching { QqProactiveGateway.channelMode?.invoke() }.getOrNull()
+                    ?: QqChannelResolver.Resolution(
+                        mode = if (cfg.transport == io.prism.qq.channel.QqTransport.ONEBOT) {
+                            QqChannelResolver.Mode.ONEBOT
+                        } else {
+                            QqChannelResolver.Mode.ACCESSIBILITY
+                        },
+                        reason = "通道解析器未装配（按配置兜底）"
+                    )
+                val nowResolveMs = System.currentTimeMillis()
+                if (nowResolveMs - lastChannelLogAtMs >= PROBE_LOG_INTERVAL_MS) {
+                    lastChannelLogAtMs = nowResolveMs
+                    Log.i(TAG, "自动回复通道=${resolution.mode}（${resolution.reason}）")
+                }
+                // 协议端已连接 → 由 WS 事件驱动（PrismApplication 订阅），本循环不轮询，
+                // 否则会重新引入"无消息也建屏"的 DEF-118；两条通道都不可用同样跳过。
+                // 判据与 autoReplyOnce 共用 QqAutoReplyDispatch（防止两处漂移）。
+                if (QqAutoReplyDispatch.shouldSkipForEventDriven(resolution)) {
                     delay(IDLE_POLL_MS)
                     continue
                 }
@@ -283,8 +556,9 @@ class ProactiveScheduleService : Service() {
                     }
                 }
                 val result = poller()
-                val ok = !result.startsWith("错误") && !result.startsWith("⚠️")
-                Log.i(TAG, if (ok) "双向对话应答：成功" else "双向对话应答：失败（已脱敏）")
+                // D-01：三态由应答器显式给出——"跳过"绝不能再被记成"成功"
+                //（原实现用 `!startsWith("错误")` 二分，真机出现"日志成功但 NapCat 无出站消息"）。
+                Log.i(TAG, result.logLine)
                 delay(REPLY_POLL_INTERVAL_MS)
             } catch (e: CancellationException) {
                 throw e
@@ -367,6 +641,11 @@ class ProactiveScheduleService : Service() {
         /** CR-5：独立通知 ID（避开既有 FGS 通知 ID，防止同号互相覆盖）。 */
         private const val NOTIFICATION_ID = 4101
 
+        /** 「熄屏跳过」通知渠道（独立于定时任务 FGS 通知；PRD US-3115 AC-6）。 */
+        private const val SKIP_CHANNEL_ID = "prism_proactive_skipped"
+        private const val SKIP_CHANNEL_NAME = "定时消息跳过提示"
+        private const val SKIP_NOTIFICATION_ID = 4102
+
         /** 精确闹钟动作：仅唤醒服务（由心跳循环判定是否到期并发送）。 */
         const val ACTION_WAKE = "io.prism.qq.ACTION_WAKE"
 
@@ -390,6 +669,15 @@ class ProactiveScheduleService : Service() {
 
         /** D-06：探针决策日志限频（60s；用于证明「无变化时零建屏」且不刷屏）。 */
         private const val PROBE_LOG_INTERVAL_MS = 60_000L
+
+        /** 环境类跳过后的重试间隔（ADR-063 修订）：足够让用户开屏/通道重连，又不至于空转。 */
+        private const val TRANSIENT_RETRY_DELAY_MS = 10 * 60 * 1000L
+
+        /** 环境类跳过的窗口内重试上限（6 次 ≈ 1 小时；之后放弃本窗口，防整夜无效唤醒）。 */
+        private const val MAX_TRANSIENT_RETRIES = 6
+
+        /** 环境守卫（唤醒/重建）后等待目标应用首帧的时间。 */
+        private const val GUARD_SETTLE_MS = 800L
 
         /** 启动调度服务（容错：系统限制 FGS 后台启动时静默降级，不阻断主流程）。 */
         fun start(context: Context) {

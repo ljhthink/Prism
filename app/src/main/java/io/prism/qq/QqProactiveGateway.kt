@@ -18,10 +18,14 @@ object QqProactiveGateway {
 
     /**
      * 执行一次**双向对话应答**（US-3109）：读取小号会话页是否有新的"收到"消息 → 若有且未回应过
-     * → 由 LLM 生成回复 → 后台发出。返回可读结果（含"跳过"原因）。null=未装配。
+     * → 由 LLM 生成回复 → 后台发出。
+     *
+     * 返回**结构化三态**（`SENT` / `FAILED` / `SKIPPED`，见 [QqReplyOutcome]）——不能用
+     * "是否以「错误」开头"反推，否则"跳过"会被记成"成功"（ac-verifier D-01）。
+     * null=未装配。
      */
     @Volatile
-    var autoReply: (suspend () -> String)? = null
+    var autoReply: (suspend () -> QqReplyOutcome.ReplyResult)? = null
 
     /**
      * 当前是否存在**可用通道**（协议端已连接，或无障碍可用）。
@@ -40,6 +44,32 @@ object QqProactiveGateway {
      */
     @Volatile
     var unreadProbe: (suspend () -> Boolean?)? = null
+
+    /**
+     * **当前真正可用的通道**（ADR-064 修订 2026-10-25；PRD US-3109 AC-1）。
+     *
+     * 由应用层把「首选通道 + 协议端连接态 + 无障碍可用性」交给 [QqChannelResolver] 解析，
+     * 调度器据此决定"事件驱动（不轮询）"还是"探针轮询"，**不再按配置项硬判**。
+     * null=未装配（调度器按配置兜底，保持旧行为）。
+     */
+    @Volatile
+    var channelMode: (suspend () -> QqChannelResolver.Resolution)? = null
+
+    /**
+     * 协议端当前是否**已连接**（用于判断发送是否需要 UI 执行面）。
+     *
+     * 协议端可用 → 发送不需要虚拟屏/屏幕交互，环境守卫可跳过；否则必须先确保执行面可用。
+     */
+    @Volatile
+    var protocolOnlineCheck: (suspend () -> Boolean)? = null
+
+    /**
+     * 当前后台执行面 displayId（`Display.INVALID_DISPLAY`=未创建）。
+     *
+     * 供 [QqExecutionGuard] 校验显示面状态；null=未装配（守卫按"无执行面"处理）。
+     */
+    @Volatile
+    var executionDisplayId: (() -> Int)? = null
 
     /** 是否已装配发送器。 */
     val isReady: Boolean get() = sender != null

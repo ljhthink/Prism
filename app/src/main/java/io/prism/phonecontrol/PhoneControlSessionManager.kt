@@ -128,6 +128,26 @@ object PhoneControlSessionManager {
     }
 
     /**
+     * 为**定时任务**临时保持亮屏（2026-10-25，ADR-063 修订；PRD US-3115 AC-6）。
+     *
+     * 与 [onPhoneToolInvoked] 的区别：定时主动消息不走交互工具入口，若不单独持锁，
+     * 唤醒后屏幕可能在 UI 自动化过程中再次熄灭（注入再次被丢弃）。这里只刷新亮屏锁，
+     * **不启动保活服务、不改变会话状态机**；锁为非引用计数、20 分钟自然过期，
+     * 下一个交互工具调用会照常刷新。
+     *
+     * @return 是否成功持锁（无上下文时 false）
+     */
+    fun holdScreenForScheduledTask(): Boolean {
+        val ctx = appContextProvider() ?: return false
+        return synchronized(sessionLock) {
+            runCatching {
+                acquireWakeLockLocked(ctx)
+                true
+            }.getOrDefault(false)
+        }
+    }
+
+    /**
      * 空闲到期检查（主线程回调）：距最近一次工具调用满 [IDLE_TIMEOUT_MS] 则停止保活并
      * 释放后台虚拟屏（guardrail P1-2：任务期结束 = 空闲超时，虚拟屏 ImageReader/HandlerThread
      * 与 force-stop 回收集中在此收口——[io.prism.phonecontrol.bg.VirtualDisplayManager.ensureDisplay]

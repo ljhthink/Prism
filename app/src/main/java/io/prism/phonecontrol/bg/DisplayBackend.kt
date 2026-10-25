@@ -9,6 +9,24 @@ import android.graphics.BitmapFactory
 import android.util.Log
 
 /**
+ * 一帧执行面画面（2026-10-25 帧健康）。
+ *
+ * @param capturedAtMs 该帧在**系统侧产生**的时刻（epoch ms；由创建者进程记录，
+ *   不是调用方取到的时刻）——调用方据此判断"这是实时画面还是冻结的旧帧"
+ * @param width/height 真实帧尺寸（**不是**执行面常量规格）
+ */
+data class DisplayFrame(
+    val bitmap: Bitmap,
+    val capturedAtMs: Long,
+    val width: Int,
+    val height: Int
+) {
+    /** 帧龄（毫秒）；时钟回拨时按 0 处理，无元信息时返回 [Long.MAX_VALUE]。 */
+    fun ageMs(nowMs: Long = System.currentTimeMillis()): Long =
+        FrameFreshness.ageMs(capturedAtMs, nowMs)
+}
+
+/**
  * ADR-065（US-3114）：手机操控**执行面后端**抽象。
  *
  * 两个实现：
@@ -39,6 +57,17 @@ interface DisplayBackend {
     /** 取最新帧（调用方负责 recycle）；无帧返回 null。maxWidth>0 时允许后端降采样预览。 */
     fun latestFrame(maxWidth: Int = 0): Bitmap?
 
+    /**
+     * 取最新帧并携带**新鲜度与真实尺寸**（2026-10-25 帧健康）。
+     *
+     * 默认实现退化为 [latestFrame]（无元信息 → `capturedAtMs=0`，调用方应视为不可信）；
+     * 支持的实现必须覆盖本方法。
+     */
+    fun latestFrameWithMeta(maxWidth: Int = 0): DisplayFrame? {
+        val bmp = latestFrame(maxWidth) ?: return null
+        return DisplayFrame(bmp, 0L, bmp.width, bmp.height)
+    }
+
     /** 执行面尺寸（宽, 高）；未创建返回 null。 */
     fun frameSize(): Pair<Int, Int>?
 
@@ -68,6 +97,10 @@ class RemoteShellBackend : DisplayBackend {
     @Volatile
     private var lastErrorText: String? = null
 
+    /** 最近一次**真实帧**尺寸（旋转/重建后可能与建屏规格不同；null=尚无帧）。 */
+    @Volatile
+    private var lastFrameSize: Pair<Int, Int>? = null
+
     override fun ensure(context: Context): Int {
         displayId.takeIf { it != android.view.Display.INVALID_DISPLAY }?.let { return it }
         if (!ShizukuShell.isReady()) {
@@ -93,6 +126,7 @@ class RemoteShellBackend : DisplayBackend {
         if (displayId == android.view.Display.INVALID_DISPLAY) return true
         val released = ShizukuShell.releaseHiddenDisplay()
         displayId = android.view.Display.INVALID_DISPLAY
+        lastFrameSize = null
         if (!released) lastErrorText = "releaseHiddenDisplay 失败"
         return released
     }
@@ -102,8 +136,40 @@ class RemoteShellBackend : DisplayBackend {
         return runCatching { BitmapFactory.decodeByteArray(png, 0, png.size) }.getOrNull()
     }
 
+    /**
+     * 2026-10-25：优先 JPEG（体积小、超限可降级），并附**真实帧龄与尺寸**。
+     *
+     * **顺序很重要（guardrail G-04）**：先取帧字节、再取元信息。若反过来，两次 Binder 往返
+     * 之间恰好来了新帧，就会用"旧元信息的 age"去描述"新帧"，把新鲜帧误判成冻结，
+     * 进而触发一次多余的重建（重建会重启目标应用）。
+     *
+     * **旧用户服务兼容（guardrail G-05）**：AIDL 从 v4 升 v5 后，Shizuku 里仍可能跑着
+     * 升级前的 shell 进程——它不认识新方法。此时 `hiddenFrameInfo()` 返回 null，
+     * 按 `capturedAtMs = now`（刚取到的字节必然是当前帧）而不是 0（=永不新鲜）处理，
+     * 避免"整条截图链路退化为全部冻结"。
+     */
+    override fun latestFrameWithMeta(maxWidth: Int): DisplayFrame? {
+        val bytes = ShizukuShell.captureHiddenFrameJpeg(maxWidth, FRAME_JPEG_QUALITY)
+            ?: ShizukuShell.captureHiddenFramePng(maxWidth)
+            ?: return null
+        val bitmap = runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }.getOrNull()
+            ?: return null
+        val info = ShizukuShell.hiddenFrameInfo()
+        val capturedAt = when {
+            info != null -> System.currentTimeMillis() - info.ageMs
+            else -> System.currentTimeMillis().also {
+                Log.i(TAG, "帧元信息不可用（旧用户服务/版本不匹配），按当前时刻计龄")
+            }
+        }
+        val w = info?.width?.takeIf { it > 0 } ?: bitmap.width
+        val h = info?.height?.takeIf { it > 0 } ?: bitmap.height
+        // 真实尺寸与建屏规格不一致（旋转/重建）时以真帧为准，供 OCR 坐标映射
+        if (w > 0 && h > 0) lastFrameSize = w to h
+        return DisplayFrame(bitmap, capturedAt, w, h)
+    }
+
     override fun frameSize(): Pair<Int, Int>? =
-        if (displayId == android.view.Display.INVALID_DISPLAY) null else WIDTH to HEIGHT
+        if (displayId == android.view.Display.INVALID_DISPLAY) null else lastFrameSize ?: (WIDTH to HEIGHT)
 
     override fun launch(component: String, packageName: String, userId: Int?, forceStop: Boolean): Boolean =
         if (userId == null) {
@@ -121,6 +187,9 @@ class RemoteShellBackend : DisplayBackend {
         const val WIDTH = 720
         const val HEIGHT = 1560
         const val DENSITY = 280
+
+        /** 截图 JPEG 初始质量（服务端超限会自行下调）。 */
+        const val FRAME_JPEG_QUALITY = 88
     }
 }
 
@@ -140,6 +209,10 @@ internal object OverlayLegacyBackend : DisplayBackend {
 
     /** legacy 帧缓存已是位图，忽略 maxWidth（Watch 在本地自建屏路径下取全尺寸帧）。 */
     override fun latestFrame(maxWidth: Int): Bitmap? = VirtualDisplayManager.legacyLatestFrame()
+
+    /** 2026-10-25：legacy 帧缓存带采集时刻；overlay（trusted）路线无本地帧 → null。 */
+    override fun latestFrameWithMeta(maxWidth: Int): DisplayFrame? =
+        VirtualDisplayManager.legacyLatestFrameWithMeta()
 
     override fun frameSize(): Pair<Int, Int>? = VirtualDisplayManager.legacyFrameSize()
 

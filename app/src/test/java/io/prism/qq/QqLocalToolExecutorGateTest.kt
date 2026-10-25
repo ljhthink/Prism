@@ -149,14 +149,40 @@ class QqLocalToolExecutorGateTest {
         cfg.setEnabled(true)
         cfg.setRiskAccepted(true)
         val e = executor(cfg, rt, HighRiskApprovalMode.ALLOW)
-        val badWindow = e.execute(
+        // 2026-10-25（ADR-063 修订）：起>止 现在是**合法的跨零点**窗口，
+        // 非法判定改为「起止相同」与「HH:mm 格式错误」。
+        val sameWindow = e.execute(
             "qq__schedule_message",
-            mapOf("action" to "create", "target_contact" to "小主", "window_start_min" to 1380, "window_end_min" to 1200)
+            mapOf("action" to "create", "target_contact" to "小主", "window_start_min" to 1200, "window_end_min" to 1200)
         )
-        assertTrue("start>=end 应拒绝：$badWindow", badWindow.contains("时间窗非法"))
+        assertTrue("起止相同应拒绝：$sameWindow", sameWindow.contains("活跃时段非法"))
+        val badFormat = e.execute(
+            "qq__schedule_message",
+            mapOf("action" to "create", "target_contact" to "小主", "window_start" to "25:00", "window_end" to "23:00")
+        )
+        assertTrue("非法 HH:mm 应拒绝：$badFormat", badFormat.contains("格式非法"))
         val noContact = e.execute("qq__schedule_message", mapOf("action" to "create"))
         assertTrue("缺 target_contact 应拒绝：$noContact", noContact.contains("target_contact"))
         assertEquals(false, cfg.get().scheduleEnabled)
+    }
+
+    @Test
+    fun `create 接受 HH-mm 并支持跨零点（2026-10-25 修订）`() = runBlocking<Unit> {
+        val (cfg, rt) = newRepos()
+        cfg.setEnabled(true)
+        cfg.setRiskAccepted(true)
+        val e = executor(cfg, rt, HighRiskApprovalMode.ALLOW)
+        val r = e.execute(
+            "qq__schedule_message",
+            mapOf(
+                "action" to "create", "target_contact" to "小主",
+                "window_start" to "22:00", "window_end" to "02:00"
+            )
+        )
+        assertTrue("应创建成功：$r", r.contains("已创建"))
+        assertEquals(22 * 60, cfg.get().windowStartMinute)
+        assertEquals(2 * 60, cfg.get().windowEndMinute)
+        assertEquals(true, cfg.get().scheduleEnabled)
     }
 
     // ==================== 定时路径凭据拦截（B-01 无绕过面） ====================

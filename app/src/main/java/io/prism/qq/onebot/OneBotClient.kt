@@ -153,10 +153,18 @@ class OneBotClient(
 
     private suspend fun runLoop() {
         var backoffMs = INITIAL_BACKOFF_MS
+        var lastConfigLogAtMs = 0L
         while (currentCoroutineContext().isActive) {
             val cfg = readConnection()
             if (cfg == null || cfg.token.isBlank()) {
                 _state.value = State.Failed("未配置 access_token（协议端必须鉴权）")
+                // 2026-10-25：配置缺失**必须可观测**——原实现只改状态、零日志，真机上表现为
+                // "协议端像在工作但永远收不到消息"，无法定位。限频 60s，且不输出任何凭据。
+                val now = System.currentTimeMillis()
+                if (now - lastConfigLogAtMs >= 60_000L) {
+                    lastConfigLogAtMs = now
+                    logger("协议端未就绪：access_token 为空（请在设置 → QQ 小号助手 → 协议端连接中配置）")
+                }
                 delay(RETRY_AFTER_INVALID_CONFIG_MS)
                 continue
             }
@@ -166,6 +174,11 @@ class OneBotClient(
                 _state.value = State.Failed(
                     "协议端地址必须是本机/私网 IPv4 字面量（安全限制）；如需公网请使用 HTTPS 反向代理"
                 )
+                val now = System.currentTimeMillis()
+                if (now - lastConfigLogAtMs >= 60_000L) {
+                    lastConfigLogAtMs = now
+                    logger("协议端未就绪：地址不是本机/私网 IPv4 字面量（安全限制）")
+                }
                 delay(RETRY_AFTER_INVALID_CONFIG_MS)
                 continue
             }

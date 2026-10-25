@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import io.prism.phonecontrol.bg.ShizukuShell
 import io.prism.phonecontrol.bg.VirtualDisplayManager
 
 /**
@@ -68,6 +69,16 @@ class HiddenVdDebugReceiver : BroadcastReceiver() {
                         frameDescription(0)
                     }
                     ACTION_FRAME_PREVIEW -> frameDescription(360)
+                    // 2026-10-25 帧健康：连续取帧并输出帧龄/尺寸，用于证明"冻结/无画面"
+                    ACTION_FRAME_PROBE -> frameProbe()
+                    ACTION_DISPLAY_STATE -> {
+                        val dm = app.getSystemService(android.content.Context.DISPLAY_SERVICE)
+                            as android.hardware.display.DisplayManager
+                        val id = VirtualDisplayManager.currentDisplayId
+                        val state = runCatching { dm.getDisplay(id)?.state }.getOrNull()
+                        val info = runCatching { ShizukuShell.hiddenFrameInfo() }.getOrNull()
+                        "displayId=$id state=$state hiddenFrame=$info"
+                    }
                     ACTION_TAKEOVER -> VirtualDisplayManager.takeOverToMainScreen(app)
                     ACTION_LEGACY -> {
                         // 强制走 legacy 后端（等价于「隐藏后端不可用」回落路径），验证 AC-5。
@@ -106,13 +117,38 @@ class HiddenVdDebugReceiver : BroadcastReceiver() {
 
     /** 取帧并返回尺寸描述（0=原图；360=Watch 预览宽）。 */
     private fun frameDescription(maxWidth: Int): String {
-        val frame = VirtualDisplayManager.latestFrame(maxWidth)
+        val frame = VirtualDisplayManager.latestFrameWithMeta(maxWidth)
             ?: return "frame=null (maxWidth=$maxWidth)"
         return try {
-            "frame=${frame.width}x${frame.height} (maxWidth=$maxWidth)"
+            "frame=${frame.width}x${frame.height} ageMs=${frame.ageMs()} " +
+                "fresh=${VirtualDisplayManager.isFrameFresh(frame.ageMs())} (maxWidth=$maxWidth)"
         } finally {
-            frame.recycle()
+            frame.bitmap.recycle()
         }
+    }
+
+    /**
+     * 连续 5 次取帧（间隔 1s），输出每次的帧龄/尺寸/新鲜度。
+     *
+     * 判据：熄屏后帧龄应持续增长且 `fresh=false`；亮屏且有画面时帧龄应保持较小。
+     */
+    private fun frameProbe(): String {
+        val sb = StringBuilder("probe:")
+        repeat(5) { i ->
+            val frame = runCatching { VirtualDisplayManager.latestFrameWithMeta() }.getOrNull()
+            if (frame == null) {
+                sb.append(" [").append(i).append("]=null")
+            } else {
+                val age = frame.ageMs()
+                sb.append(" [").append(i).append("]=")
+                    .append(frame.width).append('x').append(frame.height)
+                    .append("/age=").append(age)
+                    .append("/fresh=").append(VirtualDisplayManager.isFrameFresh(age))
+                frame.bitmap.recycle()
+            }
+            if (i < 4) runCatching { Thread.sleep(1_000L) }
+        }
+        return sb.toString()
     }
 
     private companion object {
@@ -124,6 +160,8 @@ class HiddenVdDebugReceiver : BroadcastReceiver() {
         const val ACTION_LAUNCH = "launch"
         const val ACTION_FRAME = "frame"
         const val ACTION_FRAME_PREVIEW = "frame_preview"
+        const val ACTION_FRAME_PROBE = "frame_probe"
+        const val ACTION_DISPLAY_STATE = "display_state"
         const val ACTION_TAKEOVER = "takeover"
         const val ACTION_LEGACY = "legacy"
         const val ACTION_RELEASE = "release"

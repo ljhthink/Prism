@@ -41,8 +41,10 @@ object ShizukuShell {
 
     /** UserService 版本（实现变更时递增以触发 Shizuku 重启该进程）。
      *  修复轮八：+execWithOutput（AIDL 新方法）→ 升 2。
-     *  ADR-065（US-3114）：+隐藏虚拟屏三方法 → 升 3；guardrail r1 C-4：截屏加 maxWidth → 升 4。 */
-    private const val USER_SERVICE_VERSION = 4
+     *  ADR-065（US-3114）：+隐藏虚拟屏三方法 → 升 3；guardrail r1 C-4：截屏加 maxWidth → 升 4。
+     *  2026-10-25（帧健康）：+captureHiddenFrameJpeg / hiddenFrameInfo → 升 5
+     *  （破坏性签名变更：旧用户服务进程不含新方法，必须重建）。 */
+    private const val USER_SERVICE_VERSION = 5
 
     private val bindLock = Any()
 
@@ -426,6 +428,74 @@ object ShizukuShell {
         }
     }
 
+    /**
+     * 取隐藏虚拟屏最新帧 **JPEG** 字节（2026-10-25 帧健康；服务端自适应质量/尺寸）。
+     *
+     * @param maxWidth 预览最大宽度（0=原始尺寸）
+     * @param quality 初始质量（1~100）
+     */
+    fun captureHiddenFrameJpeg(maxWidth: Int = 0, quality: Int = 90): ByteArray? {
+        val svc = ensureUserService() ?: return null
+        return try {
+            svc.captureHiddenFrameJpeg(maxWidth, quality)
+        } catch (e: Throwable) {
+            // guardrail G-05：旧用户服务进程（升级前 dex）不认识 v5 方法，抛的是
+            // RemoteException / IllegalStateException / NoSuchMethodError（Error 而非 Exception）。
+            // 必须按 Throwable 捕获并**解绑**，下一次 ensureUserService 会用新版本重建进程。
+            Log.w(TAG, "captureHiddenFrameJpeg 失败（${e::class.simpleName}），重置用户服务")
+            synchronized(bindLock) { userService = null }
+            null
+        }
+    }
+
+    /**
+     * 最新帧元信息（宽/高/帧龄）。
+     *
+     * @return [HiddenFrameInfo]；无帧/失败返回 null（调用方必须按"无画面"处理）
+     */
+    fun hiddenFrameInfo(): HiddenFrameInfo? {
+        val svc = ensureUserService() ?: return null
+        val raw = try {
+            svc.hiddenFrameInfo()
+        } catch (e: Throwable) {
+            // 同 G-05：旧进程不支持新方法 → 解绑以触发版本重建
+            Log.w(TAG, "hiddenFrameInfo 失败（${e::class.simpleName}），重置用户服务")
+            synchronized(bindLock) { userService = null }
+            return null
+        }
+        return parseHiddenFrameInfo(raw)
+    }
+
+    /** 隐藏帧元信息（[hiddenFrameInfo] 的解析产物）。 */
+    data class HiddenFrameInfo(val width: Int, val height: Int, val ageMs: Long)
+
+    /**
+     * 解析 `OK:<width>:<height>:<ageMs>`（纯函数可测）。
+     *
+     * 非法/`ERR:` 一律返回 null（fail-closed：拿不到元信息就不该把缓存帧当实时画面）。
+     */
+    fun parseHiddenFrameInfo(raw: String?): HiddenFrameInfo? {
+        if (raw == null || !raw.startsWith("OK:")) return null
+        val parts = raw.removePrefix("OK:").split(':')
+        if (parts.size != 3) return null
+        val w = parts[0].toIntOrNull()?.takeIf { it > 0 } ?: return null
+        val h = parts[1].toIntOrNull()?.takeIf { it > 0 } ?: return null
+        val age = parts[2].toLongOrNull()?.takeIf { it >= 0L } ?: return null
+        return HiddenFrameInfo(w, h, age)
+    }
+
+    /**
+     * 点亮屏幕（2026-10-25 定时任务环境守卫）。
+     *
+     * **必须走 shell 身份**：普通 App 无法向系统注入全局按键；`input keyevent KEYCODE_WAKEUP`
+     * 不带 `-d`（唤醒是全局动作，不属于某个 display）。
+     */
+    fun wakeUp(): Boolean = exec(*buildWakeUpCommand())
+
+    /** 拼装 `input keyevent KEYCODE_WAKEUP` 命令数组（纯函数可测）。 */
+    fun buildWakeUpCommand(): Array<String> =
+        arrayOf("input", "keyevent", android.view.KeyEvent.KEYCODE_WAKEUP.toString())
+
     // ==================== 纯函数（可测） ====================
 
     /**
@@ -562,6 +632,10 @@ class ShizukuUserService(private val context: android.content.Context?) : IShizu
     @Volatile
     private var hiddenFrame: android.graphics.Bitmap? = null
 
+    /** 最新帧的采集时刻（epoch ms；0=无帧）。用于向调用方报告**帧龄**（帧健康判据）。 */
+    @Volatile
+    private var hiddenFrameAtMs: Long = 0L
+
     override fun createHiddenDisplay(width: Int, height: Int, density: Int): String {
         // guardrail r1 Q-11：AIDL 是跨进程契约，必须有上界（当前调用方是常量，但契约面
         // 不允许 100000x100000 让 shell 进程 OOM）。Long 乘法防溢出。
@@ -667,6 +741,7 @@ class ShizukuUserService(private val context: android.content.Context?) : IShizu
             hiddenReader = null
             hiddenThread = null
             hiddenFrame = null
+            hiddenFrameAtMs = 0L
         }
         return try {
             // 拆卸顺序同 VirtualDisplayManager（防 native use-after-close SIGSEGV）：
@@ -686,30 +761,112 @@ class ShizukuUserService(private val context: android.content.Context?) : IShizu
         }
     }
 
-    override fun captureHiddenFramePng(maxWidth: Int): ByteArray? {
+    override fun captureHiddenFramePng(maxWidth: Int): ByteArray? =
+        encodeHiddenFrame(maxWidth, png = true, quality = 100, byteLimit = HIDDEN_MAX_FRAME_BYTES)
+
+    override fun captureHiddenFrameJpeg(maxWidth: Int, quality: Int): ByteArray? =
+        encodeHiddenFrame(
+            maxWidth = maxWidth,
+            png = false,
+            quality = quality.coerceIn(1, 100),
+            byteLimit = HIDDEN_MAX_FRAME_BYTES
+        )
+
+    override fun hiddenFrameInfo(): String {
+        val frame = synchronized(hiddenLock) { hiddenFrame }
+            ?: return "ERR:no-frame"
+        val at = synchronized(hiddenLock) { hiddenFrameAtMs }
+        val age = if (at > 0L) (System.currentTimeMillis() - at).coerceAtLeast(0L) else -1L
+        return "OK:${frame.width}:${frame.height}:$age"
+    }
+
+    /**
+     * 帧编码（JPEG/PNG）+ **自适应降级**（2026-10-25 帧健康整改）。
+     *
+     * 旧行为：PNG 全尺寸编码后 `takeIf { it.size <= 900KB }` —— 超限**静默返回 null**，
+     * 上层只能报"暂无可用画面"（真机症状：图片/视频类界面必然取不到帧）。
+     *
+     * 新行为：先按调用方参数编码；超限则**降质 → 降尺寸**逐级重试，仍超限才返回 null，
+     * 且每次都留可诊断日志（字节数/质量/缩放，不含画面内容）。
+     */
+    private fun encodeHiddenFrame(
+        maxWidth: Int,
+        png: Boolean,
+        quality: Int,
+        byteLimit: Int
+    ): ByteArray? {
         val source = synchronized(hiddenLock) {
             hiddenFrame?.copy(android.graphics.Bitmap.Config.ARGB_8888, false)
         } ?: return null
-        var scaled: android.graphics.Bitmap? = null
+        // guardrail G-03：逐级降级时会产生**中间位图**（每次 ≈1.4~2.9MB）。若只在 finally
+        // 回收 scaled/source，中间位图会泄漏在 shell 特权进程里 → OOM → 隐藏屏消失。
+        // 因此把所有"由本次调用分配"的位图登记进 ownedByCall，统一在 finally 回收。
+        val ownedByCall = mutableListOf<android.graphics.Bitmap>()
         return try {
-            // guardrail r1 Q-04：Watch 预览降采样（默认 360 宽），降低 shell 端 PNG 编码、
-            // Binder 传输与 App 端解码/GC 压力；截图（maxWidth=0）保持原始分辨率。
-            val target = if (maxWidth > 0 && source.width > maxWidth) {
+            val base = if (maxWidth > 0 && source.width > maxWidth) {
                 val h = (source.height.toLong() * maxWidth / source.width).toInt().coerceAtLeast(1)
-                android.graphics.Bitmap.createScaledBitmap(source, maxWidth, h, true).also { scaled = it }
+                android.graphics.Bitmap.createScaledBitmap(source, maxWidth, h, true).also {
+                    ownedByCall += it
+                }
             } else {
                 source
             }
-            java.io.ByteArrayOutputStream().use { out ->
-                target.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
-                out.toByteArray().takeIf { it.size <= HIDDEN_MAX_FRAME_BYTES }
+            val format = if (png) {
+                android.graphics.Bitmap.CompressFormat.PNG
+            } else {
+                android.graphics.Bitmap.CompressFormat.JPEG
             }
+            // 降级计划由纯函数给出（guardrail G-r2-03：步数有界、尺寸单调、必然终止，
+            // 三者都有单测锁住；实现只负责"按计划编码 + 按尺寸取位图"）。
+            val plan = FrameEncodePlan.steps(
+                baseWidth = base.width,
+                baseHeight = base.height,
+                initialQuality = quality,
+                png = png
+            )
+            var lastWidth = base.width
+            var lastHeight = base.height
+            var current: android.graphics.Bitmap = base
+            plan.forEachIndexed { index, step ->
+                if (index > 0 && (step.width != lastWidth || step.height != lastHeight)) {
+                    val next = android.graphics.Bitmap.createScaledBitmap(
+                        base, step.width, step.height, true
+                    )
+                    ownedByCall += next
+                    current = next
+                    lastWidth = step.width
+                    lastHeight = step.height
+                }
+                val bytes = java.io.ByteArrayOutputStream().use { out ->
+                    current.compress(format, step.quality, out)
+                    out.toByteArray()
+                }
+                if (bytes.size <= byteLimit) {
+                    if (index > 0) {
+                        android.util.Log.i(
+                            "ShizukuUserService",
+                            "帧编码已降级：bytes=${bytes.size} quality=${step.quality} " +
+                                "size=${step.width}x${step.height}"
+                        )
+                    }
+                    return bytes
+                }
+                android.util.Log.w(
+                    "ShizukuUserService",
+                    "帧超限：bytes=${bytes.size} limit=$byteLimit quality=${step.quality} " +
+                        "size=${step.width}x${step.height}"
+                )
+            }
+            android.util.Log.w("ShizukuUserService", "帧编码逐级降级后仍超限，放弃本次取帧")
+            null
         } catch (t: Throwable) {
             android.util.Log.w("ShizukuUserService", "帧编码失败：${t.javaClass.simpleName}")
             null
         } finally {
-            scaled?.recycle()
-            source.recycle()
+            // guardrail G-03 / G-r3-02：本次调用分配的**全部**位图统一回收（含缩放中间态）。
+            // 抽成 FrameBitmapRecycler 以便 Robolectric 断言"创建的都回收了"——
+            // 内联写在这里的话，回退成 r1 的 `scaled?.recycle(); source.recycle()` 不会变红。
+            FrameBitmapRecycler.recycleAll(ownedByCall, source)
         }
     }
 
@@ -757,12 +914,25 @@ class ShizukuUserService(private val context: android.content.Context?) : IShizu
     }
 
     /**
-     * ImageReader 帧监听：保持 Surface 队列流动 + 缓存最新帧供 [captureHiddenFramePng] 取用。
+     * ImageReader 帧监听：保持 Surface 队列流动 + 缓存最新帧供截图取用。
      * 拆卸期（hiddenReader==null）丢弃残帧并回收，避免写已释放对象。
+     *
+     * **消费节流（2026-10-25 帧健康）**：720×1560 RGBA 每帧约 4.5MB 拷贝；若每帧都做
+     * Bitmap 转换，消费端会把 shell 进程 CPU/GC 拉满，反过来拖住生产端（画面卡顿）。
+     * 因此距上次转换 < [HIDDEN_FRAME_MIN_INTERVAL_MS] 的帧只 `acquireLatestImage()` 后
+     * **立即 close**（队列继续流动、画面继续更新），不做 Bitmap 拷贝。
      */
+    @Volatile
+    private var lastFrameConvertAtMs: Long = 0L
+
     private val hiddenDrainListener =
         android.media.ImageReader.OnImageAvailableListener { reader ->
             try {
+                val now = System.currentTimeMillis()
+                if (now - lastFrameConvertAtMs < HIDDEN_FRAME_MIN_INTERVAL_MS) {
+                    reader.acquireLatestImage()?.close()
+                    return@OnImageAvailableListener
+                }
                 val image = reader.acquireLatestImage() ?: return@OnImageAvailableListener
                 val bitmap = try {
                     hiddenImageToBitmap(image)
@@ -770,6 +940,7 @@ class ShizukuUserService(private val context: android.content.Context?) : IShizu
                     image.close()
                 }
                 if (bitmap != null) {
+                    lastFrameConvertAtMs = now
                     var old: android.graphics.Bitmap? = null
                     var dropped = false
                     synchronized(hiddenLock) {
@@ -778,6 +949,7 @@ class ShizukuUserService(private val context: android.content.Context?) : IShizu
                         } else {
                             old = hiddenFrame
                             hiddenFrame = bitmap
+                            hiddenFrameAtMs = now
                         }
                     }
                     if (dropped) bitmap.recycle() else old?.recycle()
@@ -815,11 +987,18 @@ class ShizukuUserService(private val context: android.content.Context?) : IShizu
     private companion object {
         /** PoC 实证：shell uid 对应的包上下文（packageName must match calling uid）。 */
         const val HIDDEN_SHELL_PACKAGE = "com.android.shell"
-        const val HIDDEN_MAX_IMAGES = 2
-        /** Binder 单次事务上限 1MB；超过即诚实返回无帧（正常 UI 帧远小于此）。 */
-        const val HIDDEN_MAX_FRAME_BYTES = 900_000
-        /** 建屏尺寸上界（guardrail r1 Q-11：AIDL 契约面防 shell 进程 OOM）。 */
-        const val HIDDEN_MAX_DIMENSION = 4096
-        const val HIDDEN_MAX_PIXELS = 4_000_000L
+
+        /**
+         * 帧规格常量统一指向 [HiddenFrameSpec]（单测可断言；见该文件的设计说明）。
+         * 保留这些别名是为了让本文件内的调用点读起来仍然自洽。
+         */
+        const val HIDDEN_MAX_IMAGES = HiddenFrameSpec.MAX_IMAGES
+        const val HIDDEN_MAX_FRAME_BYTES = HiddenFrameSpec.MAX_FRAME_BYTES
+        const val HIDDEN_FRAME_ENCODE_ATTEMPTS = HiddenFrameSpec.ENCODE_ATTEMPTS
+        const val HIDDEN_FRAME_MIN_QUALITY = HiddenFrameSpec.MIN_QUALITY
+        const val HIDDEN_FRAME_SCALE_STEP = HiddenFrameSpec.SCALE_STEP
+        const val HIDDEN_FRAME_MIN_INTERVAL_MS = HiddenFrameSpec.MIN_INTERVAL_MS
+        const val HIDDEN_MAX_DIMENSION = HiddenFrameSpec.MAX_DIMENSION
+        const val HIDDEN_MAX_PIXELS = HiddenFrameSpec.MAX_PIXELS
     }
 }

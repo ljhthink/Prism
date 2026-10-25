@@ -662,6 +662,32 @@ object VirtualDisplayManager {
         return legacyLatestFrame()
     }
 
+    /**
+     * 取最新帧并携带**帧龄与真实尺寸**（2026-10-25 帧健康整改）。
+     *
+     * 调用方必须用它而不是 [latestFrame]：只有帧龄能区分"实时画面"与"熄屏后冻结的旧帧"，
+     * 只有真实尺寸能保证 OCR 坐标映射与 Watch 长宽比正确。
+     */
+    fun latestFrameWithMeta(maxWidth: Int = 0): DisplayFrame? {
+        if (isHiddenMode) return activeBackend?.latestFrameWithMeta(maxWidth)
+        return legacyLatestFrameWithMeta()
+    }
+
+    /** legacy 取帧（带帧龄；无帧返回 null）。 */
+    internal fun legacyLatestFrameWithMeta(): DisplayFrame? {
+        if (imageReader == null) return null
+        return synchronized(lock) {
+            val cached = frameCache ?: return@synchronized null
+            try {
+                val copy = cached.copy(Bitmap.Config.ARGB_8888, false) ?: return@synchronized null
+                DisplayFrame(copy, frameCacheAtMs, copy.width, copy.height)
+            } catch (e: Exception) {
+                Log.w(TAG, "latestFrameWithMeta 失败：${e::class.simpleName}")
+                null
+            }
+        }
+    }
+
     /** legacy 路线取帧（原 [latestFrame] 实现；[OverlayLegacyBackend] 委托）。 */
     internal fun legacyLatestFrame(): Bitmap? {
         if (imageReader == null) return null
@@ -678,6 +704,10 @@ object VirtualDisplayManager {
     /** 最新帧缓存（drainListener 写入；@Volatile 跨线程可见——listener 线程写、IO 线程读）。 */
     @Volatile
     private var frameCache: Bitmap? = null
+
+    /** 最新帧的采集时刻（epoch ms；0=无帧）。帧龄判据（2026-10-25）。 */
+    @Volatile
+    private var frameCacheAtMs: Long = 0L
 
     /** Image → Bitmap（处理 rowStride 行尾 padding）。 */
     private fun imageToBitmap(image: android.media.Image): Bitmap? {
@@ -705,9 +735,17 @@ object VirtualDisplayManager {
         }
     }
 
-    /** 虚拟屏尺寸 (宽, 高)；未创建返回 null。 */
+    /** 执行面尺寸 (宽, 高)；未创建返回 null。**以真实帧为准**（2026-10-25 帧健康）。 */
     fun frameSize(): Pair<Int, Int>? =
-        if (isCreated) displayWidth to displayHeight else null
+        if (isCreated) {
+            if (isHiddenMode) {
+                activeBackend?.frameSize() ?: (displayWidth to displayHeight)
+            } else {
+                displayWidth to displayHeight
+            }
+        } else {
+            null
+        }
 
     /** legacy 路线尺寸（[OverlayLegacyBackend] 委托；与 [frameSize] 同语义）。 */
     internal fun legacyFrameSize(): Pair<Int, Int>? = frameSize()
@@ -760,6 +798,7 @@ object VirtualDisplayManager {
                 // ④线程已死，frameCache 无写者 → 此时回收安全
                 frameCache?.recycle()
                 frameCache = null
+                frameCacheAtMs = 0L
                 // 批次22 修复轮六：模拟副屏路线 → 清除系统设置（回收可见小窗）
                 if (isOverlayMode) {
                     runCatching { ShizukuShell.clearOverlayDisplay() }
@@ -805,6 +844,123 @@ object VirtualDisplayManager {
 
     /** legacy 释放（[OverlayLegacyBackend] 委托；与 [releaseDisplay] 同实现）。 */
     internal fun legacyReleaseDisplay(context: Context): Boolean = releaseDisplay(context)
+
+    /**
+     * 执行面**停滞自愈**（2026-10-25 帧健康整改；ADR-065 修订）。
+     *
+     * **为什么需要**：隐藏虚拟屏随整机熄屏/解锁会停止合成新帧（Flutter #172641 的同类现象），
+     * 而本地状态仍是"已创建"——上层继续对着旧帧操作，表现为"画面冻结 / 点不动"。
+     *
+     * **约束**：
+     * - 冷却时间 [RECOVER_COOLDOWN_MS]：防止抖动式反复重建（重建会重启目标应用，代价高）；
+     * - 连续上限 [RECOVER_MAX_CONSECUTIVE]：超过后诚实失败，交给上层提示用户；
+     * - 重建后若记录了上次启动的组件，自动把它重新拉到执行面（否则执行面是空的）。
+     *
+     * @return true=已重建成功
+     */
+    fun recoverDisplay(context: Context): Boolean {
+        val now = System.currentTimeMillis()
+        synchronized(lock) {
+            if (now - lastRecoverAtMs < RECOVER_COOLDOWN_MS) {
+                Log.i(TAG, "执行面自愈冷却中（${(now - lastRecoverAtMs) / 1000}s < ${RECOVER_COOLDOWN_MS / 1000}s）")
+                return false
+            }
+            if (recoverAttempts >= RECOVER_MAX_CONSECUTIVE) {
+                Log.w(TAG, "执行面自愈连续失败达上限（$recoverAttempts），交由上层诚实报错")
+                return false
+            }
+            lastRecoverAtMs = now
+        }
+        val component = synchronized(lock) { lastLaunchedComponent }
+        val userId = synchronized(lock) { lastLaunchedUserId }
+        val packageName = component?.substringBefore('/')
+        Log.i(TAG, "执行面自愈：释放并重建（component=${packageName ?: "无"}）")
+        runCatching { releaseDisplay(context) }
+        val newId = ensureDisplay(context)
+        if (newId == Display.INVALID_DISPLAY) {
+            synchronized(lock) { recoverAttempts++ }
+            Log.w(TAG, "执行面自愈失败（重建返回 INVALID_DISPLAY）")
+            return false
+        }
+        if (component != null && packageName != null && ShizukuShell.isReady()) {
+            val started = if (userId == 0) {
+                ShizukuShell.amStartOnDisplay(component, newId)
+            } else {
+                ShizukuShell.amStartForUserOnDisplay(component, userId, newId, forceStopFirst = true)
+            }
+            if (!started) Log.w(TAG, "执行面自愈后重新拉起目标应用失败")
+        }
+        synchronized(lock) {
+            recoverAttempts = 0
+            lastRecoverAtMs = System.currentTimeMillis()
+        }
+        Log.i(TAG, "执行面自愈完成 displayId=$newId")
+        return true
+    }
+
+    /**
+     * 应用上下文（供 Watch 判定"静态画面 vs 真冻结"；[isDisplayOn] 时记录）。
+     */
+    @Volatile
+    var appContextForWatch: Context? = null
+        private set
+
+    /**
+     * 执行面 display 当前是否可用（**非 OFF/UNKNOWN**）。
+     *
+     * 隐藏虚拟屏随整机熄屏进入 OFF（真机实证），此时帧缓存会停在最后一帧——
+     * 这是"该重建"的信号；而屏幕亮着时的旧帧只是**静态画面**，不该触发重建
+     * （重建 = `force-stop` 重启目标应用，代价极高，见 ac-verifier D-02）。
+     *
+     * @return true=可用；display 不存在/读取失败返回 false（fail-closed，走自愈）
+     */
+    fun isDisplayOn(context: Context): Boolean {
+        // Watch 判定需要上下文；顺手记下，避免 Watch 再单独要一个 context 参数
+        appContextForWatch = context.applicationContext
+        val id = displayId
+        if (id == Display.INVALID_DISPLAY) return false
+        val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            ?: return false
+        val state = runCatching { dm.getDisplay(id)?.state }.getOrNull() ?: return false
+        return state != Display.STATE_OFF && state != Display.STATE_UNKNOWN
+    }
+
+    /**
+     * 执行面「轻推」（2026-10-25；guardrail G-09）。
+     *
+     * 冻结常见成因是目标应用暂停绘制（息屏/失焦/被系统降频）。相比 `recoverDisplay`
+     * （释放+重建+重启目标应用），轻推只做代价极小的"让它重新画一帧"：
+     * 1. 若记录了上次启动的组件，向执行面重新 `am start`（不 force-stop，保留现场）；
+     * 2. 否则向执行面注入一次 `KEYCODE_WAKEUP`（仅作用于该 display，不点亮主屏）。
+     *
+     * @return true=已发出轻推动作（不代表一定恢复；调用方必须复检帧龄）
+     */
+    fun nudgeDisplay(context: Context?): Boolean {
+        if (!isCreated) return false
+        val component = synchronized(lock) { lastLaunchedComponent }
+        val userId = synchronized(lock) { lastLaunchedUserId }
+        if (component != null && ShizukuShell.isReady()) {
+            val started = if (userId == 0) {
+                ShizukuShell.amStartOnDisplay(component, displayId)
+            } else {
+                ShizukuShell.amStartForUserOnDisplay(component, userId, displayId, forceStopFirst = false)
+            }
+            Log.i(TAG, "执行面轻推：重新拉起 ${component.substringBefore('/')}（success=$started）")
+            return started
+        }
+        val keyed = ShizukuShell.inputKeyevent(displayId, android.view.KeyEvent.KEYCODE_WAKEUP)
+        Log.i(TAG, "执行面轻推：向 display=$displayId 注入 WAKEUP（success=$keyed）")
+        return keyed
+    }
+
+    /**
+     * 当前帧是否可视为"实时"（纯函数可测；实现委托 [FrameFreshness]）。
+     *
+     * @param ageMs 帧龄（`Long.MAX_VALUE`=无帧）
+     * @param maxAgeMs 允许的最大帧龄
+     */
+    fun isFrameFresh(ageMs: Long, maxAgeMs: Long = FRAME_STALE_MS): Boolean =
+        FrameFreshness.isFresh(ageMs, maxAgeMs)
 
     /** 后台启动过的包统一回收（Shizuku 就绪用 am force-stop，否则 killBackgroundProcesses）。 */
     private fun stopLaunchedPackages(context: Context) {
@@ -866,6 +1022,7 @@ object VirtualDisplayManager {
                     } else {
                         old = frameCache
                         frameCache = bitmap
+                        frameCacheAtMs = System.currentTimeMillis()
                     }
                 }
                 if (dropped) {
@@ -914,6 +1071,24 @@ object VirtualDisplayManager {
         "background", "后台" -> MODE_BACKGROUND
         else -> null
     }
+
+    /**
+     * 帧新鲜度阈值（2026-10-25）：超过该帧龄即视为"画面已冻结"，上层必须自愈或诚实报错，
+     * 禁止把旧帧当实时画面交给 OCR/LLM。
+     */
+    const val FRAME_STALE_MS = 3_000L
+
+    /** 自愈冷却（重建会重启目标应用，必须限流）。 */
+    private const val RECOVER_COOLDOWN_MS = 60_000L
+
+    /** 连续自愈失败上限（超过后交由上层诚实报错，避免无限重建）。 */
+    private const val RECOVER_MAX_CONSECUTIVE = 2
+
+    @Volatile
+    private var lastRecoverAtMs: Long = 0L
+
+    @Volatile
+    private var recoverAttempts: Int = 0
 
     const val MODE_FOREGROUND = "foreground"
     const val MODE_BACKGROUND = "background"

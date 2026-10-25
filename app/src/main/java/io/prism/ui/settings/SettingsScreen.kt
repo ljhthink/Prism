@@ -227,6 +227,8 @@ fun SettingsScreen(
     var qqHistoryError by remember { mutableStateOf("") }
     // 熔断态（读 runtime；仅在进入本页/轮询时刷新）
     var qqCircuitOpen by remember { mutableStateOf(false) }
+    // 2026-10-25：上次定时任务的**结果与原因**（PRD US-3115 AC-6；不再只有"熔断/未熔断"）
+    var qqLastOutcomeText by remember { mutableStateOf("") }
     // D-01（ac-verifier）：当前**生效**通道与降级原因（所选协议端不可用时如实展示）
     var qqEffectiveChannelText by remember { mutableStateOf("") }
     // guardrail L-04：QQ 分区独立轮询间隔（不复用手机操控的常量，避免语义耦合）
@@ -234,6 +236,26 @@ fun SettingsScreen(
         while (qqApp != null) {
             qqCircuitOpen = runCatching { qqApp?.qqRuntimeStateRepository?.get()?.circuitOpen == true }
                 .getOrDefault(false)
+            qqLastOutcomeText = runCatching {
+                val rt = qqApp?.qqRuntimeStateRepository?.get() ?: return@runCatching ""
+                if (rt.lastOutcome.isBlank()) return@runCatching ""
+                val at = if (rt.lastOutcomeAtMs > 0) {
+                    java.time.Instant.ofEpochMilli(rt.lastOutcomeAtMs)
+                        .atZone(java.time.ZoneId.systemDefault())
+                        .format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm"))
+                } else {
+                    ""
+                }
+                val label = when {
+                    // guardrail G-r3-07：「未确认」在语义上是"可能已送达"，不能显示成"失败"，
+                    // 否则用户会以为没发出去而手动补发，反而制造重复消息。
+                    rt.lastOutcome.contains("SEND_UNCONFIRMED") -> "上次未确认（可能已送达）"
+                    rt.lastOutcome.startsWith("SUCCESS") -> "上次成功"
+                    rt.lastOutcome.startsWith("SKIP") -> "上次跳过"
+                    else -> "上次失败"
+                }
+                "$label $at${if (rt.lastOutcomeReason.isBlank()) "" else " · ${rt.lastOutcomeReason}"}"
+            }.getOrDefault("")
             qqEffectiveChannelText = runCatching {
                 val app = qqApp ?: return@runCatching ""
                 val active = app.activeQqChannel()
@@ -387,26 +409,43 @@ fun SettingsScreen(
         )
     }
 
-    // US-3115：活跃时段 / 每日上限 / 最小间隔自由编辑
+    // US-3115（2026-10-25 修订）：活跃时段改用 HH:mm，并提供常用预设
     if (qqScheduleDialogVisible) {
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { qqScheduleDialogVisible = false },
             title = { Text("定时参数") },
             text = {
                 androidx.compose.foundation.layout.Column {
-                    Text("时间以「当日分钟」表示：如 20:00=1200，23:00=1380。")
+                    Text("活跃时段用 24 小时制「时:分」填写，例如 07:00。允许跨零点（如 22:00 - 02:00）。")
                     androidx.compose.material3.OutlinedTextField(
                         value = qqWindowStartDraft,
                         onValueChange = { qqWindowStartDraft = it },
                         singleLine = true,
-                        label = { Text("活跃时段起（0~1439）") }
+                        label = { Text("活跃时段起（HH:mm）") },
+                        placeholder = { Text("07:00") }
                     )
                     androidx.compose.material3.OutlinedTextField(
                         value = qqWindowEndDraft,
                         onValueChange = { qqWindowEndDraft = it },
                         singleLine = true,
-                        label = { Text("活跃时段止（1~1440）") }
+                        label = { Text("活跃时段止（HH:mm）") },
+                        placeholder = { Text("22:00") }
                     )
+                    // 常用预设：一键填入起止，减少打字
+                    Text("常用时段", fontSize = 12.sp, color = Color(0xFF9BB8FF))
+                    androidx.compose.foundation.layout.Row {
+                        listOf(
+                            "07:00" to "22:00",
+                            "08:00" to "23:00",
+                            "20:00" to "23:00"
+                        ).forEach { (s, e) ->
+                            androidx.compose.material3.TextButton(onClick = {
+                                qqWindowStartDraft = s
+                                qqWindowEndDraft = e
+                                qqScheduleError = ""
+                            }) { Text("$s-$e", fontSize = 12.sp) }
+                        }
+                    }
                     androidx.compose.material3.OutlinedTextField(
                         value = qqCapDraft,
                         onValueChange = { qqCapDraft = it },
@@ -426,14 +465,14 @@ fun SettingsScreen(
             },
             confirmButton = {
                 androidx.compose.material3.TextButton(onClick = {
-                    val start = qqWindowStartDraft.trim().toIntOrNull()
-                    val end = qqWindowEndDraft.trim().toIntOrNull()
+                    val start = io.prism.qq.QqTimeOfDay.parse(qqWindowStartDraft)
+                    val end = io.prism.qq.QqTimeOfDay.parse(qqWindowEndDraft)
                     val cap = qqCapDraft.trim().toIntOrNull()
                     val intervalMin = qqIntervalDraft.trim().toLongOrNull()
-                    if (start == null || end == null || start >= end ||
-                        start < 0 || end > io.prism.qq.QqConfig.MINUTES_PER_DAY
+                    if (start == null || end == null ||
+                        !io.prism.qq.QqTimeOfDay.isValidWindow(start, end)
                     ) {
-                        qqScheduleError = "错误：时间窗非法（需 0 ≤ 起 < 止 ≤ 1440）"
+                        qqScheduleError = "错误：活跃时段非法。请填写 0:00~24:00 的「时:分」，且起止不能相同"
                         return@TextButton
                     }
                     qqScheduleDialogVisible = false
@@ -771,10 +810,16 @@ fun SettingsScreen(
                     iconColor = PrismIndigo,
                     title = "传输通道",
                     subtitle = (if (qqConfig.transport == io.prism.qq.channel.QqTransport.ONEBOT) {
-                        "协议端 OneBot 11（默认主通道）· 点击切换为无障碍兜底"
+                        "首选协议端 OneBot 11（未连接时自动改用无障碍兜底）· 点击切换为仅无障碍"
                     } else {
-                        "无障碍兜底（可能显示副屏小窗）· 点击切换回协议端"
-                    }) + if (qqEffectiveChannelText.isBlank()) "" else "\n${qqEffectiveChannelText}",
+                        "首选无障碍（可能显示副屏小窗）· 点击切换回协议端优先"
+                    }) + if (qqConfig.transport == io.prism.qq.channel.QqTransport.ONEBOT &&
+                        qqConfig.oneBotToken.isBlank()
+                    ) {
+                        "\n⚠ 协议端未配置 access_token，当前实际走无障碍兜底"
+                    } else {
+                        ""
+                    } + if (qqEffectiveChannelText.isBlank()) "" else "\n${qqEffectiveChannelText}",
                     onClick = {
                         qqScope.launch {
                             val next = if (qqConfig.transport == io.prism.qq.channel.QqTransport.ONEBOT) {
@@ -849,9 +894,10 @@ fun SettingsScreen(
                     iconColor = PrismIndigo,
                     title = "随机定时主动消息",
                     subtitle = if (qqConfig.scheduleEnabled) {
-                        "已开启 · %02d:%02d-%02d:%02d 时段内随机联系你（每日至多 ${qqConfig.maxPerDay} 次，${if (qqConfig.usePoisson) "泊松" else "均匀"}随机）".format(
-                            qqConfig.windowStartMinute / 60, qqConfig.windowStartMinute % 60,
-                            qqConfig.windowEndMinute / 60, qqConfig.windowEndMinute % 60
+                        "已开启 · %s 时段内随机联系你（每日至多 ${qqConfig.maxPerDay} 次，${if (qqConfig.usePoisson) "泊松" else "均匀"}随机）".format(
+                            io.prism.qq.QqTimeOfDay.describe(
+                                qqConfig.windowStartMinute, qqConfig.windowEndMinute
+                            )
                         )
                     } else {
                         "未开启 · 在设定时段内随机时刻主动发消息（营造真实感）"
@@ -891,13 +937,13 @@ fun SettingsScreen(
                     icon = "🕐",
                     iconColor = PrismIndigo,
                     title = "活跃时段",
-                    subtitle = "%02d:%02d - %02d:%02d（点击自由编辑）".format(
-                        qqConfig.windowStartMinute / 60, qqConfig.windowStartMinute % 60,
-                        qqConfig.windowEndMinute / 60, qqConfig.windowEndMinute % 60
+                    subtitle = "%s - %s（点击自由编辑）".format(
+                        io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute),
+                        io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
                     ),
                     onClick = {
-                        qqWindowStartDraft = qqConfig.windowStartMinute.toString()
-                        qqWindowEndDraft = qqConfig.windowEndMinute.toString()
+                        qqWindowStartDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute)
+                        qqWindowEndDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
                         qqCapDraft = qqConfig.dailyCap.toString()
                         qqIntervalDraft = (qqConfig.minIntervalMs / 60_000L).toString()
                         qqScheduleError = ""
@@ -912,13 +958,44 @@ fun SettingsScreen(
                     title = "每日消息上限",
                     subtitle = "${qqConfig.dailyCap} 条 / 天 · 最小间隔 ${qqConfig.minIntervalMs / 60000} 分钟（点击自由编辑）",
                     onClick = {
-                        qqWindowStartDraft = qqConfig.windowStartMinute.toString()
-                        qqWindowEndDraft = qqConfig.windowEndMinute.toString()
+                        qqWindowStartDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute)
+                        qqWindowEndDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
                         qqCapDraft = qqConfig.dailyCap.toString()
                         qqIntervalDraft = (qqConfig.minIntervalMs / 60_000L).toString()
                         qqScheduleError = ""
                         qqScheduleDialogVisible = true
                     }
+                )
+            }
+            // 2026-10-25（US-3115 AC-6）：熄屏策略 + 上次执行结果（不再"只能看熔断"）
+            item {
+                SetRow(
+                    icon = "🌙",
+                    iconColor = PrismIndigo,
+                    title = "熄屏时点亮屏幕执行",
+                    subtitle = if (qqConfig.wakeOnScreenOff) {
+                        "已开启 · 到点若屏幕熄灭，会临时点亮并保持亮屏把消息发出（执行后不强制熄屏）"
+                    } else {
+                        "已关闭 · 熄屏时跳过本次定时消息并记录原因（仅在协议端可用时不受影响）"
+                    },
+                    trailing = {
+                        PrismSwitch(
+                            checked = qqConfig.wakeOnScreenOff,
+                            onCheckedChange = { on ->
+                                qqScope.launch { qqApp?.qqConfigRepository?.setWakeOnScreenOff(on) }
+                            }
+                        )
+                    }
+                )
+            }
+            item {
+                SetRow(
+                    icon = "📋",
+                    iconColor = PrismMint,
+                    title = "定时任务最近状态",
+                    subtitle = qqLastOutcomeText.ifBlank {
+                        "尚无执行记录（到点后这里会展示成功/跳过/失败与原因）"
+                    } + if (qqCircuitOpen) " · 已熔断（需手动恢复）" else ""
                 )
             }
             // US-3112 AC-1/AC-4：历史上下文条数 + 记忆注入开关（含数据外发披露）

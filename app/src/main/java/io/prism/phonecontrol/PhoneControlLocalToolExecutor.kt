@@ -570,6 +570,49 @@ class PhoneControlLocalToolExecutor(
         }
     }
 
+    /**
+     * 帧龄偏大是否可疑（D-02）：只有"设备不可交互"或"执行面 display 已 OFF"才算冻结。
+     *
+     * 纯判定委托 [FrameFreshness.isStallSuspicious]；这里的职责只是取两个环境事实。
+     */
+    private fun isStallSuspicious(ageMs: Long): Boolean {
+        val ctx = appContext
+            ?: return io.prism.phonecontrol.bg.FrameFreshness.isStallSuspicious(ageMs, true, true)
+        val interactive = runCatching {
+            (ctx.getSystemService(android.content.Context.POWER_SERVICE)
+                as android.os.PowerManager).isInteractive
+        }.getOrDefault(true)
+        val displayOn = runCatching {
+            io.prism.phonecontrol.bg.VirtualDisplayManager.isDisplayOn(ctx)
+        }.getOrDefault(true)
+        return io.prism.phonecontrol.bg.FrameFreshness.isStallSuspicious(ageMs, interactive, displayOn)
+    }
+
+    /**
+     * 等待一帧**新鲜**画面（guardrail **G-r2-01**）。
+     *
+     * 轻推/重建只是"请它重绘"，新帧要等目标应用重绘 + ImageReader 回调，通常 100–300ms。
+     * 原地立刻复检拿到的必然还是旧缓存 → 会误判"自愈失败"并升级为重试/重建（重建会重启
+     * 目标应用，丢输入框与滚动位置）。故此处按 [FRAME_POLL_INTERVAL_MS] 轮询，最多
+     * [FRAME_WAIT_TIMEOUT_MS]，中间帧一律回收，只返回**新鲜**帧。
+     *
+     * @return 新鲜帧；超时返回 null（调用方诚实报错，不把旧帧交出去）
+     */
+    private suspend fun awaitFreshFrame(
+        vdm: io.prism.phonecontrol.bg.VirtualDisplayManager
+    ): io.prism.phonecontrol.bg.DisplayFrame? {
+        val deadline = System.currentTimeMillis() + FRAME_WAIT_TIMEOUT_MS
+        while (true) {
+            val candidate = vdm.latestFrameWithMeta()
+            if (candidate != null) {
+                if (vdm.isFrameFresh(candidate.ageMs())) return candidate
+                candidate.bitmap.recycle() // 仍是旧帧：回收，继续等
+            }
+            if (System.currentTimeMillis() >= deadline) return null
+            kotlinx.coroutines.delay(FRAME_POLL_INTERVAL_MS)
+        }
+    }
+
     /** 截图：多模态模型读 data URL；纯文本模型（UI 树受限时）回灌 OCR 文字+坐标（+图标区域）。 */
     private suspend fun runScreenshot(): String {
         val service = PhoneControlAccessibilityService.instance
@@ -582,17 +625,60 @@ class PhoneControlLocalToolExecutor(
         if (service.isBackgroundExecution) {
             val vdm = io.prism.phonecontrol.bg.VirtualDisplayManager
             // 批次22 修复轮六：模拟副屏（trusted）路线 → a11y takeScreenshot(displayId)；
-            // 自建虚拟屏路线 → ImageReader 帧缓存
-            val frame = if (vdm.isOverlayMode) {
-                service.takeScreenshotForDisplay(vdm.currentDisplayId)
+            // 自建虚拟屏/隐藏虚拟屏路线 → 帧缓存（带帧龄与真实尺寸）
+            var frame: android.graphics.Bitmap?
+            if (vdm.isOverlayMode) {
+                frame = service.takeScreenshotForDisplay(vdm.currentDisplayId)
                     ?: return "错误：模拟副屏截图失败。需 Android 14+，且在系统「设置 → 无障碍 → Prism」中开启「屏幕截图」能力后重试"
+                screenW = frame.width
+                screenH = frame.height
             } else {
-                vdm.latestFrame()
-                    ?: return "错误：后台虚拟屏暂无可用画面（目标 App 可能尚未渲染）。可稍后重试或用 get_ui_state（节点路径）"
+                // 2026-10-25 帧健康：先取「帧 + 帧龄 + 真实尺寸」。帧龄超阈值说明画面已冻结
+                // （典型：整机熄屏后隐藏虚拟屏 state=OFF，但缓存帧仍在），此时**禁止**把旧帧
+                // 交给 OCR/LLM。
+                //
+                // 自愈分两级（guardrail G-09 / G-r2-01）：
+                // ①**轻推**——给执行面重新注入一次按键或重拉目标应用，多数"暂时没新帧"会恢复；
+                // ②仍不新鲜才重建（重建 `forceStopFirst=true` 会**重启目标应用**，代价高）。
+                // **两级之后都必须"等一帧"再复检**：缓存帧的时刻不会因"发出轻推"而变化，
+                // 新帧要等重绘 + ImageReader 回调（≥100–300ms）。原地复检必然仍冻结 →
+                // 每次都升级成重建，两级自愈退化为"每次重启应用"（guardrail G-r2-01）。
+                var meta = vdm.latestFrameWithMeta()
+                // ac-verifier D-02：**只有环境可疑时**才把"旧帧"当冻结。
+                // 屏幕亮着 + display 正常时，旧帧是静态画面的正常表现（隐藏屏只在重绘时出新帧）；
+                // 若仅凭帧龄就 nudge→recover，而重建会 force-stop 重启目标应用，
+                // 等于"看一眼静态页面就把 QQ 重启一遍"（真机 10s 即超阈值）。
+                val suspicious = meta != null && isStallSuspicious(meta.ageMs())
+                if (suspicious) {
+                    val frozenAge = meta.ageMs()
+                    meta.bitmap.recycle()
+                    meta = null
+                    Log.w(TAG, "后台执行面帧已冻结（age=${frozenAge}ms），先轻推执行面")
+                    vdm.nudgeDisplay(appContext)
+                    meta = awaitFreshFrame(vdm)
+                    if (meta == null) {
+                        Log.w(TAG, "轻推后 ${FRAME_WAIT_TIMEOUT_MS}ms 内仍无新帧，尝试重建执行面")
+                        if (appContext?.let { vdm.recoverDisplay(it) } == true) {
+                            meta = awaitFreshFrame(vdm)
+                        }
+                    }
+                    if (meta == null) {
+                        return "错误：后台执行面画面已冻结（约 ${frozenAge / 1000}s 无新帧），" +
+                            "轻推与重建后仍无新帧。请在屏幕点亮状态下重试，或改用 get_ui_state（节点路径）"
+                    }
+                }
+                if (meta == null) {
+                    return "错误：后台虚拟屏暂无可用画面（目标 App 可能尚未渲染，或执行面已随屏幕熄灭）。" +
+                        "可点亮屏幕后重试，或用 get_ui_state（节点路径）"
+                }
+                // D-02：静态画面的旧帧是**有效**的，最多留一条 DEBUG 便于排障（不触发自愈）
+                if (!vdm.isFrameFresh(meta.ageMs())) {
+                    Log.d(TAG, "使用静态画面帧（age=${meta.ageMs()}ms，屏幕与执行面均正常）")
+                }
+                frame = meta.bitmap
+                screenW = meta.width
+                screenH = meta.height
             }
-            val size = vdm.frameSize()
-            screenW = size?.first ?: frame.width
-            screenH = size?.second ?: frame.height
             val scaled = service.downsampleBitmap(frame)
             val bytes = java.io.ByteArrayOutputStream().apply {
                 scaled.compress(
@@ -899,6 +985,15 @@ class PhoneControlLocalToolExecutor(
 
         /** get_ui_state 空树/重连重试间隔（毫秒）。8 次 × 500ms ≈ 4s 预算（远低于外层 30s 超时）。 */
         private const val UI_STATE_RETRY_DELAY_MS = 500L
+
+        /**
+         * 等待新帧的总预算（guardrail G-r2-01）：轻推/重建后必须等重绘，
+         * 但也不能无限等——截图工具整体预算有限。
+         */
+        private const val FRAME_WAIT_TIMEOUT_MS = 1_500L
+
+        /** 等待新帧的轮询间隔（≈5 次机会）。 */
+        private const val FRAME_POLL_INTERVAL_MS = 300L
 
         /** launch_app 启动后 settle 等待（毫秒），让目标 App 完成首绘/渲染再供 get_ui_state 读取。 */
         private const val LAUNCH_SETTLE_MS = 700L

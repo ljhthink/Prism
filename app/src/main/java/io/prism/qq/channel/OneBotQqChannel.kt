@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -157,6 +159,10 @@ class OneBotQqChannel(
         val cfg = configProvider()
         // guardrail M-15：双向对话未激活时不解析、不缓冲、不打好友列表请求
         if (!cfg.autoReplyActive) return@mapNotNull null
+        // 2026-10-25：心跳/生命周期等**元事件**是正常流量，不是"被丢弃的事件"——
+        // 若与真正的过滤失败共用同一条日志，真机 RCA 会被每 60s 一条的噪音误导。
+        val postType = event["post_type"]?.jsonPrimitive?.contentOrNull
+        if (postType != null && postType != "message") return@mapNotNull null
         val target = resolveTargetUserId(cfg.targetContact.trim())
         if (target == null || target <= 0L) {
             logDropRateLimited("目标 QQ 号未解析（请先连接并配置目标联系人）")

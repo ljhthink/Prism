@@ -111,6 +111,11 @@ class QqConfigRepository(
         it[MEMORY_INJECTION] = enabled
     }
 
+    /** 熄屏时是否临时点亮屏幕执行定时任务（US-3115 AC-6；默认开）。 */
+    suspend fun setWakeOnScreenOff(enabled: Boolean) = edit {
+        it[WAKE_ON_SCREEN_OFF] = enabled
+    }
+
     private suspend fun edit(block: (androidx.datastore.preferences.core.MutablePreferences) -> Unit) {
         dataStore.edit(block)
     }
@@ -137,7 +142,8 @@ class QqConfigRepository(
         oneBotSelfId = prefs[ONEBOT_SELF_ID] ?: 0L,
         oneBotTargetUserId = prefs[ONEBOT_TARGET_ID] ?: 0L,
         historyLimit = prefs[HISTORY_LIMIT] ?: QqConfig.DEFAULT_HISTORY_LIMIT,
-        memoryInjectionEnabled = prefs[MEMORY_INJECTION] ?: true
+        memoryInjectionEnabled = prefs[MEMORY_INJECTION] ?: true,
+        wakeOnScreenOff = prefs[WAKE_ON_SCREEN_OFF] ?: true
     ).clamped()
 
     companion object {
@@ -170,5 +176,6 @@ class QqConfigRepository(
         private val ONEBOT_TARGET_ID = longPreferencesKey("qq_onebot_target_id")
         private val HISTORY_LIMIT = intPreferencesKey("qq_history_limit")
         private val MEMORY_INJECTION = booleanPreferencesKey("qq_memory_injection")
+        private val WAKE_ON_SCREEN_OFF = booleanPreferencesKey("qq_wake_on_screen_off")
     }
 }
