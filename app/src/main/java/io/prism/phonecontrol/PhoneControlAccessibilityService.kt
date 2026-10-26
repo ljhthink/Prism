@@ -571,6 +571,44 @@ class PhoneControlAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * 采集执行面的**结构信号**（guardrail 后续修正；见 `QqPageState.Signals`）。
+     *
+     * 为什么需要：只靠"整页文本是否含『登录』"会把正常消息列表判成登录页——真机实证
+     * QQ 自带「我的电脑」会话，预览文案就是"已在电脑登录…"。因此必须给出**结构性**证据
+     * （会话头 / 三标签栏 / 聊天输入框），让判定层能"结构压倒文本"。
+     *
+     * @param maxNodes 遍历上限（默认 400，足够覆盖主界面骨架）
+     * @return (resource-id 尾段集合, 文本集合)；树不可读时返回 null
+     */
+    fun collectStructureSignals(maxNodes: Int = 400): Pair<Set<String>, Set<String>>? {
+        val root = executionRoot() ?: return null
+        return try {
+            val ids = LinkedHashSet<String>()
+            val texts = LinkedHashSet<String>()
+            val queue = ArrayDeque<AccessibilityNodeInfoCompat>()
+            queue.add(AccessibilityNodeInfoCompat.wrap(root))
+            var visited = 0
+            while (queue.isNotEmpty() && visited < maxNodes) {
+                val n = queue.removeFirst()
+                visited++
+                n.viewIdResourceName?.substringAfterLast('/')?.let { ids += it }
+                n.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let { texts += it }
+                n.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+                    ?.let { texts += it }
+                for (i in 0 until n.childCount) {
+                    n.getChild(i)?.let { queue.addLast(it) }
+                }
+            }
+            ids to texts
+        } catch (e: Exception) {
+            Log.w(TAG, "collectStructureSignals 失败：${e::class.simpleName}")
+            null
+        } finally {
+            runCatching { root.recycle() }
+        }
+    }
+
     fun nodeTextOf(nodeId: Int?): String? {
         if (nodeId == null) return null
         val root = executionRoot() ?: return null
@@ -710,15 +748,21 @@ class PhoneControlAccessibilityService : AccessibilityService() {
      * 读取当前执行面树中**最后一条消息气泡**的方向与文本（ADR-062 双向对话；2026-10-19 真机
      * 结构实证）。
      *
-     * 判据（QQ 真机实证）：消息文本节点 resource-id 尾段 = `mjn`（class=TextView），**收到的
+     * 判据（QQ 真机实证）：消息文本节点 resource-id 尾段在候选集内（class=TextView），**收到的
      * 消息（对方）左对齐**（气泡左侧留白小），**发出的消息（自己）右对齐**；取 bounds.bottom
      * 最大（最靠下 = 时间上最后一条）的气泡为"最后一条"。方向按左右留白比较判（对任意宽度成立）。
      *
-     * @param messageViewId 消息文本节点 resource-id 尾段（QQ=`mjn`）
+     * **2026-10-26 真机修正**：上一轮取证到的是 `mjn`，但本轮同机同版本实测气泡 id 已变为
+     * **`mjm`**（QQ 灰度/改版会换混淆名）。硬编码单个 id 会让"气泡确认"永久失效、
+     * `lastMessageWith` 永远读不到消息（真机日志：`会话页无可读消息气泡（id=mjn）`）。
+     * 因此改为**候选集**，任一命中即可。
+     *
+     * @param messageViewIds 消息文本节点 resource-id 尾段候选（QQ=`mjn`/`mjm` 等）
      * @return (incoming 是否对方发来, 文本)；无消息/树不可读返回 null
      */
-    fun lastMessageBubble(messageViewId: String): Pair<Boolean, String>? {
-        if (messageViewId.isBlank()) return null
+    fun lastMessageBubble(messageViewIds: Collection<String>): Pair<Boolean, String>? {
+        val wanted = messageViewIds.mapNotNull { it.trim().takeIf(String::isNotEmpty) }.toSet()
+        if (wanted.isEmpty()) return null
         val root = executionRoot() ?: return null
         try {
             val rootBounds = Rect().also { root.getBoundsInScreen(it) }
@@ -733,7 +777,7 @@ class PhoneControlAccessibilityService : AccessibilityService() {
                 val n = queue.removeFirst()
                 val rid = n.viewIdResourceName
                 val text = n.text?.toString()?.trim().orEmpty()
-                if (rid != null && rid.substringAfterLast('/') == messageViewId && text.isNotEmpty()) {
+                if (rid != null && rid.substringAfterLast('/') in wanted && text.isNotEmpty()) {
                     val b = Rect().also { n.getBoundsInScreen(it) }
                     if (b.bottom > bestBottom) {
                         // 方向判据（guardrail M-05）：按**左右留白**判而非中心点——宽气泡（长文本）

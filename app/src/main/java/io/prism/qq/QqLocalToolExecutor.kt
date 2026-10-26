@@ -1,4 +1,4 @@
-package io.prism.qq
+﻿package io.prism.qq
 
 import android.util.Log
 import io.prism.phonecontrol.PhoneControlAccessibilityService
@@ -212,7 +212,7 @@ class QqLocalToolExecutor(
             var tries = 0
             while (tries < 6 && evidence == QqSendConfirmation.Evidence.NONE) {
                 delay(SETTLE_SHORT_MS)
-                val bubble = runCatching { svc.lastMessageBubble(VIEW_ID_MSG_TEXT) }.getOrNull()
+                val bubble = runCatching { svc.lastMessageBubble(VIEW_ID_MSG_TEXT_CANDIDATES) }.getOrNull()
                 val bubbleOk = bubble != null && !bubble.first && bubble.second.contains(fragment)
                 // R3-01：存在性与文本必须来自**同一次**遍历（同一节点），否则树形变后错配
                 val inputNow = runCatching { svc.textOfViewId(VIEW_ID_INPUT) }
@@ -591,26 +591,29 @@ class QqLocalToolExecutor(
         val titleText = title.second
         val dialogText = text.second
 
-        // guardrail G-05：**只有"对话框结构明确存在"时才按整页文本兜底**。
-        // 原实现无条件读整页树，而关键词含"登录/密码/安全提醒"——聊天记录里出现这些词
-        // （验证码、异地登录提醒、联系人昵称）会把正常聊天页判成未登录且**不再自愈**。
-        // 收紧条件：① 有对话框标题/正文节点（结构证据），或
-        //          ② 页面里**没有**聊天输入框（聊天页必有输入框 → 有输入框就不判登录态）。
-        val hasDialogStructure = titleText != null || dialogText != null
-        val kind = if (hasDialogStructure) {
-            QqPageState.detect(titleText, dialogText)
+        // 真机 18:27 修复：只看整页文本含"登录"会把**正常消息列表**判成未登录
+        // （QQ「我的电脑」会话预览就是"已在电脑登录…"）。这里采集**结构信号**，
+        // 由 QqPageState 按"对话框 > 主界面骨架 > 文本兜底"的优先级判定。
+        val signals = runCatching { svc.collectStructureSignals() }.getOrNull()
+        val hasMainUi = signals?.let { (ids, texts) ->
+            QqPageState.hasMainUiSignals(ids, texts)
+        } ?: false
+        // 文本兜底只在"没有主界面骨架"时才读（省一次遍历，也避免把聊天内容当证据）
+        val pageText = if (hasMainUi || titleText != null || dialogText != null) {
+            null
         } else {
-            val inputPresent = runCatching { svc.textOfViewId(VIEW_ID_INPUT).first }
-                .getOrDefault(false)
-            if (inputPresent) {
-                // 聊天页（有输入框）：不做整页文本兜底，避免把聊天内容误判成阻断页
-                QqPageState.Kind.NORMAL
-            } else {
-                QqPageState.detect(null, null, runCatching { svc.getUiTreeText(80) }.getOrNull())
-            }
+            runCatching { svc.getUiTreeText(80) }.getOrNull()
         }
+        val kind = QqPageState.detect(
+            QqPageState.Signals(
+                dialogTitle = titleText,
+                dialogText = dialogText,
+                pageText = pageText,
+                hasMainUi = hasMainUi
+            )
+        )
         val message = QqPageState.blockMessage(kind) ?: return null
-        Log.i(TAG, "页面态阻断（kind=$kind，结构证据=$hasDialogStructure）：不点击、不重试")
+        Log.i(TAG, "页面态阻断（kind=$kind，主界面骨架=$hasMainUi）：不点击、不重试")
         return "错误：$message"
     }
 
@@ -718,8 +721,8 @@ class QqLocalToolExecutor(
                     Log.i(TAG, "lastMessageWith: 未进入「${maskName(contact)}」会话（列表未就绪或联系人不存在）")
                     null
                 } else {
-                    val bubble = svc.lastMessageBubble(VIEW_ID_MSG_TEXT)
-                    if (bubble == null) Log.i(TAG, "lastMessageWith: 会话页无可读消息气泡（id=$VIEW_ID_MSG_TEXT）")
+                    val bubble = svc.lastMessageBubble(VIEW_ID_MSG_TEXT_CANDIDATES)
+                    if (bubble == null) Log.i(TAG, "lastMessageWith: 会话页无可读消息气泡（候选=$VIEW_ID_MSG_TEXT_CANDIDATES）")
                     bubble?.let { LastMessage(it.first, it.second) }
                 }
             } finally {
@@ -835,6 +838,14 @@ class QqLocalToolExecutor(
 
         /** 消息气泡文本节点 resource-id 尾段（2026-10-19 真机结构实证；双向对话判定用）。 */
         const val VIEW_ID_MSG_TEXT = "mjn"
+
+        /**
+         * 气泡文本节点的**候选** viewId 尾段（2026-10-26 真机修正）。
+         *
+         * QQ 会换混淆名：上一轮取证为 `mjn`，本轮同机实测已是 `mjm`。
+         * 硬编码单个 id 会让"气泡确认"永久失效、`lastMessageWith` 永远读不到消息。
+         */
+        val VIEW_ID_MSG_TEXT_CANDIDATES = listOf(VIEW_ID_MSG_TEXT, "mjm")
 
         /** [VirtualDisplayManager.ensureDisplay] 失败哨兵（Display.INVALID_DISPLAY 非 const）。 */
         private val INVALID_DISPLAY = android.view.Display.INVALID_DISPLAY

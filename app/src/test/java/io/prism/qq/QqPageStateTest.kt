@@ -76,4 +76,85 @@ class QqPageStateTest {
                 assertFalse("不得出现 QQ 号：$msg", Regex("\\d{6,}").containsMatchIn(msg!!))
             }
     }
+
+    // ==================== 真机 18:27 误判回归锁 ====================
+
+    @Test
+    fun `消息列表含「已在电脑登录」不得误判为未登录（真机实证）`() {
+        // QQ 自带「我的电脑」会话，预览文案："已在电脑登录，试试在手机上访问电脑文件"
+        val kind = QqPageState.detect(
+            QqPageState.Signals(
+                pageText = "我的电脑 已在电脑登录，试试在手机上访问电脑文件 消息 联系人 动态",
+                hasMainUi = true
+            )
+        )
+        assertEquals(
+            "主界面骨架必须压倒文本关键词（否则正常消息列表被拦死）",
+            QqPageState.Kind.NORMAL, kind
+        )
+    }
+
+    @Test
+    fun `主界面骨架单独出现就足以判正常`() {
+        listOf(
+            setOf("conversation_head") to emptySet(),
+            setOf("input") to emptySet(),
+            emptySet<String>() to setOf("消息", "联系人", "动态")
+        ).forEach { (ids, texts) ->
+            val hasMainUi = QqPageState.hasMainUiSignals(ids, texts)
+            assertTrue("应识别为主界面骨架：ids=$ids texts=$texts", hasMainUi)
+            assertEquals(
+                QqPageState.Kind.NORMAL,
+                QqPageState.detect(
+                    QqPageState.Signals(pageText = "已在电脑登录 密码", hasMainUi = hasMainUi)
+                )
+            )
+        }
+    }
+
+    @Test
+    fun `无主界面骨架时单个登录关键词也不判未登录（宁可放过不误杀）`() {
+        val kind = QqPageState.detect(
+            QqPageState.Signals(pageText = "登录", hasMainUi = false)
+        )
+        assertEquals(QqPageState.Kind.NORMAL, kind)
+    }
+
+    @Test
+    fun `真正的登录页仍能识别（强文案或双关键词）`() {
+        assertEquals(
+            QqPageState.Kind.NOT_LOGGED_IN,
+            QqPageState.detect(QqPageState.Signals(pageText = "扫码登录", hasMainUi = false))
+        )
+        assertEquals(
+            QqPageState.Kind.NOT_LOGGED_IN,
+            QqPageState.detect(
+                QqPageState.Signals(pageText = "请输入密码 登录", hasMainUi = false)
+            )
+        )
+    }
+
+    @Test
+    fun `对话框结构仍然最强（即使同时有主界面骨架）`() {
+        assertEquals(
+            QqPageState.Kind.ACCOUNT_VERIFICATION_REQUIRED,
+            QqPageState.detect(
+                QqPageState.Signals(
+                    dialogTitle = "安全提醒",
+                    dialogText = "你的账号身份验证信息已失效",
+                    hasMainUi = true
+                )
+            )
+        )
+    }
+
+    @Test
+    fun `无关对话框不判为阻断页`() {
+        assertEquals(
+            QqPageState.Kind.NORMAL,
+            QqPageState.detect(
+                QqPageState.Signals(dialogTitle = "提示", dialogText = "操作成功")
+            )
+        )
+    }
 }
