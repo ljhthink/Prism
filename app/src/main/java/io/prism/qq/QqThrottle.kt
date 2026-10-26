@@ -40,10 +40,11 @@ object QqThrottle {
             return Decision.Deny("未达最小间隔（还需约 $remainMin 分钟）")
         }
         if (state.firedDate == todayKey(nowMs, zone)) {
-            if (state.firedCount >= config.dailyCap) {
+            // 2026-10-26：0 = 用户显式关闭该上限（参考 OneBot 生态：配额应可关闭而非硬编码）
+            if (config.dailyCap > 0 && state.firedCount >= config.dailyCap) {
                 return Decision.Deny("已达当日发送上限（${config.dailyCap} 条）")
             }
-            if (state.scheduledFiredCount >= config.maxPerDay) {
+            if (config.maxPerDay > 0 && state.scheduledFiredCount >= config.maxPerDay) {
                 return Decision.Deny("已达定时主动消息当日上限（${config.maxPerDay} 次）")
             }
         }
@@ -68,7 +69,15 @@ object QqThrottle {
      * 被动路径仍然保留三道**必要**保护（防跑飞，与"打扰"无关）：
      * 1. **熔断**：连续失败达阈值仍拒绝（否则会对着坏掉的通道反复重试）；
      * 2. **短间隔**：距上次被动回复 < [PASSIVE_MIN_GAP_MS] 拒绝（防同一条消息双发）；
-     * 3. **被动日上限**：[PASSIVE_DAILY_CAP] 条（防与另一个机器人互相应声形成死循环）。
+     * 3. **滑动窗口限流**：[PASSIVE_WINDOW_MS] 内已回 ≥ [PASSIVE_MAX_IN_WINDOW] 条才拒绝
+     *    （防与另一个机器人互相应声形成死循环）。**不设日上限**——用户说话就该有回话。
+     *
+     * **2026-10-26 缺陷修复（RC-3）**：原实现用
+     * `state.repliedMessageIds.size >= PASSIVE_ID_WINDOW` 做限流，而该集合被
+     * `takeLast(MAX_REPLIED_IDS)` 裁剪到**恰好 20 条且永不缩短**——累计回复 20 条后
+     * 被动回复被**永久拒绝**（真机表现为"有时回有时不回，越用越不回"）。
+     * 现在限流改用**带时间戳的滑动窗口**（[QqRuntimeState.passiveReplyTimestamps]），
+     * 与去重集合彻底解耦。
      *
      * 去重（`QqReplyDedup`）在调用方**先于**本函数执行，不在此重复。
      */
@@ -83,11 +92,35 @@ object QqThrottle {
         if (state.lastRepliedAtMs > 0L && nowMs - state.lastRepliedAtMs < PASSIVE_MIN_GAP_MS) {
             return Decision.Deny("与上次回复间隔过短（防重复发送）")
         }
-        // 被动回复计数复用 firedDate/firedCount 会污染主动配额，故单独用 repliedMessageIds
-        // 的可见窗口做**粗略**上限：该列表只保留最近 MAX_REPLIED_IDS 条，故上限取窗口大小，
-        // 语义是"短时间内不要连续回同一批消息"（真正的日上限由主动配额与熔断共同兜底）。
-        if (state.repliedMessageIds.size >= PASSIVE_ID_WINDOW) {
-            return Decision.Deny("短时间内回复条数过多（$PASSIVE_ID_WINDOW 条），请稍后")
+        val recent = state.passiveReplyTimestamps.count { ts ->
+            ts in 1..nowMs && nowMs - ts < PASSIVE_WINDOW_MS
+        }
+        if (recent >= PASSIVE_MAX_IN_WINDOW) {
+            return Decision.Deny(
+                "短时间内回复过于频繁（${PASSIVE_WINDOW_MS / 60_000} 分钟内 $recent 条），请稍后"
+            )
+        }
+        return Decision.Allow
+    }
+
+    /**
+     * **手动/工具发起**的发送（用户或 LLM 显式要求发一条消息）的准入判定。
+     *
+     * 真机实证（2026-10-26 联调）：`qq__send_message` 被
+     * "已达定时主动消息当日上限（3 次）" 拦掉——但那是**主动定时**的配额，
+     * 与"用户现在让我发一条"完全无关。配额存在的意义是限制**系统自发**行为。
+     *
+     * 保留两道保护：熔断（通道坏了不要反复重试）+ [PASSIVE_MIN_GAP_MS] 防双发。
+     */
+    fun decideManual(
+        state: QqRuntimeState,
+        nowMs: Long
+    ): Decision {
+        if (state.circuitOpen) {
+            return Decision.Deny("已熔断（连续失败达 $FAILURE_STREAK_THRESHOLD 次），请在设置中手动恢复后再试")
+        }
+        if (state.lastFiredAt > 0L && nowMs - state.lastFiredAt < PASSIVE_MIN_GAP_MS) {
+            return Decision.Deny("与上次发送间隔过短（防重复发送）")
         }
         return Decision.Allow
     }
@@ -95,8 +128,11 @@ object QqThrottle {
     /** 被动回复的最小间隔（防同一条消息被双发；不构成"打扰"限制）。 */
     const val PASSIVE_MIN_GAP_MS: Long = 3_000L
 
-    /** 被动回复的窗口上限（与 `QqRuntimeState.MAX_REPLIED_IDS` 对齐）。 */
-    const val PASSIVE_ID_WINDOW: Int = 20
+    /** 被动回复滑动窗口长度。 */
+    const val PASSIVE_WINDOW_MS: Long = 60_000L
+
+    /** 滑动窗口内允许的最大被动回复条数（防机器对机器死循环）。 */
+    const val PASSIVE_MAX_IN_WINDOW: Int = 20
 
     /**
      * 相容旧行为：保留 `decide` 供**主动**消息使用，本函数不参与被动路径。

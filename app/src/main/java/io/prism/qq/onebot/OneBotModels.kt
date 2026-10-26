@@ -77,6 +77,62 @@ object OneBotModels {
         }
     }.toString()
 
+    /**
+     * 出站消息段（PRD US-3122；2026-10-26 新增）。
+     *
+     * 只覆盖 OneBot 11 **标准**段 + NapCat 明确支持发送的 `mface`
+     * （见 [NapCat 消息格式兼容表](https://doc.napneko.icu/develop/msg)）。
+     * 不使用私有扩展，保持可移植性。
+     */
+    sealed interface OutSegment {
+        data class Text(val text: String) : OutSegment
+        data class Face(val id: String) : OutSegment
+        /** 图片/表情图：`file` 用 `base64://`（跨主机安全，见 OneBot 图片段说明）。 */
+        data class Image(val file: String) : OutSegment
+        data class Mface(val emojiId: String, val emojiPackageId: String, val key: String) : OutSegment
+        data class Record(val file: String) : OutSegment
+    }
+
+    /** 构建带消息段的 `send_private_msg` 请求体。 */
+    fun buildSendPrivateSegments(userId: Long, segments: List<OutSegment>): String = buildJsonObject {
+        put("user_id", userId)
+        putJsonArray("message") {
+            segments.forEach { segment ->
+                addJsonObject {
+                    when (segment) {
+                        is OutSegment.Text -> {
+                            put("type", "text")
+                            putJsonObject("data") { put("text", segment.text) }
+                        }
+                        is OutSegment.Face -> {
+                            put("type", "face")
+                            putJsonObject("data") { put("id", segment.id) }
+                        }
+                        is OutSegment.Image -> {
+                            put("type", "image")
+                            putJsonObject("data") {
+                                put("file", segment.file)
+                                put("sub_type", "0")
+                            }
+                        }
+                        is OutSegment.Mface -> {
+                            put("type", "mface")
+                            putJsonObject("data") {
+                                put("emoji_id", segment.emojiId)
+                                put("emoji_package_id", segment.emojiPackageId)
+                                put("key", segment.key)
+                            }
+                        }
+                        is OutSegment.Record -> {
+                            put("type", "record")
+                            putJsonObject("data") { put("file", segment.file) }
+                        }
+                    }
+                }
+            }
+        }
+    }.toString()
+
     /** 构建 `get_friend_msg_history` 请求体（NapCat 扩展；缺失时调用方按失败降级）。 */
     fun buildGetFriendMsgHistory(userId: Long, count: Int): String = buildJsonObject {
         put("user_id", userId)
@@ -114,7 +170,7 @@ object OneBotModels {
         // 媒体消息不进入回复链路：message 数组无 text 段时**不得**回退 raw_message
         //（真实事件必带 `[CQ:image,...]`，回退会把 CQ 码当正文回复，guardrail M-01）。
         val messageElement = event["message"]
-        val text = extractText(messageElement)
+        val text = extractTextWithPlaceholder(messageElement)
             ?: if (messageElement == null) {
                 event["raw_message"]?.jsonPrimitive?.contentOrNull?.takeIf { !it.contains("[CQ:") }
             } else {
@@ -149,7 +205,7 @@ object OneBotModels {
                 ?: message["user_id"]?.jsonPrimitive?.longOrNull
                 ?: return@mapNotNull null
             val messageElement = message["message"]
-            val text = extractText(messageElement)
+            val text = extractTextWithPlaceholder(messageElement)
                 ?: if (messageElement == null) {
                     message["raw_message"]?.jsonPrimitive?.contentOrNull
                         ?.takeIf { !it.contains("[CQ:") }
@@ -180,6 +236,30 @@ object OneBotModels {
             val obj = segment as? JsonObject ?: return@mapNotNull null
             if (obj["type"]?.jsonPrimitive?.contentOrNull != "text") return@mapNotNull null
             obj["data"]?.jsonObject?.get("text")?.jsonPrimitive?.contentOrNull
+        }.joinToString("").ifBlank { null }
+        else -> null
+    }
+
+    /**
+     * 提取正文，**媒体段转占位符**（2026-10-26 新增；PRD US-3122）。
+     *
+     * 原实现遇到无文本的消息直接返回 null → 整条丢弃，于是"对方只发了个表情"时
+     * 永远不会触发回复。现在表情/图片/语音都会被转成可读占位符进入回复链路，
+     * 让模型能自然回应（system prompt 里会说明占位符含义）。
+     */
+    fun extractTextWithPlaceholder(message: JsonElement?): String? = when (message) {
+        is JsonPrimitive -> message.contentOrNull?.takeIf { !it.contains("[CQ:") }
+        is JsonArray -> message.mapNotNull { segment ->
+            val obj = segment as? JsonObject ?: return@mapNotNull null
+            when (obj["type"]?.jsonPrimitive?.contentOrNull) {
+                "text" -> obj["data"]?.jsonObject?.get("text")
+                    ?.jsonPrimitive?.contentOrNull
+                "face", "mface" -> "[表情]"
+                "image" -> "[图片]"
+                "record" -> "[语音]"
+                "video" -> "[视频]"
+                else -> null
+            }
         }.joinToString("").ifBlank { null }
         else -> null
     }

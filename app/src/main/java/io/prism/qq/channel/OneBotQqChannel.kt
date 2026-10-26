@@ -31,6 +31,8 @@ import java.util.concurrent.ConcurrentHashMap
 class OneBotQqChannel(
     /** 注入 [OneBotApi] 以便 JVM 测试用假实现（guardrail L-07）。 */
     private val client: OneBotApi,
+    /** 表情目录（2026-10-26：内置表情/用户图片/学到的商城表情）；null=只用内置表情。 */
+    private val stickerStore: io.prism.qq.QqStickerStore? = null,
     private val configProvider: suspend () -> QqConfig
 ) : QqChannel {
 
@@ -116,6 +118,79 @@ class OneBotQqChannel(
         }
     }
 
+    /**
+     * 发送表情（PRD US-3122）。
+     *
+     * 三类素材 → 三种消息段：
+     * - 内置 QQ 表情 → `face`（零素材、最稳）；
+     * - 用户导入图片 → `image` + `base64://`；
+     * - 收到过的商城表情 → `mface`（仅回发已学到的元数据）。
+     *
+     * 表情发送**失败不抛异常**，返回可读错误；调用方应把"表情失败"与"文本失败"分开处理，
+     * 绝不能让一个表情把整条回复吞掉。
+     */
+    override suspend fun sendSticker(
+        contact: String,
+        emotion: String?,
+        stickerId: String?
+    ): String {
+        val userId = resolveTargetUserId(contact)
+            ?: return "错误：协议端未解析到「${mask(contact)}」的 QQ 号"
+        val sticker = resolveSticker(stickerId, emotion)
+            ?: return "错误：没有可用的表情素材（可在设置 → QQ 小号助手 → 表情包中导入）"
+        val segment = when (sticker) {
+            is io.prism.qq.QqStickerStore.Sticker.BuiltinFace ->
+                OneBotModels.OutSegment.Face(sticker.faceId)
+            is io.prism.qq.QqStickerStore.Sticker.ImageFile -> {
+                val base64 = runCatching {
+                    "base64://" + android.util.Base64.encodeToString(
+                        sticker.file.readBytes(), android.util.Base64.NO_WRAP
+                    )
+                }.getOrNull() ?: return "错误：表情图片读取失败"
+                OneBotModels.OutSegment.Image(base64)
+            }
+            is io.prism.qq.QqStickerStore.Sticker.Mface ->
+                OneBotModels.OutSegment.Mface(
+                    emojiId = sticker.mface.emojiId,
+                    emojiPackageId = sticker.mface.emojiPackageId,
+                    key = sticker.mface.key
+                )
+        }
+        val response = client.call(
+            "send_private_msg",
+            OneBotModels.buildSendPrivateSegments(userId, listOf(segment))
+        )
+        return if (response.ok) {
+            "已发送表情给「${mask(contact)}」（协议端确认）"
+        } else {
+            "错误：表情发送失败（${response.message ?: "未知原因"}，retcode=${response.retcode}）"
+        }
+    }
+
+    /** 按 id 或情绪挑表情；都不可用时退回内置表情（保证"总能发一个表情"）。 */
+    private fun resolveSticker(
+        stickerId: String?,
+        emotion: String?
+    ): io.prism.qq.QqStickerStore.Sticker? {
+        val store = stickerStore
+        if (store != null) {
+            if (!stickerId.isNullOrBlank()) {
+                store.imageFile(stickerId)?.let {
+                    return io.prism.qq.QqStickerStore.Sticker.ImageFile(it)
+                }
+                store.learnedMfaces().firstOrNull { m ->
+                    m.emojiId == stickerId || m.summary == stickerId
+                }?.let { return io.prism.qq.QqStickerStore.Sticker.Mface(it) }
+            }
+            store.pick(emotion)?.let { return it }
+        }
+        // 兜底：内置"微笑"，保证工具调用不会因为目录为空而完全失败
+        val fallback = io.prism.qq.QqStickerCatalog.faceIdFor(emotion.orEmpty())
+            ?: io.prism.qq.QqStickerCatalog.allFaceIds().firstOrNull()
+            ?: return null
+        return io.prism.qq.QqStickerStore.Sticker.BuiltinFace(fallback)
+    }
+
     override suspend fun recentMessages(contact: String, limit: Int): List<QqMessage> {
         if (limit <= 0) return emptyList()
         val userId = resolveTargetUserId(contact)
@@ -159,6 +234,8 @@ class OneBotQqChannel(
         val cfg = configProvider()
         // guardrail M-15：双向对话未激活时不解析、不缓冲、不打好友列表请求
         if (!cfg.autoReplyActive) return@mapNotNull null
+        // 2026-10-26：学习收到的商城表情元数据（供"回发同一表情"），不下载素材
+        runCatching { stickerStore?.learnFromEvent(event) }
         // 2026-10-25：心跳/生命周期等**元事件**是正常流量，不是"被丢弃的事件"——
         // 若与真正的过滤失败共用同一条日志，真机 RCA 会被每 60s 一条的噪音误导。
         val postType = event["post_type"]?.jsonPrimitive?.contentOrNull

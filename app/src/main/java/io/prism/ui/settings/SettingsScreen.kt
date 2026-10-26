@@ -214,6 +214,10 @@ fun SettingsScreen(
     var qqTargetIdDraft by remember { mutableStateOf("") }
     var qqClearToken by remember { mutableStateOf(false) }
     var qqChannelStatusText by remember { mutableStateOf("") }
+    // 2026-10-26（ADR-066）：协议端地址单输入 + 真实连接诊断
+    var qqHostDraft by remember { mutableStateOf("") }
+    var qqDiagText by remember { mutableStateOf("") }
+    var qqDiagRunning by remember { mutableStateOf(false) }
     // US-3115：自由编辑（活跃时段 / 上限 / 最小间隔 / 历史条数）
     var qqScheduleDialogVisible by remember { mutableStateOf(false) }
     var qqWindowStartDraft by remember { mutableStateOf("") }
@@ -345,16 +349,29 @@ fun SettingsScreen(
                             "数据流：消息正文 → 你自建的协议端 → QQ；消息与历史 → 你配置的模型端点。"
                     )
                     androidx.compose.material3.OutlinedTextField(
+                        value = qqHostDraft,
+                        onValueChange = { qqHostDraft = it },
+                        singleLine = true,
+                        label = { Text("协议端地址（推荐只填这个：IP 或 IP:端口）") },
+                        placeholder = { Text("192.168.1.10") }
+                    )
+                    Text(
+                        "填 PC 的局域网 IP（HTTP 默认 3000、WS 自动 3001）。" +
+                            "127.0.0.1 是手机自己；协议端在 PC 上时不要填它。",
+                        color = Color(0xFF7A8699),
+                        fontSize = 12.sp
+                    )
+                    androidx.compose.material3.OutlinedTextField(
                         value = qqBaseUrlDraft,
                         onValueChange = { qqBaseUrlDraft = it },
                         singleLine = true,
-                        label = { Text("HTTP 地址（如 http://192.168.1.10:3000）") }
+                        label = { Text("HTTP 地址（高级；填写上方地址后此项被覆盖）") }
                     )
                     androidx.compose.material3.OutlinedTextField(
                         value = qqWsUrlDraft,
                         onValueChange = { qqWsUrlDraft = it },
                         singleLine = true,
-                        label = { Text("WS 地址（如 ws://192.168.1.10:3001）") }
+                        label = { Text("WS 地址（高级；填写上方地址后此项被覆盖）") }
                     )
                     androidx.compose.material3.OutlinedTextField(
                         value = qqTokenDraft,
@@ -387,15 +404,68 @@ fun SettingsScreen(
                         singleLine = true,
                         label = { Text("目标（主号）QQ 号；留空则按备注名解析") }
                     )
+                    // 2026-10-26（ADR-066）：真实连接诊断——逐阶段给出可执行结论。
+                    // 真机踩坑：网络已通但地址仍是回环，旧 UI 只显示"无法连接"，无从定位。
+                    androidx.compose.material3.TextButton(onClick = {
+                        if (qqDiagRunning) return@TextButton
+                        qqDiagRunning = true
+                        qqDiagText = "诊断中…"
+                        qqScope.launch {
+                            val input = qqHostDraft.ifBlank {
+                                qqBaseUrlDraft.ifBlank { qqConfig.oneBotBaseUrl }
+                            }
+                            val token = qqTokenDraft.ifBlank { qqConfig.oneBotToken }
+                            val report = runCatching {
+                                io.prism.qq.onebot.QqConnectionDiagnostics.create(context)
+                                    .run(input, token)
+                            }.getOrNull()
+                            qqDiagText = if (report == null) {
+                                "诊断异常：无法执行"
+                            } else {
+                                buildString {
+                                    appendLine(report.summary())
+                                    report.steps.forEach { step ->
+                                        val mark = when (step.outcome) {
+                                            io.prism.qq.onebot.QqDiagnosticsRules.Outcome.PASS -> "✓"
+                                            io.prism.qq.onebot.QqDiagnosticsRules.Outcome.WARN -> "!"
+                                            io.prism.qq.onebot.QqDiagnosticsRules.Outcome.FAIL -> "✗"
+                                        }
+                                        appendLine("$mark ${step.stage}：${step.detail}")
+                                    }
+                                    io.prism.qq.onebot.QqDiagnosticsRules
+                                        .topologyAdvice(report.verdict)
+                                        ?.let { append("建议：$it") }
+                                }
+                            }
+                            qqDiagRunning = false
+                        }
+                    }) { Text(if (qqDiagRunning) "诊断中…" else "连接诊断（推荐先点）") }
+                    if (qqDiagText.isNotBlank()) {
+                        Text(
+                            qqDiagText,
+                            color = if (qqDiagText.startsWith("已连接")) {
+                                Color(0xFF4CAF50)
+                            } else {
+                                Color(0xFFFFB74D)
+                            },
+                            fontSize = 12.sp
+                        )
+                    }
                 }
             },
             confirmButton = {
                 androidx.compose.material3.TextButton(onClick = {
                     qqOneBotDialogVisible = false
                     qqScope.launch {
+                        // 2026-10-26：单地址输入优先——归一化后同时写 HTTP/WS，
+                        // 避免"只改了一个框"导致另一半仍指向回环（真机踩坑点）
+                        val pair = qqHostDraft.trim()
+                            .takeIf { it.isNotEmpty() }
+                            ?.let { io.prism.qq.onebot.OneBotEndpoint.normalize(it) }
+                            ?.takeIf { it.ok }
                         qqApp?.qqConfigRepository?.setOneBotConnection(
-                            baseUrl = qqBaseUrlDraft,
-                            wsUrl = qqWsUrlDraft,
+                            baseUrl = pair?.baseUrl ?: qqBaseUrlDraft,
+                            wsUrl = pair?.wsUrl ?: qqWsUrlDraft,
                             token = qqTokenDraft,
                             selfId = qqSelfIdDraft.trim().toLongOrNull() ?: 0L,
                             targetUserId = qqTargetIdDraft.trim().toLongOrNull() ?: 0L,
@@ -403,6 +473,7 @@ fun SettingsScreen(
                         )
                         qqClearToken = false
                         qqTokenDraft = ""
+                        qqHostDraft = ""
                         qqApp?.oneBotChannel?.invalidateTarget()
                     }
                 }) { Text("保存") }
@@ -454,7 +525,7 @@ fun SettingsScreen(
                         value = qqCapDraft,
                         onValueChange = { qqCapDraft = it },
                         singleLine = true,
-                        label = { Text("每日消息上限（1~200）") }
+                        label = { Text("每日消息上限（0~200；0=不限）") }
                     )
                     androidx.compose.material3.OutlinedTextField(
                         value = qqIntervalDraft,
@@ -504,12 +575,12 @@ fun SettingsScreen(
             title = { Text("历史上下文条数") },
             text = {
                 androidx.compose.foundation.layout.Column {
-                    Text("回复时读取最近 N 条消息（6~30）。消息与相关记忆会发送至你配置的模型端点。")
+                    Text("回复时读取最近 N 条消息（1~200）。真正上限由字符预算兜底：超出时从最旧截断。消息与相关记忆会发送至你配置的模型端点。")
                     androidx.compose.material3.OutlinedTextField(
                         value = qqHistoryDraft,
                         onValueChange = { qqHistoryDraft = it },
                         singleLine = true,
-                        label = { Text("N（6~30）") }
+                        label = { Text("N（1~200）") }
                     )
                     if (qqHistoryError.isNotBlank()) {
                         Text(text = qqHistoryError, color = Color(0xFFFF7A6B), fontSize = 12.sp)
@@ -522,7 +593,7 @@ fun SettingsScreen(
                     if (n == null || n < io.prism.qq.QqConfig.MIN_HISTORY_LIMIT ||
                         n > io.prism.qq.QqConfig.MAX_HISTORY_LIMIT
                     ) {
-                        qqHistoryError = "错误：历史条数需在 6~30 之间"
+                        qqHistoryError = "错误：历史条数需在 1~200 之间"
                         return@TextButton
                     }
                     qqHistoryDialogVisible = false
@@ -904,6 +975,10 @@ fun SettingsScreen(
                     onClick = {
                         qqBaseUrlDraft = qqConfig.oneBotBaseUrl
                         qqWsUrlDraft = qqConfig.oneBotWsUrl
+                        // 2026-10-26：单地址输入默认为空（留空=沿用上面的 HTTP/WS），
+                        // 诊断结果也每次重开重置，避免看到上一次的过期结论
+                        qqHostDraft = ""
+                        qqDiagText = ""
                         // 不回填 token（PRD US-3110 AC-3 展示脱敏）；留空=保持原值
                         qqTokenDraft = ""
                         qqClearToken = false

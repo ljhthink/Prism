@@ -1,4 +1,4 @@
-﻿package io.prism.qq
+package io.prism.qq
 
 import io.prism.qq.channel.QqTransport
 
@@ -62,8 +62,20 @@ data class QqConfig(
     /** 目标（主号）QQ 号。0=按 [targetContact] 从好友列表解析。 */
     val oneBotTargetUserId: Long = 0L,
 
-    /** 回复时读取的历史消息条数（US-3112；6~30）。 */
+    /** 回复时读取的历史消息条数（US-3112；1~200）。 */
     val historyLimit: Int = DEFAULT_HISTORY_LIMIT,
+
+    /** 上下文字符预算（2026-10-26 新增；超出时从最旧截断）。 */
+    val historyCharBudget: Int = DEFAULT_HISTORY_CHAR_BUDGET,
+
+    /** 自动回复中是否允许附带表情/语音（2026-10-26 新增；仅协议端生效）。 */
+    val mediaReplyEnabled: Boolean = true,
+
+    /** 自动回复附带表情的概率（百分比 0~100）。 */
+    val stickerChancePercent: Int = 25,
+
+    /** 自动回复改用语音的概率（百分比 0~100；失败自动降级文本）。 */
+    val voiceChancePercent: Int = 10,
 
     /** 是否把 L2/L3 记忆注入 QQ 回复（US-3112 AC-4 可关闭）。 */
     val memoryInjectionEnabled: Boolean = true,
@@ -99,6 +111,8 @@ data class QqConfig(
             "oneBotToken=${if (oneBotToken.isBlank()) "<empty>" else "***"}, " +
             "oneBotSelfId=$oneBotSelfId, oneBotTargetUserId=$oneBotTargetUserId, " +
             "historyLimit=$historyLimit, memoryInjectionEnabled=$memoryInjectionEnabled, " +
+            "historyCharBudget=$historyCharBudget, mediaReplyEnabled=$mediaReplyEnabled, " +
+            "stickerChance=$stickerChancePercent, voiceChance=$voiceChancePercent, " +
             "wakeOnScreenOff=$wakeOnScreenOff)"
 
     /** 归一化为合法值域（读/写两侧共用）。 */
@@ -110,7 +124,12 @@ data class QqConfig(
         maxPerDay = maxPerDay.coerceIn(MIN_PER_DAY, MAX_PER_DAY_CEIL),
         oneBotSelfId = oneBotSelfId.coerceAtLeast(0L),
         oneBotTargetUserId = oneBotTargetUserId.coerceAtLeast(0L),
-        historyLimit = historyLimit.coerceIn(MIN_HISTORY_LIMIT, MAX_HISTORY_LIMIT)
+        historyLimit = historyLimit.coerceIn(MIN_HISTORY_LIMIT, MAX_HISTORY_LIMIT),
+        historyCharBudget = historyCharBudget.coerceIn(
+            MIN_HISTORY_CHAR_BUDGET, MAX_HISTORY_CHAR_BUDGET
+        ),
+        stickerChancePercent = stickerChancePercent.coerceIn(0, 100),
+        voiceChancePercent = voiceChancePercent.coerceIn(0, 100)
     )
 
     companion object {
@@ -118,7 +137,7 @@ data class QqConfig(
         const val MAX_INTERVAL_MS_CEIL: Long = 24 * 60 * 60 * 1000L
         const val DEFAULT_MIN_INTERVAL_MS: Long = 30 * 60 * 1000L
 
-        const val MIN_DAILY_CAP: Int = 1
+        const val MIN_DAILY_CAP: Int = 0
         const val MAX_DAILY_CAP: Int = 200
         const val DEFAULT_DAILY_CAP: Int = 20
 
@@ -126,13 +145,25 @@ data class QqConfig(
         const val DEFAULT_WINDOW_START_MINUTE: Int = 20 * 60
         const val DEFAULT_WINDOW_END_MINUTE: Int = 23 * 60
 
-        const val MIN_PER_DAY: Int = 1
+        const val MIN_PER_DAY: Int = 0
         const val MAX_PER_DAY_CEIL: Int = 20
         const val DEFAULT_MAX_PER_DAY: Int = 3
 
-        const val MIN_HISTORY_LIMIT: Int = 6
-        const val MAX_HISTORY_LIMIT: Int = 30
+        /**
+         * 历史条数下/上限（2026-10-26 用户裁定：1~200）。
+         *
+         * 原为 6~30，用户反馈"最大 30 条"无法接受。真正的上下文长度由
+         * [historyCharBudget] 的字符预算兜底，条数只是 UI 便利参数——
+         * 参考 OneBot 生态（AstrBot 等）的做法：按会话持久化 + 按 token/字符预算裁剪。
+         */
+        const val MIN_HISTORY_LIMIT: Int = 1
+        const val MAX_HISTORY_LIMIT: Int = 200
         const val DEFAULT_HISTORY_LIMIT: Int = 12
+
+        /** 上下文字符预算：默认 6000，范围 1000~30000；0=不限制（不推荐）。 */
+        const val MIN_HISTORY_CHAR_BUDGET: Int = 1_000
+        const val MAX_HISTORY_CHAR_BUDGET: Int = 30_000
+        const val DEFAULT_HISTORY_CHAR_BUDGET: Int = 6_000
 
         const val DEFAULT_ONEBOT_BASE_URL: String = "http://127.0.0.1:3000"
         const val DEFAULT_ONEBOT_WS_URL: String = "ws://127.0.0.1:3001"

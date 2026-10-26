@@ -749,9 +749,32 @@ class PrismApplication : Application() {
         )
     }
 
-    /** 协议端通道（US-3110 / US-3111 / US-3112）。 */
+    /** 协议端通道（US-3110 / US-3111 / US-3112；2026-10-26 接入表情目录）。 */
     val oneBotChannel: io.prism.qq.channel.OneBotQqChannel by lazy {
-        io.prism.qq.channel.OneBotQqChannel(oneBotClient) { qqConfigRepository.get() }
+        io.prism.qq.channel.OneBotQqChannel(
+            client = oneBotClient,
+            configProvider = { qqConfigRepository.get() },
+            stickerStore = qqStickerStore
+        )
+    }
+
+    /**
+     * 表情目录（2026-10-26；US-3122）：内置 QQ 表情 + 用户导入图片 + 学到的商城表情。
+     *
+     * 存在 `filesDir/qq_stickers/`，仅本机可见；商店表情只记元数据不下载素材。
+     */
+    val qqStickerStore: io.prism.qq.QqStickerStore by lazy {
+        io.prism.qq.QqStickerStore(filesDir)
+    }
+
+    /**
+     * Prism 侧会话记录（2026-10-26；US-3112 修订）。
+     *
+     * 无障碍通道只能读到最后一条气泡、协议端历史接口也可能缺失——本地会话记录是
+     * 「回复接得上话」的兜底数据源，按字符预算裁剪后注入 prompt。
+     */
+    val qqConversationStore: io.prism.qq.QqConversationStore by lazy {
+        io.prism.qq.QqConversationStore(filesDir)
     }
 
     /** 无障碍兜底通道（ADR-062 原主路线；协议端不可用时自动生效）。 */
@@ -1366,6 +1389,41 @@ class PrismApplication : Application() {
         }
     }
 
+    /**
+     * 注册网络变化回调（2026-10-26；ADR-066）。
+     *
+     * 只做一件事：通知 `OneBotClient` 打断退避、立即重连。
+     * 真机实证：用户切换 WiFi/热点后，原实现要等最长 30s 退避才重试，期间一律显示"无法连接"。
+     */
+    private var qqNetworkCallback: android.net.ConnectivityManager.NetworkCallback? = null
+    private var qqNetworkCallbackRegistered = false
+
+    private fun registerQqNetworkCallback() {
+        if (qqNetworkCallbackRegistered) return
+        val cm = getSystemService(android.net.ConnectivityManager::class.java) ?: return
+        val callback = object : android.net.ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: android.net.Network) {
+                runCatching { oneBotClient.nudgeReconnect() }
+            }
+
+            override fun onCapabilitiesChanged(
+                network: android.net.Network,
+                caps: android.net.NetworkCapabilities
+            ) {
+                if (caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                    runCatching { oneBotClient.nudgeReconnect() }
+                }
+            }
+        }
+        runCatching {
+            cm.registerDefaultNetworkCallback(callback)
+            qqNetworkCallback = callback
+            qqNetworkCallbackRegistered = true
+        }.onFailure {
+            android.util.Log.w("PrismApplication", "网络回调注册失败（${it::class.simpleName}）")
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         // 批次21（ADR-046）：ShizukuShell 上下文注入（四态判定需 PackageManager 探测
@@ -1680,9 +1738,19 @@ class PrismApplication : Application() {
                     rolePackLoader.effectiveRolePack().persona.systemPrompt
                 }.getOrNull()
 
-                // US-3112 AC-1/AC-2：读取最近 N 条；失败逐级降级（API → 仅当前一条）
-                val history = runCatching { channel.recentMessages(contact, cfg.historyLimit) }
+                // US-3112 AC-1/AC-2：读取最近 N 条；失败逐级降级（API → 本地会话 → 仅当前一条）
+                // 2026-10-26：新增 Prism 侧会话记录作为第 2 级——无障碍通道恒为 ≤1 条，
+                // 没有本地记录时"回复接不上话"（用户真机反馈的核心体验问题）。
+                // 同时按字符预算裁剪（条数可到 200，但必须防 prompt 撑爆）。
+                runCatching { qqConversationStore.append(contact, incoming) }
+                val channelHistory = runCatching { channel.recentMessages(contact, cfg.historyLimit) }
                     .getOrDefault(emptyList())
+                val sourceHistory = if (channelHistory.isEmpty()) {
+                    qqConversationStore.recent(contact, cfg.historyLimit)
+                } else {
+                    channelHistory
+                }
+                val history = sourceHistory
                     .let { list ->
                         when {
                             !incoming.messageId.isNullOrBlank() ->
@@ -1692,6 +1760,7 @@ class PrismApplication : Application() {
                             else -> list
                         }
                     }
+                    .let { io.prism.qq.QqContextBuilder.trimByBudget(it, cfg.historyCharBudget) }
                 // guardrail M-08：L2+L3 合并后硬上限 1200 字符，防 L3 全量画像撑爆 prompt
                 val memory = if (cfg.memoryInjectionEnabled) {
                     buildMemorySection(incoming.text)?.take(MAX_MEMORY_SECTION_CHARS)
@@ -1707,16 +1776,75 @@ class PrismApplication : Application() {
                     companionAddress = null,
                     incoming = incoming.text,
                     history = history,
-                    memorySection = memory
+                    memorySection = memory,
+                    // 2026-10-26（US-3122）：仅在协议端且用户开启媒体回复时提示指令语法
+                    mediaHint = if (cfg.mediaReplyEnabled &&
+                        channel.transport == io.prism.qq.channel.QqTransport.ONEBOT
+                    ) {
+                        io.prism.qq.QqReplyDirective.promptHint(
+                            enabledSticker = cfg.stickerChancePercent > 0,
+                            enabledVoice = cfg.voiceChancePercent > 0
+                        )
+                    } else {
+                        null
+                    }
                 ) ?: return io.prism.qq.QqReplyOutcome.failed("回复生成失败（端点/模型异常）")
                 // 2026-10-26 真机修复：被动回复经工具执行器发送时会命中**主动**节流
                 // （minInterval/dailyCap/maxPerDay）。这些配额语义是"不要主动打扰"，
                 // 不该拦"用户说话→系统回话"。此处置位被动作用域，闸门改走 decidePassive。
+                //
+                // 2026-10-26 新增（US-3122）：解析末尾的 [[sticker:情绪]] / [[voice]] 指令。
+                // 媒体是**增强**：文本先发，媒体失败只记日志，绝不让回复丢失。
+                val allowMedia = cfg.mediaReplyEnabled
+                val parsed = io.prism.qq.QqReplyDirective.parse(reply, allowMedia)
                 val previousScope = io.prism.qq.QqLocalToolExecutor.enterPassiveReplyScope()
                 val sendResult = try {
-                    channel.sendText(contact, reply)
+                    channel.sendText(contact, parsed.text)
                 } finally {
                     io.prism.qq.QqLocalToolExecutor.exitPassiveReplyScope(previousScope)
+                }
+                // 文本成功才继续媒体（文本失败时媒体没有意义，且会造成"半个回复"）
+                if (!sendResult.startsWith("错误") && !sendResult.startsWith("⚠️") &&
+                    channel.transport == io.prism.qq.channel.QqTransport.ONEBOT
+                ) {
+                    if (parsed.voice && cfg.voiceChancePercent > 0 &&
+                        kotlin.random.Random.nextInt(100) < cfg.voiceChancePercent
+                    ) {
+                        runCatching {
+                            val synth = qqVoiceSynthesizer.synthesize(parsed.text)
+                            if (synth != null && synth.samples.isNotEmpty()) {
+                                channel.sendVoice(contact, synth.samples, synth.sampleRate)
+                            }
+                        }.onFailure {
+                            android.util.Log.w(
+                                "QqProactiveSchedule",
+                                "被动回复改语音失败（已保留文本）：${it::class.simpleName}"
+                            )
+                        }
+                    }
+                    if (parsed.stickerEmotion != null && cfg.stickerChancePercent > 0 &&
+                        kotlin.random.Random.nextInt(100) < cfg.stickerChancePercent
+                    ) {
+                        runCatching {
+                            channel.sendSticker(contact, parsed.stickerEmotion, null)
+                        }.onFailure {
+                            android.util.Log.w(
+                                "QqProactiveSchedule",
+                                "被动回复附带表情失败（已保留文本）：${it::class.simpleName}"
+                            )
+                        }
+                    }
+                }
+                runCatching {
+                    qqConversationStore.append(
+                        contact,
+                        io.prism.qq.channel.QqMessage(
+                            messageId = null,
+                            incoming = false,
+                            text = parsed.text,
+                            timestampMs = System.currentTimeMillis()
+                        )
+                    )
                 }
                 val result = sendResult
                 val sentAt = System.currentTimeMillis()
@@ -1804,6 +1932,10 @@ class PrismApplication : Application() {
             io.prism.qq.QqProactiveGateway.executionDisplayId = {
                 io.prism.phonecontrol.bg.VirtualDisplayManager.currentDisplayId
             }
+
+            // 2026-10-26（ADR-066）：网络恢复/切换时**立即**重连协议端。
+            // 原实现失败后最长等 30s 退避，用户切 WiFi/热点后往往在这段时间内就判定"还是连不上"。
+            registerQqNetworkCallback()
 
             // US-3111：协议端事件驱动（替代 90s 轮询）。仅在双向对话激活时处理事件。
             oneBotChannel.incoming().collect { message ->

@@ -108,10 +108,15 @@ class QqLocalToolExecutor(
     override suspend fun execute(toolName: String, arguments: Map<String, Any?>): String {
         PhoneControlSessionManager.onPhoneToolInvoked()
         val tool = toolName.removePrefix(NAMESPACE)
+        // 2026-10-26 真机实证：工具调用（用户/LLM 显式要求发一条）被
+        // "已达定时主动消息当日上限（3 次）"拦掉。配额语义是限制**系统自发**行为，
+        // 故工具路径置位手动作用域，闸门改走 QqThrottle.decideManual。
+        val previous = TOOL_SCOPE.getAndSet(true)
         return try {
             when (tool) {
                 "send_message" -> sendMessage(arguments, confirmRequired = true)
                 "send_voice" -> sendVoice(arguments, confirmRequired = true)
+                "send_sticker" -> sendSticker(arguments, confirmRequired = true)
                 "set_signature" -> setSignature(arguments, confirmRequired = true)
                 "schedule_message" -> scheduleMessage(arguments)
                 else -> "错误：未知 QQ 工具 $tool"
@@ -121,6 +126,8 @@ class QqLocalToolExecutor(
         } catch (e: Exception) {
             Log.w(TAG, "execute($tool) 失败：${e::class.simpleName}")
             "错误：QQ 工具执行失败（${e::class.simpleName}）"
+        } finally {
+            TOOL_SCOPE.set(previous)
         }
     }
 
@@ -351,6 +358,43 @@ class QqLocalToolExecutor(
         }
     }
 
+    // ==================== qq__send_sticker（2026-10-26 新增；US-3122） ====================
+
+    /**
+     * 发送表情（仅协议端）。
+     *
+     * 无障碍通道无法向 QQ 输入框注入图片，返回可读"不支持"并建议改用文本——
+     * 不做假承诺，也不静默失败。
+     */
+    private suspend fun sendSticker(
+        arguments: Map<String, Any?>,
+        confirmRequired: Boolean
+    ): String {
+        val cfgRepo = configRepoProvider() ?: return "错误：QQ 小号助手配置未装配"
+        val cfg = cfgRepo.get()
+        val contact = parseString(arguments, "contact")?.trim()
+            ?.takeIf { it.isNotEmpty() } ?: cfg.targetContact
+        if (contact.isBlank()) return "错误：缺少 contact 参数（好友备注名）"
+        val emotion = parseString(arguments, "emotion")?.trim()?.takeIf { it.isNotEmpty() }
+        val stickerId = parseString(arguments, "sticker_id")?.trim()?.takeIf { it.isNotEmpty() }
+        if (emotion == null && stickerId == null) {
+            return "错误：需要 emotion 或 sticker_id 之一"
+        }
+        configAndThrottleGate()?.let { return it }
+        val channel = protocolChannelOrNull()
+            ?: return "错误：表情消息仅协议端支持（当前无障碍通道无法注入图片）；" +
+                "请改用 qq__send_message 发文本"
+        if (confirmRequired) {
+            val gate = highRiskGate("发送表情", "${maskName(contact)} / ${emotion ?: stickerId}")
+            if (gate != null) return gate
+        }
+        val result = channel.sendSticker(contact, emotion, stickerId)
+        if (!result.startsWith("错误") && !result.startsWith("⚠️")) {
+            recordVoiceSend() // 与语音一致：计当日总数与最小间隔基准，但不占定时配额
+        }
+        return result
+    }
+
     // ==================== qq__set_signature ====================
 
     private suspend fun setSignature(arguments: Map<String, Any?>, confirmRequired: Boolean): String {
@@ -559,11 +603,11 @@ class QqLocalToolExecutor(
         if (runtimeRepo != null) {
             val now = System.currentTimeMillis()
             val state = runtimeRepo.get()
-            // 被动应答走被动规则；主动/定时消息仍受完整主动节流约束
-            val decision = if (passiveReplyScope) {
-                QqThrottle.decidePassive(state, now)
-            } else {
-                QqThrottle.decide(cfg, state, now)
+            // 被动应答走被动规则；工具调用走手动规则（不受主动配额约束）；主动/定时走完整节流
+            val decision = when {
+                passiveReplyScope -> QqThrottle.decidePassive(state, now)
+                TOOL_SCOPE.get() -> QqThrottle.decideManual(state, now)
+                else -> QqThrottle.decide(cfg, state, now)
             }
             when (decision) {
                 is QqThrottle.Decision.Deny -> return "错误：${decision.reason}（节流保护，稍后再试；" +
@@ -863,6 +907,15 @@ class QqLocalToolExecutor(
             PASSIVE_REPLY_SCOPE.set(previous)
         }
 
+        /**
+         * 进程级"当前是工具调用发起"标记（2026-10-26 新增）。
+         *
+         * 与 [PASSIVE_REPLY_SCOPE] 同理：执行器是多实例，置位方是 [execute] 本身，
+         * 但闸门读的是同一个进程级标记。作用：工具调用（用户/LLM 显式要求发消息）
+         * **不受主动定时配额**（minInterval/dailyCap/maxPerDay）约束。
+         */
+        private val TOOL_SCOPE = java.util.concurrent.atomic.AtomicBoolean(false)
+
         /** 工具命名空间前缀。 */
         const val NAMESPACE = "qq__"
 
@@ -964,6 +1017,13 @@ class QqLocalToolExecutor(
                     "文本上限 200 字；语音合成失败时会自动改发文本并在结果中说明。" +
                     "contact 为小号对该好友的备注名；message 为要朗读的文本。",
                 """{"type":"object","properties":{"contact":{"type":"string","description":"好友备注名（小号视角）"},"message":{"type":"string","description":"要朗读的文本（口语化短句，≤200 字）"}},"required":["contact","message"]}"""
+            ),
+            tool(
+                "send_sticker",
+                "以 QQ 小号身份给指定好友发送一个**表情**（仅协议端 OneBot 可用；无障碍通道会返回不支持）。" +
+                    "可用 emotion 指定情绪（如 开心/难过/无语/赞同/疑问/害羞 等），或 sticker_id 指定已导入/已学到的表情。" +
+                    "适合在想表达情绪、又不需要打字时使用，不要每条消息都发。",
+                """{"type":"object","properties":{"contact":{"type":"string","description":"好友备注名（小号视角）"},"emotion":{"type":"string","description":"情绪标签，如 开心/难过/无语/赞同/疑问"},"sticker_id":{"type":"string","description":"指定表情 ID（可选，优先于 emotion）"}},"required":["contact"]}"""
             ),
             tool(
                 "set_signature",

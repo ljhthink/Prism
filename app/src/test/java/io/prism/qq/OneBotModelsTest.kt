@@ -100,14 +100,26 @@ class OneBotModelsTest {
     }
 
     @Test
-    fun `媒体消息（无文本）不进入回复链路，且不回退 raw_message`() {
-        // 真实 OneBot 事件必带 raw_message（含 CQ 码）；不得把它当正文回复（guardrail M-01）
+    fun `媒体消息转为占位符但仍不回退 raw_message`() {
+        // 真实 OneBot 事件必带 raw_message（含 CQ 码）；不得把它当正文回复（guardrail M-01）。
+        // 2026-10-26：媒体消息不再整条丢弃，而是转为占位符（否则"只发表情"永远不会被回复）。
         val event = Json.parseToJsonElement(
             """{"post_type":"message","message_type":"private","self_id":900,"user_id":10001,
                "message_id":1,"raw_message":"[CQ:image,file=a.jpg]",
                "message":[{"type":"image","data":{"file":"a.jpg"}}]}"""
         ).jsonObject
-        assertNull(OneBotModels.parsePrivateMessage(event, 900, 10001))
+        val parsed = OneBotModels.parsePrivateMessage(event, 900, 10001)
+        assertEquals("[图片]", parsed?.text)
+    }
+
+    @Test
+    fun `纯表情消息转为占位符`() {
+        val event = Json.parseToJsonElement(
+            """{"post_type":"message","message_type":"private","self_id":900,"user_id":10001,
+               "message_id":2,"raw_message":"[CQ:face,id=1]",
+               "message":[{"type":"face","data":{"id":"1"}}]}"""
+        ).jsonObject
+        assertEquals("[表情]", OneBotModels.parsePrivateMessage(event, 900, 10001)?.text)
     }
 
     @Test
@@ -153,11 +165,13 @@ class OneBotModelsTest {
     }
 
     @Test
-    fun `历史解析跳过纯媒体消息`() {
+    fun `历史解析把纯媒体消息转为占位符`() {
         val data = Json.parseToJsonElement(
             """{"messages":[{"message_id":1,"user_id":900,"time":10,"message":[{"type":"face","data":{"id":"1"}}]}]}"""
         )
-        assertTrue(OneBotModels.parseHistory(data, selfId = 900).isEmpty())
+        val parsed = OneBotModels.parseHistory(data, selfId = 900)
+        assertEquals(1, parsed.size)
+        assertEquals("[表情]", parsed.single().text)
     }
 
     @Test

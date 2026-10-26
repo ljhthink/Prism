@@ -77,6 +77,16 @@ class ProactiveScheduleService : Service() {
     private var skipNoticeSentForWindow = false
 
     /**
+     * **亮屏唤醒信号**（2026-10-26 新增）。
+     *
+     * 亮屏时若还在等 90s 轮询间隔，用户发完消息要等近一分半才可能被回——
+     * 注册 `ACTION_SCREEN_ON` 后立即打断等待，复评一次（[QqPollPolicy] 亮屏分支直接放行）。
+     */
+    private val replyWake = Channel<Unit>(Channel.CONFLATED)
+
+    private var screenReceiver: android.content.BroadcastReceiver? = null
+
+    /**
      * 统一维护「本窗口」的进程内状态（guardrail **G-r2-04**）。
      *
      * 原实现里 `notifySkipped` 先读 `skipNoticeSentForWindow`、再由 `retryOrClear` 重置 →
@@ -116,12 +126,42 @@ class ProactiveScheduleService : Service() {
         }
         if (loopJob == null) loopJob = scope.launch { heartbeatLoop() }
         if (replyJob == null) replyJob = scope.launch { replyLoop() }
+        registerScreenReceiver()
         return START_NOT_STICKY
+    }
+
+    /**
+     * 注册亮屏广播（`ACTION_SCREEN_ON` / `ACTION_USER_PRESENT`）。
+     *
+     * 只用于**打断轮询等待**，不做任何数据操作；注销在 [onDestroy]。
+     */
+    private fun registerScreenReceiver() {
+        if (screenReceiver != null) return
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                replyWake.trySend(Unit)
+            }
+        }
+        runCatching {
+            val filter = android.content.IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_ON)
+                addAction(Intent.ACTION_USER_PRESENT)
+            }
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            } else {
+                @Suppress("UnspecifiedRegisterReceiverFlag")
+                registerReceiver(receiver, filter)
+            }
+            screenReceiver = receiver
+        }.onFailure { Log.w(TAG, "亮屏广播注册失败（${it::class.simpleName}）") }
     }
 
     override fun onDestroy() {
         loopJob = null
         replyJob = null
+        screenReceiver?.let { runCatching { unregisterReceiver(it) } }
+        screenReceiver = null
         scope.cancel()
         cancelExactAlarm()
         Log.i(TAG, "定时主动消息调度服务已停止")
@@ -286,6 +326,28 @@ class ProactiveScheduleService : Service() {
         }
         withTimeoutOrNull(timeoutMs) { wakeSignal.receive() }
     }
+
+    /** 被动轮询等待：可被**亮屏广播**提前打断（2026-10-26）。 */
+    private suspend fun awaitReplyOrTimeout(timeoutMs: Long) {
+        if (timeoutMs <= 0L) {
+            replyWake.tryReceive()
+            return
+        }
+        withTimeoutOrNull(timeoutMs) { replyWake.receive() }
+    }
+
+    /**
+     * 屏幕是否处于**可交互**状态（亮屏且未锁屏）。
+     *
+     * 判定失败按"熄屏"处理——保守方向：不点亮、不建屏（宁少打扰）。
+     */
+    private fun isScreenInteractive(): Boolean = runCatching {
+        val pm = getSystemService(android.os.PowerManager::class.java)
+        val km = getSystemService(android.app.KeyguardManager::class.java)
+        val interactive = pm?.isInteractive == true
+        val locked = km?.isKeyguardLocked == true
+        interactive && !locked
+    }.getOrDefault(false)
 
     /**
      * 到期处理（**唯一发送路径**；ADR-063 修订 2026-10-25）。
@@ -536,30 +598,41 @@ class ProactiveScheduleService : Service() {
                 // US-3111 AC-4（guardrail H-04/H-05）：**只有明确命中才建屏**。
                 // null 结果不建屏；探针内部有「连续未知 5 次」与「最长静默 15 分钟」两道兜底。
                 // L-25：探针**未装配**是装配缺陷，不能与"未知"混同——按旧行为轮询并告警一次。
+                //
+                // 2026-10-26 真机修复：改为**屏幕态驱动**（[QqPollPolicy]）——
+                // 亮屏时不再依赖通知摘要（通知被关/摘要在前台不更新都会让原策略永久失聪），
+                // 直接放行；熄屏仍保持"不点亮 + 探针命中才建屏 + 15 分钟兜底"。
                 val probe = QqProactiveGateway.unreadProbe
-                if (probe == null) {
+                val decision = if (probe == null) {
                     Log.w(TAG, "新消息探针未装配（装配缺陷）：本次按旧行为轮询")
+                    io.prism.qq.QqPollPolicy.Decision(
+                        poll = true,
+                        nextDelayMs = io.prism.qq.QqPollPolicy.SCREEN_OFF_POLL_MS,
+                        reason = "探针未装配：按旧行为轮询"
+                    )
                 } else {
-                    val hit = probe.invoke()
-                    val shouldPoll = io.prism.qq.QqPollDecision.shouldPoll(hit)
-                    val nowMs = System.currentTimeMillis()
-                    if (nowMs - lastProbeLogAtMs >= PROBE_LOG_INTERVAL_MS) {
-                        lastProbeLogAtMs = nowMs
-                        Log.i(
-                            TAG,
-                            "探针结果=$hit → ${if (shouldPoll) "放行（建屏读取）" else "跳过（零建屏）"}"
-                        )
-                    }
-                    if (!shouldPoll) {
-                        delay(REPLY_POLL_INTERVAL_MS)
-                        continue
-                    }
+                    io.prism.qq.QqPollPolicy.decide(
+                        screenInteractive = isScreenInteractive(),
+                        probe = probe.invoke()
+                    )
+                }
+                val nowMs = System.currentTimeMillis()
+                if (nowMs - lastProbeLogAtMs >= PROBE_LOG_INTERVAL_MS) {
+                    lastProbeLogAtMs = nowMs
+                    Log.i(
+                        TAG,
+                        "轮询决策：${decision.reason} → ${if (decision.poll) "放行（读会话）" else "跳过（零建屏）"}"
+                    )
+                }
+                if (!decision.poll) {
+                    awaitReplyOrTimeout(decision.nextDelayMs)
+                    continue
                 }
                 val result = poller()
                 // D-01：三态由应答器显式给出——"跳过"绝不能再被记成"成功"
                 //（原实现用 `!startsWith("错误")` 二分，真机出现"日志成功但 NapCat 无出站消息"）。
                 Log.i(TAG, result.logLine)
-                delay(REPLY_POLL_INTERVAL_MS)
+                awaitReplyOrTimeout(decision.nextDelayMs)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

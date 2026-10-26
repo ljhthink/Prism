@@ -127,7 +127,9 @@ class QqProactiveComposerTest {
     @Test
     fun `回复上下文对超长单条与超量历史做截断`() {
         val longText = "啊".repeat(500)
-        val many = (1..40).map {
+        // 2026-10-26：MAX_HISTORY_IN_PROMPT 随配置域扩到 200（真正上限是字符预算），
+        // 故构造「超过该常量」的历史来验证截断本身仍然生效
+        val many = (1..(QqProactiveComposer.MAX_HISTORY_IN_PROMPT + 10)).map {
             io.prism.qq.channel.QqMessage(null, it % 2 == 0, longText, 0)
         }
         val context = QqProactiveComposer.buildReplyUserContext(many, "收到")

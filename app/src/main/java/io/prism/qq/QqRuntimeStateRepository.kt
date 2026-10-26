@@ -56,6 +56,8 @@ class QqRuntimeStateRepository(
         prefs[FIRED_DATE] = todayKey
         prefs[FIRED_COUNT] = (if (sameDay) prefs[FIRED_COUNT] ?: 0 else 0) + 1
         prefs[FAILURE_STREAK] = 0
+        // 2026-10-26 RC-3 修复：被动回复的滑动窗口记账（与去重集合解耦）
+        prefs[PASSIVE_REPLY_AT] = appendPassiveTimestamp(prefs[PASSIVE_REPLY_AT], nowMs)
     }
 
     /**
@@ -97,6 +99,8 @@ class QqRuntimeStateRepository(
         prefs[FIRED_COUNT] = (if (sameDay) prefs[FIRED_COUNT] ?: 0 else 0) + 1
         // 刻意不写 SCHEDULED_COUNT：被动回复不消耗定时主动消息配额
         // 刻意不动 FAILURE_STREAK / CIRCUIT_OPEN：未确认既非成功也非账号失败
+        // 2026-10-26 RC-3 修复：仍计入被动回复滑动窗口（否则窗口限流可被"未确认"绕过）
+        prefs[PASSIVE_REPLY_AT] = appendPassiveTimestamp(prefs[PASSIVE_REPLY_AT], nowMs)
     }
 
     /** 记录一次**失败**：连续失败达到阈值即熔断（US-3105 AC-3）。 */
@@ -184,6 +188,22 @@ class QqRuntimeStateRepository(
         dataStore.edit(block)
     }
 
+    /**
+     * 追加一条被动回复时间戳并裁剪（RC-3）。
+     *
+     * 只保留最近 [QqRuntimeState.MAX_PASSIVE_TIMESTAMPS] 条，且淘汰超出滑动窗口 2 倍时长的旧值——
+     * 既保证限流判定正确，又避免文件无限增长。
+     */
+    private fun appendPassiveTimestamp(existing: String?, nowMs: Long): String {
+        val kept = existing.orEmpty()
+            .split(',')
+            .mapNotNull { it.trim().toLongOrNull() }
+            .filter { ts -> ts > 0L && nowMs - ts < PASSIVE_TIMESTAMP_TTL_MS }
+            .toMutableList()
+        kept += nowMs
+        return kept.takeLast(QqRuntimeState.MAX_PASSIVE_TIMESTAMPS).joinToString(",")
+    }
+
     private fun toState(prefs: Preferences): QqRuntimeState = QqRuntimeState(
         plannedTriggerAt = prefs[PLANNED_AT] ?: 0L,
         lastFiredAt = prefs[LAST_FIRED_AT] ?: 0L,
@@ -202,7 +222,10 @@ class QqRuntimeStateRepository(
         lastOutcomeReason = prefs[LAST_OUTCOME_REASON] ?: "",
         lastOutcomeAtMs = prefs[LAST_OUTCOME_AT] ?: 0L,
         retryWindowAnchor = prefs[RETRY_ANCHOR] ?: 0L,
-        retryCount = prefs[RETRY_COUNT] ?: 0
+        retryCount = prefs[RETRY_COUNT] ?: 0,
+        passiveReplyTimestamps = prefs[PASSIVE_REPLY_AT].orEmpty()
+            .split(',')
+            .mapNotNull { it.trim().toLongOrNull() }
     )
 
     companion object {
@@ -222,5 +245,11 @@ class QqRuntimeStateRepository(
         private val LAST_OUTCOME_AT = longPreferencesKey("qq_last_outcome_at")
         private val RETRY_ANCHOR = longPreferencesKey("qq_retry_window_anchor")
         private val RETRY_COUNT = intPreferencesKey("qq_retry_count")
+
+        /** 被动回复时间戳（逗号分隔 epoch ms；RC-3 滑动窗口）。 */
+        private val PASSIVE_REPLY_AT = stringPreferencesKey("qq_passive_reply_at")
+
+        /** 时间戳保留时长（滑动窗口的 2 倍，超出即淘汰）。 */
+        private const val PASSIVE_TIMESTAMP_TTL_MS = 5 * 60_000L
     }
 }

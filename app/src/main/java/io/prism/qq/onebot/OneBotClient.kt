@@ -13,7 +13,9 @@ import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.contentType
+import io.ktor.websocket.CloseReason
 import io.ktor.websocket.Frame
+import io.ktor.websocket.close
 import io.ktor.websocket.readText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -29,10 +31,12 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
@@ -124,6 +128,28 @@ class OneBotClient(
     private var droppedEventCount: Long = 0L
     private var lastDropLogAtMs: Long = 0L
 
+    /**
+     * 最近一次收到**任意帧**的时刻（含心跳元事件）。
+     *
+     * 用于识别**半开连接**：TCP 已死但本端未收到 FIN 时，`incoming` 会一直挂起、不抛异常，
+     * 表现为"显示已连接但永远收不到消息"。真机（2026-10-26）在 WiFi 切换后出现过该形态。
+     */
+    @Volatile
+    private var lastFrameAtMs: Long = 0L
+
+    /** 网络变化时立即打断退避等待（由系统 `NetworkCallback` 触发）。 */
+    private val reconnectSignal = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    /**
+     * 请求**立即重连**（网络恢复/切换时调用）。
+     *
+     * 原实现失败后最长要等 30s 退避才重试；用户在设置页切 WiFi/热点后往往在 30s 内
+     * 就判定"还是连不上"。本方法让退避等待可被网络事件打断，并把退避重置为初始值。
+     */
+    fun nudgeReconnect() {
+        reconnectSignal.tryEmit(Unit)
+    }
+
     /** 启动连接循环（幂等；与 [stop] 串行化）。 */
     suspend fun start() = lifecycleMutex.withLock {
         if (job?.isActive == true) return@withLock
@@ -184,6 +210,7 @@ class OneBotClient(
             }
             _state.value = State.Connecting
             var handshakeFailure: String? = null
+            var idleTimeout = false
             try {
                 http.webSocket(
                     urlString = cfg.wsUrl,
@@ -198,8 +225,26 @@ class OneBotClient(
                     connectedSelfId = selfId
                     _state.value = State.Connected(selfId)
                     backoffMs = INITIAL_BACKOFF_MS
-                    logger("OneBot WS 已连接")
+                    lastFrameAtMs = System.currentTimeMillis()
+                    logger("OneBot WS 已连接（${describeEndpoint(cfg.wsUrl)}）")
+                    // 半开连接看门狗：任何帧（含心跳）都会刷新 lastFrameAtMs；
+                    // 超过 IDLE_TIMEOUT_MS 无帧即主动关闭，让外层重连（而不是永久挂起）。
+                    val watchdog = launch {
+                        while (isActive) {
+                            delay(WATCHDOG_INTERVAL_MS)
+                            val idleMs = System.currentTimeMillis() - lastFrameAtMs
+                            if (idleMs >= IDLE_TIMEOUT_MS) {
+                                idleTimeout = true
+                                logger("连接空闲 ${idleMs / 1000}s（无任何帧），判定为半开连接，主动重连")
+                                runCatching {
+                                    close(CloseReason(CloseReason.Codes.GOING_AWAY, "idle"))
+                                }
+                                break
+                            }
+                        }
+                    }
                     for (frame in incoming) {
+                        lastFrameAtMs = System.currentTimeMillis()
                         if (frame !is Frame.Text) continue
                         val text = frame.readText()
                         if (text.length > MAX_FRAME_CHARS) {
@@ -217,23 +262,43 @@ class OneBotClient(
                             }
                         }
                     }
+                    watchdog.cancel()
                 }
                 if (currentCoroutineContext().isActive) {
                     // guardrail L-13：握手失败原因不得被"对端关闭"覆盖
-                    _state.value = State.Failed(handshakeFailure ?: "连接已被对端关闭")
+                    _state.value = State.Failed(
+                        handshakeFailure ?: if (idleTimeout) {
+                            "连接空闲超时（已自动重连）"
+                        } else {
+                            "连接已被对端关闭"
+                        }
+                    )
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                // 只记录异常类型与短消息；异常 message 可能含 URL（不含 token 头）
-                logger("OneBot WS 断开：${describeFailure(e)}")
+                // 只记录异常类型与短消息；异常 message 可能含 URL（不含 token 头）。
+                // 2026-10-26：必须带目标 host:port——原日志只有"无法连接"，真机上无法区分
+                // "地址是回环/跨网段/端口错/防火墙"（见 ADR-066）。
+                logger("OneBot WS 断开（${describeEndpoint(cfg.wsUrl)}）：${describeFailure(e)}")
             }
             if (!currentCoroutineContext().isActive) return
             connectedSelfId = 0L
-            delay(backoffMs)
+            // 网络变化可打断退避并重置（否则用户切换网络后仍要等最长 30s）
+            val nudged = withTimeoutOrNull(backoffMs) { reconnectSignal.first() } != null
+            if (nudged) {
+                backoffMs = INITIAL_BACKOFF_MS
+                logger("网络变化：立即重连")
+            }
             backoffMs = (backoffMs * 2).coerceAtMost(MAX_BACKOFF_MS)
         }
     }
+
+    /** `ws://host:port/...` → `host:port`（日志用，不含 token/路径）。 */
+    private fun describeEndpoint(rawUrl: String): String = runCatching {
+        val uri = java.net.URI(rawUrl)
+        "${uri.host}:${if (uri.port > 0) uri.port else 80}"
+    }.getOrDefault("未知地址")
 
     /** 把常见异常映射为**可执行**的可读原因（guardrail H-02 / M-06）。 */
     private fun describeFailure(e: Exception): String {
@@ -316,5 +381,15 @@ class OneBotClient(
 
         /** 丢事件日志的最小间隔（防刷屏）。 */
         private const val DROP_LOG_INTERVAL_MS = 60_000L
+
+        /** 半开连接看门狗检查间隔。 */
+        private const val WATCHDOG_INTERVAL_MS = 15_000L
+
+        /**
+         * 无任何帧的最长容忍时间。
+         *
+         * NapCat 默认每 5s 发一次 `meta_event` 心跳，90s 无帧（≈18 个心跳周期）可确定链路已死。
+         */
+        private const val IDLE_TIMEOUT_MS = 90_000L
     }
 }

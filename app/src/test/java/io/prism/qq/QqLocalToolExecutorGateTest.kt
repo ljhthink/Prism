@@ -213,17 +213,24 @@ class QqLocalToolExecutorGateTest {
     }
 
     @Test
-    fun `send_message 受每日上限闸拒绝（US-3105 AC-1 编排生效）`() = runBlocking<Unit> {
+    fun `send_message 不受主动每日上限闸约束（2026-10-26 语义修订）`() = runBlocking<Unit> {
         val (cfg, rt) = newRepos()
         cfg.setEnabled(true)
         cfg.setRiskAccepted(true)
         val today = QqThrottle.todayKey(System.currentTimeMillis(), java.time.ZoneId.systemDefault())
-        // 用"1 小时前"记录，绕过最小间隔判定（30min）直达上限分支
         val anHourAgo = System.currentTimeMillis() - 60L * 60_000
-        repeat(20) { rt.recordFired(anHourAgo, today) } // dailyCap 默认 20
+        repeat(20) { rt.recordFired(anHourAgo, today) } // dailyCap 默认 20 已用满
         val e = executor(cfg, rt, HighRiskApprovalMode.ALLOW)
         val r = e.execute("qq__send_message", mapOf("contact" to "测试", "message" to "在忙吗"))
-        assertTrue("达上限应拒绝：$r", r.contains("上限"))
+        // 真机 2026-10-26：工具发送被"已达定时主动消息当日上限"拦掉。
+        // 配额语义是限制**系统自发**行为，工具调用是用户/模型显式要求，故改走 decideManual。
+        assertTrue("工具发送不得再被主动配额拦截：$r", !r.contains("上限"))
+        // 主动路径（定时消息）仍然受限——由 QqThrottleTest / QqThrottlePassiveTest 覆盖
+        assertTrue(
+            QqThrottle.decide(
+                cfg.get(), rt.get(), System.currentTimeMillis()
+            ) is QqThrottle.Decision.Deny
+        )
     }
 
     // ==================== cancel / status（US-3108） ====================

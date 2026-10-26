@@ -81,6 +81,21 @@ interface QqChannel {
         "错误：当前通道不支持语音消息（无障碍通道无法注入预生成音频）"
 
     /**
+     * 发送表情（PRD US-3122；2026-10-26 新增）。
+     *
+     * 两种形态：
+     * - `emotion`：内置 QQ 表情的**情绪标签**（如 `开心`），由通道映射到 `face` 段；
+     * - `stickerId`：用户导入的表情图片 ID 或收到过的商城表情键。
+     *
+     * 默认实现返回可读「不支持」——无障碍通道无法向 QQ 输入框注入图片。
+     */
+    suspend fun sendSticker(
+        contact: String,
+        emotion: String? = null,
+        stickerId: String? = null
+    ): String = "错误：当前通道不支持表情消息（无障碍通道无法注入图片）"
+
+    /**
      * 新消息事件流（仅协议端实现；无障碍通道返回空流——其轮询由 Service 侧承载）。
      */
     fun incoming(): Flow<QqMessage>

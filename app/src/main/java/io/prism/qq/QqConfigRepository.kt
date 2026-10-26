@@ -101,9 +101,29 @@ class QqConfigRepository(
         it[ONEBOT_TARGET_ID] = targetUserId.coerceAtLeast(0L)
     }
 
-    /** 回复时读取的历史条数（US-3112；读侧/写侧均钳制）。 */
+    /** 回复时读取的历史条数（US-3112；读侧/写侧均钳制；2026-10-26 扩到 1~200）。 */
     suspend fun setHistoryLimit(n: Int) = edit {
         it[HISTORY_LIMIT] = n.coerceIn(QqConfig.MIN_HISTORY_LIMIT, QqConfig.MAX_HISTORY_LIMIT)
+    }
+
+    /** 上下文字符预算（2026-10-26 新增）。 */
+    suspend fun setHistoryCharBudget(n: Int) = edit {
+        it[HISTORY_CHAR_BUDGET] = n.coerceIn(
+            QqConfig.MIN_HISTORY_CHAR_BUDGET, QqConfig.MAX_HISTORY_CHAR_BUDGET
+        )
+    }
+
+    /** 自动回复是否允许附带表情/语音（仅协议端生效）。 */
+    suspend fun setMediaReplyEnabled(enabled: Boolean) = edit { it[MEDIA_REPLY] = enabled }
+
+    /** 自动回复附带表情的概率（0~100）。 */
+    suspend fun setStickerChancePercent(p: Int) = edit {
+        it[STICKER_CHANCE] = p.coerceIn(0, 100)
+    }
+
+    /** 自动回复改用语音的概率（0~100）。 */
+    suspend fun setVoiceChancePercent(p: Int) = edit {
+        it[VOICE_CHANCE] = p.coerceIn(0, 100)
     }
 
     /** 是否注入 L2/L3 记忆（US-3112 AC-4）。 */
@@ -142,6 +162,10 @@ class QqConfigRepository(
         oneBotSelfId = prefs[ONEBOT_SELF_ID] ?: 0L,
         oneBotTargetUserId = prefs[ONEBOT_TARGET_ID] ?: 0L,
         historyLimit = prefs[HISTORY_LIMIT] ?: QqConfig.DEFAULT_HISTORY_LIMIT,
+        historyCharBudget = prefs[HISTORY_CHAR_BUDGET] ?: QqConfig.DEFAULT_HISTORY_CHAR_BUDGET,
+        mediaReplyEnabled = prefs[MEDIA_REPLY] ?: true,
+        stickerChancePercent = prefs[STICKER_CHANCE] ?: 25,
+        voiceChancePercent = prefs[VOICE_CHANCE] ?: 10,
         memoryInjectionEnabled = prefs[MEMORY_INJECTION] ?: true,
         wakeOnScreenOff = prefs[WAKE_ON_SCREEN_OFF] ?: true
     ).clamped()
@@ -175,6 +199,10 @@ class QqConfigRepository(
         private val ONEBOT_SELF_ID = longPreferencesKey("qq_onebot_self_id")
         private val ONEBOT_TARGET_ID = longPreferencesKey("qq_onebot_target_id")
         private val HISTORY_LIMIT = intPreferencesKey("qq_history_limit")
+        private val HISTORY_CHAR_BUDGET = intPreferencesKey("qq_history_char_budget")
+        private val MEDIA_REPLY = booleanPreferencesKey("qq_media_reply")
+        private val STICKER_CHANCE = intPreferencesKey("qq_sticker_chance")
+        private val VOICE_CHANCE = intPreferencesKey("qq_voice_chance")
         private val MEMORY_INJECTION = booleanPreferencesKey("qq_memory_injection")
         private val WAKE_ON_SCREEN_OFF = booleanPreferencesKey("qq_wake_on_screen_off")
     }

@@ -93,7 +93,7 @@ class QqLocalToolExecutorTest {
     @Test
     fun `工具定义为合法 JSON Schema（避免 400）`() {
         val defs = QqLocalToolExecutor.buildToolDefinitions()
-        assertEquals(4, defs.size)
+        assertEquals(5, defs.size)
         assertTrue(defs.any { it.function.name == "qq__send_voice" })
         defs.forEach { d ->
             assertTrue(d.function.name.startsWith("qq__"))
@@ -190,16 +190,19 @@ class QqLocalToolExecutorTest {
     }
 
     @Test
-    fun `buildTools 两态形状 - qqToolsEnabled 为真注入四个 qq 工具`() {
+    fun `buildTools 两态形状 - qqToolsEnabled 为真注入五个 qq 工具`() {
         val tools = io.prism.ui.chat.ConversationViewModel.buildTools(emptyList(), qqToolsEnabled = true)
         val names = tools.map { it.function.name }
         assertTrue(
-            "应注入 qq__send_message/send_voice/set_signature/schedule_message：$names",
+            "应注入 qq__send_message/send_voice/send_sticker/set_signature/schedule_message：$names",
             names.containsAll(
-                listOf("qq__send_message", "qq__send_voice", "qq__set_signature", "qq__schedule_message")
+                listOf(
+                    "qq__send_message", "qq__send_voice", "qq__send_sticker",
+                    "qq__set_signature", "qq__schedule_message"
+                )
             )
         )
-        assertEquals(4, names.count { it.startsWith("qq__") })
+        assertEquals(5, names.count { it.startsWith("qq__") })
     }
 
     @Test

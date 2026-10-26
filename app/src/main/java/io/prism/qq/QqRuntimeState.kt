@@ -44,6 +44,16 @@ data class QqRuntimeState(
      */
     val repliedMessageIds: List<String> = emptyList(),
     /**
+     * 最近若干次**被动回复**的时间戳（2026-10-26 RC-3 修复）。
+     *
+     * 滑动窗口限流专用：与 [repliedMessageIds]（去重集合）**彻底解耦**。
+     * 原实现把「去重集合长度」当限流判据，而该集合会被裁剪到固定 20 条且永不缩短，
+     * 导致累计回复 20 条后被动回复被**永久拒绝**。
+     *
+     * 只保留最近 [MAX_PASSIVE_TIMESTAMPS] 条（按时间升序），更旧的在写入时淘汰。
+     */
+    val passiveReplyTimestamps: List<Long> = emptyList(),
+    /**
      * 上次定时任务的**结果类别**（ADR-063 修订 2026-10-25；PRD US-3115 AC-6）。
      *
      * 取值：`SUCCESS` / `SKIP:<原因类别>` / `FAIL:<原因类别>` / 空=从未执行。
@@ -68,5 +78,13 @@ data class QqRuntimeState(
     companion object {
         /** 幂等集合上限（防无限增长；远大于一次重连可能补投的条数）。 */
         const val MAX_REPLIED_IDS = 20
+
+        /**
+         * 被动回复时间戳保留条数。
+         *
+         * 只需覆盖一个滑动窗口（[QqThrottle.PASSIVE_WINDOW_MS] 内最多 20 条），
+         * 这里留 2 倍余量，且写入时按时间淘汰，文件不会无限增长。
+         */
+        const val MAX_PASSIVE_TIMESTAMPS = 40
     }
 }

@@ -90,6 +90,12 @@ class QqProactiveComposer(
         history: List<QqMessage> = emptyList(),
         /** L2 跨会话记忆 + L3 用户画像的合并 section（US-3112 AC-3；null/空=不注入）。 */
         memorySection: String? = null,
+        /**
+         * 表情/语音指令提示（2026-10-26；US-3122）。
+         *
+         * 由 [QqReplyDirective.promptHint] 生成；null/空表示本次不允许媒体。
+         */
+        mediaHint: String? = null,
         now: LocalDateTime = LocalDateTime.now()
     ): String? {
         if (baseUrl.isBlank() || apiKey.isBlank() || model.isBlank()) return null
@@ -102,7 +108,8 @@ class QqProactiveComposer(
         val system = persona + memory +
             "\n\n对方刚给你发了一条消息，请**像真人那样自然、即时地回一句**。" +
             "要求：口语、简短（不超过 60 字）、承接对方话题，可以有语气词/表情；" +
-            "不要引号、不要自称 AI、不要解释你在做什么，只输出回复正文本身。"
+            "不要引号、不要自称 AI、不要解释你在做什么，只输出回复正文本身。" +
+            (mediaHint?.takeIf { it.isNotBlank() } ?: "")
         val userContext = buildReplyUserContext(history, incoming)
         val body = buildRequestJson(model, system, userContext, reply = true)
         return postWithRetry(body, baseUrl, apiKey)
@@ -148,11 +155,12 @@ class QqProactiveComposer(
         const val MAX_LEN = 200
 
         /**
-         * 进入 prompt 的历史条数上限（US-3112；与配置域 6~30 一致，guardrail D-02）。
+         * 进入 prompt 的历史条数上限（US-3112；2026-10-26 随配置域扩到 200）。
          *
-         * 此前为 20，导致用户配置 21~30 时静默失效——AC-1 要求「可配置」必须真实生效。
+         * 真正的上限是**字符预算**（`QqConfig.historyCharBudget`，由
+         * [QqContextBuilder.trimByBudget] 在调用方裁剪），这里只防"历史列表未裁剪时"的极端输入。
          */
-        const val MAX_HISTORY_IN_PROMPT = 30
+        const val MAX_HISTORY_IN_PROMPT = 200
 
         /** 单条历史消息进入 prompt 的字符上限（防单条长文撑爆上下文）。 */
         const val MAX_CHARS_PER_MESSAGE = 120
@@ -190,7 +198,7 @@ class QqProactiveComposer(
         buildJsonObject {
             put("model", model)
             put("stream", false)
-            put("max_tokens", 120)
+            put("max_tokens", if (reply) 400 else 120)
             put("temperature", 0.9)
             put(
                 "messages",
