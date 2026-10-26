@@ -67,4 +67,15 @@ interface IShizukuUserService {
      * @return `OK:<width>:<height>:<ageMs>` 或 `ERR:<原因>`
      */
     String hiddenFrameInfo();
+
+    /**
+     * 2026-10-26（ADR-046 修订；PRISM US-3117）：**本用户服务进程自己的 PID**。
+     *
+     * 用途：清理"孤儿用户服务"时必须排除当前在用的这个进程。调用方无法从 Binder 代理
+     * 反查对端 PID（`Binder.getCallingPid()` 只在服务端有效），若传 -1 当占位，
+     * 清理逻辑会把"为读取 ps 而刚创建的本进程"当孤儿杀掉（真机复核发现的缺陷）。
+     *
+     * @return `Process.myPid()`（正整数）
+     */
+    int selfPid();
 }

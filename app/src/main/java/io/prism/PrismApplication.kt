@@ -954,6 +954,34 @@ class PrismApplication : Application() {
         kotlinx.coroutines.flow.MutableStateFlow(io.prism.config.DisplayBackendConfigRepository.DEFAULT_HIDDEN_ENABLED)
 
     /**
+     * ADR-046 修订（2026-10-26，PRD US-3116）：无障碍**自愈开关**（默认开，用户裁定）。
+     *
+     * 用轻量 SharedPreferences 而非新开 DataStore：只有一个布尔、读写都在主线程路径上，
+     * 且不希望为它再引入一个 DataStore 单例（多实例会崩）。
+     */
+    private val accessibilitySelfHealEnabledFlow = kotlinx.coroutines.flow.MutableStateFlow(
+        runCatching {
+            getSharedPreferences("prism_a11y", MODE_PRIVATE)
+                .getBoolean("self_heal_enabled", true)
+        }.getOrDefault(true)
+    )
+
+    /** 读/写无障碍自愈开关（设置页与 Monitor 共用）。 */
+    fun isAccessibilitySelfHealEnabled(): Boolean = accessibilitySelfHealEnabledFlow.value
+
+    fun setAccessibilitySelfHealEnabled(enabled: Boolean) {
+        accessibilitySelfHealEnabledFlow.value = enabled
+        runCatching {
+            getSharedPreferences("prism_a11y", MODE_PRIVATE).edit()
+                .putBoolean("self_heal_enabled", enabled).apply()
+        }
+    }
+
+    /** 无障碍服务实例是否可用（debug 探针/设置页共用）。 */
+    fun isAccessibilityService(): Boolean =
+        io.prism.phonecontrol.PhoneControlAccessibilityService.instance != null
+
+    /**
      * ADR-065（US-3114）：执行面后端偏好仓库（隐藏执行面开关，DataStore 持久化）。
      */
     val displayBackendConfigRepository: io.prism.config.DisplayBackendConfigRepository by lazy {
@@ -1343,6 +1371,47 @@ class PrismApplication : Application() {
         // 批次21（ADR-046）：ShizukuShell 上下文注入（四态判定需 PackageManager 探测
         // Shizuku manager 包，区分"未安装"与"已安装未激活"）
         io.prism.phonecontrol.bg.ShizukuShell.init(this)
+        // ADR-046 修订（2026-10-26，PRD US-3116）：无障碍健康监测装配。
+        // - 自愈开关默认开（用户 2026-10-26 裁定）；可在设置页关闭；
+        // - 状态变化时发**可点通知**（HyperOS 清掉注册是常见现象，必须让用户知道而不是
+        //   "等工具失败才发现"）；
+        // - 检查由"App 进入前台 / 调用手机操控工具"打点触发，**不常驻轮询**。
+        io.prism.phonecontrol.health.AccessibilityHealthMonitor.selfHealEnabledProvider = {
+            runCatching { accessibilitySelfHealEnabledFlow.value }.getOrDefault(true)
+        }
+        io.prism.phonecontrol.health.AccessibilityHealthMonitor.onStateChanged = { old, new, message ->
+            android.util.Log.i("PrismApplication", "无障碍状态 $old → $new：$message")
+            // guardrail G-10：原实现在"自愈成功"时仍发「被系统关闭」通知（标题与正文矛盾）。
+            // 现在只在"仍处于 DISABLED 且未被恢复"时发通知；恢复成功只记日志 + 设置页可见。
+            if (new == io.prism.phonecontrol.health.AccessibilityHealth.State.DISABLED) {
+                io.prism.phonecontrol.PhoneControlAskUserNotifier.notifyAccessibilityLost(this, message)
+            }
+        }
+        // App 启动即做一次（限频；force=false，避免每次冷启动都写 settings）
+        appScope.launch {
+            runCatching {
+                io.prism.phonecontrol.health.AccessibilityHealthMonitor
+                    .notifyAppActive(this@PrismApplication)
+            }
+        }
+        // 每次回到前台再打点（间隔由 Monitor 内部 30s 限频）
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            override fun onActivityResumed(activity: android.app.Activity) {
+                appScope.launch {
+                    runCatching {
+                        io.prism.phonecontrol.health.AccessibilityHealthMonitor
+                            .notifyAppActive(this@PrismApplication)
+                    }
+                }
+            }
+
+            override fun onActivityCreated(activity: android.app.Activity, state: android.os.Bundle?) = Unit
+            override fun onActivityStarted(activity: android.app.Activity) = Unit
+            override fun onActivityPaused(activity: android.app.Activity) = Unit
+            override fun onActivityStopped(activity: android.app.Activity) = Unit
+            override fun onActivitySaveInstanceState(activity: android.app.Activity, outState: android.os.Bundle) = Unit
+            override fun onActivityDestroyed(activity: android.app.Activity) = Unit
+        })
         // ADR-065（US-3114）：执行面后端偏好注入（默认隐藏虚拟屏）+ DataStore 热更新。
         // 秒读 StateFlow（工具/建屏在 IO 协程）；读取失败保持默认值，不阻断后台执行。
         io.prism.phonecontrol.bg.VirtualDisplayManager.hiddenDisplayEnabledProvider = {
@@ -1362,7 +1431,41 @@ class PrismApplication : Application() {
         // 修复轮八：进程死亡残留对账（叠加小窗滞留兜底）——后台线程（Shizuku 绑定 +
         // settings get 最长 5s）；应用冷启动时 Shizuku 未就绪则 no-op，由 a11y 服务连接
         // 时再次对账
-        Thread { runCatching { io.prism.phonecontrol.bg.VirtualDisplayManager.reconcileStaleOverlay(this) } }.start()
+        Thread {
+            // ADR-046 修订（2026-10-26）：清理孤儿用户服务 → 补一次无障碍自愈 → 显示面对账。
+            // 动作序列与等待上限由 [StartupSelfHealPlan] 定义（guardrail R4-04：可单测）。
+            //
+            // 为什么需要"等 READY"：`onCreate` 时 Shizuku 往往尚未 READY（权限/服务枚举是
+            // 异步的），`cleanupOrphanUserServices()` 会直接返回空 → 孤儿永远清不掉。
+            // 为什么需要"补一次自愈"（真机 14:29 复现）：自愈若在 Shizuku 就绪**之前**尝试，
+            // 会以"需要 Shizuku"跳过，而后续没有重试触发点（只有回前台触发，后台执行期不回前台）。
+            var polls = 0
+            while (io.prism.phonecontrol.health.StartupSelfHealPlan.shouldKeepWaiting(
+                    polls, io.prism.phonecontrol.bg.ShizukuShell.isReady()
+                )
+            ) {
+                runCatching { Thread.sleep(io.prism.phonecontrol.health.StartupSelfHealPlan.POLL_INTERVAL_MS) }
+                polls++
+            }
+            val shizukuReady = io.prism.phonecontrol.bg.ShizukuShell.isReady()
+            io.prism.phonecontrol.health.StartupSelfHealPlan.steps(shizukuReady).forEach { step ->
+                runCatching {
+                    when (step) {
+                        io.prism.phonecontrol.health.StartupSelfHealPlan.Step.SWEEP_ORPHAN_USER_SERVICES -> {
+                            val killed = io.prism.phonecontrol.bg.ShizukuShell.cleanupOrphanUserServices()
+                            if (killed.isNotEmpty()) {
+                                android.util.Log.i("PrismApplication", "启动清理孤儿用户服务 ${killed.size} 个")
+                            }
+                        }
+                        io.prism.phonecontrol.health.StartupSelfHealPlan.Step.FORCE_ACCESSIBILITY_SELF_HEAL ->
+                            io.prism.phonecontrol.health.AccessibilityHealthMonitor
+                                .notifyAppActive(this, force = true)
+                        io.prism.phonecontrol.health.StartupSelfHealPlan.Step.RECONCILE_RESIDUAL_DISPLAY ->
+                            io.prism.phonecontrol.bg.VirtualDisplayManager.reconcileStaleOverlay(this)
+                    }
+                }
+            }
+        }.start()
         boxStore = MyObjectBox.builder()
             .androidContext(this)
             .build()

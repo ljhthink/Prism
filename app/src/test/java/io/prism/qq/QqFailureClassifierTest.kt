@@ -165,4 +165,37 @@ class QqFailureClassifierTest {
             )
         }
     }
+
+    // ==================== US-3118：账号态不可用 ====================
+
+    @Test
+    fun `小号登录态失效归为账号态且不重试不熔断`() {
+        // 真机 2026-10-26 原文（QqPageState.blockMessage 的输出）
+        val text = "错误：小号登录态失效：QQ 要求重新验证身份（安全提醒）。请在手机上的小号 QQ 中" +
+            "完成验证后再试（本次不会重试、不消耗配额，也不计入熔断）"
+        val kind = QqFailureClassifier.classify(text)
+        assertEquals(QqFailureClassifier.Kind.ACCOUNT_STATE_INVALID, kind)
+        assertFalse("不能重试——需用户验证", QqFailureClassifier.isRetryable(kind))
+        assertFalse("不能熔断——不是账号/内容失败而是登录态", QqFailureClassifier.countsTowardCircuit(kind))
+        assertTrue(QqFailureClassifier.isAccountStateBlocked(kind))
+    }
+
+    @Test
+    fun `小号未登录同样归为账号态`() {
+        val kind = QqFailureClassifier.classify(
+            "错误：小号未登录：QQ 停在登录页。请先在小号 QQ 中完成登录后再试"
+        )
+        assertEquals(QqFailureClassifier.Kind.ACCOUNT_STATE_INVALID, kind)
+        assertFalse(QqFailureClassifier.isRetryable(kind))
+    }
+
+    @Test
+    fun `账号态优先于目标找不到（真机上两者常同时出现）`() {
+        // 登录失效 → 会话列表空 → 文案里既可能提"找不到联系人"也可能提"登录态"
+        val text = "错误：未能在 QQ 消息列表找到「S***」。请核实小号 QQ 登录态后重试（身份验证已失效）"
+        assertEquals(
+            QqFailureClassifier.Kind.ACCOUNT_STATE_INVALID,
+            QqFailureClassifier.classify(text)
+        )
+    }
 }

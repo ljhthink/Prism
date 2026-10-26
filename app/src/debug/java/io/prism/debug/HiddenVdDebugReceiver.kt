@@ -68,6 +68,9 @@ class HiddenVdDebugReceiver : BroadcastReceiver() {
                     ACTION_FRAME -> {
                         frameDescription(0)
                     }
+                    // 2026-10-26 排障：把当前执行面帧落盘到应用外部目录，供 `adb pull` 查看实况
+                    // （此前只能拿到尺寸，无法判断"点了发送到底发出没有/画面停在哪一页"）。
+                    ACTION_DUMP_FRAME -> dumpFrame(app)
                     ACTION_FRAME_PREVIEW -> frameDescription(360)
                     // 2026-10-25 帧健康：连续取帧并输出帧龄/尺寸，用于证明"冻结/无画面"
                     ACTION_FRAME_PROBE -> frameProbe()
@@ -113,6 +116,27 @@ class HiddenVdDebugReceiver : BroadcastReceiver() {
 
     private fun logError(message: String) {
         Log.e(TAG, message)
+    }
+
+    /**
+     * 把执行面当前帧写成 PNG 到 `files/exports/hidden-frame.png`（仅 debug 构建）。
+     *
+     * 用于真机排障："发送后到底停在哪一页""输入框还有没有文字""画面是不是卡住了"——
+     * 只有看到像素才能区分"没点中发送按钮"与"点了但没确认"。
+     */
+    private fun dumpFrame(context: android.content.Context): String {
+        val frame = io.prism.phonecontrol.bg.VirtualDisplayManager.latestFrameWithMeta()
+            ?: return "dump=no-frame"
+        return try {
+            val dir = java.io.File(context.filesDir, "exports").apply { mkdirs() }
+            val out = java.io.File(dir, "hidden-frame.png")
+            java.io.FileOutputStream(out).use { stream ->
+                frame.bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream)
+            }
+            "dump=${out.absolutePath} ${frame.width}x${frame.height} ageMs=${frame.ageMs()}"
+        } finally {
+            frame.bitmap.recycle()
+        }
     }
 
     /** 取帧并返回尺寸描述（0=原图；360=Watch 预览宽）。 */
@@ -161,6 +185,7 @@ class HiddenVdDebugReceiver : BroadcastReceiver() {
         const val ACTION_FRAME = "frame"
         const val ACTION_FRAME_PREVIEW = "frame_preview"
         const val ACTION_FRAME_PROBE = "frame_probe"
+        const val ACTION_DUMP_FRAME = "dump_frame"
         const val ACTION_DISPLAY_STATE = "display_state"
         const val ACTION_TAKEOVER = "takeover"
         const val ACTION_LEGACY = "legacy"

@@ -482,6 +482,95 @@ class PhoneControlAccessibilityService : AccessibilityService() {
      * @param nodeId 节点序号；null 时返回 null
      * @return 节点+子树文本/描述拼接（可为 null）
      */
+    /**
+     * 聊天记录区域的可见文本（**排除**输入框子树；guardrail R2-01）。
+     *
+     * 为什么要排除：`getUiTreeText` 会把输入框里的文本也聚合进来。若用它做"消息是否出现"
+     * 的兜底判据，"点了发送但输入框还留着原文"会因输入框自身文本命中片段而被判成已发出，
+     * 反而抵消"输入框未清空 = 未确认"的保护（正是丢消息的方向）。
+     *
+     * 做法：遍历执行面树，跳过 `VIEW_ID_INPUT` 节点及其子树，其余文本按 maxChars 截断拼接。
+     *
+     * @param excludeViewIdTail 需要整棵跳过的 resource-id 尾段（如输入框 `input`）
+     */
+    fun visibleTextExcluding(excludeViewIdTail: String, maxChars: Int = 4_000): String? {
+        val root = executionRoot() ?: return null
+        return try {
+            val sb = StringBuilder()
+            val q = ArrayDeque<AccessibilityNodeInfoCompat>()
+            q.add(AccessibilityNodeInfoCompat.wrap(root))
+            while (q.isNotEmpty() && sb.length < maxChars) {
+                val n = q.removeFirst()
+                val rid = n.viewIdResourceName
+                if (rid != null && rid.substringAfterLast('/') == excludeViewIdTail) {
+                    continue // 跳过整个输入框子树
+                }
+                n.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let { sb.append(it).append(' ') }
+                n.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+                    ?.let { sb.append(it).append(' ') }
+                for (i in 0 until n.childCount) {
+                    n.getChild(i)?.let { q.addLast(it) }
+                }
+            }
+            if (sb.isEmpty()) null else sb.toString()
+        } catch (e: Exception) {
+            Log.w(TAG, "visibleTextExcluding 失败：${e::class.simpleName}")
+            null
+        } finally {
+            runCatching { root.recycle() }
+        }
+    }
+
+    /**
+     * 输入框是否**存在**（区别于"存在但读不到文本"；guardrail R2-01）。
+     *
+     * `nodeTextOf` 对空输入框会返回 null（聚合文本为空即 null），这与"节点已不存在/
+     * 读取失败"无法区分。本方法只回答"节点在不在"，让"空"与"读不到"可以分开判定。
+     *
+     * @deprecated guardrail **R3-01**：存在性与文本分两次读会**寻址基准不一致**
+     *   （一次按 viewId 实时定位、一次按发送前的 BFS 序号），树形变后序号会落到
+     *   别的子树 → 误判"已清空"。请改用 [textOfViewId] 一次取回两者。
+     */
+    @Deprecated("用 textOfViewId 一次取回存在性与文本（R3-01）")
+    fun hasNodeByViewId(viewId: String): Boolean =
+        runCatching { findNodeByViewIdNid(viewId) != null }.getOrDefault(false)
+
+    /**
+     * 按 **viewId 实时定位**并返回 (节点是否存在, 聚合文本)；guardrail **R3-01**。
+     *
+     * 为什么必须原子：此前"存在性"用 `findNodeByViewIdNid`（实时 BFS 定位）、"文本"用发送前
+     * 取得的 BFS **序号** `nodeTextOf(nid)`。发送前后树形会变（输入区按钮切换、新增气泡、
+     * 弹层、收键盘），旧序号会落到头像/分隔块等无文本子树 → 文本读成 null → 判"已清空"
+     * → 报已发送且不重试（丢消息）。本方法**一次遍历**同时给出存在性与文本，
+     * 二者必然来自同一个节点。
+     *
+     * @return `first`=该 viewId 的节点是否存在；`second`=其聚合文本（空/无文本为 null）
+     */
+    fun textOfViewId(viewId: String): Pair<Boolean, String?> {
+        if (viewId.isBlank()) return false to null
+        val root = executionRoot() ?: return false to null
+        return try {
+            val queue = ArrayDeque<AccessibilityNodeInfoCompat>()
+            queue.add(AccessibilityNodeInfoCompat.wrap(root))
+            while (queue.isNotEmpty()) {
+                val n = queue.removeFirst()
+                val rid = n.viewIdResourceName
+                if (rid != null && rid.substringAfterLast('/') == viewId) {
+                    return true to aggregateNodeText(n)
+                }
+                for (i in 0 until n.childCount) {
+                    queue.addLast(n.getChild(i) ?: continue)
+                }
+            }
+            false to null
+        } catch (e: Exception) {
+            Log.w(TAG, "textOfViewId 失败：${e::class.simpleName}")
+            false to null
+        } finally {
+            runCatching { root.recycle() }
+        }
+    }
+
     fun nodeTextOf(nodeId: Int?): String? {
         if (nodeId == null) return null
         val root = executionRoot() ?: return null
@@ -779,6 +868,40 @@ class PhoneControlAccessibilityService : AccessibilityService() {
      * 避免 LLM 盲目重试、缓解"感知不到"死循环。
      *
      * @return 前台包名；无可判定窗口返回 null
+     */
+    /**
+     * 按 display 分组的可见窗口**包名**（2026-10-26，ADR-065 修订用）。
+     *
+     * 封装 `getWindowsOnAllDisplays()` 的唯一目的：把"窗口根节点的获取与回收"收在一处，
+     * 避免调用方拿到 `AccessibilityNodeInfo` 后忘记 recycle。
+     *
+     * **注意**：这里**无法**区分同名包的不同用户实例（小号 XSpace 999 与用户 0 同包名）。
+     * 需要用户归属的判据见 [io.prism.phonecontrol.bg.MainDisplayWindows]，它从
+     * `dumpsys window windows` 的 `Window{.. u<userId> pkg/..}` 头行解析。
+     *
+     * @return displayId → 包名列表；不可用返回 null（调用方按"无法判定"处理）
+     */
+    fun windowsOnAllDisplaysCompat(): Map<Int, List<String>>? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return null
+        val all = runCatching { getWindowsOnAllDisplays() }.getOrNull() ?: return null
+        val out = mutableMapOf<Int, MutableList<String>>()
+        for (i in 0 until all.size()) {
+            val displayId = all.keyAt(i)
+            val list = all.valueAt(i)
+            val names = out.getOrPut(displayId) { mutableListOf() }
+            list.forEach { win ->
+                val root = runCatching { win.root }.getOrNull() ?: return@forEach
+                runCatching { root.packageName?.toString() }.getOrNull()?.let { names += it }
+                runCatching { root.recycle() }
+            }
+        }
+        return out
+    }
+
+    /**
+     * 前台（当前活动窗口）包名。
+     *
+     * @return 活动窗口根节点的包名；无窗口/读不到返回 null
      */
     fun currentForegroundPackage(): String? {
         val best = windows

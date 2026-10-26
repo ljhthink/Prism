@@ -130,10 +130,70 @@ class PhoneControlAskUserNotifier(
         /** 确认通知 id 基址（测试经此映射断言通知存在）。 */
         const val NOTIFICATION_ID_BASE = 7000
 
+        /** 无障碍被关闭提醒（独立渠道与 id，避免与高危确认互相覆盖）。 */
+        private const val A11Y_CHANNEL_ID = "prism_a11y_lost"
+        private const val A11Y_CHANNEL_NAME = "无障碍状态提醒"
+        private const val A11Y_NOTIFICATION_ID = 7101
+
         private val nextAskId = java.util.concurrent.atomic.AtomicLong(1L)
 
         @JvmStatic
         fun nextId(): Long = nextAskId.getAndIncrement()
+
+        /**
+         * 无障碍被系统关闭时的可点通知（ADR-046 修订 2026-10-26；PRD US-3116 AC-4）。
+         *
+         * **为什么不做成静默日志**：HyperOS 安全中心会周期性清除本应用的注册项（真机实测），
+         * 用户此前只能在"工具调用失败"时才发现。这里给出可读原因 + 直达系统无障碍设置的入口。
+         *
+         * @param message 已脱敏的可读说明（自愈成功/失败/需要 Shizuku 等）
+         */
+        @JvmStatic
+        fun notifyAccessibilityLost(context: Context, message: String) {
+            runCatching {
+                // guardrail G-10：Android 13+ 未授予通知权限时 notify 会静默失败——
+                // 这里提前判定并降级为日志（设置页仍可见状态），避免"以为通知了其实没有"。
+                if (android.os.Build.VERSION.SDK_INT >= 33 &&
+                    androidx.core.content.ContextCompat.checkSelfPermission(
+                        context, android.Manifest.permission.POST_NOTIFICATIONS
+                    ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+                ) {
+                    android.util.Log.w(
+                        "PhoneControlAskUserNotifier",
+                        "无 POST_NOTIFICATIONS 权限，无障碍提醒降级为仅设置页可见"
+                    )
+                    return
+                }
+                val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                if (android.os.Build.VERSION.SDK_INT >= 26) {
+                    nm.createNotificationChannel(
+                        NotificationChannel(
+                            A11Y_CHANNEL_ID, A11Y_CHANNEL_NAME, NotificationManager.IMPORTANCE_DEFAULT
+                        ).apply { description = "无障碍权限被系统关闭时的提醒与恢复入口" }
+                    )
+                }
+                val settingsIntent = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                val pending = android.app.PendingIntent.getActivity(
+                    context,
+                    A11Y_NOTIFICATION_ID,
+                    settingsIntent,
+                    android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT
+                )
+                val n = androidx.core.app.NotificationCompat.Builder(context, A11Y_CHANNEL_ID)
+                    .setSmallIcon(android.R.drawable.ic_dialog_alert)
+                    .setContentTitle("Prism 的无障碍被系统关闭")
+                    .setContentText(message.take(80))
+                    .setStyle(
+                        androidx.core.app.NotificationCompat.BigTextStyle().bigText(message)
+                    )
+                    .setContentIntent(pending)
+                    .setAutoCancel(true)
+                    .setPriority(androidx.core.app.NotificationCompat.PRIORITY_DEFAULT)
+                    .build()
+                nm.notify(A11Y_NOTIFICATION_ID, n)
+            }
+        }
 
         /**
          * 创建确认通知渠道（在 Application.onCreate 调用一次；API 26+ 需要渠道）。

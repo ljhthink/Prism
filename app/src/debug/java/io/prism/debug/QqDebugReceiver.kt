@@ -126,7 +126,43 @@ class QqDebugReceiver : BroadcastReceiver() {
                         val r = fn()
                         "reply kind=${r.kind} message=${r.message.take(80)}"
                     }
-                    // 定时参数（等价于设置页保存；用于真机验收时快速构造窗口/上限场景）
+                    // 2026-10-26 排障：导出执行面 UI 树的「resource-id + class + 文本摘要」，
+                    // 用于核实 QQ 改版后硬编码的 viewId（如消息气泡 `mjn`、输入框 `input`）是否仍存在。
+                    ACTION_TREE -> dumpTree(
+                        intent.getIntExtra(EXTRA_LIMIT, 60),
+                        intent.getIntExtra(EXTRA_DISPLAY, 0)
+                    )
+                    // 2026-10-26 排障：无障碍三态 + 自愈结果（US-3116）
+                    ACTION_A11Y -> {
+                        val state = io.prism.phonecontrol.health.AccessibilityHealthMonitor
+                            .readState(app)
+                        val selfHeal = app.isAccessibilitySelfHealEnabled()
+                        val shizuku = io.prism.phonecontrol.bg.ShizukuShell.currentState()
+                        "a11y state=$state selfHeal=$selfHeal shizuku=$shizuku " +
+                            "usable=${app.isAccessibilityService()} " +
+                            "last=${io.prism.phonecontrol.health.AccessibilityRestorer.lastResult}"
+                    }
+                    // 2026-10-26 排障：孤儿用户服务与残留虚拟屏（US-3117）
+                    ACTION_INSTANCES -> {
+                        val ps = io.prism.phonecontrol.bg.ShizukuShell.execPsForDebug()
+                        val candidates = io.prism.phonecontrol.bg.ShizukuInstancePlan
+                            .orphanPids(ps, "io.prism", -1)
+                        "instances a11yUserServices=${io.prism.phonecontrol.bg.ShizukuInstancePlan.describe(candidates)}"
+                    }
+                    // 2026-10-26 排障：页面态判定（US-3118）
+                    ACTION_PAGE -> {
+                        val svc = io.prism.phonecontrol.PhoneControlAccessibilityService.instance
+                        if (svc == null) {
+                            "page=无障碍实例不存在"
+                        } else {
+                            val titleNid = svc.findNodeByViewIdNid("dialogTitle")
+                            val textNid = svc.findNodeByViewIdNid("dialogText")
+                            val title = titleNid?.let { svc.nodeTextOf(it) }
+                            val text = textNid?.let { svc.nodeTextOf(it) }
+                            val kind = io.prism.qq.QqPageState.detect(title, text)
+                            "page kind=$kind titleSet=${title != null} textSet=${text != null}"
+                        }
+                    }
                     ACTION_CONFIG -> runBlocking {
                         val repo = app.qqConfigRepository
                         intent.getStringExtra(EXTRA_MAX_PER_DAY)?.toIntOrNull()
@@ -172,6 +208,54 @@ class QqDebugReceiver : BroadcastReceiver() {
         }, "qq-debug").start()
     }
 
+    /**
+     * 导出执行面 UI 树的 id/class/文本摘要（**仅 debug**）。
+     *
+     * 用途：QQ 改版会让硬编码 viewId（`mjn`/`input`/`send_btn`）失配——表现为"点了发送但读不回
+     * 气泡"或"读不到会话消息"。这里把真实 id 打出来，与常量逐条对照即可定性。
+     */
+    private fun dumpTree(limit: Int, displayId: Int): String {
+        val svc = io.prism.phonecontrol.PhoneControlAccessibilityService.instance
+            ?: return "tree=无障碍实例不存在"
+        // 显式指定执行面（默认 INVALID=当前前台）：排障时调用方通常在**没有**会话上下文的情况下
+        // 触发，此时 executionDisplayId 为 null，直接 dump 会拿到 Prism 自己的界面。
+        val restore = if (displayId > 0) {
+            svc.setExecutionDisplay(displayId)
+            true
+        } else {
+            false
+        }
+        val root = svc.executionRoot() ?: return "tree=执行面无根节点".also {
+            if (restore) svc.setExecutionDisplay(null)
+        }
+        return try {
+            val sb = StringBuilder("tree:")
+            var idx = 0
+            val queue = ArrayDeque<android.view.accessibility.AccessibilityNodeInfo>()
+            queue.add(root)
+            while (queue.isNotEmpty() && idx < limit) {
+                val n = queue.removeFirst()
+                val id = n.viewIdResourceName?.substringAfterLast('/')
+                val cls = n.className?.toString()?.substringAfterLast('.')
+                val text = (n.text ?: n.contentDescription)?.toString()?.trim()
+                    ?.take(24)?.replace('\n', ' ')
+                if (id != null || !text.isNullOrEmpty()) {
+                    sb.append(" [").append(idx).append("]")
+                        .append(id ?: "-").append('/').append(cls ?: "-")
+                    if (!text.isNullOrEmpty()) sb.append("=\"").append(text).append('"')
+                }
+                idx++
+                for (i in 0 until n.childCount) n.getChild(i)?.let { queue.addLast(it) }
+            }
+            sb.toString()
+        } catch (t: Throwable) {
+            "tree=异常 ${t.javaClass.simpleName}"
+        } finally {
+            runCatching { root.recycle() }
+            if (restore) svc.setExecutionDisplay(null)
+        }
+    }
+
     private companion object {
         const val TAG = "QqDebug"
         const val EXTRA_ACTION = "action"
@@ -191,6 +275,12 @@ class QqDebugReceiver : BroadcastReceiver() {
         const val EXTRA_WINDOW_START = "window_start"
         const val EXTRA_WINDOW_END = "window_end"
         const val ACTION_CONFIG = "config"
+        const val ACTION_TREE = "tree"
+        const val ACTION_A11Y = "a11y"
+        const val ACTION_INSTANCES = "instances"
+        const val ACTION_PAGE = "page"
+        const val EXTRA_LIMIT = "limit"
+        const val EXTRA_DISPLAY = "display"
         const val ACTION_CHANNEL = "channel"
         const val ACTION_DISPLAY = "display"
         const val ACTION_FIRE = "fire"

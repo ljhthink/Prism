@@ -140,8 +140,17 @@ object VirtualDisplayManager {
     var displayDensity: Int = 0
         private set
 
-    /** 已启动过的包名集合（release 时统一 killBackgroundProcesses 回收）。 */
-    private val launchedPackages = LinkedHashSet<String>()
+    /**
+     * 已启动过的 (包, 用户) 集合（release 时按各自用户回收）。
+     *
+     * guardrail **R2-02**：原来只存包名 + 一个全局 `lastLaunchedUserId`。混合会话后
+     * （先在 XSpace 999 发 QQ、再在 user 0 开别的 App）会对集合内所有包用**最后一个**用户
+     * 执行 `force-stop --user`，从而杀掉用户自己在主屏的 QQ——正是 G-02 要修的故障。
+     *
+     * guardrail **R3-02**：键必须是 `(包, 用户)` 二元组——只按包名去重时，同一包在两个用户
+     * 下先后启动会互相覆盖，回收时只剩最后一次的用户，另一个实例就变成孤儿。
+     */
+    private val launchedPackages = LinkedHashSet<Pair<String, Int>>()
 
     /** 当前 displayId；未创建返回 [Display.INVALID_DISPLAY]。 */
     val currentDisplayId: Int
@@ -407,22 +416,31 @@ object VirtualDisplayManager {
     /**
      * 释放 shell 用户服务进程中残留的隐藏虚拟屏（App 进程重启但用户服务进程存活）。
      * 仅在本地未持有执行面时执行（[lock] 内复检，防拆掉正在进行的新会话）。
+     *
+     * **2026-10-26（PRD US-3117 AC-3）**：原实现"检测到有残留就释放**一次**"，但真机上可能
+     * 同时存在多个残留（实测 uniqueId `...4` 与 `...28` 两个，对应两个孤儿用户服务）。
+     * 现在改为**循环释放直到系统里没有本应用的隐藏屏**（上限 [MAX_RESIDUAL_RELEASE_ROUNDS]，
+     * 防死循环）；每次释放都由 shell 侧销毁其持有的那一个 display。
      */
     private fun reconcileResidualHiddenDisplay(context: Context) {
-        val hasResidual = runCatching {
-            val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-            dm.getDisplays().any { it.displayId != Display.DEFAULT_DISPLAY && it.name == HIDDEN_DISPLAY_NAME }
-        }.getOrDefault(false)
-        if (!hasResidual) return
-        synchronized(lock) {
-            if (isCreated) return
-            val released = runCatching { ShizukuShell.releaseHiddenDisplay() }.getOrDefault(false)
-            if (!released) {
-                // guardrail r1 Q-09：释放失败（用户服务刚重启/绑定超时）→ 允许下次入口重试
-                reconcileAttempted.set(false)
-                Log.w(TAG, "启动对账：残留隐藏虚拟屏释放失败，等待下次入口重试")
-            } else {
-                Log.i(TAG, "启动对账：检测到残留隐藏虚拟屏（$HIDDEN_DISPLAY_NAME），已释放")
+        val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        repeat(MAX_RESIDUAL_RELEASE_ROUNDS) {
+            val residualCount = runCatching {
+                dm.getDisplays().count {
+                    it.displayId != Display.DEFAULT_DISPLAY && it.name == HIDDEN_DISPLAY_NAME
+                }
+            }.getOrDefault(0)
+            if (residualCount == 0) return
+            synchronized(lock) {
+                if (isCreated) return
+                val released = runCatching { ShizukuShell.releaseHiddenDisplay() }.getOrDefault(false)
+                if (!released) {
+                    // guardrail r1 Q-09：释放失败（用户服务刚重启/绑定超时）→ 允许下次入口重试
+                    reconcileAttempted.set(false)
+                    Log.w(TAG, "启动对账：残留隐藏虚拟屏释放失败（剩余 $residualCount），等待下次入口重试")
+                    return
+                }
+                Log.i(TAG, "启动对账：已释放一个残留隐藏虚拟屏（释放前剩余 $residualCount）")
             }
         }
     }
@@ -473,7 +491,11 @@ object VirtualDisplayManager {
             val options = ActivityOptions.makeBasic()
             options.setLaunchDisplayId(displayId)
             context.startActivity(intent, options.toBundle())
-            synchronized(launchedPackages) { launchedPackages.add(packageName) }
+            synchronized(launchedPackages) {
+                launchedPackages.add(
+                    packageName to android.os.Process.myUserHandle().hashCode()
+                )
+            }
             Log.i(TAG, "已启动到虚拟屏 $packageName（displayId=$displayId）")
             "已在后台虚拟屏启动应用 $packageName"
         } catch (e: SecurityException) {
@@ -525,7 +547,11 @@ object VirtualDisplayManager {
             }
         }
         if (rendered) {
-            synchronized(launchedPackages) { launchedPackages.add(packageName) }
+            synchronized(launchedPackages) {
+                launchedPackages.add(
+                    packageName to (userId ?: android.os.Process.myUserHandle().hashCode())
+                )
+            }
             Log.i(TAG, "已在虚拟屏渲染 $packageName（displayId=$displayId, user=${userId ?: "current"}）")
             return "已在后台虚拟屏启动应用 $packageName（窗口已就绪）。" +
                 "注意：主屏上出现的「叠加视图」小窗是后台执行面（用户可见），任务结束后约 2 分钟自动关闭，" +
@@ -765,46 +791,85 @@ object VirtualDisplayManager {
      * @return 是否成功释放（未创建时返回 true——幂等）
      */
     fun releaseDisplay(context: Context): Boolean {
+        // guardrail R2-06 + R3-03 + R3-04：
+        // - 必须在销毁显示面**之前**清理"泄漏到主屏"的实例（否则集合被清空后再也识别不出）；
+        // - 必须在 `isCreated` 判断**之前**执行：隐藏后端由 shell 进程持有时，本地 `isCreated`
+        //   可能为 false（App 刚重启/后端重建），但泄漏窗口仍需清理；
+        // - 必须在 `synchronized(lock)` **之外**执行：evict 内含 `dumpsys windows` + 多次
+        //   `am force-stop`（单条最长 5s），持锁会阻塞 create/launch/frame 等全部执行面操作。
+        runCatching { evictFromMainDisplay(context) }
         synchronized(lock) {
             if (!isCreated) return true
-            // ADR-065：隐藏后端由 shell 进程释放（创建者自持 ImageReader）；本地无
-            // virtualDisplay/reader 需要拆卸，只需回收启动包并复位状态。
+            // ADR-065 修订（2026-10-26）：**先回收目标、再销毁显示面**。
+            // 旧顺序（先 release 再 force-stop）会让系统在"显示面已消失、目标仍在跑"的窗口里
+            // 把 task 迁回 display 0 —— 真机表现为 QQ/设置页闪在用户主屏（实测 release 期间
+            // 主屏出现 com.android.settings/...MainSettings EXITING）。
+            // task 先被 force-stop 掉，就不存在可迁移的对象。
+            // 顺序定义与单测同源：[DisplayTeardown.HIDDEN_ORDER]。
             if (isHiddenMode) {
-                val released = activeBackend?.release(context) ?: false
-                stopLaunchedPackages(context)
+                // 顺序与执行**都**在 DisplayTeardown（单测锁的是生产执行路径，不是清单副本）
+                var stoppedCount = 0
+                var released = false
+                DisplayTeardown.run(
+                    DisplayTeardown.HIDDEN_ORDER,
+                    mapOf(
+                        DisplayTeardown.Step.STOP_LAUNCHED_PACKAGES to {
+                            stoppedCount = stopLaunchedPackages(context).size
+                        },
+                        DisplayTeardown.Step.RELEASE_DISPLAY to {
+                            released = activeBackend?.release(context) ?: false
+                        }
+                    )
+                )
                 DisplayWatchOverlay.stop()
                 resetDisplayState()
-                Log.i(TAG, "隐藏虚拟屏已释放（后端返回=$released）")
+                Log.i(TAG, "隐藏虚拟屏已释放（后端返回=$released，先回收包=$stoppedCount）")
                 return released
             }
             return try {
-                // ①摘掉监听（阻止新回调入队）
-                runCatching { imageReader?.setOnImageAvailableListener(null, null) }
-                // ②停线程并等待在途回调执行完毕（quitSafely 会跑完已 post 的消息再退出）。
-                //   **join 超时后仍 close 的安全前提（结构不变量）**：drainListener 内所有
-                //   reader 访问都在其进锁之前完成，锁段仅有 frameCache 交换 + 释放闸——
-                //   超时场景在途回调只会卡在本锁（安全），锁段后严禁新增 reader 访问。
-                //   正常回调 <10ms，2s join 仅作有界兜底（超时白等为已知成本，后台线程可接受）
-                listenerThread?.quitSafely()
-                listenerThread?.join(2_000L)
-                // ③线程已退（或超时兜底）→ 释放显示面与 reader
-                runCatching { virtualDisplay?.release() }
-                runCatching { imageReader?.close() }
-                stopLaunchedPackages(context)
-                Log.i(TAG, "虚拟屏已释放（曾启动包：已回收后台进程）")
+                // 顺序由 [DisplayTeardown.LEGACY_ORDER] 定义（与单测同源，stop 早于 release）
+                var stoppedCount = 0
+                DisplayTeardown.run(
+                    DisplayTeardown.LEGACY_ORDER,
+                    mapOf(
+                        DisplayTeardown.Step.DETACH_LISTENER to {
+                            runCatching { imageReader?.setOnImageAvailableListener(null, null) }
+                        },
+                        DisplayTeardown.Step.STOP_LISTENER_THREAD to {
+                            //   **join 超时后仍 close 的安全前提（结构不变量）**：drainListener 内所有
+                            //   reader 访问都在其进锁之前完成，锁段仅有 frameCache 交换 + 释放闸——
+                            //   超时场景在途回调只会卡在本锁（安全），锁段后严禁新增 reader 访问。
+                            //   正常回调 <10ms，2s join 仅作有界兜底（超时白等为已知成本，后台线程可接受）
+                            listenerThread?.quitSafely()
+                            listenerThread?.join(2_000L)
+                        },
+                        DisplayTeardown.Step.STOP_LAUNCHED_PACKAGES to {
+                            // **先回收目标**（ADR-065 修订：task 先消失，销毁显示面时才不会被迁回主屏）
+                            stoppedCount = stopLaunchedPackages(context).size
+                        },
+                        DisplayTeardown.Step.RELEASE_DISPLAY to {
+                            runCatching { virtualDisplay?.release() }
+                        },
+                        DisplayTeardown.Step.CLOSE_READER to {
+                            runCatching { imageReader?.close() }
+                        },
+                        DisplayTeardown.Step.CLEAR_OVERLAY_SETTING to {
+                            if (isOverlayMode) {
+                                runCatching { ShizukuShell.clearOverlayDisplay() }
+                                overlayDisplayObj = null
+                                isOverlayMode = false
+                            }
+                        }
+                    )
+                )
+                Log.i(TAG, "虚拟屏已释放（曾启动包：已回收后台进程 $stoppedCount 个）")
                 virtualDisplay = null
                 imageReader = null
                 listenerThread = null
-                // ④线程已死，frameCache 无写者 → 此时回收安全
+                // 线程已死，frameCache 无写者 → 此时回收安全
                 frameCache?.recycle()
                 frameCache = null
                 frameCacheAtMs = 0L
-                // 批次22 修复轮六：模拟副屏路线 → 清除系统设置（回收可见小窗）
-                if (isOverlayMode) {
-                    runCatching { ShizukuShell.clearOverlayDisplay() }
-                    overlayDisplayObj = null
-                    isOverlayMode = false
-                }
                 resetDisplayState()
                 DisplayWatchOverlay.stop()
                 true
@@ -962,21 +1027,90 @@ object VirtualDisplayManager {
     fun isFrameFresh(ageMs: Long, maxAgeMs: Long = FRAME_STALE_MS): Boolean =
         FrameFreshness.isFresh(ageMs, maxAgeMs)
 
-    /** 后台启动过的包统一回收（Shizuku 就绪用 am force-stop，否则 killBackgroundProcesses）。 */
-    private fun stopLaunchedPackages(context: Context) {
+    /**
+     * 回收本进程启动过的包（force-stop / killBackgroundProcesses）。
+     *
+     * guardrail **G-02 / R2-02**：逐包使用**它自己**的启动用户执行 `force-stop --user`。
+     * 跨用户（XSpace 999）启动的目标与用户自己在用的同名 App 是两个实例；
+     * 用错用户会"该清的没清、把用户的杀了"。
+     *
+     * @return 实际处理的包名列表（供调用方记日志；ADR-065 修订要求"先回收再销毁"可观测）
+     */
+    private fun stopLaunchedPackages(context: Context): List<String> {
         val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE)
             as android.app.ActivityManager
-        synchronized(launchedPackages) {
-            for (pkg in launchedPackages) {
-                if (ShizukuShell.isReady()) {
-                    runCatching { ShizukuShell.forceStop(pkg) }
-                } else {
-                    runCatching { activityManager.killBackgroundProcesses(pkg) }
-                }
-            }
+        val handled = mutableListOf<String>()
+        // 快照化（R2-02/R3-02）：遍历中不再读取可变的全局用户值
+        val snapshot = synchronized(launchedPackages) {
+            val copy = launchedPackages.toList()
             launchedPackages.clear()
+            copy
         }
+        // guardrail R4-01：**force-stop 必须在锁外执行**。单条 `am force-stop` 最长 5s，
+        // 若持锁执行会阻塞 create/launch/frame 等全部执行面操作（甚至 ANR 风险）。
+        snapshot.forEach { (pkg, userId) ->
+            val ok = if (ShizukuShell.isReady()) {
+                runCatching { ShizukuShell.forceStopForUser(pkg, userId) }.getOrDefault(false)
+            } else {
+                runCatching { activityManager.killBackgroundProcesses(pkg); true }
+                    .getOrDefault(false)
+            }
+            if (ok) {
+                if (pkg !in handled) handled += pkg
+            } else {
+                Log.w(TAG, "回收包失败：${maskPackage(pkg)}（user=$userId）")
+            }
+        }
+        return handled
     }
+
+    /**
+     * **抢占主屏**清理（ADR-065 修订 2026-10-26；PRD US-3119 AC-2）。
+     *
+     * 后台动作收尾时，目标包有时会自己把窗口开到 `display 0`（QQ 的弹窗/验证页会这么做），
+     * 用户主屏上就会看到 QQ。
+     *
+     * **guardrail G-02 / R2-02 修正**（三条约束，缺一不可）：
+     * 1. **判据必须带用户**：小号在 XSpace(999)，用户自己也用同一个包（user 0）。
+     *    只按包名判定会"清不掉 999 的泄漏、却杀掉用户本人的 QQ"。这里用
+     *    [MainDisplayWindows]（shell `dumpsys`，头行含 `u<userId>`）**逐包按其启动用户**匹配；
+     * 2. **击杀必须带 `--user`**：见 [ShizukuShell.forceStopForUser]；
+     * 3. **调用点必须收敛**：只在"执行面释放/会话收尾"调用一次，不在每次工具调用的
+     *    `finally` 里跑（否则暴露面过大）。
+     *
+     * 无法判定归属时**不动作**（`dumpsys` 读不到 → 空集合 → 返回空列表）。
+     *
+     * @return 被清理的包名列表
+     */
+    fun evictFromMainDisplay(context: Context): List<String> {
+        if (takeoverActive) return emptyList()
+        if (!ShizukuShell.isReady()) return emptyList()
+        // R3-02：快照 (包, 启动它的用户) 二元组
+        val snapshot = synchronized(launchedPackages) { launchedPackages.toList() }
+        if (snapshot.isEmpty()) return emptyList()
+        val dump = runCatching { ShizukuShell.windowWindowsDump() }.getOrNull() ?: return emptyList()
+        // 一次解析，按用户分组（避免每包一次 dumpsys）
+        val leakedByUser = snapshot.map { it.second }.distinct()
+            .associateWith { MainDisplayWindows.packagesOnMainDisplayForUser(dump, it) }
+        val evicted = mutableListOf<String>()
+        snapshot.forEach { (pkg, userId) ->
+            // 只处理"该包确实以**它自己的**用户身份泄漏到主屏"的情形
+            val leaked = leakedByUser[userId] ?: return@forEach
+            if (pkg !in leaked) return@forEach
+            val ok = runCatching { ShizukuShell.forceStopForUser(pkg, userId) }.getOrDefault(false)
+            if (ok) {
+                evicted += pkg
+                Log.i(TAG, "抢占主屏清理：已回收 ${maskPackage(pkg)}（user=$userId）")
+            } else {
+                Log.w(TAG, "抢占主屏清理失败：${maskPackage(pkg)}（user=$userId）")
+            }
+        }
+        return evicted
+    }
+
+    /** 包名脱敏到日志（只保留前段，避免日志出现完整可见标识）。 */
+    private fun maskPackage(pkg: String): String =
+        if (pkg.length <= 6) "***" else pkg.take(6) + "***"
 
     /** 复位执行面状态（后端无关字段）。 */
     private fun resetDisplayState() {
@@ -1080,6 +1214,9 @@ object VirtualDisplayManager {
 
     /** 自愈冷却（重建会重启目标应用，必须限流）。 */
     private const val RECOVER_COOLDOWN_MS = 60_000L
+
+    /** 残留隐藏虚拟屏释放的最大轮数（真机可能同时存在多个残留，防死循环）。 */
+    private const val MAX_RESIDUAL_RELEASE_ROUNDS = 4
 
     /** 连续自愈失败上限（超过后交由上层诚实报错，避免无限重建）。 */
     private const val RECOVER_MAX_CONSECUTIVE = 2

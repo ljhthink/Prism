@@ -43,6 +43,15 @@ object QqFailureClassifier {
          */
         SEND_UNCONFIRMED,
 
+        /**
+         * **小号账号态不可用**（2026-10-26 真机实证；PRD US-3118）。
+         *
+         * QQ 停在「安全提醒：账号身份验证信息已失效」或登录页——必须由**用户**在小号上处理，
+         * 任何自动重试都只会重复调用 LLM 并继续失败。
+         * 语义：不重试、不计熔断、不占配额，但必须**如实告诉用户原因**。
+         */
+        ACCOUNT_STATE_INVALID,
+
         /** 无法归类（保守：不计入熔断，但需留痕）。 */
         UNKNOWN
     }
@@ -62,6 +71,12 @@ object QqFailureClassifier {
         // 既不重试也不计熔断，熔断永远不会触发。
         if (UNCONFIRMED_PREFIXES.any { text.startsWith(it) }) return Kind.SEND_UNCONFIRMED
         return when {
+            // US-3118：账号态不可用优先于"目标找不到"——真机上两者常同时出现
+            // （登录失效 → 会话列表为空 → 找不到联系人），先判账号态才能给出正确引导。
+            text.contains("小号登录态失效") || text.contains("小号未登录") ||
+                text.contains("身份验证") || text.contains("安全提醒") ->
+                Kind.ACCOUNT_STATE_INVALID
+
             text.contains("屏幕已熄灭") || text.contains("屏幕熄灭") || text.contains("熄屏") ->
                 Kind.SCREEN_OFF_BLOCKED
 
@@ -113,6 +128,7 @@ object QqFailureClassifier {
      * 其余一律不重试：
      * - [Kind.SEND_UNCONFIRMED]：消息很可能已送达，重试即重复发送；
      * - [Kind.SEND_REJECTED]：明确被拒，重发同样的内容没有意义；
+     * - [Kind.ACCOUNT_STATE_INVALID]：需用户在小号上验证/登录，自动重试只会空烧（US-3118）；
      * - [Kind.LLM_FAILED] / [Kind.TARGET_NOT_FOUND] / [Kind.UNKNOWN]：重试只会**再调一次
      *   LLM 生成文案**（真机上单次 ~16s），既烧额度又可能连续产生多条文案，收益极低。
      */
@@ -120,6 +136,9 @@ object QqFailureClassifier {
 
     /** 是否属于"可能已送达"（不可重试、不可熔断）。 */
     fun isUnconfirmedDelivery(kind: Kind): Boolean = kind == Kind.SEND_UNCONFIRMED
+
+    /** 是否属于"需要用户介入的账号态"（不可重试、不可熔断、**不占配额**）。 */
+    fun isAccountStateBlocked(kind: Kind): Boolean = kind == Kind.ACCOUNT_STATE_INVALID
 
     /**
      * 「可能已送达」的固定前缀（见 [classify] 的 G-r3-06 说明：必须前缀匹配）。

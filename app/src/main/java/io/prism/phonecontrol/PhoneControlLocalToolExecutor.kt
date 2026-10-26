@@ -802,6 +802,9 @@ class PhoneControlLocalToolExecutor(
             return block()
         } finally {
             svc?.setExecutionDisplay(null)
+            // guardrail G-02：主屏抢占清理已收敛到执行面释放/会话收尾（见
+            // VirtualDisplayManager.releaseDisplay），不在每次工具调用的 finally 里跑
+            // （原实现会对每次调用执行一次 dumpsys + force-stop，暴露面过大）。
         }
     }
 

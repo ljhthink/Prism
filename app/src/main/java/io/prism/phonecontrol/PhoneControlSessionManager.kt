@@ -169,6 +169,8 @@ object PhoneControlSessionManager {
                     val releaseCtx = ctx.applicationContext
                     Thread {
                         runCatching {
+                            // US-3119 AC-2：主屏抢占清理已内聚到 releaseDisplay 内部
+                            // （guardrail R3-03：避免两处各做一次 dumpsys + force-stop）。
                             io.prism.phonecontrol.bg.VirtualDisplayManager.releaseDisplay(releaseCtx)
                         }
                     }.start()

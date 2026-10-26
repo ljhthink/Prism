@@ -160,11 +160,18 @@ class QqLocalToolExecutor(
         // 后台副屏执行（US-3102 AC-2：发送在后台完成，不占用用户前台）。不占用前台的
         // 关键：小号在 XSpace 用户 999，App 自身无法把它启动到副屏——须 Shizuku（见 withQqBackground）。
         return withQqBackground { displayId, svc ->
+            // US-3118 AC-1/AC-2：先判**阻断页面态**（安全提醒/登录页），命中就直接返回可读原因，
+            // **不点输入框、不点发送**——在错误页乱点只会让状态更糟，且会把原因掩盖成
+            // "找不到联系人"（真机 2026-10-26 实证）。
+            pageStateBlock(svc)?.let { return@withQqBackground it }
+
             // 归位到「消息」列表页（后台副屏内；QQ 可能停在抽屉/会话页/任意页）。
             ensureMessageList(svc, displayId)
 
             // 1) 进入会话：联系人节点定位（desc/text 模糊匹配），未命中回退 back 重试
             if (!openConversation(svc, contact)) {
+                // 归位后仍失败：再判一次页面态——QQ 可能在 back 过程中弹出验证提示
+                pageStateBlock(svc)?.let { return@withQqBackground it }
                 return@withQqBackground "错误：未能在 QQ 消息列表找到「${contact.take(20)}」。" +
                     "请确认该联系人存在（小号的好友列表），或核实小号 QQ 登录态后重试"
             }
@@ -178,8 +185,14 @@ class QqLocalToolExecutor(
             val typed = svc.performType(inputNid, 0, 0, message)
             if (typed.startsWith("错误")) return@withQqBackground "错误：消息输入失败（$typed）"
 
-            // 3) 发送：viewId=id/send_btn 优先，text=发送 兜底
+            // 2b) **发送前快照**（guardrail G-03/R2-04/R3-01）：只有"发送前输入框确实含我们输入的
+            // 内容"，"发送后变空"才是"清空"证据。输入后需要 settle，否则可能读到输入前的空值。
+            // 快照按 **viewId 实时定位**（与发送后的读取同一寻址基准），不用 BFS 序号。
             delay(SETTLE_SHORT_MS)
+            val fragment = QqLocalToolExecutor.firstCodePoints(message, VERIFY_FRAGMENT_LEN)
+            val beforeInputText = runCatching { svc.textOfViewId(VIEW_ID_INPUT).second }.getOrNull()
+
+            // 3) 发送：viewId=id/send_btn 优先，text=发送 兜底
             val sendNid = svc.findNodeByViewIdNid(VIEW_ID_SEND_BTN) ?: svc.findNodeByTextNid("发送")
             if (sendNid == null) {
                 return@withQqBackground "错误：消息已输入但未找到「发送」按钮（QQ 界面可能变化）。" +
@@ -190,21 +203,47 @@ class QqLocalToolExecutor(
                 return@withQqBackground "错误：点击发送失败（$tapped）"
             }
 
-            // 4) 校验：聊天页**最后一条气泡**应为「自己发出」且含消息片段。
-            // DEF-116/117（2026-10-19 真机 E2E）：树文本受节点预算截断（新气泡在列表末端常超出）
-            // 致单次检查假阴性（真机实证：消息已成功送达对端，日志却报"未能确认"）——改用
-            // [PhoneControlAccessibilityService.lastMessageBubble]（按 bounds 取最后一条，不受预算影响）轮询确认。
-            val fragment = QqLocalToolExecutor.firstCodePoints(message, VERIFY_FRAGMENT_LEN)
-            var confirmed = false
+            // 4) 校验（2026-10-26 三判据；US-3118 AC-4 / guardrail G-03 + R2-01 + R3-01）：
+            //   ① 聊天页最后一条气泡为「自己发出」且含消息片段 —— **最强**，先判
+            //   ② 输入框**确实**已清空（同一节点上取"存在性 + 文本"，需发送前含片段）
+            //   ③ 聊天记录区域文本含片段（**排除输入框子树**，否则"未发出但输入框留原文"
+            //      会被误判成已发送 —— R2-01）
+            var evidence = QqSendConfirmation.Evidence.NONE
             var tries = 0
-            while (tries < 6 && !confirmed) {
+            while (tries < 6 && evidence == QqSendConfirmation.Evidence.NONE) {
                 delay(SETTLE_SHORT_MS)
-                val bubble = svc.lastMessageBubble(VIEW_ID_MSG_TEXT)
-                confirmed = bubble != null && !bubble.first && bubble.second.contains(fragment)
+                val bubble = runCatching { svc.lastMessageBubble(VIEW_ID_MSG_TEXT) }.getOrNull()
+                val bubbleOk = bubble != null && !bubble.first && bubble.second.contains(fragment)
+                // R3-01：存在性与文本必须来自**同一次**遍历（同一节点），否则树形变后错配
+                val inputNow = runCatching { svc.textOfViewId(VIEW_ID_INPUT) }
+                    .getOrElse { false to null }
+                val cleared = QqSendConfirmation.isInputCleared(
+                    inputNodePresent = inputNow.first,
+                    inputText = inputNow.second,
+                    typedFragment = fragment,
+                    beforeText = beforeInputText
+                )
+                evidence = QqSendConfirmation.decide(
+                    bubbleConfirmed = bubbleOk,
+                    inputCleared = cleared,
+                    pageTextHasFragment = false
+                )
                 tries++
             }
-            if (confirmed) {
-                "已发送消息给「${contact.take(20)}」（已在校验中确认出现在聊天记录）"
+            if (!QqSendConfirmation.isSent(evidence)) {
+                // R2-01：兜底只看**聊天记录区域**（排除输入框子树）——输入框自身文本不算证据
+                val treeHasFragment = runCatching {
+                    svc.visibleTextExcluding(VIEW_ID_INPUT)?.contains(fragment) == true
+                }.getOrDefault(false)
+                evidence = QqSendConfirmation.decide(
+                    bubbleConfirmed = false,
+                    inputCleared = false,
+                    pageTextHasFragment = treeHasFragment
+                )
+            }
+            if (QqSendConfirmation.isSent(evidence)) {
+                Log.i(TAG, "发送确认判据=${evidence.name}")
+                "已发送消息给「${contact.take(20)}」（确认依据：${evidence.label}）"
             } else {
                 // guardrail G-r4-05：文案必须与 QqFailureClassifier 的前缀**共用同一常量**，
                 // 否则改文案会静默失配，而失配方向正是"变回重复发送"。
@@ -214,6 +253,12 @@ class QqLocalToolExecutor(
         }
     }
 
+    /**
+     * 输入框是否已清空（US-3118 AC-4 判据 ②）。
+     *
+     * QQ 发送成功后输入框必然被清空；若仍保留原文说明"没点中发送"或"发送被拦"。
+     * 读不到输入框时返回 false（保守：交给其它判据）。
+     */
     // ==================== qq__send_voice ====================
 
     /**
@@ -531,6 +576,45 @@ class QqLocalToolExecutor(
     }
 
     /**
+     * 判定执行面是否处于**阻断性页面态**，命中则返回给调用方的可读错误（PRD US-3118）。
+     *
+     * 只读 UI 树的 `dialogTitle`/`dialogText`（无对话框返回 null），**不做任何点击**。
+     * 返回文案同时被 [QqFailureClassifier] 归为 `ACCOUNT_STATE_INVALID`（不重试/不熔断/不占配额）。
+     */
+    private fun pageStateBlock(svc: PhoneControlAccessibilityService): String? {
+        // guardrail R4-02：与发送确认统一寻址基准——用 textOfViewId **一次遍历**取
+        // (存在性, 文本)，不再"先取 nid 再按序号读文本"（树形变后会错配，可能漏判阻断页）。
+        val title = runCatching { svc.textOfViewId(VIEW_ID_DIALOG_TITLE) }
+            .getOrElse { false to null }
+        val text = runCatching { svc.textOfViewId(VIEW_ID_DIALOG_TEXT) }
+            .getOrElse { false to null }
+        val titleText = title.second
+        val dialogText = text.second
+
+        // guardrail G-05：**只有"对话框结构明确存在"时才按整页文本兜底**。
+        // 原实现无条件读整页树，而关键词含"登录/密码/安全提醒"——聊天记录里出现这些词
+        // （验证码、异地登录提醒、联系人昵称）会把正常聊天页判成未登录且**不再自愈**。
+        // 收紧条件：① 有对话框标题/正文节点（结构证据），或
+        //          ② 页面里**没有**聊天输入框（聊天页必有输入框 → 有输入框就不判登录态）。
+        val hasDialogStructure = titleText != null || dialogText != null
+        val kind = if (hasDialogStructure) {
+            QqPageState.detect(titleText, dialogText)
+        } else {
+            val inputPresent = runCatching { svc.textOfViewId(VIEW_ID_INPUT).first }
+                .getOrDefault(false)
+            if (inputPresent) {
+                // 聊天页（有输入框）：不做整页文本兜底，避免把聊天内容误判成阻断页
+                QqPageState.Kind.NORMAL
+            } else {
+                QqPageState.detect(null, null, runCatching { svc.getUiTreeText(80) }.getOrNull())
+            }
+        }
+        val message = QqPageState.blockMessage(kind) ?: return null
+        Log.i(TAG, "页面态阻断（kind=$kind，结构证据=$hasDialogStructure）：不点击、不重试")
+        return "错误：$message"
+    }
+
+    /**
      * 确保**后台副屏执行面**就绪，随后在 [block] 内执行（finally 还原前台执行面）。
      *
      * 步骤（PRD US-3102 AC-2「发送在后台完成，不占用用户前台」）：
@@ -595,6 +679,10 @@ class QqLocalToolExecutor(
             block(displayId, svc)
         } finally {
             svc.setExecutionDisplay(null)
+            // US-3119 AC-2 的清理**不在此处**执行（guardrail G-02：原实现在每次工具调用的
+            // finally 里跑 `dumpsys` + force-stop，暴露面过大且可能杀掉用户本人的 App）。
+            // 现在统一收敛到"执行面释放/会话收尾"一次（见 VirtualDisplayManager.releaseDisplay
+            // 与 PhoneControlSessionManager 的空闲回收）。
         }
     }
 
@@ -616,6 +704,13 @@ class QqLocalToolExecutor(
             val svc = PhoneControlAccessibilityService.instance ?: return@withLock null
             svc.setExecutionDisplay(displayId)
             try {
+                // US-3118 AC-1（ac-verifier 复核缺口）：**读取路径也要判页面态**。
+                // PRD 写的是"发送/读取前判定"；此前只在发送侧拦截，读取侧会在验证弹窗上
+                // 读到空/旧气泡，导致上层误判"对方没回消息"。
+                pageStateBlock(svc)?.let {
+                    Log.w(TAG, "lastMessageWith: 页面态阻断，放弃本次读取")
+                    return@withLock null
+                }
                 // DEF-110（2026-10-19 真机 E2E）：与 sendMessage 一致先归位到「消息」列表页——
                 // 否则小号停在会话页/抽屉/启动页时 openConversation 必失败（实测恒"未读取到会话消息"）。
                 ensureMessageList(svc, displayId)
@@ -745,6 +840,10 @@ class QqLocalToolExecutor(
         private val INVALID_DISPLAY = android.view.Display.INVALID_DISPLAY
 
         const val SIGNATURE_MAX_LEN = 120
+
+        /** QQ 对话框标题/正文的 resource-id 尾段（2026-10-26 真机 `tree` 实测）。 */
+        const val VIEW_ID_DIALOG_TITLE = "dialogTitle"
+        const val VIEW_ID_DIALOG_TEXT = "dialogText"
 
         /** 消息长度上限（US-3102 AC-4；超长拒绝并提示分条）。 */
         const val MESSAGE_MAX_LEN = 500

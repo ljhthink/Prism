@@ -250,6 +250,10 @@ fun SettingsScreen(
                     // guardrail G-r3-07：「未确认」在语义上是"可能已送达"，不能显示成"失败"，
                     // 否则用户会以为没发出去而手动补发，反而制造重复消息。
                     rt.lastOutcome.contains("SEND_UNCONFIRMED") -> "上次未确认（可能已送达）"
+                    // US-3118 AC-3（ac-verifier 复核缺口）：账号态不可用必须显示**可执行的原因**，
+                    // 否则用户只看到"上次失败"，不知道该去小号上重新验证。
+                    rt.lastOutcome.contains("ACCOUNT_STATE_INVALID") ->
+                        "上次未发送：小号登录态失效，需要重新验证"
                     rt.lastOutcome.startsWith("SUCCESS") -> "上次成功"
                     rt.lastOutcome.startsWith("SKIP") -> "上次跳过"
                     else -> "上次失败"
@@ -618,6 +622,55 @@ fun SettingsScreen(
                     }
                 )
             }
+            // ADR-046 修订（2026-10-26；PRD US-3116）：无障碍自愈 + Shizuku 单实例说明。
+            // 真机实测 HyperOS 安全中心会清掉本应用的无障碍注册，故这里给"状态 + 一键恢复 + 开关"。
+            item {
+                val a11yState = io.prism.phonecontrol.health.AccessibilityHealthMonitor.currentState
+                val selfHeal = (context.applicationContext as? io.prism.PrismApplication)
+                    ?.isAccessibilitySelfHealEnabled() ?: true
+                SetRow(
+                    icon = "♻",
+                    iconColor = if (a11yState == io.prism.phonecontrol.health.AccessibilityHealth.State.OK) {
+                        PrismMint
+                    } else {
+                        Color(0xFFFF7A6B)
+                    },
+                    title = "无障碍自动恢复",
+                    subtitle = buildString {
+                        append(
+                            when (a11yState) {
+                                io.prism.phonecontrol.health.AccessibilityHealth.State.OK -> "当前状态：正常"
+                                io.prism.phonecontrol.health.AccessibilityHealth.State.REBINDING ->
+                                    "当前状态：重连中（通常数秒内自动恢复）"
+                                io.prism.phonecontrol.health.AccessibilityHealth.State.DISABLED ->
+                                    "当前状态：已被系统关闭（HyperOS 常见）"
+                            }
+                        )
+                        append(" · ")
+                        append(if (selfHeal) "自动恢复已开（仅写回本应用，不动你的其它无障碍服务）" else "自动恢复已关")
+                        val last = io.prism.phonecontrol.health.AccessibilityRestorer.lastResult
+                        if (last.isNotBlank()) append("\n最近：").append(last)
+                    },
+                    trailing = {
+                        PrismSwitch(
+                            checked = selfHeal,
+                            onCheckedChange = { on ->
+                                (context.applicationContext as? io.prism.PrismApplication)
+                                    ?.setAccessibilitySelfHealEnabled(on)
+                                if (on) {
+                                    // 打开开关立即尝试一次（不等待下次前台打点）
+                                    Thread {
+                                        runCatching {
+                                            io.prism.phonecontrol.health.AccessibilityHealthMonitor
+                                                .notifyAppActive(context, force = true)
+                                        }
+                                    }.start()
+                                }
+                            }
+                        )
+                    }
+                )
+            }
             // v1 US-201（LLM 操控手机）：无障碍服务引导 + 用途声明（prominent disclosure）
             item { SetSection("手机操控（LLM 操控手机）") }
             item {
@@ -664,6 +717,9 @@ fun SettingsScreen(
                         )
                         append(" · ")
                         append(if (canDrawOverlays) "悬浮窗权限已授权" else "悬浮窗权限未授权（点此去授权）")
+                        // US-3117 AC-1（ac-verifier 复核缺口）：`daemon(false)` 后用户服务随 App
+                        // 进程退出回收，下次需重新连接——把代价如实告知，避免用户以为"掉了"。
+                        append("\nShizuku 服务随 App 退出回收，下次使用会重新连接（约数百毫秒）")
                         backendNote?.let { append("\n最近回落：").append(it) }
                     },
                     onClick = {
