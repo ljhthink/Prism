@@ -1,127 +1,158 @@
 # Prism
 
-> 手机端个人 AI Agent 平台 —— 让 AI 真正"用"起来。
+<p align="center">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg"></a>
+  <img alt="Platform" src="https://img.shields.io/badge/Android-8.0%2B%20(API%2026)-3DDC84?logo=android&logoColor=white">
+  <img alt="Kotlin" src="https://img.shields.io/badge/Kotlin-2.3-7F52FF?logo=kotlin&logoColor=white">
+  <img alt="Compose" src="https://img.shields.io/badge/Compose-Material%203-4285F4?logo=jetpackcompose&logoColor=white">
+  <img alt="No backend" src="https://img.shields.io/badge/backend-none-success">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.1-informational">
+</p>
 
-Prism 是一款 Android 原生 AI 聊天应用，核心定位是**个人 Agent 平台**。它不只是一个聊天界面，而是一个让 AI 可以调用工具、读取知识库、记住你、甚至操作手机其他 App 的开放平台。
+> 手机上的个人 AI Agent —— 会聊天、会记事、会用工具，还能替你操作手机。
 
-## 特性
+Prism 是一款 **Android 原生、零后端**的个人 Agent 应用。它不只是一个聊天框：LLM 在这里可以调用工具、检索你自己的知识库、跨会话记住你、把回复读成语音、驱动桌面上的角色形象，甚至在后台替你操作其它 App。
 
-### 角色包（RolePack）
+所有数据留在设备上——没有 Prism 账号，没有中转服务器，只有你和你自己配置的模型端点。
 
-把角色作为**可导入的资产包**使用，而不是把第三方角色写死在应用里：
+## 为什么是 Prism
 
-- Schema `prism-rolepack/1`：persona / worldbook（关键词激活的背景设定）/ style / voice / pet
-- 用户导入到应用私有目录（`filesDir/rolepacks/`），随应用卸载清除，不入 APK、不入公开仓库
-- 出厂仅内置一个中性通用助手（B0），未导入时行为与无角色包完全一致
-- 选中后统一作用于**文本聊天 + 语音通话**人设，语音通话可另带「电话场景收紧」段
+| | 普通 AI 聊天 App | Prism |
+|---|---|---|
+| 模型端点 | 平台指定 | **BYOK**：任意 OpenAI 兼容 / Anthropic / Ollama 端点 |
+| 数据 | 过平台服务器 | **零后端**：Key 与对话都在设备侧，Keystore 加密 |
+| 能力边界 | 只会说话 | **会做事**：内置工具、MCP、Skills、手机操控 |
+| 记忆 | 单会话上下文 | **三层记忆** + 端侧 RAG 知识库 |
+| 存在感 | 只有气泡 | **语音通话** + **桌面角色**（Live2D） |
 
-### 角色包桌宠（桌面宠物）
+## 核心能力
 
-让角色**看得见**：在手机桌面显示角色形象，可拖动、可点击互动、可做动作表情。
+| 领域 | 能做什么 |
+|---|---|
+| 💬 对话 | 流式输出、深度思考、思维链折叠、对话回退、重新生成与多版本切换 |
+| 🧠 记忆 | L1 滑动窗口 + LLM 摘要、L2 跨会话向量记忆、L3 显式与隐式用户画像 |
+| 📚 知识库 | 端侧 RAG：PDF/DOCX/XLSX/MD/TXT → 切片 → ONNX 嵌入 → 向量检索 + 引用来源 |
+| 🔧 工具 | 内置工具路由器、MCP Client、SKILL.md 技能包、`ask_user` 主动提问 |
+| 🌐 联网 | Bing RSS 搜索（零 Key）、WebView 渲染抓取、中文平台热榜 |
+| 📄 文档 | Markdown → Word / Excel 生成，文件系统读写 |
+| 🎙 语音 | 语音通话（流式 ASR + TTS）、端侧音色克隆、角色音色绑定 |
+| 📱 手机操控 | 无障碍 + Shizuku，隐藏虚拟屏后台执行、Watch 观战、Takeover 接管 |
+| 💌 QQ 小号助手 | 双轨通道（OneBot / 无障碍）、后台代发、自动回复、随机定时主动消息 |
+| 🐾 角色与桌宠 | 角色包（人设 / 世界书 / 音色）、Live2D 桌面挂件、动作与口型联动 |
 
-- **形象来源由用户决定**：导入 `.petpack` 形象包（含 Live2D 模型全套资产），或直接选一张立绘图片
-- **Live2D 渲染**（WebView + pixi.js + pixi-live2d-display + Live2D Cubism Core），支持动作、
-  表情、物理摆动、命中区点击、自动眨眼与呼吸、口型同步
-- **点击互动**：点击模型不同部位触发不同反应（映射由形象包声明，因为 Cubism 官方规范
-  的 `HitAreas[]` 并不携带"命中后播什么"）
-- **AI 联动**：内置 `pet__play_action` 工具，角色可让自己的形象配合说话内容做动作；
-  语音播报时嘴型跟随，回复内容以气泡显示在形象旁
-- **默认关闭**：在「设置 → 桌宠」显式开启；窗口可见、通知即收起入口、关闭即停止服务，无开机自启
-- **合规**：角色形象资产始终是**用户私有资产**（`filesDir/pets/`），不提交版本库、不打进 APK
+## 功能详解
 
-> 形象资产请自行确认使用权。以昔涟为例，其 Live2D 模型作者为 B 站 UP 主
-> [是依七哒](https://space.bilibili.com/457683484)，角色 IP 属米哈游/HoYoverse 且禁止商用。
+### 💬 对话与模型
 
-### 联网搜索（零配置，开箱即用）
+- **BYOK 多端点**：OpenAI 兼容（DeepSeek / Moonshot / OpenRouter …）、Anthropic 原生、Ollama 本地模型；会话中可切换 Provider 并保留历史
+- **深度思考**：按端点能力发送 `thinking` / `reasoning_effort`（low / high / max），推理过程以可折叠卡片呈现；不兼容端点会明确提示
+- **对话回退**：从任意用户消息回滚，可选是否先保存当前副本
+- **重新生成**：重试产生多个变体，随时左右切换，不丢失旧版本
+- **流式渲染**：SSE 增量输出，工具调用与文本交错的回合式渲染
+- **待办清单**：`todo_write` 让 Agent 自建多步计划并在界面上打勾推进
 
-内置 **Bing RSS 联网搜索**，无需 API Key、无需注册，在 App 内开启联网开关即可使用。AI 可实时搜索互联网获取最新信息并引用来源。
+### 🧠 记忆与知识
 
-- 搜索工具名：`web_search__search`
-- 参数：`query`（搜索关键词）+ `maxResults`（1-8 条，默认 5）
-- 返回：标题 + 链接 + 摘要，标注「外部内容，未经验证」
-- 智能降级：对中文新词/冷门词自动用核心词短整词重试，避免 Bing 长 query 分词失败
-- 失败熔断：同一工具连续失败 2 次后自动熔断，避免 LLM 空转
+三层记忆解决"越聊越糊"：
 
-### BYOK 多端点（Bring Your Own Key）
+- **L1 滑动窗口**：最近 N 轮原文 + 超窗时 LLM 摘要压缩后回注
+- **L2 跨会话记忆**：会话结束向量化入库，新会话按相关度召回
+- **L3 用户画像**：显式（设置里填的偏好）+ 隐式（从对话中抽取的偏好）
 
-支持用户自配任意 LLM 端点：
+任一层的失败都降级为 `null` 而不阻断对话——记忆是增强，不是前提。
 
-- OpenAI 兼容（DeepSeek、Moonshot、OpenRouter 等）
-- Anthropic 原生
-- Ollama（本地模型）
-- API Key 通过 Android Keystore + DataStore 加密存储
-- 会话中可一键切换 Provider，保留对话历史
+端侧 RAG 知识库支持分库管理（如「工作」/「学习」），导入即解析→切片→嵌入→可检索，回答标注文件名与片段位置。
 
-### MCP 工具系统（Model Context Protocol）
+### 🔧 工具生态
 
-内置 **MCP Client**，支持 AI 调用各类工具扩展能力。预设 15 个常用 Server：
+工具通过统一路由器装配，命名空间前缀区分来源：
 
-- **本地 6 个**：文件系统读写、网页抓取、记忆管理、Sequential Thinking、时间查询、跨 App 调用
-- **远程 9 个模板**：GitHub、Notion、Slack、Sentry、Stripe、Asana、Brave Search、Exa、Context7
-- 支持用户添加任意远程 MCP Server
-- 工具调用前需用户确认（可配置自动批准白名单）
+| 命名空间 | 作用 |
+|---|---|
+| `phone_control__` | 手机操控（12 个工具：读屏 / 点击 / 长按 / 双击 / 滑动 / 输入 / 返回 / 桌面 / 启动应用 / 等待 / 截图 / 人工接管） |
+| `qq__` | QQ 小号助手（发消息 / 发语音 / 改签名 / 定时消息管理） |
+| `knowledge_base__` | 知识库检索 |
+| `web_search__` | 联网搜索 |
+| `hotlist__` | 中文平台实时热榜 |
+| `document__` | Word / Excel 生成 |
+| `cross_app__` | Deep Link 跳转与系统分享 |
+| `todo__` | 待办清单 |
+| `pet__` | 桌宠动作与表情 |
+| `ask_user__` | 反向提问，需要用户决策时主动发问 |
+| `mcp_*` | MCP Server 提供的远程工具 |
 
-### Skills 系统（可扩展工具包）
+- **MCP Client**：内置本地 Server（文件系统、网页抓取、记忆、时序推理、时间等）与多个远程模板（GitHub / Notion / Slack / Sentry / Stripe / Asana / Brave / Exa / Context7），也支持自定义远程 Server
+- **Skills**：兼容 `SKILL.md` 声明式工具包，支持本地与 HTTPS 远程加载（多重校验 + zip slip 防护），仅在启用时加载，不污染系统提示词
+- **工具权限**：每次工具调用可按策略确认或自动批准；支付 / 密码 / 验证码等敏感内容由拦截器硬拦截，不可绕过
 
-复用 OpenClaw SKILL.md 设计，支持本地与远程加载：
+### 🎙 语音
 
-- 内置 3 个 Skill：中文人性化改写、联网深度调研、网页数据抓取
-- 通过 `SKILL.md` 声明工具定义，snakeyaml 安全解析
-- 远程下载 HTTPS + 9 层安全校验 + zip slip 防护
-- 渐进式加载：仅启用时加载，不污染 system prompt
+- **语音通话**：全双工会话式交互，悬浮通话层 + 前台服务保活
+- **ASR 三档**：端侧流式（sherpa-onnx）→ 云端流式（阿里云 Paraformer-realtime）→ 系统识别降级
+- **TTS 多引擎**：系统 TTS（零依赖）→ 云端 MiniMax → **端侧音色克隆**
+- **音色克隆**：侧载或应用内导入 `.voicepack`，本地合成、流式播放，支持段间停顿与总静音上界，避免长文本播报出现大段空白
+- **角色音色**：角色包可声明音色，用户选择优先于角色包声明
 
-### 个人知识库（端侧 RAG）
+### 📱 手机操控
 
-端侧本地知识库，降低 AI 幻觉：
+让 LLM 真正"用手"操作手机，三种执行面：
 
-- 导入格式：PDF / DOCX / XLSX / MD / TXT
-- 文档解析 → 切片（可配 chunk size/overlap）→ 嵌入（all-MiniLM-L6-v2 ONNX INT8）→ 向量检索
-- 对话时自动检索 top-k 相关片段注入 prompt
-- AI 回答标注引用来源（文件名 + 片段位置）
-- 支持分库管理（如"工作"/"学习"）
-- 嵌入模型按需加载，闲置 5 分钟卸载
+| 执行面 | 表现 | 依赖 |
+|---|---|---|
+| 前台 | 直接操作当前屏幕，支持坐标手势 | 无障碍服务 |
+| 隐藏虚拟屏 | 在不可见副屏运行目标 App，**主屏不受影响** | Shizuku |
+| Takeover | 把后台任务迁移到主屏，用户可旁观 | Shizuku |
 
-### 三层记忆系统
+- **无障碍读取**：UI 树结构化文本；树不可读时（微信 / WebView / Flutter）自动回退到截图 + OCR 文字与图标区域
+- **Shizuku 增强**：shell 身份直启应用到副屏、坐标手势、跨用户（工作资料 / 分身）启动
+- **Watch 观战**：可选主屏小窗实时观看 Agent 在后台的操作画面
+- **自愈与对账**：虚拟屏残留、孤儿 shell 进程、被系统清掉的无障碍注册都会在启动时检测并恢复，失败如实报告
+- **安全边界**：敏感页硬拦截、高优先级人工接管、用完即回收目标 App，不在主屏留下残影
 
-解决多轮对话上下文污染：
+### 💌 QQ 小号助手
 
-- **L1 滑动窗口**：最近 N 轮对话（默认 10 轮）+ LLM 摘要压缩，超窗口时压缩注入
-- **L2 跨会话记忆**：对话结束自动向量化存储，新会话 top-k 检索相关记忆（默认 k=3）
-- **L3 用户画像**：显式偏好（UI 设定）+ 隐式偏好（LLM 从对话中抽取）
-- 降级设计：L1/L2/L3 任一失败降级为 null，不阻断对话
+在端侧控制一个小号，让 Agent 以"你"的身份与之对话——不需要服务器，也不上传聊天记录。
 
-### 跨 App 调用
+- **双轨通道**：优先 OneBot 11 协议端（需自建 NapCat 等），未连接时自动降级为无障碍 UI 自动化；切换由能力探测驱动，不是配置项决定
+- **后台代发**：经隐藏虚拟屏以小号身份发送，主屏无感
+- **双向自动回复**：检测新消息 → 读取上下文 → LLM 生成 → 后台发出；被动应答与主动消息的配额分离，用户说话必答、系统不主动打扰
+- **随机定时主动消息**：活跃时段（HH:mm，支持跨零点）+ 每日上限 + 最小间隔，泊松或均匀采样，精确闹钟兜底
+- **失败分型**：环境类（熄屏 / 执行面 / 通道）不计熔断，账号态（需重新验证）不重试不占配额，避免空转烧额度
+- **隐私**：消息内容只在设备与你的模型端点之间流动
 
-AI 可调用手机其他 App 的能力：
+> 该能力涉及第三方 App 的自动化操作，请遵守目标平台的服务条款，仅用于你自己的账号。
 
-- Deep Link 跳转（微信、支付宝、淘宝、抖音、QQ、微博、百度地图）
-- Share Sheet 发送内容
-- Media Picker 选择文件
-- 用户确认弹窗，安全可控
+### 🐾 角色包与桌宠
 
-### 深度思考
+角色是**可导入的资产包**，而不是写死在应用里的预设：
 
-支持 DeepSeek 的 `thinking` / `reasoning_effort` 参数，按开关开启/关闭，AI 推理过程以可折叠卡片展示。
+- **RolePack**（`prism-rolepack/1`）：persona / worldbook（关键词激活的背景设定）/ style / voice / pet
+- 导入到应用私有目录，随卸载清除，不入 APK、不入公开仓库；出厂仅内置一个中性助手
+- **桌宠**：Live2D 渲染（WebView + pixi.js + Cubism Core），支持动作、表情、物理摆动、命中区点击、眨眼呼吸与口型同步
+- **AI 联动**：`pet__play_action` 工具让角色配合说话内容做动作，回复以气泡显示在形象旁
+- 默认关闭，显式开启；窗口可见、通知即入口、关闭即停服，无开机自启
 
-### 设备适配
+> 形象资产请自行确认使用权。以示例角色为例，其 Live2D 模型作者为 B 站 UP 主 [是依七哒](https://space.bilibili.com/457683484)，角色 IP 属米哈游 / HoYoverse 且禁止商用。
 
-四档性能模式（FULL / STANDARD / MINIMAL / CHAT_ONLY）按 RAM 自动降级：
+### ⚙️ 设备适配
 
-- FULL（≥8GB）：全部功能
-- STANDARD（≥6GB）：关闭端侧嵌入
-- MINIMAL（≥4GB）：关闭嵌入 + 记忆系统
-- CHAT_ONLY（<4GB）：纯聊天
+按 RAM 自动分档，也可手动覆盖（重启生效）：
 
-支持手动覆盖，**重启生效**。
+| 档位 | 内存 | 知识库 | 跨会话记忆 | 嵌入模型 | top-k |
+|---|---|---|---|---|---|
+| FULL | ≥ 6 GB | 标准批次 | 启用 | 常驻，闲置 5 min 卸载 | 5 |
+| STANDARD | 4–6 GB | 小批次 | 启用 | 按需，闲置 2 min 卸载 | 3 |
+| MINIMAL | 3–4 GB | 关键词检索 | 禁用 | 不加载 | — |
+| CHAT_ONLY | < 3 GB | 禁用 | 禁用 | 不加载 | — |
 
 ## 快速开始
 
-### 前置要求
+### 环境要求
 
-- Android Studio Hedgehog (2023.1.1+) 或更高版本
-- JDK 17+
+- Android Studio，需支持 AGP 8.13（Narwhal 或更新版本）
+- JDK 17
 - Android SDK 34
-- 真机（Android 8.0+ / API 26+）或 arm64 模拟器
+- 真机 **Android 8.0+（API 26+）**，arm64
 
 ### 构建
 
@@ -131,7 +162,7 @@ cd Prism
 ./gradlew :app:assembleDebug
 ```
 
-APK 输出位置：`app/build/outputs/apk/debug/app-debug.apk`
+产物：`app/build/outputs/apk/debug/app-debug.apk`
 
 ### 安装
 
@@ -139,151 +170,197 @@ APK 输出位置：`app/build/outputs/apk/debug/app-debug.apk`
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-### 配置
+### 首次配置
 
-首次启动后，进入设置页配置你的 LLM Provider：
+1. 打开 **设置 → 模型与端点 → Provider 配置**，添加一个端点（名称 / baseURL / 模型名）
+2. 在 **API Key** 填入密钥（Keystore 加密，明文不落盘）
+3. 回到聊天页即可开始；联网搜索、深度思考可在输入框上方或设置页随时切换
 
-1. **添加 Provider**：点击右上角设置 → Provider 管理 → 添加
-2. **配置端点**：填入名称（如 DeepSeek）、baseURL、API Key
-3. **选择模型**：输入模型名称（如 `deepseek-chat`）
-4. **保存**：API Key 经 Android Keystore 加密存储
+### 可选增强
 
-### 功能开关
+以下能力按需开启，不开启时应用功能完整、只是少了对应能力：
 
-- 设置页可开启/关闭：联网搜索、深度思考、知识库检索、工具审批模式
-- 联网搜索开关位于输入框上方，快捷切换
+| 能力 | 需要 | 开启位置 |
+|---|---|---|
+| 读屏与点击 | 无障碍服务 | 设置 → 手机操控 |
+| 后台执行面 / 坐标手势 | [Shizuku](https://shizuku.rikka.app/) | 设置 → 手机操控 → Shizuku |
+| Watch 观战小窗 | 悬浮窗权限 | 设置 → 手机操控 → 观看 AI 操作 |
+| 语音通话 | 麦克风 + 通知 | 设置 → 语音通话 |
+| 定时主动消息 | 精确闹钟 | 设置 → QQ 小号助手 |
+| 桌宠 | 悬浮窗 + 前台服务 | 设置 → 桌宠 |
 
-## 架构概览
+## 架构
 
-```text
-Prism/
-├── app/
-│   └── src/main/java/io/prism/
-│       ├── network/           # 网络层：Provider / MCP Client / 流式请求
-│       │   ├── ChatStreamProvider.kt       # 流式 SSE 请求
-│       │   ├── OpenAICompatibleProvider.kt # OpenAI 兼容协议（含 tool_calling）
-│       │   ├── WebSearchLocalToolExecutor.kt  # Bing RSS 联网搜索
-│       │   ├── KnowledgeBaseLocalToolExecutor.kt # 知识库工具
-│       │   ├── McpClientManager.kt         # MCP Kotlin SDK Client
-│       │   └── LocalMcpToolProvider.kt     # 本地 MCP 工具（Fetch/Filesystem）
-│       ├── skill/              # Skills 系统
-│       │   ├── SkillExecutor.kt            # 工具执行回路（maxRounds 10 + 熔断）
-│       │   └── CompositeLocalToolExecutor.kt # 本地工具组合
-│       ├── ui/                 # UI 层 Compose
-│       │   ├── chat/           # 聊天界面 + ViewModel
-│       │   ├── knowledge/      # 知识库管理 UI
-│       │   ├── settings/       # 设置页
-│       │   └── capabilities/   # 能力管理（Skills/记忆/跨 App）
-│       ├── data/               # 数据层（ObjectBox 实体 + Repository）
-│       ├── memory/             # 三层记忆系统
-│       ├── rag/                # RAG 对话集成
-│       ├── embedding/          # 端侧嵌入引擎（ONNX Runtime）
-│       ├── ingestion/          # 文档摄入管线
-│       ├── crossapp/           # 跨 App 调用
-│       ├── pet/                # 角色包桌宠（ADR-051）
-│       │   ├── model/          # 纯数据层：形象描述 / 动作目录 / 配置 / 窗口几何（JVM 可测）
-│       │   ├── asset/          # 形象资产：.petpack 解析、安装（zip slip 防护）、引用校验
-│       │   ├── overlay/        # 悬浮窗：前台 Service、WindowManager、虚拟资源路由
-│       │   ├── PetManager.kt   # 门面：形象管理 + 服务起停 + 渲染描述符编译
-│       │   └── PetLocalToolExecutor.kt  # pet__play_action 工具
-│       ├── voice/local/        # 端侧本地音色克隆（ADR-053）：音色包定位/校验、文本规范化、
-│       │                       # 参考音频选择、ZipVoice 引擎与 AudioTrack 播放（JVM 可测）
-│       ├── security/           # 安全层（KeyStore 加密）
-│       └── config/             # 配置仓库
-├── app/src/sherpa/kotlin/      # sherpa-onnx 条件源集（AAR 就位才编译；含 ASR 与 ZipVoice TTS）
-├── app/src/main/assets/pet/    # 桌宠渲染器（HTML/JS + 内置 pixi/Cubism 运行时）
-├── docs/                       # 文档
-│   ├── decisions/              # 架构决策记录（ADR，本地专属）
-│   ├── templates/              # PRD/ARCH/ADR/Task 模板
-│   └── progress.md             # 项目进展记录（本地专属）
-├── rules/                      # AI 规则模块（本地专属，入口见 AGENTS.md）
-└── AGENTS.md                   # AI 规则体系入口（适配 TRAE / opencode / DeepSeek Harness / Claude Code）
+```mermaid
+flowchart TB
+    subgraph UI["界面层 · Jetpack Compose"]
+        Chat["聊天与对话列表"]
+        Call["语音通话"]
+        Caps["能力中心 · 设置"]
+        PetUI["桌面角色"]
+    end
+
+    subgraph ORCH["编排层"]
+        Loop["工具调用回路<br/>maxRounds + 熔断"]
+        Mem["三层记忆<br/>L1 / L2 / L3"]
+        Rag["RAG 检索"]
+        Dispatch["通道解析与降级"]
+    end
+
+    subgraph TOOLS["工具层"]
+        Local["本地工具路由器"]
+        Mcp["MCP Client"]
+        Skill["Skills 运行时"]
+    end
+
+    subgraph PLATFORM["平台层"]
+        A11y["无障碍服务"]
+        Shizuku["Shizuku shell"]
+        Vd["隐藏虚拟屏 / Watch / Takeover"]
+        Voice["ASR / TTS 引擎"]
+    end
+
+    subgraph DATA["数据层"]
+        Ob["ObjectBox"]
+        Ds["DataStore"]
+        Ks["Keystore 加密"]
+        Onnx["ONNX 嵌入模型"]
+    end
+
+    UI --> ORCH
+    ORCH --> TOOLS
+    TOOLS --> PLATFORM
+    ORCH --> DATA
+    PLATFORM --> DATA
 ```
+
+源码地图（`app/src/main/java/io/prism/`）：
+
+| 目录 | 职责 |
+|---|---|
+| `ui/` | Compose 界面：聊天、对话列表、能力中心、知识库、设置、主题 |
+| `network/` | Provider 抽象与流式请求、MCP Client、搜索与抓取、本地工具执行器 |
+| `skill/` | 工具回路、工具路由、SKILL.md 解析与下载、待办与反向提问 |
+| `phonecontrol/` | 无障碍服务、Shizuku 用户服务、显示后端、执行面与保活 |
+| `qq/` | QQ 小号助手：通道抽象、调度、守卫、失败分型、状态仓库 |
+| `voice/` | 语音会话、ASR / TTS 引擎、端侧音色克隆（`local/`）、云端引擎（`cloud/`） |
+| `pet/` | 角色包桌宠：形象资产、悬浮窗、渲染描述符、动作工具 |
+| `memory/` `rag/` `embedding/` `ingestion/` | 三层记忆、检索编排、ONNX 嵌入、文档摄入 |
+| `document/` `hotlist/` `crossapp/` `fs/` | 文档生成、热榜、跨 App、文件系统工具 |
+| `data/` `config/` `security/` `tier/` | 持久化、配置仓库、Keystore 封装、设备分档 |
+| `app/src/sherpa/kotlin/` | sherpa-onnx 条件源集（AAR 就位才编译，含端侧 ASR 与 VITS） |
+| `assets/pet/` | 桌宠渲染器（HTML / JS + 内置 pixi 与 Cubism 运行时） |
 
 ## 技术栈
 
 | 领域 | 选型 |
 |---|---|
-| 语言 | Kotlin 2.1 |
+| 语言 | Kotlin 2.3 |
 | UI | Jetpack Compose + Material 3 |
-| 数据库 | ObjectBox 4.0 |
-| 网络 | Ktor 3.x（OkHttp） |
-| 序列化 | kotlinx.serialization |
-| MCP | MCP Kotlin SDK 0.12.0 |
-| 嵌入 | ONNX Runtime Android + all-MiniLM-L6-v2 INT8 |
-| 文档解析 | Apache PDFBox 3.0.8 + POI 5.4.0 |
-| 安全 | Android Keystore + Tink 1.16.0 |
-| 构建 | Gradle 8.7 + AGP 8.7 |
-| 最低 SDK | Android 8.0 (API 26) |
-| 目标 SDK | Android 14 (API 34) |
+| 数据库 | ObjectBox 5.4 |
+| 网络 | Ktor 3.3（OkHttp 引擎） |
+| 序列化 | kotlinx.serialization 1.11 |
+| MCP | MCP Kotlin SDK 0.12 |
+| 嵌入 | ONNX Runtime 1.27 + all-MiniLM-L6-v2 INT8 |
+| 文档解析 | Apache PDFBox 3.0 + POI 5.5 |
+| 安全 | Android Keystore + Tink 1.15 |
+| 权限增强 | Shizuku API 13.1 |
+| 构建 | Gradle 8.13 + AGP 8.13 |
+| SDK | min 26 · target / compile 34 |
 
-## 协议
+## 隐私与安全
 
-本项目基于 [Apache 2.0](LICENSE) 许可证开源。
+**零后端**：Prism 自身不运营任何服务器。模型请求直连你配置的端点；没有账号体系，没有遥测上传。
 
-## 获取
+- **密钥**：API Key 经 Android Keystore 加密后存入 DataStore，明文不落盘、不进日志
+- **数据**：对话、记忆、知识库、音色包、角色包全部位于应用私有目录，随卸载清除
+- **日志**：敏感内容（正文、联系人、账号、密钥）在日志中脱敏或截断
+- **资产**：角色形象、音色包、训练素材始终是用户私有资产，不提交版本库、不打进 APK
 
-- GitHub Releases：[v0.1.0](https://github.com/ljhthink/Prism/releases/tag/v0.1.0)
-- 自行构建：[构建指南](#快速开始)
+申请的系统权限与用途：
 
-## 相关文档
+| 权限 | 用途 |
+|---|---|
+| `INTERNET` / `ACCESS_NETWORK_STATE` | 访问你配置的模型端点、搜索与 MCP |
+| `RECORD_AUDIO` + `FOREGROUND_SERVICE_MICROPHONE` | 语音通话 |
+| `FOREGROUND_SERVICE(_SPECIAL_USE)` | 语音通话、定时消息、桌宠的前台保活 |
+| `POST_NOTIFICATIONS` | 状态与提醒通知 |
+| `SYSTEM_ALERT_WINDOW` | Watch 观战小窗、桌宠 |
+| `SCHEDULE_EXACT_ALARM` | 定时主动消息的精确触发 |
+| `WAKE_LOCK` | 后台执行任务期间保持唤醒 |
+| `KILL_BACKGROUND_PROCESSES` | 无 Shizuku 时回收后台执行目标 |
 
-- [AGENTS.md](AGENTS.md) —— AI 规则体系入口（适配 TRAE / opencode / DeepSeek Harness / Claude Code；本地专属）
-- [docs/progress.md](docs/progress.md) —— 项目进展记录（本地专属）
-- 规则模块（本地专属，经 [AGENTS.md](AGENTS.md) 强制加载矩阵读取）：[00-core](rules/00-core.md) / [01-planning-research](rules/01-planning-research.md) / [02-source-github](rules/02-source-github.md) / [03-doc-governance](rules/03-doc-governance.md) / [04-coding-review-loop](rules/04-coding-review-loop.md) / [05-git-release](rules/05-git-release.md) / [06-risk](rules/06-risk.md) / [07-engineering-standards](rules/07-engineering-standards.md) / [08-bugfix-ops](rules/08-bugfix-ops.md)
-- [docs/decisions/](docs/decisions/README.md) —— 架构决策记录（ADR-001~ADR-061，本地专属；索引见该目录 README）
-- [docs/PRD.md](docs/PRD.md) —— 产品需求文档 v0.1（本地专属）
-- [docs/prd-search-fetch-enhancement.md](docs/prd-search-fetch-enhancement.md) —— 搜索命中与 Fetch 反爬优化 PRD（v1 批次15，本地专属）
-- [docs/prd-v1-b17-features.md](docs/prd-v1-b17-features.md) —— 批次17 四项新功能 PRD（TODO List / 思维链覆写 / 对话回退 / 对话重试，本地专属）
-- [docs/prd-v1-b20-voice-bg-control.md](docs/prd-v1-b20-voice-bg-control.md) —— 批次20 PRD（语音通话 P1 / 手机操控后台化 M1，ADR-044/045，本地专属）
-- [docs/prd-v1-b24-rolepack-pet.md](docs/prd-v1-b24-rolepack-pet.md) —— 批次24 PRD（角色包桌宠 US-2401~US-2413，ADR-051，本地专属）
-- [docs/decisions/ADR-051-rolepack-pet-live2d.md](docs/decisions/ADR-051-rolepack-pet-live2d.md) —— 桌宠架构与 Live2D 移动端渲染选型（本地专属）
-- [docs/prd-local-voice-clone.md](docs/prd-local-voice-clone.md) —— 端侧本地音色克隆 PRD（US-001~US-004、AC0~AC8，ADR-053，本地专属）
-- [docs/prd-qq-burner-account.md](docs/prd-qq-burner-account.md) —— QQ 小号端侧控制 PRD（后台代发消息 / 换头像 / 改签名 / 随机定时主动消息；US-3101~US-3108，ADR-062、ADR-063，本地专属）
-- [docs/decisions/ADR-062-qq-burner-account-android-control.md](docs/decisions/ADR-062-qq-burner-account-android-control.md) —— QQ 小号端侧控制路线选型（端侧 UI 自动化为主、Termux + NapCat 为备选，本地专属）
-- [docs/decisions/ADR-063-proactive-message-scheduling.md](docs/decisions/ADR-063-proactive-message-scheduling.md) —— 随机定时主动消息的调度机制选型（前台服务心跳 + AlarmManager 精确闹钟兜底，本地专属）
-- [docs/decisions/ADR-053-local-voice-clone-ondevice.md](docs/decisions/ADR-053-local-voice-clone-ondevice.md) —— 端侧本地音色克隆（ZipVoice）与音色包侧载分发（本地专属）
-- [docs/decisions/ADR-054-local-clone-streaming-playback.md](docs/decisions/ADR-054-local-clone-streaming-playback.md) —— 本地音色**流式播放**（合成回调分块 → 常开音轨逐块写入，本地专属）
-- [docs/decisions/ADR-055-ondevice-vits-voicepack.md](docs/decisions/ADR-055-ondevice-vits-voicepack.md) —— 端侧**微调 VITS** 音色包与 ZipVoice 并存切换（Proposed，本地专属）
-- [docs/decisions/ADR-056-local-clone-playback-modes-and-tiers.md](docs/decisions/ADR-056-local-clone-playback-modes-and-tiers.md) —— 本地音色**播报管线双模（连续/整段）与三档合成档位**（本地专属）
-- [docs/decisions/ADR-057-voicepack-inapp-import.md](docs/decisions/ADR-057-voicepack-inapp-import.md) —— 音色包**应用内导入**（`.voicepack` zip 归档，本地专属）
-- [docs/decisions/ADR-058-local-voice-pack-user-selection.md](docs/decisions/ADR-058-local-voice-pack-user-selection.md) —— 本地音色包的**用户选择与生效优先级**（用户选择 > 角色包声明，本地专属）
-- [docs/decisions/ADR-059-sentence-gap-for-local-tts.md](docs/decisions/ADR-059-sentence-gap-for-local-tts.md) —— 段间停顿 `generation.sentenceGapMs`（处置端侧"语速过快"，本地专属）
-- [docs/decisions/ADR-060-voice-clone-kit-versioning-boundary.md](docs/decisions/ADR-060-voice-clone-kit-versioning-boundary.md) —— `voice-clone-kit/` 版本控制边界收窄（脚本入库、素材与体积产物继续忽略，本地专属）
-- [docs/decisions/ADR-061-sentence-gap-total-cap.md](docs/decisions/ADR-061-sentence-gap-total-cap.md) —— 段间停顿的「单次播报总静音上界」20s（处置 DEF-01 长文本静音线性增长，P2，补 ADR-059 的落地前置条件）
-- [docs/reports/2026-09-24-voice-quality-ui-and-asset-tidy-proposal.md](docs/reports/2026-09-24-voice-quality-ui-and-asset-tidy-proposal.md) —— 端侧音色质量 / 设置页 UI / 资产与临时文件治理方案（含真机取证、客观测量与 `voicebox` 调研裁决，一次性报告）
-- [docs/reports/2026-09-20-vits-finetune-verification.md](docs/reports/2026-09-20-vits-finetune-verification.md) —— 中文 VITS 微调全链路验证（训练/导出/加载崩溃根因/RTF 实测，一次性报告）
-- [docs/reports/2026-09-20-local-voice-clone-streaming-measurement.md](docs/reports/2026-09-20-local-voice-clone-streaming-measurement.md) —— 流式播放机制核实与一手实测（TKN-LVC-013，一次性报告）
-- [docs/reports/2026-09-20-voice-clone-vits-route-research.md](docs/reports/2026-09-20-voice-clone-vits-route-research.md) —— 中文 VITS 微调→sherpa-onnx ONNX 路线一手核查（一次性报告）
-- [docs/reports/2026-10-18-qq-wechat-persona-im-research.md](docs/reports/2026-10-18-qq-wechat-persona-im-research.md) —— QQ/微信拟人化跨 IM 能力（发消息/动态/头像/签名）调研（一次性报告，本地专属）
-- [docs/reports/2026-10-18-qq-burner-account-android-control-research.md](docs/reports/2026-10-18-qq-burner-account-android-control-research.md) —— QQ 小号在纯 Android 端由 Prism 后台控制（发消息/换头像/改签名）专项调研（一次性报告，本地专属）
-- [docs/reports/2026-10-18-qq-proactive-scheduled-messaging-research.md](docs/reports/2026-10-18-qq-proactive-scheduled-messaging-research.md) —— QQ 随机定时主动消息（拟人化）补充调研（Android 定时机制/随机化算法/先例，一次性报告，本地专属）
-- [docs/reports/2026-10-18-qq-control-archaeology.md](docs/reports/2026-10-18-qq-control-archaeology.md) —— QQ 小号控制功能集成点源码考古（工具接入链路/手机操控执行面/保活/设置页/持久化范式，一次性报告，本地专属）
-- [docs/reports/2026-10-19-qq-m0-poc.md](docs/reports/2026-10-19-qq-m0-poc.md) —— QQ 小号端侧控制 M0 真机 PoC（会话页/资料页节点可定位，结论通过，一次性报告，本地专属）
-- [docs/reports/2026-10-19-qq-executor-guardrail.md](docs/reports/2026-10-19-qq-executor-guardrail.md) —— QQ 执行器批次 guardrail 审查（B-01/H-01 阻断轮，一次性报告，本地专属）
-- [docs/reports/2026-10-19-qq-executor-guardrail-r2.md](docs/reports/2026-10-19-qq-executor-guardrail-r2.md) —— QQ 执行器批次 guardrail 复审（通过，一次性报告，本地专属）
-- [docs/reports/2026-10-19-qq-executor-acceptance.md](docs/reports/2026-10-19-qq-executor-acceptance.md) —— QQ 执行器批次验收测试（通过，一次性报告，本地专属）
-- [docs/reports/2026-10-19-qq-bg-executor-archaeology.md](docs/reports/2026-10-19-qq-bg-executor-archaeology.md) —— QQ 小号后台虚拟屏化 + 双向对话源码考古（改造点/调用链/风险，一次性报告，本地专属）
-- [docs/reports/2026-10-19-qq-bg-executor-guardrail.md](docs/reports/2026-10-19-qq-bg-executor-guardrail.md) —— QQ 后台虚拟屏化 + 双向对话 guardrail 审查（有条件通过：H-01 等已闭合，一次性报告，本地专属）
-- [docs/reports/2026-10-19-qq-bg-executor-acceptance.md](docs/reports/2026-10-19-qq-bg-executor-acceptance.md) —— QQ 后台虚拟屏化 + 双向对话验收测试（一次性报告，本地专属）
-- [docs/reports/2026-10-19-qq-bg-executor-followup-research.md](docs/reports/2026-10-19-qq-bg-executor-followup-research.md) —— QQ 小号助手真机 5 项问题诊断与深度调研（DEF-118~122，一次性报告，本地专属）
-- [docs/reports/2026-10-21-qq-protocol-archaeology.md](docs/reports/2026-10-21-qq-protocol-archaeology.md) —— QQ 小号助手改 OneBot 11 协议端路线的现状考古（模块复用/替换边界/风险，TKN-QQ-PROTOCOL-001，一次性报告，本地专属）
-- [docs/reports/2026-10-21-qq-onebot-opencyvis-plan.md](docs/reports/2026-10-21-qq-onebot-opencyvis-plan.md) —— QQ 小号助手「OneBot 11 协议端 + OpenCyvis 隐藏执行面」落地方案（TKN-QQ-PROTOCOL-002，一次性报告，本地专属）
-- [docs/reports/2026-10-21-qq-protocol-guardrail.md](docs/reports/2026-10-21-qq-protocol-guardrail.md) —— 协议端改造 guardrail 审查（首轮：有条件通过，TKN-QQ-PROTOCOL-003，一次性报告，本地专属）
-- [docs/reports/2026-10-21-qq-protocol-guardrail-r2.md](docs/reports/2026-10-21-qq-protocol-guardrail-r2.md) —— 协议端改造 guardrail 复审（B-01/H-01/H-03 闭合，H-05 等已修复待三审，TKN-QQ-PROTOCOL-004，一次性报告，本地专属）
-- [docs/reports/2026-10-21-qq-protocol-guardrail-r3.md](docs/reports/2026-10-21-qq-protocol-guardrail-r3.md) —— 协议端改造 guardrail 三审（H-05 闭合，H-06/M-18/M-19 待修，TKN-QQ-PROTOCOL-005，一次性报告，本地专属）
-- [docs/reports/2026-10-21-qq-protocol-guardrail-r4.md](docs/reports/2026-10-21-qq-protocol-guardrail-r4.md) —— 协议端改造 guardrail 四审（无阻断/无高危；M-19 计时器语义 + M-20 测试缺口待闭合，TKN-QQ-PROTOCOL-006，一次性报告，本地专属）
-- [docs/reports/2026-10-21-qq-protocol-guardrail-r5.md](docs/reports/2026-10-21-qq-protocol-guardrail-r5.md) —— 协议端改造 guardrail 五审收尾（**通过**；M-19/M-20/L-27~L-30 闭合，遗留 R-01 与 L-31~L-35 已登记，TKN-QQ-PROTOCOL-007，一次性报告，本地专属）
-- [docs/reports/2026-10-21-qq-voice-guardrail.md](docs/reports/2026-10-21-qq-voice-guardrail.md) —— QQ 语音消息（US-3113）+ r5 遗留修复 guardrail 六审（**有条件通过**；R-01/L-31~L-34 闭合，语音链路无阻断/无高危，M-01~M-08 待闭合，TKN-QQ-PROTOCOL-008，一次性报告，本地专属）
-- [docs/reports/2026-10-21-qq-voice-guardrail-r2.md](docs/reports/2026-10-21-qq-voice-guardrail-r2.md) —— QQ 语音消息 C1~C5 收尾 guardrail 七审（**有条件通过**；C2/C4/M-04/M-07/M-08 闭合，C1/C3/C5 实现已改、验证未满，M-09~M-11 待闭合，TKN-QQ-PROTOCOL-009，一次性报告，本地专属）
-- [docs/reports/2026-10-21-qq-voice-guardrail-r3.md](docs/reports/2026-10-21-qq-voice-guardrail-r3.md) —— QQ 语音消息 M-09/M-10/M-11 闭合核验 guardrail 八审（**通过**；三项中危闭合，无阻断/无高危，遗留 L-23~L-29 低危，可进入 ac-verifier，TKN-QQ-PROTOCOL-010，一次性报告，本地专属）
-- [docs/reports/2026-10-21-qq-protocol-acceptance.md](docs/reports/2026-10-21-qq-protocol-acceptance.md) —— QQ 双轨改造批次验收（US-3110/3111/3112/3113/3115；**PARTIAL**：复验后代码层 PASS、P-01 关闭、D-01~D-09/R-02 闭合，真机端到端仍 BLOCKED，TKN-QQ-PROTOCOL-011，一次性报告，本地专属）
-- [docs/reports/2026-10-21-qq-protocol-guardrail-r6.md](docs/reports/2026-10-21-qq-protocol-guardrail-r6.md) —— QQ 双轨当前快照 guardrail 六审（**通过**；覆盖 P-01 当前快照，D-01~D-09/R-02 闭合，无阻断/无高危；M-01 已由 `QqRuntimeStateRepositoryTest` 补齐，TKN-QQ-PROTOCOL-011，一次性报告，本地专属）
-- [docs/reports/2026-10-21-qq-hidden-vd-poc.md](docs/reports/2026-10-21-qq-hidden-vd-poc.md) —— 隐藏虚拟屏 PoC（ADR-065 M9 闸门）：**PASS**（shell 包上下文 + TRUSTED flags、主屏零窗口、user 999 QQ 渲染、`input -d` 可操作，一次性报告，本地专属）
-- [docs/reports/2026-10-24-qq-hidden-display-guardrail.md](docs/reports/2026-10-24-qq-hidden-display-guardrail.md) —— 隐藏执行面 Phase 4（US-3114）guardrail 审查（r1 **有条件通过** → **r2/r3 通过**，C-1~C-10 闭合，安全无阻断；E-01 release 真机冒烟延后，TKN-QQ-HIDDENVD-001，一次性报告，本地专属）
-- [docs/reports/2026-10-24-qq-hidden-display-acceptance.md](docs/reports/2026-10-24-qq-hidden-display-acceptance.md) —— 隐藏执行面 Phase 4（US-3114）ac-verifier 验收（**PASS**：AC-1~AC-6 单元/静态/真机通过；O-1 release 冒烟延后、D-01~D-08 残余登记，TKN-QQ-HIDDENVD-001，一次性报告，本地专属）
-- [docs/reports/2026-10-24-qq-hidden-display-milestone-audit.md](docs/reports/2026-10-24-qq-hidden-display-milestone-audit.md) —— M9 隐藏执行面里程碑功能完整性审计（**有条件通过**：AC-1~AC-6 实质通过，本阶段内部可交付；对外分发前须补 O-1 release 冒烟、O-4 10 分钟基线、D-02 资产治理与文档修正，TKN-QQ-HIDDENVD-002，一次性报告，本地专属）
-- [docs/runbooks/setup-local-voice-clone.md](docs/runbooks/setup-local-voice-clone.md) —— 本地音色包侧载与启用 Runbook（含真机验收清单）
-- [docs/runbooks/finetune-vits-zh-cyrene.md](docs/runbooks/finetune-vits-zh-cyrene.md) —— 中文 VITS 微调（昔涟音色）→ sherpa-onnx 端侧 Runbook（TKN-LVC-014，**已按实测更正**）
-- [docs/runbooks/searxng-selfhost.md](docs/runbooks/searxng-selfhost.md) —— SearXNG 自建搜索接入 Runbook
-- [CLAUDE.md](CLAUDE.md) —— 指向 AGENTS.md 的规则入口指针（Claude Code 适配，本地专属）
+无障碍服务与 Shizuku 属**可选**增强，只在你显式开启后参与；不开启时应用不会读取屏幕。
+
+## 工程质量
+
+本项目以"先取证、再修改、后验收"的方式推进，每次改动都走同一条闭环：
+
+```text
+方案 → 影响自检 → guardrail 审查（可多轮）→ 单元 / 真机验收 → 真机手动确认
+```
+
+当前基线：
+
+| 项 | 数值 |
+|---|---|
+| 单元测试 | 260 个套件 / 3572 用例（最近一次全量） |
+| 静态检查 | lint 0 error |
+| 最低验证设备 | Android 16 真机（HyperOS） |
+
+文档质量由 CI 把关：Markdown 规范检查、文档索引一致性校验、本地链接检查。
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [docs/progress.md](docs/progress.md) | 项目进展记录（唯一进展事实来源） |
+| [docs/PRD.md](docs/PRD.md) | 产品需求基线 |
+| [docs/decisions/](docs/decisions/README.md) | 架构决策记录（ADR 索引） |
+| [docs/reports/](docs/reports/README.md) | 一次性调研 / 审查 / 验收报告归档 |
+| [docs/templates/](docs/templates/README.md) | PRD / ADR / 报告模板 |
+| [docs/design/deep-space-glass-design-spec.md](docs/design/deep-space-glass-design-spec.md) | 视觉设计规范 |
+| [docs/behavioral-rules.md](docs/behavioral-rules.md) | 行为规则累积层 |
+
+按功能分域的 PRD：
+
+- [docs/prd-v1-features.md](docs/prd-v1-features.md) —— 基础能力集
+- [docs/prd-search-fetch-enhancement.md](docs/prd-search-fetch-enhancement.md) —— 搜索与抓取增强
+- [docs/prd-mcp-api-enhancement.md](docs/prd-mcp-api-enhancement.md) —— MCP 能力扩展
+- [docs/prd-v1-b20-voice-bg-control.md](docs/prd-v1-b20-voice-bg-control.md) —— 语音通话与手机操控
+- [docs/prd-v1-b21-shizuku-bg-control.md](docs/prd-v1-b21-shizuku-bg-control.md) —— Shizuku 后台化
+- [docs/prd-local-voice-clone.md](docs/prd-local-voice-clone.md) —— 端侧音色克隆
+- [docs/prd-v1-b24-rolepack-pet.md](docs/prd-v1-b24-rolepack-pet.md) —— 角色包与桌宠
+- [docs/prd-qq-burner-account.md](docs/prd-qq-burner-account.md) —— QQ 小号助手
+
+运维手册：
+
+- [docs/runbooks/setup-local-voice-clone.md](docs/runbooks/setup-local-voice-clone.md) —— 音色包侧载与启用
+- [docs/runbooks/searxng-selfhost.md](docs/runbooks/searxng-selfhost.md) —— 自建 SearXNG 搜索
+- [docs/runbooks/miui-logcat-real-device.md](docs/runbooks/miui-logcat-real-device.md) —— 真机日志抓取
+
+AI 协作规则位于 [AGENTS.md](AGENTS.md)（入口）与 `rules/` 模块，规则文件与进展记录为本地专属、不推送到远程。
+
+## 参与贡献
+
+欢迎 Issue 与 PR：
+
+1. Fork 并基于 `main` 开分支
+2. 保持改动聚焦，附带测试或真机证据
+3. 运行 `./gradlew :app:testDebugUnitTest :app:lintDebug` 保证本地绿灯
+4. 若新增或重命名文档，请同步更新 [docs/progress.md](docs/progress.md) 与文档索引
+
+提交信息建议遵循 `type(scope): 摘要` 形式（如 `fix(qq): …`），并在正文说明取证与验证方式。
+
+## 许可证与致谢
+
+基于 [Apache License 2.0](LICENSE) 开源，第三方组件署名见 [NOTICE](NOTICE)。
+
+特别致谢：
+
+- [Shizuku](https://shizuku.rikka.app/) —— 提供免 root 的 shell 能力通道
+- [OpenCyvis](https://github.com/opencyvis/opencyvis-phone) —— 隐藏虚拟显示方案的参考实现
+- [pixi.js](https://pixijs.com/) / [pixi-live2d-display](https://github.com/guansss/pixi-live2d-display) / [Live2D Cubism](https://www.live2d.com/) —— 桌宠渲染栈
+- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) / [ONNX Runtime](https://onnxruntime.ai/) —— 端侧语音与嵌入推理
+
+> 本项目仅供个人学习与自用。使用手机操控、QQ 小号助手等能力时，请自行确认是否符合目标平台的服务条款与当地法律法规。
