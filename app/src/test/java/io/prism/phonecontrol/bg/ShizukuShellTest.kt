@@ -26,6 +26,23 @@ class ShizukuShellTest {
     }
 
     @Test
+    fun `amStartForUserOnDisplay 命令拼装 - 跨用户+跨屏（ADR-062 QQ 小号）`() {
+        assertArrayEquals(
+            arrayOf("am", "start", "--user", "999", "--display", "4", "-n", "com.tencent.mobileqq/.activity.SplashActivity"),
+            ShizukuShell.buildAmStartForUserOnDisplayCommand("com.tencent.mobileqq/.activity.SplashActivity", 999, 4)
+        )
+    }
+
+    @Test
+    fun `amStartForUserOnDisplay 命令拼装 - forceStopFirst 追加 -S（迁屏必需）`() {
+        val cmd = ShizukuShell.buildAmStartForUserOnDisplayCommand(
+            "com.tencent.mobileqq/.activity.SplashActivity", 999, 4, forceStopFirst = true
+        )
+        assertTrue("forceStopFirst=true 必须含 -S：${cmd.toList()}", cmd.contains("-S"))
+        assertEquals("-S 必须出现在 -n 之前（am 选项先于组件）", "am start", "${cmd[0]} ${cmd[1]}")
+    }
+
+    @Test
     fun `buildPmGrantCommand 命令拼装 - 4 token 数组（SZ-101 验收项）`() {
         assertArrayEquals(
             arrayOf("pm", "grant", "com.google.android.googlequicksearchbox", "android.permission.RECORD_AUDIO"),
@@ -124,5 +141,51 @@ class ShizukuShellTest {
         // force-stop 不在本测试直接执行（依赖 Shizuku server），此处固化
         // "仅代码拼装" 的边界意识：包名必须经 PhoneControlSecurity.isSensitivePackage 前置
         assertTrue(PhoneControlSecurity.isSensitivePackage("com.eg.android.AlipayGphone"))
+    }
+
+    // ==================== 隐藏虚拟屏响应解析（ADR-065 / US-3114） ====================
+
+    @Test
+    fun `parseHiddenDisplayResult - OK 响应解析 displayId 与 flags`() {
+        val ok = ShizukuShell.parseHiddenDisplayResult("OK:24:0x1fec1")
+        assertTrue(ok is ShizukuShell.HiddenDisplayResult.Ok)
+        ok as ShizukuShell.HiddenDisplayResult.Ok
+        assertEquals(24, ok.displayId)
+        assertEquals(0x1FEC1, ok.flags)
+    }
+
+    @Test
+    fun `parseHiddenDisplayResult - flags 缺省或零值容错`() {
+        val ok = ShizukuShell.parseHiddenDisplayResult("OK:24:0x0")
+        assertTrue(ok is ShizukuShell.HiddenDisplayResult.Ok)
+        assertEquals(0, (ok as ShizukuShell.HiddenDisplayResult.Ok).flags)
+        val noFlags = ShizukuShell.parseHiddenDisplayResult("OK:7")
+        assertTrue(noFlags is ShizukuShell.HiddenDisplayResult.Ok)
+        assertEquals(7, (noFlags as ShizukuShell.HiddenDisplayResult.Ok).displayId)
+    }
+
+    @Test
+    fun `parseHiddenDisplayResult - displayId 必须为正数（0 与负值均拒绝）`() {
+        // guardrail r1 Q-13：OK:0 与 OK:-5 若被当作有效屏，INVALID_DISPLAY(-1) 判定失效
+        assertTrue(ShizukuShell.parseHiddenDisplayResult("OK:0:0x0") is ShizukuShell.HiddenDisplayResult.Error)
+        assertTrue(ShizukuShell.parseHiddenDisplayResult("OK:-1:0x0") is ShizukuShell.HiddenDisplayResult.Error)
+        assertTrue(ShizukuShell.parseHiddenDisplayResult("OK:-5:0x0") is ShizukuShell.HiddenDisplayResult.Error)
+    }
+
+    @Test
+    fun `parseHiddenDisplayResult - ERR 响应保留可读原因（SecurityException 场景）`() {
+        val err = ShizukuShell.parseHiddenDisplayResult(
+            "ERR:java.lang.SecurityException:packageName must match the calling uid"
+        )
+        assertTrue(err is ShizukuShell.HiddenDisplayResult.Error)
+        assertTrue((err as ShizukuShell.HiddenDisplayResult.Error).message.contains("packageName"))
+    }
+
+    @Test
+    fun `parseHiddenDisplayResult - 空响应与非法格式必须失败（不静默成功）`() {
+        assertTrue(ShizukuShell.parseHiddenDisplayResult(null) is ShizukuShell.HiddenDisplayResult.Error)
+        assertTrue(ShizukuShell.parseHiddenDisplayResult("  ") is ShizukuShell.HiddenDisplayResult.Error)
+        assertTrue(ShizukuShell.parseHiddenDisplayResult("OK:abc:0x1") is ShizukuShell.HiddenDisplayResult.Error)
+        assertTrue(ShizukuShell.parseHiddenDisplayResult("garbage") is ShizukuShell.HiddenDisplayResult.Error)
     }
 }

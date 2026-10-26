@@ -50,6 +50,18 @@ class ProviderConfigRepository(private val boxStore: BoxStore) {
      * @return 保存后的 id
      */
     fun save(config: ProviderConfig): Long {
+        // ADR-064 H-06：持久化层拒绝**形如 URL 的**远端明文 http（防 API Key/对话内容明文外发）。
+        // 仅校验以 http:// 开头的值：本仓库同时被测试/导入路径用于持久化非 URL 占位值，
+        // 不应在存储层做通用 URL 语法校验（运行时守卫见 OpenAICompatibleProvider）。
+        val baseUrl = config.baseUrl.trim()
+        // guardrail L-33：scheme 大小写不敏感（`HTTP://remote` 同样必须被拒绝）
+        if (baseUrl.startsWith("http://", ignoreCase = true) &&
+            !io.prism.network.PrivateNetwork.isCleartextAllowed(baseUrl)
+        ) {
+            require(false) {
+                "Provider baseUrl 不得使用远端明文 http：请改用 https 或本机/私网地址"
+            }
+        }
         var resultId = 0L
         boxStore.runInTx {
             if (config.isActive) {

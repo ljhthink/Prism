@@ -1,0 +1,157 @@
+Prism
+Copyright 2026 Prism contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+===============================================================================
+1. 代码移植与署名（Attribution for ported code）
+===============================================================================
+
+This product includes software developed at opencyvis/opencyvis-phone
+(https://github.com/opencyvis/opencyvis-phone), licensed under the
+Apache License, Version 2.0.
+
+The hidden virtual display implementation in
+app/src/main/java/io/prism/phonecontrol/bg/ShizukuShell.kt and
+app/src/main/java/io/prism/phonecontrol/bg/DisplayBackend.kt is derived
+from the OpenCyvis virtual display approach (privileged virtual display
+creation and its flag-degradation ladder). No OpenCyvis product shell or
+unrelated source is included.
+
+===============================================================================
+2. 随 APK 分发的第三方开源组件（Bundled third-party components）
+===============================================================================
+
+AndroidX / Jetpack Compose —— Apache License 2.0
+  core-ktx, activity-compose, lifecycle, navigation-compose, documentfile,
+  datastore-preferences, compose ui / ui-graphics / material3 /
+  material-icons-extended
+  Copyright (C) The Android Open Source Project
+
+Kotlin standard library, kotlinx.coroutines, kotlinx.serialization
+  Apache License 2.0
+  Copyright (C) JetBrains s.r.o.
+
+ObjectBox —— Apache License 2.0
+  Copyright (C) ObjectBox GmbH
+
+Ktor —— Apache License 2.0
+  Copyright (C) JetBrains s.r.o.
+
+MCP Kotlin SDK (io.modelcontextprotocol:kotlin-sdk) —— MIT License
+  Copyright (C) Anthropic, PBC and contributors
+  Note: the MCP project is transitioning from MIT to Apache-2.0; components
+  originally licensed under MIT and not yet relicensed remain under MIT.
+
+ONNX Runtime —— MIT License
+  Copyright (C) Microsoft Corporation
+
+sherpa-onnx —— Apache License 2.0
+  Copyright (C) The k2-fsa project authors
+  Note: shipped as an optional, user-supplied AAR (app/libs/), not part of
+  the source tree. Absent by default; voice recognition falls back to the
+  system engine.
+
+Tink (com.google.crypto.tink:tink-android) —— Apache License 2.0
+  Copyright (C) Google LLC
+
+Shizuku API / provider (dev.rikka.shizuku) —— MIT License
+  Copyright (C) 2021 RikkaW
+
+Apache PDFBox, via pdfbox-android —— Apache License 2.0
+  PDFBox: Copyright (C) The Apache Software Foundation
+  pdfbox-android: Copyright (C) Tom Roush
+
+Apache POI (poi-ooxml) —— Apache License 2.0
+  Copyright (C) The Apache Software Foundation
+
+snakeyaml-engine-kmp —— Apache License 2.0
+  Copyright (C) The snakeyaml-engine contributors; KMP port by krzema12
+
+multiplatform-markdown-renderer —— Apache License 2.0
+  Copyright (C) Mike Penz (mikepenz)
+
+jsoup —— MIT License
+  Copyright (C) Jonathan Hedley
+
+Readability4J —— Apache License 2.0
+  Copyright (C) dankito
+  Port of Mozilla Readability.js (Copyright (C) Mozilla Foundation)
+
+Lottie (com.airbnb.android:lottie-compose) —— Apache License 2.0
+  Copyright (C) Airbnb, Inc.
+
+pixi.js —— MIT License
+  Copyright (c) 2013-2023 Mathew Groves, Chad Engler
+  Bundled at app/src/main/assets/pet/vendor/pixi.min.js;
+  full text at app/src/main/assets/pet/vendor/LICENSE-pixi.txt
+
+pixi-live2d-display —— MIT License
+  Copyright (c) 2020 Guan
+  Bundled at app/src/main/assets/pet/vendor/pixi-live2d-display-cubism4.min.js;
+  full text at app/src/main/assets/pet/vendor/LICENSE-pixi-live2d-display.txt
+
+===============================================================================
+3. 非开源组件（Proprietary components, use subject to their own terms）
+===============================================================================
+
+Live2D Cubism Core (app/src/main/assets/pet/vendor/live2dcubismcore.min.js)
+  Copyright (C) Live2D Inc.
+  Distributed under the Live2D Proprietary Software License Agreement.
+  Used solely to render Live2D model assets that the user imports themselves.
+  See https://www.live2d.com/eula/live2d-proprietary-software-license-agreement_en.html
+
+ML Kit Text Recognition (Chinese) —— com.google.mlkit:text-recognition-chinese
+  Copyright (C) Google LLC
+  Subject to Google APIs Terms of Service. Used for on-device OCR only;
+  images are not uploaded by this component.
+
+===============================================================================
+4. 仅测试期使用（Test-only dependencies, not distributed）
+===============================================================================
+
+JUnit 4 —— Eclipse Public License 1.0
+Robolectric —— MIT License
+Ktor client-mock / server-* —— Apache License 2.0
+
+===============================================================================
+5. 设计借鉴（Design references — no upstream code reused）
+===============================================================================
+
+Prism reimplements the following designs in Kotlin; no upstream code is
+included. See README "开源声明与致谢" for the full mapping and the ADRs.
+
+  - OpenClaw (MIT) —— SKILL.md format, layered loading precedence,
+    progressive disclosure, tool gating
+  - Open-AutoGLM (Apache-2.0) —— capability shape for LLM phone control;
+    the PC/ADB approach is explicitly NOT ported
+  - Cyrene-Agent —— role pack persona structure and desktop-pet rendering /
+    interaction; ported assets remain user-private and are never
+    distributed with this project
+  - TencentDB-Agent-Memory —— L2 atomic memory extraction
+  - mem0, CALMem —— three-layer memory architecture comparison
+  - Continuous-learning (author's prior project) —— skills / memory
+    architecture and knowledge-base asset selection methodology
+  - gstack —— code-review template structure
+  - OneBot 11 —— publicly specified messaging protocol
+
+===============================================================================
+6. 仅连接、不分发（Connected, not distributed）
+===============================================================================
+
+The QQ companion feature can connect to a user-deployed OneBot 11
+implementation such as NapCat (https://github.com/NapNeko/NapCatQQ) or
+SnowLuma. Those projects use non-OSI "source-available" licenses that
+prohibit commercial use and unauthorized redistribution. Prism does not
+bundle, embed, or redistribute them; it only speaks HTTP / WebSocket to an
+instance the user runs. Without a protocol endpoint, the feature uses
+Android accessibility only.
+
+===============================================================================
+7. 用户私有资产（User-private assets, not distributed）
+===============================================================================
+
+Role packs, pet / Live2D assets, voice packs and training material are
+imported by the user into the app's private storage. They are not part of
+this repository, are not shipped in the APK, and their licensing is the
+user's responsibility.

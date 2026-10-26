@@ -61,11 +61,55 @@ object VirtualDisplayManager {
     private val lock = Any()
 
     /**
+     * 后台执行面互斥（guardrail H-01，2026-10-19）：无障碍服务的 `executionDisplayId` 是**全局
+     * 单值**，多个调用方（交互工具 / QQ 后台循环 / 手机操控后台工具）并发切换会相互覆盖——
+     * 一方的 finally 还原会把另一方正在使用的执行面清成 null，后续节点查询回落主屏活动窗口，
+     * 可能误操作用户当前前台界面。所有 `setExecutionDisplay` 使用方必须持此锁串行化。
+     */
+    val executionFaceMutex = kotlinx.coroutines.sync.Mutex()
+
+    /**
      * 批次22 修复轮六：当前执行面是否为**系统模拟副屏（trusted）**——true 时截图走
      * a11y takeScreenshotForDisplay（无 ImageReader），合成输入可用。
      */
     @Volatile
     var isOverlayMode: Boolean = false
+        private set
+
+    /**
+     * ADR-065（US-3114）：当前执行面是否为**隐藏虚拟屏**（shell 进程自建 PUBLIC+TRUSTED 屏，
+     * 主屏零窗口）。true 时主屏不出现小窗，截图经 Binder 从创建者进程的 ImageReader 取帧。
+     */
+    @Volatile
+    var isHiddenMode: Boolean = false
+        private set
+
+    /** 当前生效的后端（null=尚未创建执行面）。 */
+    @Volatile
+    private var activeBackend: DisplayBackend? = null
+
+    /**
+     * 隐藏执行面开关（ADR-065；默认开启）。由 PrismApplication 从 DataStore 注入；
+     * 关闭或 Shizuku 未就绪时直接走 legacy 兼容后端（主屏可能出现小窗）。
+     */
+    @Volatile
+    var hiddenDisplayEnabledProvider: () -> Boolean = { true }
+
+    /** 最近一次后端回落的可读说明（null=未回落；UI/工具文案如实展示）。 */
+    @Volatile
+    var lastBackendNote: String? = null
+        private set
+
+    /** 最近一次以后台方式启动的组件与用户（Takeover 迁屏/迁回用；由启动链路记录）。 */
+    @Volatile
+    private var lastLaunchedComponent: String? = null
+
+    @Volatile
+    private var lastLaunchedUserId: Int = 0
+
+    /** Takeover 激活态：目标应用已临时迁到主屏，下次后台准备时迁回隐藏屏。 */
+    @Volatile
+    var takeoverActive: Boolean = false
         private set
 
     @Volatile
@@ -96,8 +140,17 @@ object VirtualDisplayManager {
     var displayDensity: Int = 0
         private set
 
-    /** 已启动过的包名集合（release 时统一 killBackgroundProcesses 回收）。 */
-    private val launchedPackages = LinkedHashSet<String>()
+    /**
+     * 已启动过的 (包, 用户) 集合（release 时按各自用户回收）。
+     *
+     * guardrail **R2-02**：原来只存包名 + 一个全局 `lastLaunchedUserId`。混合会话后
+     * （先在 XSpace 999 发 QQ、再在 user 0 开别的 App）会对集合内所有包用**最后一个**用户
+     * 执行 `force-stop --user`，从而杀掉用户自己在主屏的 QQ——正是 G-02 要修的故障。
+     *
+     * guardrail **R3-02**：键必须是 `(包, 用户)` 二元组——只按包名去重时，同一包在两个用户
+     * 下先后启动会互相覆盖，回收时只剩最后一次的用户，另一个实例就变成孤儿。
+     */
+    private val launchedPackages = LinkedHashSet<Pair<String, Int>>()
 
     /** 当前 displayId；未创建返回 [Display.INVALID_DISPLAY]。 */
     val currentDisplayId: Int
@@ -106,10 +159,10 @@ object VirtualDisplayManager {
     /**
      * 虚拟屏是否已创建。批次22 修复轮六：**overlay-aware**——模拟副屏（trusted）路线无
      * ImageReader（virtualDisplay=null），漏判会导致 launch 必败 + release 永不清 overlay
-     * 设置（guardrail B1）。
+     * 设置（guardrail B1）。ADR-065：隐藏虚拟屏同理无本地 virtualDisplay。
      */
     val isCreated: Boolean
-        get() = displayId != Display.INVALID_DISPLAY && (isOverlayMode || virtualDisplay != null)
+        get() = displayId != Display.INVALID_DISPLAY && (isHiddenMode || isOverlayMode || virtualDisplay != null)
 
     /**
      * 后台模式是否被当前系统支持：需要 API 30+（getWindowsOnAllDisplays 跨屏无障碍）。
@@ -125,6 +178,63 @@ object VirtualDisplayManager {
     /**
      * 幂等创建后台执行面（已存在则直接返回当前 displayId）。
      *
+     * **ADR-065（US-3114）后端选择**：默认优先 [RemoteShellBackend]（隐藏虚拟屏，主屏零窗口）；
+     * Shizuku 未就绪、开关关闭或创建失败时**回落** [OverlayLegacyBackend]（既有 overlay →
+     * 自建虚拟屏路线），并把回落原因写入 [lastBackendNote]（UI/工具文案如实说明，不静默切换）。
+     *
+     * @return displayId；创建失败返回 [Display.INVALID_DISPLAY]
+     */
+    fun ensureDisplay(context: Context): Int {
+        if (!isSupported()) return Display.INVALID_DISPLAY
+        synchronized(lock) {
+            if (isCreated) {
+                // 隐藏后端由 shell 进程持有：进程被回收（Shizuku 重启）时显示随之消失，
+                // 但本地 displayId 仍在——必须按系统显示列表存活探测后重建（否则后续
+                // 一切启动/注入都指向不存在的 display）。
+                if (!isHiddenMode || isCurrentDisplayAlive(context)) {
+                    resumeFromTakeOverIfNeeded()
+                    return displayId
+                }
+                Log.w(TAG, "隐藏执行面已消失（shell 进程重启/显示被移除），销毁本地状态后重建")
+                runCatching { activeBackend?.release(context) }
+                resetDisplayState()
+            }
+            lastBackendNote = null
+            // ADR-065：按纯函数给出的顺序尝试（默认隐藏优先、失败回落 legacy）
+            for (kind in backendPlan(hiddenDisplayEnabledProvider(), ShizukuShell.isReady())) {
+                if (kind == DisplayBackend.Kind.LEGACY) {
+                    return legacyEnsureDisplay(context)
+                }
+                val hidden = RemoteShellBackend()
+                val hiddenId = hidden.ensure(context)
+                if (hiddenId != Display.INVALID_DISPLAY) {
+                    activeBackend = hidden
+                    isHiddenMode = true
+                    isOverlayMode = false
+                    overlayDisplayObj = null
+                    virtualDisplay = null
+                    imageReader = null
+                    listenerThread = null
+                    displayId = hiddenId
+                    hidden.frameSize()?.let { (w, h) ->
+                        displayWidth = w
+                        displayHeight = h
+                    }
+                    displayDensity = RemoteShellBackend.DENSITY
+                    Log.i(TAG, "隐藏虚拟屏执行面已就绪 displayId=$displayId（主屏零窗口）")
+                    return displayId
+                }
+                lastBackendNote = "隐藏执行面不可用（${hidden.lastError() ?: "未知原因"}），" +
+                    "已回落兼容模式（主屏可能出现可见小窗）"
+                Log.w(TAG, "隐藏虚拟屏创建失败，回落 legacy：${hidden.lastError()}")
+            }
+            return Display.INVALID_DISPLAY
+        }
+    }
+
+    /**
+     * legacy 执行面创建（原 [ensureDisplay] 实现，ADR-065 起由 [OverlayLegacyBackend] 委托）。
+     *
      * 批次22 修复轮六（2026-09-07）：**优先系统模拟副屏（trusted）路线**——App 自建
      * untrusted 虚拟屏对第三方窗口"只渲染不响应合成输入"（tap/text 均无效，真机实证
      * DeepSeek/微信；scrcpy #6643 同类平台焦点问题）。改为 shell `settings put
@@ -134,10 +244,12 @@ object VirtualDisplayManager {
      *
      * @return displayId；创建失败返回 [Display.INVALID_DISPLAY]
      */
-    fun ensureDisplay(context: Context): Int {
+    internal fun legacyEnsureDisplay(context: Context): Int {
         if (!isSupported()) return Display.INVALID_DISPLAY
         synchronized(lock) {
             if (isCreated) return displayId
+            isHiddenMode = false
+            activeBackend = OverlayLegacyBackend
             // ---- 路线 1：系统模拟副屏（trusted，需 Shizuku）----
             // guardrail Q1：beforeIds 快照必须在 setOverlayDisplay **之前**——exec 返回与
             // display 添加存在毫秒级竞态（真机实证创建仅 ~51ms），快照晚了会把新屏 id
@@ -278,12 +390,17 @@ object VirtualDisplayManager {
      * 并发的 ensureDisplay（持锁"先写设置→等 display 出现→才置 isCreated"）形成
      * check-then-act 竞态，会拆掉刚建好的会话执行面；双入口（Application/a11y 连接）
      * 经 [reconcileAttempted] 去重，Shizuku 未就绪时不消费标记允许下次重试。
+     *
+     * **ADR-065 补充**：隐藏虚拟屏（display 25 等）由 shell 用户服务进程持有，App 进程被
+     * 杀/升级时显示可能仍在（用户服务进程存活）。启动时按 `HIDDEN_DISPLAY_NAME` 探测并
+     * 释放残留（当前未持有执行面时），避免残留屏与目标 App 常驻。
      */
     private val reconcileAttempted = java.util.concurrent.atomic.AtomicBoolean(false)
 
-    fun reconcileStaleOverlay() {
+    fun reconcileStaleOverlay(context: Context) {
         if (!ShizukuShell.isReady()) return
         if (!reconcileAttempted.compareAndSet(false, true)) return
+        reconcileResidualHiddenDisplay(context)
         val current = ShizukuShell.getOverlayDisplaySetting() ?: run {
             reconcileAttempted.set(false)  // 读取失败：允许下个入口重试
             return
@@ -293,6 +410,38 @@ object VirtualDisplayManager {
             if (isCreated) return  // 锁内复检：会话正在重建（竞态窗口内设置已是我们的规格）
             runCatching { ShizukuShell.clearOverlayDisplay() }
             Log.i(TAG, "启动对账：检测到进程死亡残留的模拟副屏设置（$current），已清除")
+        }
+    }
+
+    /**
+     * 释放 shell 用户服务进程中残留的隐藏虚拟屏（App 进程重启但用户服务进程存活）。
+     * 仅在本地未持有执行面时执行（[lock] 内复检，防拆掉正在进行的新会话）。
+     *
+     * **2026-10-26（PRD US-3117 AC-3）**：原实现"检测到有残留就释放**一次**"，但真机上可能
+     * 同时存在多个残留（实测 uniqueId `...4` 与 `...28` 两个，对应两个孤儿用户服务）。
+     * 现在改为**循环释放直到系统里没有本应用的隐藏屏**（上限 [MAX_RESIDUAL_RELEASE_ROUNDS]，
+     * 防死循环）；每次释放都由 shell 侧销毁其持有的那一个 display。
+     */
+    private fun reconcileResidualHiddenDisplay(context: Context) {
+        val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        repeat(MAX_RESIDUAL_RELEASE_ROUNDS) {
+            val residualCount = runCatching {
+                dm.getDisplays().count {
+                    it.displayId != Display.DEFAULT_DISPLAY && it.name == HIDDEN_DISPLAY_NAME
+                }
+            }.getOrDefault(0)
+            if (residualCount == 0) return
+            synchronized(lock) {
+                if (isCreated) return
+                val released = runCatching { ShizukuShell.releaseHiddenDisplay() }.getOrDefault(false)
+                if (!released) {
+                    // guardrail r1 Q-09：释放失败（用户服务刚重启/绑定超时）→ 允许下次入口重试
+                    reconcileAttempted.set(false)
+                    Log.w(TAG, "启动对账：残留隐藏虚拟屏释放失败（剩余 $residualCount），等待下次入口重试")
+                    return
+                }
+                Log.i(TAG, "启动对账：已释放一个残留隐藏虚拟屏（释放前剩余 $residualCount）")
+            }
         }
     }
 
@@ -317,7 +466,7 @@ object VirtualDisplayManager {
      * @return 成功/失败描述文案（含诊断；由上层决定是否 settle）
      */
     fun launchApp(context: Context, packageName: String): String {
-        if (!isCreated) return "错误：后台虚拟屏未创建"
+        if (!isCreatedAndAlive(context)) return "错误：后台虚拟屏未创建"
         val intent = context.packageManager.getLaunchIntentForPackage(packageName)
             ?: return "错误：未找到应用 $packageName 的启动入口"
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -331,36 +480,7 @@ object VirtualDisplayManager {
             val component = intent.component?.flattenToString()
                 ?: return "错误：未找到应用 $packageName 的启动组件"
             return try {
-                val started = ShizukuShell.amStartOnDisplay(component, displayId)
-                if (!started) {
-                    Log.w(TAG, "shell am start --display 失败（$packageName）")
-                    return "错误：shell 启动失败（am start 非零退出）。请确认 Shizuku 状态后重试，" +
-                        "或显式传 mode=\"foreground\" 在主屏继续"
-                }
-                // 轮询窗口就绪（最多 6s；虚拟屏顶层窗口包名 == 目标包名才算渲染成功）
-                var rendered = false
-                var topPkg: String? = null
-                repeat(12) {
-                    Thread.sleep(500)
-                    topPkg = io.prism.phonecontrol.PhoneControlAccessibilityService
-                        .instance?.backgroundWindowPackage(displayId)
-                    if (topPkg == packageName) {
-                        rendered = true
-                        return@repeat
-                    }
-                }
-                if (rendered) {
-                    synchronized(launchedPackages) { launchedPackages.add(packageName) }
-                    Log.i(TAG, "已在虚拟屏渲染 $packageName（displayId=$displayId）")
-                    "已在后台虚拟屏启动应用 $packageName（窗口已就绪）。" +
-                        "注意：主屏上出现的「叠加视图」小窗是后台执行面（用户可见），任务结束后约 2 分钟自动关闭，" +
-                        "也可在通知栏「Prism 正在操控手机」通知上点「关闭后台虚拟屏」立即关闭——可向用户说明"
-                } else {
-                    Log.w(TAG, "直启后虚拟屏无目标窗口（actual=$topPkg）→ 诚实判定拒绝渲染")
-                    "错误：应用 $packageName 未能渲染到后台虚拟屏（当前虚拟屏顶层=${topPkg ?: "无窗口"}）。" +
-                        "该 App 大概率拒绝在非物理屏运行（启动期检测），重试后台启动无效——" +
-                        "请改用 mode=foreground（会短暂占用主屏，先告知用户）或 take_over"
-                }
+                shellLaunchAndVerify(component, packageName, userId = null)
             } catch (e: Exception) {
                 Log.w(TAG, "后台直启失败：${e::class.simpleName}: ${e.message}")
                 "错误：后台启动应用失败（${e::class.simpleName}: ${e.message}）。请重试，或显式传 mode=\"foreground\" 在主屏继续"
@@ -371,7 +491,11 @@ object VirtualDisplayManager {
             val options = ActivityOptions.makeBasic()
             options.setLaunchDisplayId(displayId)
             context.startActivity(intent, options.toBundle())
-            synchronized(launchedPackages) { launchedPackages.add(packageName) }
+            synchronized(launchedPackages) {
+                launchedPackages.add(
+                    packageName to android.os.Process.myUserHandle().hashCode()
+                )
+            }
             Log.i(TAG, "已启动到虚拟屏 $packageName（displayId=$displayId）")
             "已在后台虚拟屏启动应用 $packageName"
         } catch (e: SecurityException) {
@@ -388,6 +512,166 @@ object VirtualDisplayManager {
     }
 
     /**
+     * shell 直启 + 窗口验证（[launchApp] 与 [launchAppForUser] 共用）。
+     *
+     * @param component 启动组件（"pkg/.Activity"）
+     * @param packageName 目标包名（顶层窗口校验用）
+     * @param userId 目标用户（null=当前用户 → [ShizukuShell.amStartOnDisplay]；
+     *   非 null → [ShizukuShell.amStartForUserOnDisplay]，且 force-stop 确保迁至目标副屏）
+     * @return 可读结果文案（成功含回收说明；失败含诊断与降级引导）
+     */
+    private fun shellLaunchAndVerify(component: String, packageName: String, userId: Int?): String {
+        lastLaunchedComponent = component
+        // guardrail r1 Q-06：记录真实用户 id（非跨用户启动时是当前用户，不能硬编码 0——
+        // 工作资料/多用户设备上 --user 0 会迁错实例）。UserHandle.hashCode() 即 userId。
+        lastLaunchedUserId = userId ?: android.os.Process.myUserHandle().hashCode()
+        val backend = activeBackend
+            ?: return "错误：后台执行面未就绪（请先调用 ensureDisplay）"
+        // 跨用户启动：目标 App 若已在其它屏有窗口，须 force-stop 才能迁到本副屏（真机 PoC）
+        val started = backend.launch(component, packageName, userId, forceStop = userId != null)
+        if (!started) {
+            Log.w(TAG, "shell am start 失败（$packageName user=${userId ?: "current"}）")
+            return "错误：shell 启动失败（am start 非零退出）。请确认 Shizuku 状态后重试，" +
+                "或显式传 mode=\"foreground\" 在主屏继续"
+        }
+        // 轮询窗口就绪（最多 6s；虚拟屏顶层窗口包名 == 目标包名才算渲染成功）
+        var rendered = false
+        var topPkg: String? = null
+        repeat(12) {
+            Thread.sleep(500)
+            topPkg = io.prism.phonecontrol.PhoneControlAccessibilityService
+                .instance?.backgroundWindowPackage(displayId)
+            if (topPkg == packageName) {
+                rendered = true
+                return@repeat
+            }
+        }
+        if (rendered) {
+            synchronized(launchedPackages) {
+                launchedPackages.add(
+                    packageName to (userId ?: android.os.Process.myUserHandle().hashCode())
+                )
+            }
+            Log.i(TAG, "已在虚拟屏渲染 $packageName（displayId=$displayId, user=${userId ?: "current"}）")
+            return "已在后台虚拟屏启动应用 $packageName（窗口已就绪）。" +
+                "注意：主屏上出现的「叠加视图」小窗是后台执行面（用户可见），任务结束后约 2 分钟自动关闭，" +
+                "也可在通知栏「Prism 正在操控手机」通知上点「关闭后台虚拟屏」立即关闭——可向用户说明"
+        }
+        Log.w(TAG, "直启后虚拟屏无目标窗口（actual=$topPkg）→ 诚实判定拒绝渲染")
+        return "错误：应用 $packageName 未能渲染到后台虚拟屏（当前虚拟屏顶层=${topPkg ?: "无窗口"}）。" +
+            "该 App 大概率拒绝在非物理屏运行（启动期检测），重试后台启动无效——" +
+            "请改用 mode=foreground（会短暂占用主屏，先告知用户）或 take_over"
+    }
+
+    /**
+     * 在虚拟屏上启动**指定用户**下的目标应用（ADR-062 QQ 小号助手：小号在 XSpace 用户 999，
+     * 与主号同包名但不同用户——必须在副屏内以正确用户启动，否则会拉到主屏占用用户前台）。
+     *
+     * 与 [launchApp] 同一范式（shell 直启 + 窗口验证 + 诚实降级），但走
+     * [ShizukuShell.amStartForUserOnDisplay]（`--user` + `--display` + force-stop）。
+     * **必须 Shizuku 就绪**——纯 App 的 `setLaunchDisplayId` 只能作用于当前用户，无法跨用户。
+     *
+     * @param userId 目标用户 id（XSpace=999）
+     * @return 成功/失败描述文案（含诊断）
+     */
+    fun launchAppForUser(context: Context, packageName: String, userId: Int): String {
+        if (!isCreatedAndAlive(context)) return "错误：后台虚拟屏未创建"
+        if (!ShizukuShell.isReady()) {
+            return "错误：跨用户后台启动需要 Shizuku（已安装并激活）——App 自身无法把其它用户的应用启动到副屏"
+        }
+        val intent = context.packageManager.getLaunchIntentForPackage(packageName)
+            ?: return "错误：未找到应用 $packageName 的启动入口"
+        val component = intent.component?.flattenToString()
+            ?: return "错误：未找到应用 $packageName 的启动组件"
+        return try {
+            shellLaunchAndVerify(component, packageName, userId)
+        } catch (e: Exception) {
+            Log.w(TAG, "launchAppForUser 失败：${e::class.simpleName}: ${e.message}")
+            "错误：后台启动应用失败（${e::class.simpleName}: ${e.message}）"
+        }
+    }
+
+    /**
+     * legacy 启动（[OverlayLegacyBackend] 委托）：shell 直启到当前 displayId。
+     */
+    internal fun legacyLaunchOnDisplay(component: String, userId: Int?, forceStop: Boolean): Boolean =
+        if (userId == null) {
+            ShizukuShell.amStartOnDisplay(component, displayId)
+        } else {
+            ShizukuShell.amStartForUserOnDisplay(component, userId, displayId, forceStopFirst = forceStop)
+        }
+
+    /**
+     * Takeover（US-3114 AC-4）：把当前后台目标应用**临时迁到主屏**供用户手动接管。
+     *
+     * 实现取舍（ADR-065 补充）：PoC 未验证跨进程 `moveTaskToDisplay`，故采用可验证的
+     * `am start --user <u> --display 0 -S -n <component>`（force-stop 后主屏重启，确保
+     * 迁屏生效）；AI 下次后台操作时由 [resumeFromTakeOverIfNeeded] 自动迁回执行面。
+     *
+     * **强副作用声明**：迁入/迁回均 force-stop 重启目标应用，未保存状态可能丢失。
+     * **成功判定**（guardrail r1 Q-02）：`am start` 退出码 0 只代表命令被接受，必须轮询
+     * 主屏顶层窗口包名确认；未确认不置 [takeoverActive]（避免"假接管"后又自动迁回）。
+     *
+     * @return 可读结果/说明（由 take_over 工具原样回给 LLM）
+     */
+    fun takeOverToMainScreen(context: Context): String {
+        if (!isCreatedAndAlive(context)) return "（当前没有后台执行面，无需迁移）"
+        val component: String
+        val userId: Int
+        synchronized(lock) {
+            component = lastLaunchedComponent
+                ?: return "（未记录到后台运行的目标应用，无法自动迁移——请手动打开应用接管）"
+            userId = lastLaunchedUserId
+        }
+        if (!ShizukuShell.isReady()) {
+            return "（Shizuku 未就绪，无法自动迁移——请手动打开应用接管）"
+        }
+        val packageName = component.substringBefore('/')
+        val started = ShizukuShell.amStartForUserOnDisplay(
+            component, userId, Display.DEFAULT_DISPLAY, forceStopFirst = true
+        )
+        if (!started) return "（迁移到主屏失败——请手动打开应用接管）"
+        // 轮询主屏顶层窗口确认迁移真正生效（a11y 未连接时不虚构成功）
+        val svc = io.prism.phonecontrol.PhoneControlAccessibilityService.instance
+            ?: return "已发起迁移（会重启目标应用，未保存状态可能丢失），但无障碍未连接、无法确认结果——请手动确认"
+        var confirmed = false
+        for (i in 0 until 12) {
+            Thread.sleep(500)
+            if (svc.backgroundWindowPackage(Display.DEFAULT_DISPLAY) == packageName) {
+                confirmed = true
+                break
+            }
+        }
+        if (!confirmed) {
+            return "已发起迁移（会重启目标应用），但未确认目标应用已出现在主屏——请手动确认后再接管"
+        }
+        synchronized(lock) { takeoverActive = true }
+        Log.i(TAG, "Takeover：$component 已迁到主屏（user=$userId）")
+        return "已把后台目标应用临时迁到主屏（display 0），请手动接管；下次 AI 继续操作时会自动迁回隐藏执行面。" +
+            "注意：迁入/迁回都会重启目标应用，未保存的状态可能丢失。"
+    }
+
+    /**
+     * Takeover 结束：把目标应用迁回执行面（仅 [takeoverActive] 时动作；失败保留标志待下次重试）。
+     */
+    private fun resumeFromTakeOverIfNeeded() {
+        if (!takeoverActive) return
+        val backend = activeBackend
+        val component = lastLaunchedComponent
+        if (backend == null || component == null) {
+            takeoverActive = false
+            return
+        }
+        val packageName = component.substringBefore('/')
+        if (backend.launch(component, packageName, lastLaunchedUserId, forceStop = true)) {
+            takeoverActive = false
+            Log.i(TAG, "Takeover 结束：$component 已迁回执行面 displayId=$displayId")
+        } else {
+            Log.w(TAG, "Takeover 迁回失败（component=$component），保留激活态待下次重试")
+        }
+    }
+
+    /**
      * 取虚拟屏最新帧（虚拟屏坐标空间 Bitmap）。
      *
      * 批次22 修复轮四（2026-09-07）：**帧缓存模式**——此前 latestFrame 依赖 acquireLatestImage
@@ -397,7 +681,41 @@ object VirtualDisplayManager {
      *
      * @return 帧位图副本（调用方负责 recycle）；未创建/从未渲染/异常返回 null
      */
-    fun latestFrame(): Bitmap? {
+    fun latestFrame(maxWidth: Int = 0): Bitmap? {
+        // ADR-065：隐藏虚拟屏的帧由创建者进程（shell）自持 ImageReader 获取，
+        // 本地无 ImageReader（跨进程 Surface/`screencap -d` 均不可用，PoC 实证）。
+        if (isHiddenMode) return activeBackend?.latestFrame(maxWidth)
+        return legacyLatestFrame()
+    }
+
+    /**
+     * 取最新帧并携带**帧龄与真实尺寸**（2026-10-25 帧健康整改）。
+     *
+     * 调用方必须用它而不是 [latestFrame]：只有帧龄能区分"实时画面"与"熄屏后冻结的旧帧"，
+     * 只有真实尺寸能保证 OCR 坐标映射与 Watch 长宽比正确。
+     */
+    fun latestFrameWithMeta(maxWidth: Int = 0): DisplayFrame? {
+        if (isHiddenMode) return activeBackend?.latestFrameWithMeta(maxWidth)
+        return legacyLatestFrameWithMeta()
+    }
+
+    /** legacy 取帧（带帧龄；无帧返回 null）。 */
+    internal fun legacyLatestFrameWithMeta(): DisplayFrame? {
+        if (imageReader == null) return null
+        return synchronized(lock) {
+            val cached = frameCache ?: return@synchronized null
+            try {
+                val copy = cached.copy(Bitmap.Config.ARGB_8888, false) ?: return@synchronized null
+                DisplayFrame(copy, frameCacheAtMs, copy.width, copy.height)
+            } catch (e: Exception) {
+                Log.w(TAG, "latestFrameWithMeta 失败：${e::class.simpleName}")
+                null
+            }
+        }
+    }
+
+    /** legacy 路线取帧（原 [latestFrame] 实现；[OverlayLegacyBackend] 委托）。 */
+    internal fun legacyLatestFrame(): Bitmap? {
         if (imageReader == null) return null
         return synchronized(lock) {
             try {
@@ -412,6 +730,10 @@ object VirtualDisplayManager {
     /** 最新帧缓存（drainListener 写入；@Volatile 跨线程可见——listener 线程写、IO 线程读）。 */
     @Volatile
     private var frameCache: Bitmap? = null
+
+    /** 最新帧的采集时刻（epoch ms；0=无帧）。帧龄判据（2026-10-25）。 */
+    @Volatile
+    private var frameCacheAtMs: Long = 0L
 
     /** Image → Bitmap（处理 rowStride 行尾 padding）。 */
     private fun imageToBitmap(image: android.media.Image): Bitmap? {
@@ -439,9 +761,20 @@ object VirtualDisplayManager {
         }
     }
 
-    /** 虚拟屏尺寸 (宽, 高)；未创建返回 null。 */
+    /** 执行面尺寸 (宽, 高)；未创建返回 null。**以真实帧为准**（2026-10-25 帧健康）。 */
     fun frameSize(): Pair<Int, Int>? =
-        if (isCreated) displayWidth to displayHeight else null
+        if (isCreated) {
+            if (isHiddenMode) {
+                activeBackend?.frameSize() ?: (displayWidth to displayHeight)
+            } else {
+                displayWidth to displayHeight
+            }
+        } else {
+            null
+        }
+
+    /** legacy 路线尺寸（[OverlayLegacyBackend] 委托；与 [frameSize] 同语义）。 */
+    internal fun legacyFrameSize(): Pair<Int, Int>? = frameSize()
 
     /**
      * 释放虚拟屏并回收启动过的应用（killBackgroundProcesses——普通权限可用的最接近
@@ -458,58 +791,337 @@ object VirtualDisplayManager {
      * @return 是否成功释放（未创建时返回 true——幂等）
      */
     fun releaseDisplay(context: Context): Boolean {
+        // guardrail R2-06 + R3-03 + R3-04：
+        // - 必须在销毁显示面**之前**清理"泄漏到主屏"的实例（否则集合被清空后再也识别不出）；
+        // - 必须在 `isCreated` 判断**之前**执行：隐藏后端由 shell 进程持有时，本地 `isCreated`
+        //   可能为 false（App 刚重启/后端重建），但泄漏窗口仍需清理；
+        // - 必须在 `synchronized(lock)` **之外**执行：evict 内含 `dumpsys windows` + 多次
+        //   `am force-stop`（单条最长 5s），持锁会阻塞 create/launch/frame 等全部执行面操作。
+        runCatching { evictFromMainDisplay(context) }
         synchronized(lock) {
             if (!isCreated) return true
-            return try {
-                // ①摘掉监听（阻止新回调入队）
-                runCatching { imageReader?.setOnImageAvailableListener(null, null) }
-                // ②停线程并等待在途回调执行完毕（quitSafely 会跑完已 post 的消息再退出）。
-                //   **join 超时后仍 close 的安全前提（结构不变量）**：drainListener 内所有
-                //   reader 访问都在其进锁之前完成，锁段仅有 frameCache 交换 + 释放闸——
-                //   超时场景在途回调只会卡在本锁（安全），锁段后严禁新增 reader 访问。
-                //   正常回调 <10ms，2s join 仅作有界兜底（超时白等为已知成本，后台线程可接受）
-                listenerThread?.quitSafely()
-                listenerThread?.join(2_000L)
-                // ③线程已退（或超时兜底）→ 释放显示面与 reader
-                runCatching { virtualDisplay?.release() }
-                runCatching { imageReader?.close() }
-                val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE)
-                    as android.app.ActivityManager
-                synchronized(launchedPackages) {
-                    for (pkg in launchedPackages) {
-                        // 批次21（SZ-005，ADR-046）：Shizuku 就绪时用 am force-stop（干净回收），
-                        // 否则回退 killBackgroundProcesses（普通权限可用的最接近语义）
-                        if (ShizukuShell.isReady()) {
-                            runCatching { ShizukuShell.forceStop(pkg) }
-                        } else {
-                            runCatching { activityManager.killBackgroundProcesses(pkg) }
+            // ADR-065 修订（2026-10-26）：**先回收目标、再销毁显示面**。
+            // 旧顺序（先 release 再 force-stop）会让系统在"显示面已消失、目标仍在跑"的窗口里
+            // 把 task 迁回 display 0 —— 真机表现为 QQ/设置页闪在用户主屏（实测 release 期间
+            // 主屏出现 com.android.settings/...MainSettings EXITING）。
+            // task 先被 force-stop 掉，就不存在可迁移的对象。
+            // 顺序定义与单测同源：[DisplayTeardown.HIDDEN_ORDER]。
+            if (isHiddenMode) {
+                // 顺序与执行**都**在 DisplayTeardown（单测锁的是生产执行路径，不是清单副本）
+                var stoppedCount = 0
+                var released = false
+                DisplayTeardown.run(
+                    DisplayTeardown.HIDDEN_ORDER,
+                    mapOf(
+                        DisplayTeardown.Step.STOP_LAUNCHED_PACKAGES to {
+                            stoppedCount = stopLaunchedPackages(context).size
+                        },
+                        DisplayTeardown.Step.RELEASE_DISPLAY to {
+                            released = activeBackend?.release(context) ?: false
                         }
-                    }
-                    launchedPackages.clear()
-                }
-                Log.i(TAG, "虚拟屏已释放（曾启动包：已回收后台进程）")
+                    )
+                )
+                DisplayWatchOverlay.stop()
+                resetDisplayState()
+                Log.i(TAG, "隐藏虚拟屏已释放（后端返回=$released，先回收包=$stoppedCount）")
+                return released
+            }
+            return try {
+                // 顺序由 [DisplayTeardown.LEGACY_ORDER] 定义（与单测同源，stop 早于 release）
+                var stoppedCount = 0
+                DisplayTeardown.run(
+                    DisplayTeardown.LEGACY_ORDER,
+                    mapOf(
+                        DisplayTeardown.Step.DETACH_LISTENER to {
+                            runCatching { imageReader?.setOnImageAvailableListener(null, null) }
+                        },
+                        DisplayTeardown.Step.STOP_LISTENER_THREAD to {
+                            //   **join 超时后仍 close 的安全前提（结构不变量）**：drainListener 内所有
+                            //   reader 访问都在其进锁之前完成，锁段仅有 frameCache 交换 + 释放闸——
+                            //   超时场景在途回调只会卡在本锁（安全），锁段后严禁新增 reader 访问。
+                            //   正常回调 <10ms，2s join 仅作有界兜底（超时白等为已知成本，后台线程可接受）
+                            listenerThread?.quitSafely()
+                            listenerThread?.join(2_000L)
+                        },
+                        DisplayTeardown.Step.STOP_LAUNCHED_PACKAGES to {
+                            // **先回收目标**（ADR-065 修订：task 先消失，销毁显示面时才不会被迁回主屏）
+                            stoppedCount = stopLaunchedPackages(context).size
+                        },
+                        DisplayTeardown.Step.RELEASE_DISPLAY to {
+                            runCatching { virtualDisplay?.release() }
+                        },
+                        DisplayTeardown.Step.CLOSE_READER to {
+                            runCatching { imageReader?.close() }
+                        },
+                        DisplayTeardown.Step.CLEAR_OVERLAY_SETTING to {
+                            if (isOverlayMode) {
+                                runCatching { ShizukuShell.clearOverlayDisplay() }
+                                overlayDisplayObj = null
+                                isOverlayMode = false
+                            }
+                        }
+                    )
+                )
+                Log.i(TAG, "虚拟屏已释放（曾启动包：已回收后台进程 $stoppedCount 个）")
                 virtualDisplay = null
                 imageReader = null
                 listenerThread = null
-                // ④线程已死，frameCache 无写者 → 此时回收安全
+                // 线程已死，frameCache 无写者 → 此时回收安全
                 frameCache?.recycle()
                 frameCache = null
-                // 批次22 修复轮六：模拟副屏路线 → 清除系统设置（回收可见小窗）
-                if (isOverlayMode) {
-                    runCatching { ShizukuShell.clearOverlayDisplay() }
-                    overlayDisplayObj = null
-                    isOverlayMode = false
-                }
-                displayId = Display.INVALID_DISPLAY
-                displayWidth = 0
-                displayHeight = 0
-                displayDensity = 0
+                frameCacheAtMs = 0L
+                resetDisplayState()
+                DisplayWatchOverlay.stop()
                 true
             } catch (e: Exception) {
                 Log.w(TAG, "releaseDisplay 失败：${e::class.simpleName}")
                 false
             }
         }
+    }
+
+    /** 当前 displayId 是否仍存在于系统（隐藏后端进程重启后的存活探测）。 */
+    private fun isCurrentDisplayAlive(context: Context): Boolean {
+        if (displayId == Display.INVALID_DISPLAY) return false
+        val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager ?: return false
+        return runCatching { dm.getDisplays().any { it.displayId == displayId } }.getOrDefault(false)
+    }
+
+    /**
+     * 本地状态是否可用且系统侧存活（guardrail r1 Q-07）。
+     *
+     * 隐藏后端的 display 随 shell 用户服务进程持有——进程重启后本地 `displayId` 仍在但屏
+     * 已消失。所有直接使用 `displayId` 的入口（launch/takeover）必须先过本检查，失败即
+     * 复位状态（下次调用方走 [ensureDisplay] 幂等重建）。
+     */
+    private fun isCreatedAndAlive(context: Context): Boolean {
+        if (!isCreated) return false
+        if (!isHiddenMode) return true
+        if (isCurrentDisplayAlive(context)) return true
+        synchronized(lock) {
+            if (!isCreated || !isHiddenMode) return false
+            Log.w(TAG, "隐藏执行面已消失（shell 进程重启/显示被移除），复位状态")
+            runCatching { activeBackend?.release(context) }
+            resetDisplayState()
+        }
+        return false
+    }
+
+    /** legacy 释放（[OverlayLegacyBackend] 委托；与 [releaseDisplay] 同实现）。 */
+    internal fun legacyReleaseDisplay(context: Context): Boolean = releaseDisplay(context)
+
+    /**
+     * 执行面**停滞自愈**（2026-10-25 帧健康整改；ADR-065 修订）。
+     *
+     * **为什么需要**：隐藏虚拟屏随整机熄屏/解锁会停止合成新帧（Flutter #172641 的同类现象），
+     * 而本地状态仍是"已创建"——上层继续对着旧帧操作，表现为"画面冻结 / 点不动"。
+     *
+     * **约束**：
+     * - 冷却时间 [RECOVER_COOLDOWN_MS]：防止抖动式反复重建（重建会重启目标应用，代价高）；
+     * - 连续上限 [RECOVER_MAX_CONSECUTIVE]：超过后诚实失败，交给上层提示用户；
+     * - 重建后若记录了上次启动的组件，自动把它重新拉到执行面（否则执行面是空的）。
+     *
+     * @return true=已重建成功
+     */
+    fun recoverDisplay(context: Context): Boolean {
+        val now = System.currentTimeMillis()
+        synchronized(lock) {
+            if (now - lastRecoverAtMs < RECOVER_COOLDOWN_MS) {
+                Log.i(TAG, "执行面自愈冷却中（${(now - lastRecoverAtMs) / 1000}s < ${RECOVER_COOLDOWN_MS / 1000}s）")
+                return false
+            }
+            if (recoverAttempts >= RECOVER_MAX_CONSECUTIVE) {
+                Log.w(TAG, "执行面自愈连续失败达上限（$recoverAttempts），交由上层诚实报错")
+                return false
+            }
+            lastRecoverAtMs = now
+        }
+        val component = synchronized(lock) { lastLaunchedComponent }
+        val userId = synchronized(lock) { lastLaunchedUserId }
+        val packageName = component?.substringBefore('/')
+        Log.i(TAG, "执行面自愈：释放并重建（component=${packageName ?: "无"}）")
+        runCatching { releaseDisplay(context) }
+        val newId = ensureDisplay(context)
+        if (newId == Display.INVALID_DISPLAY) {
+            synchronized(lock) { recoverAttempts++ }
+            Log.w(TAG, "执行面自愈失败（重建返回 INVALID_DISPLAY）")
+            return false
+        }
+        if (component != null && packageName != null && ShizukuShell.isReady()) {
+            val started = if (userId == 0) {
+                ShizukuShell.amStartOnDisplay(component, newId)
+            } else {
+                ShizukuShell.amStartForUserOnDisplay(component, userId, newId, forceStopFirst = true)
+            }
+            if (!started) Log.w(TAG, "执行面自愈后重新拉起目标应用失败")
+        }
+        synchronized(lock) {
+            recoverAttempts = 0
+            lastRecoverAtMs = System.currentTimeMillis()
+        }
+        Log.i(TAG, "执行面自愈完成 displayId=$newId")
+        return true
+    }
+
+    /**
+     * 应用上下文（供 Watch 判定"静态画面 vs 真冻结"；[isDisplayOn] 时记录）。
+     */
+    @Volatile
+    var appContextForWatch: Context? = null
+        private set
+
+    /**
+     * 执行面 display 当前是否可用（**非 OFF/UNKNOWN**）。
+     *
+     * 隐藏虚拟屏随整机熄屏进入 OFF（真机实证），此时帧缓存会停在最后一帧——
+     * 这是"该重建"的信号；而屏幕亮着时的旧帧只是**静态画面**，不该触发重建
+     * （重建 = `force-stop` 重启目标应用，代价极高，见 ac-verifier D-02）。
+     *
+     * @return true=可用；display 不存在/读取失败返回 false（fail-closed，走自愈）
+     */
+    fun isDisplayOn(context: Context): Boolean {
+        // Watch 判定需要上下文；顺手记下，避免 Watch 再单独要一个 context 参数
+        appContextForWatch = context.applicationContext
+        val id = displayId
+        if (id == Display.INVALID_DISPLAY) return false
+        val dm = context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager
+            ?: return false
+        val state = runCatching { dm.getDisplay(id)?.state }.getOrNull() ?: return false
+        return state != Display.STATE_OFF && state != Display.STATE_UNKNOWN
+    }
+
+    /**
+     * 执行面「轻推」（2026-10-25；guardrail G-09）。
+     *
+     * 冻结常见成因是目标应用暂停绘制（息屏/失焦/被系统降频）。相比 `recoverDisplay`
+     * （释放+重建+重启目标应用），轻推只做代价极小的"让它重新画一帧"：
+     * 1. 若记录了上次启动的组件，向执行面重新 `am start`（不 force-stop，保留现场）；
+     * 2. 否则向执行面注入一次 `KEYCODE_WAKEUP`（仅作用于该 display，不点亮主屏）。
+     *
+     * @return true=已发出轻推动作（不代表一定恢复；调用方必须复检帧龄）
+     */
+    fun nudgeDisplay(context: Context?): Boolean {
+        if (!isCreated) return false
+        val component = synchronized(lock) { lastLaunchedComponent }
+        val userId = synchronized(lock) { lastLaunchedUserId }
+        if (component != null && ShizukuShell.isReady()) {
+            val started = if (userId == 0) {
+                ShizukuShell.amStartOnDisplay(component, displayId)
+            } else {
+                ShizukuShell.amStartForUserOnDisplay(component, userId, displayId, forceStopFirst = false)
+            }
+            Log.i(TAG, "执行面轻推：重新拉起 ${component.substringBefore('/')}（success=$started）")
+            return started
+        }
+        val keyed = ShizukuShell.inputKeyevent(displayId, android.view.KeyEvent.KEYCODE_WAKEUP)
+        Log.i(TAG, "执行面轻推：向 display=$displayId 注入 WAKEUP（success=$keyed）")
+        return keyed
+    }
+
+    /**
+     * 当前帧是否可视为"实时"（纯函数可测；实现委托 [FrameFreshness]）。
+     *
+     * @param ageMs 帧龄（`Long.MAX_VALUE`=无帧）
+     * @param maxAgeMs 允许的最大帧龄
+     */
+    fun isFrameFresh(ageMs: Long, maxAgeMs: Long = FRAME_STALE_MS): Boolean =
+        FrameFreshness.isFresh(ageMs, maxAgeMs)
+
+    /**
+     * 回收本进程启动过的包（force-stop / killBackgroundProcesses）。
+     *
+     * guardrail **G-02 / R2-02**：逐包使用**它自己**的启动用户执行 `force-stop --user`。
+     * 跨用户（XSpace 999）启动的目标与用户自己在用的同名 App 是两个实例；
+     * 用错用户会"该清的没清、把用户的杀了"。
+     *
+     * @return 实际处理的包名列表（供调用方记日志；ADR-065 修订要求"先回收再销毁"可观测）
+     */
+    private fun stopLaunchedPackages(context: Context): List<String> {
+        val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE)
+            as android.app.ActivityManager
+        val handled = mutableListOf<String>()
+        // 快照化（R2-02/R3-02）：遍历中不再读取可变的全局用户值
+        val snapshot = synchronized(launchedPackages) {
+            val copy = launchedPackages.toList()
+            launchedPackages.clear()
+            copy
+        }
+        // guardrail R4-01：**force-stop 必须在锁外执行**。单条 `am force-stop` 最长 5s，
+        // 若持锁执行会阻塞 create/launch/frame 等全部执行面操作（甚至 ANR 风险）。
+        snapshot.forEach { (pkg, userId) ->
+            val ok = if (ShizukuShell.isReady()) {
+                runCatching { ShizukuShell.forceStopForUser(pkg, userId) }.getOrDefault(false)
+            } else {
+                runCatching { activityManager.killBackgroundProcesses(pkg); true }
+                    .getOrDefault(false)
+            }
+            if (ok) {
+                if (pkg !in handled) handled += pkg
+            } else {
+                Log.w(TAG, "回收包失败：${maskPackage(pkg)}（user=$userId）")
+            }
+        }
+        return handled
+    }
+
+    /**
+     * **抢占主屏**清理（ADR-065 修订 2026-10-26；PRD US-3119 AC-2）。
+     *
+     * 后台动作收尾时，目标包有时会自己把窗口开到 `display 0`（QQ 的弹窗/验证页会这么做），
+     * 用户主屏上就会看到 QQ。
+     *
+     * **guardrail G-02 / R2-02 修正**（三条约束，缺一不可）：
+     * 1. **判据必须带用户**：小号在 XSpace(999)，用户自己也用同一个包（user 0）。
+     *    只按包名判定会"清不掉 999 的泄漏、却杀掉用户本人的 QQ"。这里用
+     *    [MainDisplayWindows]（shell `dumpsys`，头行含 `u<userId>`）**逐包按其启动用户**匹配；
+     * 2. **击杀必须带 `--user`**：见 [ShizukuShell.forceStopForUser]；
+     * 3. **调用点必须收敛**：只在"执行面释放/会话收尾"调用一次，不在每次工具调用的
+     *    `finally` 里跑（否则暴露面过大）。
+     *
+     * 无法判定归属时**不动作**（`dumpsys` 读不到 → 空集合 → 返回空列表）。
+     *
+     * @return 被清理的包名列表
+     */
+    fun evictFromMainDisplay(context: Context): List<String> {
+        if (takeoverActive) return emptyList()
+        if (!ShizukuShell.isReady()) return emptyList()
+        // R3-02：快照 (包, 启动它的用户) 二元组
+        val snapshot = synchronized(launchedPackages) { launchedPackages.toList() }
+        if (snapshot.isEmpty()) return emptyList()
+        val dump = runCatching { ShizukuShell.windowWindowsDump() }.getOrNull() ?: return emptyList()
+        // 一次解析，按用户分组（避免每包一次 dumpsys）
+        val leakedByUser = snapshot.map { it.second }.distinct()
+            .associateWith { MainDisplayWindows.packagesOnMainDisplayForUser(dump, it) }
+        val evicted = mutableListOf<String>()
+        snapshot.forEach { (pkg, userId) ->
+            // 只处理"该包确实以**它自己的**用户身份泄漏到主屏"的情形
+            val leaked = leakedByUser[userId] ?: return@forEach
+            if (pkg !in leaked) return@forEach
+            val ok = runCatching { ShizukuShell.forceStopForUser(pkg, userId) }.getOrDefault(false)
+            if (ok) {
+                evicted += pkg
+                Log.i(TAG, "抢占主屏清理：已回收 ${maskPackage(pkg)}（user=$userId）")
+            } else {
+                Log.w(TAG, "抢占主屏清理失败：${maskPackage(pkg)}（user=$userId）")
+            }
+        }
+        return evicted
+    }
+
+    /** 包名脱敏到日志（只保留前段，避免日志出现完整可见标识）。 */
+    private fun maskPackage(pkg: String): String =
+        if (pkg.length <= 6) "***" else pkg.take(6) + "***"
+
+    /** 复位执行面状态（后端无关字段）。 */
+    private fun resetDisplayState() {
+        activeBackend = null
+        displayId = Display.INVALID_DISPLAY
+        displayWidth = 0
+        displayHeight = 0
+        displayDensity = 0
+        isHiddenMode = false
+        takeoverActive = false
+        lastLaunchedComponent = null
     }
 
     /** 清空已启动包名记录（不杀进程；如任务完成后想保留应用常驻虚拟屏时用）。 */
@@ -544,6 +1156,7 @@ object VirtualDisplayManager {
                     } else {
                         old = frameCache
                         frameCache = bitmap
+                        frameCacheAtMs = System.currentTimeMillis()
                     }
                 }
                 if (dropped) {
@@ -557,6 +1170,20 @@ object VirtualDisplayManager {
     }
 
     // ==================== 纯逻辑可测部分 ====================
+
+    /**
+     * 后端尝试顺序（ADR-065，纯函数可测）。
+     *
+     * - 隐藏执行面开关开启且 Shizuku 就绪：先 [DisplayBackend.Kind.HIDDEN]，失败回落 LEGACY；
+     * - 否则直接 LEGACY（不白等一次注定失败的重绑定）。
+     */
+    internal fun backendPlan(hiddenEnabled: Boolean, shizukuReady: Boolean): List<DisplayBackend.Kind> =
+        if (hiddenEnabled && shizukuReady) {
+            listOf(DisplayBackend.Kind.HIDDEN, DisplayBackend.Kind.LEGACY)
+        } else {
+            listOf(DisplayBackend.Kind.LEGACY)
+        }
+
 
     /**
      * overlay 副屏尺寸校验（纯函数可测；修复轮七差集法检测的防误报闸）。
@@ -578,6 +1205,27 @@ object VirtualDisplayManager {
         "background", "后台" -> MODE_BACKGROUND
         else -> null
     }
+
+    /**
+     * 帧新鲜度阈值（2026-10-25）：超过该帧龄即视为"画面已冻结"，上层必须自愈或诚实报错，
+     * 禁止把旧帧当实时画面交给 OCR/LLM。
+     */
+    const val FRAME_STALE_MS = 3_000L
+
+    /** 自愈冷却（重建会重启目标应用，必须限流）。 */
+    private const val RECOVER_COOLDOWN_MS = 60_000L
+
+    /** 残留隐藏虚拟屏释放的最大轮数（真机可能同时存在多个残留，防死循环）。 */
+    private const val MAX_RESIDUAL_RELEASE_ROUNDS = 4
+
+    /** 连续自愈失败上限（超过后交由上层诚实报错，避免无限重建）。 */
+    private const val RECOVER_MAX_CONSECUTIVE = 2
+
+    @Volatile
+    private var lastRecoverAtMs: Long = 0L
+
+    @Volatile
+    private var recoverAttempts: Int = 0
 
     const val MODE_FOREGROUND = "foreground"
     const val MODE_BACKGROUND = "background"

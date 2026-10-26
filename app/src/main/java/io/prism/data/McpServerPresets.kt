@@ -286,14 +286,14 @@ object McpServerPresets {
         McpPresetMeta(
             name = "Scrapling",
             description = "PC/NAS 自建抓取中转（Scrapling 反反爬 + JS 渲染）：服务端抓取目标 URL 并返回渲染后的正文/Markdown，手机端不接触目标站 cookie",
-            keyHint = "Scrapling 内置 MCP Server，端点与端口以你自建部署配置为准（将 Base URL 占位替换为你的服务地址），Prism 仅支持 Streamable HTTP 传输；默认无认证，如部署时开启 API key 则填入对应 header（Bearer 型可直接存入 Key 字段，其他请在自定义请求头添加）。注意：Android 仅放行 localhost 明文 http，局域网 http 端点会被系统拦截——请用 adb reverse 端口转发（端点填 http://127.0.0.1:<端口>）或 https 反向代理",
-            networkNote = "本地局域网自建服务（需自行部署），需与手机同一网络；明文 http 见 keyHint 系统限制说明"
+            keyHint = "Scrapling 内置 MCP Server，端点与端口以你自建部署配置为准（将 Base URL 占位替换为你的服务地址），Prism 仅支持 Streamable HTTP 传输；默认无认证，如部署时开启 API key 则填入对应 header（Bearer 型可直接存入 Key 字段，其他请在自定义请求头添加）。注意：Prism 应用层拒绝**远端明文 http**；本机/私网 IP 的 http 端点可直接填写（公网请用 https 或反向代理，或改用 adb reverse 端口转发填 http://127.0.0.1:<端口>）",
+            networkNote = "本地局域网自建服务（需自行部署），需与手机同一网络；本机/私网 http 允许，公网需 https"
         ),
         McpPresetMeta(
             name = "crawl4ai",
             description = "PC/NAS 自建抓取中转（crawl4ai 反反爬 + JS 渲染）：服务端抓取目标 URL 并返回渲染后的正文/Markdown，手机端不接触目标站 cookie",
-            keyHint = "crawl4ai 官方 Docker 默认端口 11235，端点以实际部署为准（将 Base URL 占位替换为你的服务地址）；可选 JWT/密钥认证——启用后填入 Key 字段（经 Authorization Bearer 头注入），或按部署配置在自定义请求头添加。注意：Android 仅放行 localhost 明文 http，局域网 http 端点会被系统拦截——请用 adb reverse 端口转发（端点填 http://127.0.0.1:<端口>）或 https 反向代理",
-            networkNote = "本地局域网自建服务（需自行部署），需与手机同一网络；明文 http 见 keyHint 系统限制说明"
+            keyHint = "crawl4ai 官方 Docker 默认端口 11235，端点以实际部署为准（将 Base URL 占位替换为你的服务地址）；可选 JWT/密钥认证——启用后填入 Key 字段（经 Authorization Bearer 头注入），或按部署配置在自定义请求头添加。注意：Prism 应用层拒绝**远端明文 http**；本机/私网 IP 的 http 端点可直接填写（公网请用 https 或反向代理，或改用 adb reverse 端口转发填 http://127.0.0.1:<端口>）",
+            networkNote = "本地局域网自建服务（需自行部署），需与手机同一网络；本机/私网 http 允许，公网需 https"
         )
     ).associateBy { it.name.lowercase() }
 }

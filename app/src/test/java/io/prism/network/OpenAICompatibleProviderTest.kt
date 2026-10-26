@@ -1,6 +1,8 @@
 package io.prism.network
 
 import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.sse.SSE
 import io.ktor.client.request.HttpRequestBuilder
@@ -2006,5 +2008,63 @@ class OpenAICompatibleProviderTest {
         } finally {
             server.stop(gracePeriodMillis = 0, timeoutMillis = 1_000)
         }
+    }
+
+    // ==================== ADR-064 H-06 / guardrail M-20：运行时明文守卫（零请求） ====================
+
+    @Test
+    fun `streamChat rejects remote cleartext without issuing any request`() = runBlocking {
+        // 存量脏配置（持久化层校验上线前已保存的远端 http）必须被运行时拦下，且不得发出请求。
+        // MockEngine 计数为零即证明守卫在读 Key / 建连之前生效。
+        var requests = 0
+        val guarded = OpenAICompatibleProvider(
+            HttpClient(MockEngine) {
+                engine {
+                    addHandler {
+                        requests++
+                        respond("""{"choices":[{"delta":{"content":"x"}}]}""")
+                    }
+                }
+            },
+            apiKeyRepo
+        )
+        val config = ProviderConfig(
+            name = "Remote", baseUrl = "http://api.example.com/v1",
+            apiKeyRef = "remote", models = listOf("gpt-4o")
+        )
+        val events = guarded.streamChat(
+            config, sampleMessages(), systemPrompt = null, ragContext = null,
+            tools = null, toolChoice = null, thinkingEnabled = null, reasoningEffort = null
+        ).toList()
+        val error = events.filterIsInstance<StreamEvent.Error>().firstOrNull()
+        assertNotNull("远端明文 http 应发射 Error 事件", error)
+        assertTrue("错误信息应说明安全策略", error!!.message.contains("安全策略"))
+        assertEquals("守卫应在发出任何请求前拒绝", 0, requests)
+    }
+
+    @Test
+    fun `chatCompletion rejects remote cleartext without issuing any request`() = runBlocking {
+        var requests = 0
+        val guarded = OpenAICompatibleProvider(
+            HttpClient(MockEngine) {
+                engine {
+                    addHandler {
+                        requests++
+                        respond("""{"choices":[{"message":{"content":"x"}}]}""")
+                    }
+                }
+            },
+            apiKeyRepo
+        )
+        val config = ProviderConfig(
+            name = "Remote", baseUrl = "http://api.example.com/v1",
+            apiKeyRef = "remote", models = listOf("gpt-4o")
+        )
+        val result = guarded.chatCompletion(
+            config, sampleMessages(), systemPrompt = null, ragContext = null,
+            thinkingEnabled = null, reasoningEffort = null
+        )
+        assertNull("远端明文 http 应返回 null（不发请求）", result)
+        assertEquals("守卫应在发出任何请求前拒绝", 0, requests)
     }
 }

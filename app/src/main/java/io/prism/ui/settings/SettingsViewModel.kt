@@ -77,7 +77,12 @@ class SettingsViewModel(
      * TKN-LVC-016（ADR-057）：音色包导入器（`.voicepack` 归档 → 应用私有目录）；
      * null 时导入入口降级为不可用（向后兼容且保持 JVM 可测）。
      */
-    private val localVoicePackImporter: io.prism.voice.local.LocalVoicePackImporter? = null
+    private val localVoicePackImporter: io.prism.voice.local.LocalVoicePackImporter? = null,
+    /**
+     * ADR-065（US-3114）：执行面后端偏好仓库（隐藏执行面开关）；
+     * null 时按默认开启（向后兼容且保持 JVM 可测）。
+     */
+    private val displayBackendConfigRepository: io.prism.config.DisplayBackendConfigRepository? = null
 ) : ViewModel() {
 
     /** Provider 已配置列表。 */
@@ -91,6 +96,15 @@ class SettingsViewModel(
     private val _selectedProvider = MutableStateFlow<ProviderConfig?>(null)
     /** 当前编辑的 Provider（null 表示未选中）。 */
     val selectedProvider: StateFlow<ProviderConfig?> = _selectedProvider.asStateFlow()
+
+    private val _providerSaveError = MutableStateFlow<String?>(null)
+    /** Provider 保存被安全策略拒绝时的可读错误（guardrail L-28）；null 表示无错误。 */
+    val providerSaveError: StateFlow<String?> = _providerSaveError.asStateFlow()
+
+    /** 清除 Provider 保存错误提示（弹层重开/用户确认后调用）。 */
+    fun clearProviderSaveError() {
+        _providerSaveError.value = null
+    }
 
     private val _apiKeyLoading = MutableStateFlow(false)
     /** API Key 读取中状态。 */
@@ -114,6 +128,31 @@ class SettingsViewModel(
     val reasoningEffort: StateFlow<String> =
         (thinkingConfigRepository?.reasoningEffort() ?: flowOf(ThinkingConfigRepository.DEFAULT_EFFORT))
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ThinkingConfigRepository.DEFAULT_EFFORT)
+
+    /**
+     * ADR-065（US-3114）：隐藏执行面开关（默认开启）。
+     * 关闭后走 legacy 兼容后端（overlay/自建虚拟屏，主屏可能出现小窗）。
+     */
+    val hiddenDisplayEnabled: StateFlow<Boolean> =
+        (displayBackendConfigRepository?.hiddenDisplayEnabled()
+            ?: flowOf(io.prism.config.DisplayBackendConfigRepository.DEFAULT_HIDDEN_ENABLED))
+            .stateIn(
+                viewModelScope,
+                SharingStarted.WhileSubscribed(5_000),
+                io.prism.config.DisplayBackendConfigRepository.DEFAULT_HIDDEN_ENABLED
+            )
+
+    /**
+     * ADR-065（US-3114）：隐藏执行面开关保存失败提示（guardrail r1 Q-08：写失败必须可读，
+     * 不能只让开关"弹回"）。null=无错误；成功保存后清空。
+     */
+    private val _hiddenDisplaySaveError = MutableStateFlow<String?>(null)
+    val hiddenDisplaySaveError: StateFlow<String?> = _hiddenDisplaySaveError.asStateFlow()
+
+    /** 清除隐藏执行面保存错误提示。 */
+    fun clearHiddenDisplaySaveError() {
+        _hiddenDisplaySaveError.value = null
+    }
 
     /**
      * v1 US-301：视觉旁路授权（用户明示：图片可外发到视觉 Provider）。默认 false。
@@ -220,6 +259,22 @@ class SettingsViewModel(
                 throw e // BR-error-handling-007：不吞 CancellationException
             } catch (e: Exception) {
                 Log.w("SettingsViewModel", "设置思考强度失败: $effort", e)
+            }
+        }
+    }
+
+    /** ADR-065（US-3114）：切换隐藏执行面（持久化，运行期即时生效——下次建屏生效）。 */
+    fun setHiddenDisplayEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            try {
+                displayBackendConfigRepository?.setHiddenDisplayEnabled(enabled)
+                _hiddenDisplaySaveError.value = null
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // guardrail r1 Q-08：写失败给用户可见原因（UI 行内展示）
+                _hiddenDisplaySaveError.value = "保存失败（${e::class.simpleName}）：开关可能未生效"
+                Log.w("SettingsViewModel", "设置隐藏执行面失败: $enabled", e)
             }
         }
     }
@@ -1184,11 +1239,17 @@ class SettingsViewModel(
 
     /** 选择要编辑的 Provider。 */
     fun selectProvider(config: ProviderConfig?) {
+        _providerSaveError.value = null
         _selectedProvider.value = config
     }
 
-    /** 保存 Provider 配置（id=0 新建，id>0 更新）。@return 保存后的 id（新建时用于后续激活） */
-    fun saveProvider(config: ProviderConfig): Long {
+    /**
+     * 保存 Provider 配置（id=0 新建，id>0 更新）。
+     *
+     * @return 保存后的 id（新建时用于后续激活）；被安全策略拒绝时返回 null，
+     *   原因写入 [providerSaveError]（guardrail L-28：非 UI 路径的明文 http 拒绝不再直接崩溃 UI）
+     */
+    fun saveProvider(config: ProviderConfig): Long? {
         // v1 批次13（B，D16b）：按模型名自动启用视觉能力（开箱即用）——用户配了 glm-4.6v-flash
         // 等视觉模型时无需知道要去手动开关 supportsVision，截图即以图片注入会话（发挥多模态）。
         // **仅当用户未显式设置过**（supportsVisionSet=false）才自动提示并落标记；用户已显式触碰
@@ -1200,7 +1261,14 @@ class SettingsViewModel(
             config.supportsVision = true
             config.supportsVisionSet = true
         }
-        val id = providerRepository.save(config)
+        _providerSaveError.value = null
+        val id = try {
+            providerRepository.save(config)
+        } catch (e: IllegalArgumentException) {
+            // guardrail L-28：持久化层 Fail-Fast 的明文 http 拒绝转为可读错误，不使 UI 崩溃
+            _providerSaveError.value = e.message ?: "Provider 配置不合法，无法保存"
+            return null
+        }
         // v1 真机二次修复（Issue 3）：把某 Provider 标记为「视觉旁路 Provider」本身即用户"把图片
         // 外发到该端点"的明确意图 → 同步写入云端旁路授权 consent，避免用户"激活了视觉模型却
         // 仍只见 OCR"（原误解：isBypassAvailable 因 consent 默认 false 恒不过，Cloud 从不执行）。
@@ -1230,6 +1298,7 @@ class SettingsViewModel(
      * 复用 [ProviderEditSheet] 的编辑界面完成手填创建。
      */
     fun newCustomProvider() {
+        _providerSaveError.value = null
         _selectedProvider.value = ProviderConfig(
             name = "",
             baseUrl = "",
@@ -1321,7 +1390,9 @@ class SettingsViewModel(
                     // LVC-1（ADR-053）：本地音色包仓库（设置页展示安装状态 + 选项门控）
                     localVoicePackStore = app.localVoicePackStore,
                     // TKN-LVC-016（ADR-057）：音色包导入器（设置页「导入音色包」）
-                    localVoicePackImporter = app.localVoicePackImporter
+                    localVoicePackImporter = app.localVoicePackImporter,
+                    // ADR-065（US-3114）：执行面后端偏好（隐藏执行面开关）
+                    displayBackendConfigRepository = app.displayBackendConfigRepository
                 )
             }
         }

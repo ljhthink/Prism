@@ -784,6 +784,8 @@ class WebSearchLocalToolExecutor(
     internal fun buildSearxngSearchUrl(endpoint: String): String? {
         val trimmed = endpoint.trim()
         if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return null
+        // ADR-064：远端 http 被拒（明文），仅本机/私网允许 http
+        if (!io.prism.network.PrivateNetwork.isCleartextAllowed(trimmed)) return null
         val base = trimmed.trimEnd('/')
         return if (base.endsWith("/search")) base else "$base/search"
     }

@@ -521,7 +521,8 @@ private fun McpConfigSheet(config: McpServerConfig, viewModel: CapabilitiesViewM
     // 输入校验：名称非空 + Base URL 为合法 http(s) 地址 + 拒绝 CRLF（纵深防御，guardrail S1）
     val nameValid = name.trim().isNotEmpty()
     val baseUrlTrimmed = baseUrl.trim()
-    val urlValid = baseUrlTrimmed.startsWith("http://") || baseUrlTrimmed.startsWith("https://")
+    val urlValid = (baseUrlTrimmed.startsWith("http://") || baseUrlTrimmed.startsWith("https://")) &&
+        io.prism.network.PrivateNetwork.isCleartextAllowed(baseUrlTrimmed)
     val urlSafe = urlValid && !baseUrlTrimmed.contains('\r') && !baseUrlTrimmed.contains('\n')
     val canSave = nameValid && (isLocal || (urlValid && urlSafe))
     val validHeaders = headers

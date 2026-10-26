@@ -84,8 +84,11 @@ class LocalCloneTtsEngineTest {
         private val ignoreProbeMs: Long = 0L,
         private val blockMs: Long = 0L,
         private val onEnter: (() -> Unit)? = null,
+        private val reportedSampleRate: Int = 0,
         private val audioProvider: () -> LocalCloneAudio = { LocalCloneAudio(floatArrayOf(0.25f, -0.25f), 24_000) }
     ) : LocalCloneSynthesizer {
+
+        override fun sampleRate(): Int = reportedSampleRate
         val synthCalls = AtomicInteger(0)
         val releaseCalls = AtomicInteger(0)
         val concurrent = AtomicInteger(0)
@@ -161,6 +164,12 @@ class LocalCloneTtsEngineTest {
         /** 每次 `play` 的样本数（顺序敏感：末次必须是末段音频，不是静音）。 */
         val playedSizes = CopyOnWriteArrayList<Int>()
 
+        /**
+         * 每次 `play` 的采样率（顺序与 [playedSizes] 对齐）。
+         * 用途：跨采样率用例要断言**静音片被标注的采样率**，而 [lastSampleRate] 只保留最后一次。
+         */
+        val playedRates = CopyOnWriteArrayList<Int>()
+
         private val stopSignal = CountDownLatch(1)
 
         override fun play(samples: FloatArray, sampleRate: Int, isCancelled: () -> Boolean) {
@@ -170,6 +179,7 @@ class LocalCloneTtsEngineTest {
             lastSamples = samples.size
             playedTotalSamples.addAndGet(samples.size)
             playedSizes += samples.size
+            playedRates += sampleRate
             if (blockUntilStoppedMs > 0) {
                 stopSignal.await(blockUntilStoppedMs, TimeUnit.MILLISECONDS)
             }
@@ -783,6 +793,102 @@ class LocalCloneTtsEngineTest {
     }
 
     @Test
+    fun `段间停顿 - 非流式路径必须消费封顶后的计划（批次30 接线钉子，guardrail F1）`() = runBlocking {
+        // 为什么需要这条（guardrail F1, High）：上面那条"相邻段之间插入静音"的期望值是用
+        // `gapMsFor + silenceSamples` **逐边界直接算**的，而在**短文本**上 `gapPlanFor` 与
+        // 旧实现**结果完全相同**（没触到 20s 封顶）⇒ 即使把非流式路径改回
+        // `gapMsFor + silenceSamples`，那条用例**依然全绿**（审查方 M5 实测"56 个引擎用例全绿"）。
+        // 故这里必须构造一个**封顶真的生效**的输入，让两条实现的结果**可区分**。
+        val synth = FakeSynth()
+        val player = FakePlayer()
+        val gapMs = LocalCloneConfig.MAX_SENTENCE_GAP_MS // 2000ms：少量段即触封顶
+        val engine = concurrentEngine(
+            synth, player,
+            LocalCloneConfig(timeoutMs = 10_000L, sentenceGapMs = gapMs)
+        )
+        // 120 句 × 5 字 = 600 字 ⇒ 多于 10 个句末边界 ⇒ 未封顶总量 > 20000ms
+        val longText = "第一句话。".repeat(120)
+        val listener = RecListener()
+        engine.speak(longText, listener)
+
+        assertTrue("必须播完", awaitUntil(20_000) { listener.events.contains("done") })
+        val segments = segmentForSynthesis(longText, DEFAULT_SEGMENT_CHARS, FIRST_SEGMENT_CHARS)
+        assertTrue("前提：必须切成足够多的段（实际 ${segments.size}）", segments.size >= 12)
+
+        // 旧实现的等价物：逐边界直接算，**无总量上限**
+        val uncappedSamples = segments.dropLast(1).sumOf {
+            LocalCloneSegmentGap.silenceSamples(
+                LocalCloneSegmentGap.gapMsFor(it, gapMs), 24_000
+            )
+        }
+        val cappedSamples = LocalCloneSegmentGap.gapPlanFor(segments, gapMs, 24_000).sum()
+        assertTrue(
+            "前提：本用例必须让封顶真的生效（未封顶 $uncappedSamples vs 封顶 $cappedSamples）",
+            uncappedSamples > cappedSamples
+        )
+
+        val perSegment = 2 // FakeSynth 默认产出 2 样本
+        assertEquals(
+            "非流式路径写入的样本数必须等于「封顶后的计划」而不是「逐边界无上限」",
+            synth.synthCalls.get() * perSegment + cappedSamples,
+            player.playedTotalSamples.get()
+        )
+        // 反向钉子：若改回旧实现，实际值会等于 uncappedSamples 那一版 ⇒ 下面这条必须成立
+        assertTrue(
+            "实际写入量必须显著小于未封顶版本（否则说明没走 gapPlanFor）",
+            player.playedTotalSamples.get() < synth.synthCalls.get() * perSegment + uncappedSamples
+        )
+        engine.release()
+    }
+
+    @Test
+    fun `段间停顿 - 静音片必须标注计算计划时的采样率（跨采样率，guardrail F8）`() = runBlocking {
+        // 背景（guardrail F4/F8）：非流式路径用**首段回报的**采样率折算静音样本数，故静音片必须
+        // 标注**同一采样率**。若误标成"当前段的采样率"，当各段采样率不一致时静音时长就会失真
+        // （样本数不变、语义采样率变了 ⇒ 实际播出的毫秒数不同）。
+        // 此前这条修复是**裸修**：把 `sampleRate = gapPlanRate` 变异回 `audio.sampleRate`，
+        // 全部用例仍然全绿（审查方 N1 实证）。本用例专门把这个分歧钉住。
+        val firstRate = 24_000
+        val laterRate = 16_000
+        var calls = 0
+        val synth = FakeSynth(
+            audioProvider = {
+                // 首段 24k，其后各段 16k ⇒ 计划按 24k 折算，后续段的"当前采样率"是 16k
+                val rate = if (calls++ == 0) firstRate else laterRate
+                LocalCloneAudio(floatArrayOf(0.25f, -0.25f), rate)
+            }
+        )
+        val player = FakePlayer()
+        val gapMs = 400
+        val engine = concurrentEngine(
+            synth, player,
+            LocalCloneConfig(timeoutMs = 5_000L, sentenceGapMs = gapMs)
+        )
+        val listener = RecListener()
+        engine.speak(gapLongText, listener)
+
+        assertTrue("必须播完", awaitUntil(8_000) { listener.events.contains("done") })
+        val segments = segmentForSynthesis(gapLongText, DEFAULT_SEGMENT_CHARS, FIRST_SEGMENT_CHARS)
+        assertTrue("前提：必须切成多段（实际 ${segments.size}）", segments.size >= 2)
+
+        // 找出静音片的下标（全零片段，且长度 > 2 以区别于 FakeSynth 的 2 样本音频）
+        val gapIndices = player.playedSizes.indices.filter { i ->
+            val size = player.playedSizes[i]
+            size > 2 && size == LocalCloneSegmentGap.silenceSamples(gapMs, firstRate)
+        }
+        assertTrue("前提：必须真的插入了静音片（否则是空断言）", gapIndices.isNotEmpty())
+        // 关键断言：静音片的采样率必须是**首段的 24k**，而不是后续段的 16k
+        gapIndices.forEach { i ->
+            assertEquals(
+                "第 $i 个 piece 是静音片，必须按计划采样率 $firstRate 标注（若为 $laterRate 说明标注了当前段采样率）",
+                firstRate,
+                player.playedRates[i]
+            )
+        }
+        engine.release()
+    }
+
+    @Test
     fun `段间停顿默认 0 - 写入样本数与改造前一致（回归钉子）`() = runBlocking {
         // 默认 0 必须与改造前**逐字节等价**：不插任何静音 piece，play 次数 == 段数。
         val synth = FakeSynth()
@@ -1109,6 +1215,87 @@ class LocalCloneTtsEngineTest {
 
         assertTrue("两轮应都被处理", awaitUntil(4_000) { synth.synthCalls.get() >= 2 })
         assertEquals("不得并发进入 native 合成", 1, synth.maxConcurrent.get())
+        engine.release()
+    }
+
+    // ==================== US-3113：导出合成（不播放） ====================
+
+    @Test
+    fun `导出合成返回拼接音频且不触发播放`() = runBlocking {
+        val synth = FakeSynth(
+            reportedSampleRate = 24_000,
+            audioProvider = { LocalCloneAudio(floatArrayOf(0.5f, -0.5f), 24_000) }
+        )
+        val player = FakePlayer()
+        val engine = syncEngine(synth, player)
+
+        val audio = engine.synthesizeForExport("你好，世界")
+
+        assertTrue("应产出音频", audio != null && audio.samples.isNotEmpty())
+        assertEquals("采样率来自引擎", 24_000, audio!!.sampleRate)
+        assertEquals("导出不得触发播放", 0, player.playCalls.get())
+        engine.release()
+    }
+
+    @Test
+    fun `导出合成 - 合成失败返回 null 而不抛异常`() = runBlocking {
+        val engine = syncEngine(
+            FakeSynth(reportedSampleRate = 24_000, failure = IllegalStateException("boom")),
+            FakePlayer()
+        )
+        assertEquals(null, engine.synthesizeForExport("失败用例"))
+        engine.release()
+    }
+
+    @Test
+    fun `导出合成 - 分段采样率不一致时放弃（guardrail M-04）`() = runBlocking {
+        // 引擎声明 24k，但合成器实际回报 16k → 不得拼接导出（会变调变速）
+        val engine = syncEngine(
+            FakeSynth(
+                reportedSampleRate = 24_000,
+                audioProvider = { LocalCloneAudio(floatArrayOf(0.1f), 16_000) }
+            ),
+            FakePlayer()
+        )
+        assertEquals(null, engine.synthesizeForExport("采样率不一致"))
+        engine.release()
+    }
+
+    @Test
+    fun `导出合成 - 合成器不声明采样率时返回 null`() = runBlocking {
+        val engine = syncEngine(FakeSynth(reportedSampleRate = 0), FakePlayer())
+        assertEquals(null, engine.synthesizeForExport("无采样率"))
+        engine.release()
+    }
+
+    @Test
+    fun `导出合成 - 分段被标记 truncated 时放弃`() = runBlocking {
+        val engine = syncEngine(
+            FakeSynth(
+                reportedSampleRate = 24_000,
+                audioProvider = { LocalCloneAudio(floatArrayOf(0.1f), 24_000, truncated = true) }
+            ),
+            FakePlayer()
+        )
+        assertEquals(null, engine.synthesizeForExport("被中止的分段"))
+        engine.release()
+    }
+
+    @Test
+    fun `导出合成 - 引擎已释放时返回 null`() = runBlocking {
+        val engine = syncEngine(FakeSynth(reportedSampleRate = 24_000), FakePlayer())
+        engine.release()
+        assertEquals(null, engine.synthesizeForExport("释放后"))
+    }
+
+    @Test
+    fun `导出合成 - 空参考集（VITS 语义外的 ZIPVOICE）返回 null`() = runBlocking {
+        val engine = syncEngine(
+            FakeSynth(reportedSampleRate = 24_000),
+            FakePlayer(),
+            refs = emptyList()
+        )
+        assertEquals(null, engine.synthesizeForExport("无参考"))
         engine.release()
     }
 }

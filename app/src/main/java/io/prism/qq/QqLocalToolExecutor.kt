@@ -1,0 +1,991 @@
+package io.prism.qq
+
+import android.util.Log
+import io.prism.phonecontrol.PhoneControlAccessibilityService
+import io.prism.phonecontrol.PhoneControlSessionManager
+import io.prism.phonecontrol.bg.ShizukuShell
+import io.prism.phonecontrol.bg.VirtualDisplayManager
+import io.prism.skill.AskUserLocalToolExecutor
+import io.prism.skill.LocalToolExecutor
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+
+/**
+ * QQ 小号助手本地工具执行器（ADR-062 路线 R1；PRD US-3102 / US-3104 / US-3108）。
+ *
+ * **工具集**（命名空间 `qq__`）：
+ * - `qq__send_message(contact, message)`：以小号身份给好友发消息（US-3102）
+ * - `qq__send_voice(contact, message)`：以 Prism 音色包合成语音发送（US-3113；仅协议端）
+ * - `qq__set_signature(signature)`：修改小号个性签名（US-3104）
+ * - `qq__schedule_message(action=status|create|cancel, ...)`：随机定时主动消息管理（US-3108）
+ *
+ * **UI 链路**（M0 PoC 实证，docs/reports/2026-10-19-qq-m0-poc.md）：
+ * QQ 暴露稳定 resource-id（`id/input`、`id/send_btn`）与可读 text/content-desc——
+ * **viewId 优先、text/desc 兜底**。
+ *
+ * **后台副屏执行**（2026-10-19 改造，PRD US-3102 AC-2「发送在后台完成」）：小号运行于 XSpace
+ * 用户 999——经 Shizuku 创建可信副屏（[VirtualDisplayManager.ensureDisplay]）+ `am start
+ * --user 999 --display N`（[ShizukuShell.amStartForUserOnDisplay]）把小号拉到副屏顶层，
+ * 再把无障碍执行面（[PhoneControlAccessibilityService.setExecutionDisplay]）指向该 display，
+ * 节点感知/操作自动路由到副屏小号窗口；**全链路不占用用户前台**（真机 PoC 实证 user-0 无障碍
+ * 可读取 user-999 在副屏的 QQ 窗口）。结束后 finally 还原执行面。
+ *
+ * **安全闸门**（依层）：总开关 + 风险确认（US-3101）→ 节流/熔断（US-3105）→
+ * 高风险三态确认（发送类动作，交互路径；定时路径视为用户已显式授权，仍受节流）。
+ *
+ * **降级契约**（与 [LocalToolExecutor] 一致）：所有失败返回可读字符串，绝不抛异常
+ * （`CancellationException` 除外）；每步失败附当前页诊断，LLM 可改用
+ * `phone_control__*` 工具接手或 take_over。
+ *
+ * **可测性**：参数解析 / 结果判定 / 节流编排为 internal 纯函数（JVM 可测）；
+ * UI 链路依赖服务单例（真机验证）。
+ */
+class QqLocalToolExecutor(
+    /** 配置仓库（读 + 写定时任务配置；生产：QqConfigRepositoryHolder）。 */
+    private val configRepoProvider: suspend () -> QqConfigRepository?,
+    /** 运行时状态仓库（节流/熔断记录；生产：QqRuntimeStateRepositoryHolder）。 */
+    private val runtimeRepoProvider: suspend () -> QqRuntimeStateRepository?,
+    /** 高危动作确认策略（US-3103/3104 AC-4；生产：HighRiskApprovalRepository.mode）。 */
+    private val highRiskApprovalProvider: suspend () -> io.prism.config.HighRiskApprovalMode =
+        { io.prism.config.HighRiskApprovalMode.ASK },
+    /** 高危确认通知桥（后台可见；与手机操控同范式）。 */
+    private val askUserNotifier: io.prism.phonecontrol.PhoneControlAskUserNotifier? = null,
+    /**
+     * 应用上下文（后台副屏创建/跨用户启动需要）。生产由 PrismApplication 注入
+     * applicationContext；null 时后台执行返回可读错误（保持既有 JVM 测试兼容）。
+     */
+    private val appContextProvider: () -> android.content.Context? = { null },
+    /**
+     * 协议端通道（ADR-064；默认主通道）。返回 null 或未连接时，本执行器回落到 UI 链路
+     * （无障碍 + 后台副屏）。连接判定在每次发送前实时进行，使协议端掉线可即时降级。
+     */
+    private val oneBotChannelProvider: suspend () -> io.prism.qq.channel.QqChannel? = { null },
+    /**
+     * 语音合成器（PRD US-3113）。协议端可用时把文本合成 Prism 音色的 PCM 并以语音发送；
+     * 不可用或合成失败时如实提示并降级为文本。
+     */
+    private val voiceSynthesizerProvider: suspend () -> QqVoiceSource? = { null },
+    /** XSpace 用户 id（小号所在用户；MIUI 应用双开固定 999，M0 实证）。 */
+    private val xSpaceUserId: Int = 999
+) : LocalToolExecutor {
+
+    /**
+     * 定时主动消息专用发送入口（US-3108；[QqProactiveGateway.sender] 装配调用）。
+     *
+     * 与 LLM 交互路径的区别：**不走逐次高风险确认**——定时任务的创建本身即用户显式授权
+     * （PRD US-3101 风险确认 + US-3108 开关），无人值守场景 ask_user 会永久挂起；
+     * 仍受配置闸门与节流/熔断约束（不豁免）。
+     */
+    suspend fun sendProactive(contact: String, message: String): String =
+        sendMessage(mapOf("contact" to contact, "message" to message), confirmRequired = false)
+
+    /**
+     * 无逐次确认的签名修改（ADR-064）：供 [io.prism.qq.channel.AccessibilityQqChannel]
+     * 在交互路径已完成三态确认后调用；闸门/节流仍在内部生效。
+     */
+    suspend fun setSignatureUnconfirmed(signature: String): String =
+        setSignature(mapOf("signature" to signature), confirmRequired = false)
+
+    /**
+     * 返回**已连接的协议端通道**；null 表示应回落 UI 链路。
+     *
+     * 只在 `transport=ONEBOT` 且连接健康时命中；任何异常按不可用处理（不阻断发送）。
+     */
+    private suspend fun protocolChannelOrNull(): io.prism.qq.channel.QqChannel? {
+        val channel = runCatching { oneBotChannelProvider() }.getOrNull() ?: return null
+        if (channel.transport != io.prism.qq.channel.QqTransport.ONEBOT) return null
+        return if (runCatching { channel.status().connected }.getOrDefault(false)) channel else null
+    }
+
+    override fun handles(toolName: String): Boolean = toolName.startsWith(NAMESPACE)
+
+    override suspend fun execute(toolName: String, arguments: Map<String, Any?>): String {
+        PhoneControlSessionManager.onPhoneToolInvoked()
+        val tool = toolName.removePrefix(NAMESPACE)
+        return try {
+            when (tool) {
+                "send_message" -> sendMessage(arguments, confirmRequired = true)
+                "send_voice" -> sendVoice(arguments, confirmRequired = true)
+                "set_signature" -> setSignature(arguments, confirmRequired = true)
+                "schedule_message" -> scheduleMessage(arguments)
+                else -> "错误：未知 QQ 工具 $tool"
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "execute($tool) 失败：${e::class.simpleName}")
+            "错误：QQ 工具执行失败（${e::class.simpleName}）"
+        }
+    }
+
+    // ==================== qq__send_message ====================
+
+    private suspend fun sendMessage(arguments: Map<String, Any?>, confirmRequired: Boolean): String {
+        val contact = parseString(arguments, "contact")?.trim().orEmpty()
+        val message = parseString(arguments, "message")?.trim().orEmpty()
+        if (contact.isEmpty()) return "错误：缺少 contact 参数（好友备注名）"
+        if (message.isEmpty()) return "错误：缺少 message 参数"
+        // guardrail B-01（2026-10-19）：凭据硬拦截**必须先于一切确认/发送路径**——对齐
+        // PhoneControlSecurity 契约（验证码/密码/卡号"永不执行，即使人工确认也不放行"）。
+        // 定时路径（sendProactive）同样经过本入口，无绕过面。
+        if (io.prism.phonecontrol.PhoneControlSecurity.isCredentialInput(message)) {
+            return "⚠️ 消息内容含凭据（密码/验证码/卡号），已硬拦截（不可执行，即便人工确认也不放行）"
+        }
+        // guardrail M-01（US-3102 AC-4）：消息长度上限——超长拒绝并提示分条（不做静默截断，
+        // 静默截断会造成"发出的话不完整"，拟人场景下比拒绝更伤真实感）
+        if (message.length > MESSAGE_MAX_LEN) {
+            return "错误：消息过长（${message.length} 字，上限 $MESSAGE_MAX_LEN）。请拆分成多条发送（像真人那样分几条说更自然）"
+        }
+
+        val gate = configAndThrottleGate()
+        if (gate != null) return gate
+
+        if (confirmRequired) {
+            val confirm = highRiskGate("向「${contact.take(20)}」发送消息", message.take(40))
+            if (confirm != null) return confirm
+        }
+
+        // 协议端主通道（ADR-064 / US-3110 AC-2/AC-4）：连接健康时直接经 OneBot 发送，
+        // 不创建副屏、不启动 QQ UI；未连接则继续走下方无障碍后台链路（自动降级）。
+        protocolChannelOrNull()?.let { channel ->
+            return channel.sendText(contact, message)
+        }
+
+        // 后台副屏执行（US-3102 AC-2：发送在后台完成，不占用用户前台）。不占用前台的
+        // 关键：小号在 XSpace 用户 999，App 自身无法把它启动到副屏——须 Shizuku（见 withQqBackground）。
+        return withQqBackground { displayId, svc ->
+            // US-3118 AC-1/AC-2：先判**阻断页面态**（安全提醒/登录页），命中就直接返回可读原因，
+            // **不点输入框、不点发送**——在错误页乱点只会让状态更糟，且会把原因掩盖成
+            // "找不到联系人"（真机 2026-10-26 实证）。
+            pageStateBlock(svc)?.let { return@withQqBackground it }
+
+            // 归位到「消息」列表页（后台副屏内；QQ 可能停在抽屉/会话页/任意页）。
+            ensureMessageList(svc, displayId)
+
+            // 1) 进入会话：联系人节点定位（desc/text 模糊匹配），未命中回退 back 重试
+            if (!openConversation(svc, contact)) {
+                // 归位后仍失败：再判一次页面态——QQ 可能在 back 过程中弹出验证提示
+                pageStateBlock(svc)?.let { return@withQqBackground it }
+                return@withQqBackground "错误：未能在 QQ 消息列表找到「${contact.take(20)}」。" +
+                    "请确认该联系人存在（小号的好友列表），或核实小号 QQ 登录态后重试"
+            }
+
+            // 2) 输入：viewId=id/input（M0 实证聊天页专属 id；DEF-104 后不再用 findEditableNid
+            // 兜底——列表页搜索框同样是 EditText，误命中会把消息打进搜索框）
+            val inputNid = svc.findNodeByViewIdNid(VIEW_ID_INPUT)
+            if (inputNid == null) {
+                return@withQqBackground "错误：当前不在 QQ 聊天页（未找到输入框）。请确认小号 QQ 已登录且能进入与目标的会话后重试"
+            }
+            val typed = svc.performType(inputNid, 0, 0, message)
+            if (typed.startsWith("错误")) return@withQqBackground "错误：消息输入失败（$typed）"
+
+            // 2b) **发送前快照**（guardrail G-03/R2-04/R3-01）：只有"发送前输入框确实含我们输入的
+            // 内容"，"发送后变空"才是"清空"证据。输入后需要 settle，否则可能读到输入前的空值。
+            // 快照按 **viewId 实时定位**（与发送后的读取同一寻址基准），不用 BFS 序号。
+            delay(SETTLE_SHORT_MS)
+            val fragment = QqLocalToolExecutor.firstCodePoints(message, VERIFY_FRAGMENT_LEN)
+            val beforeInputText = runCatching { svc.textOfViewId(VIEW_ID_INPUT).second }.getOrNull()
+
+            // 3) 发送：viewId=id/send_btn 优先，text=发送 兜底
+            val sendNid = svc.findNodeByViewIdNid(VIEW_ID_SEND_BTN) ?: svc.findNodeByTextNid("发送")
+            if (sendNid == null) {
+                return@withQqBackground "错误：消息已输入但未找到「发送」按钮（QQ 界面可能变化）。" +
+                    "消息仍在输入框中，可稍后重试"
+            }
+            val tapped = svc.performTapNodeBoundsShell(sendNid)
+            if (tapped.startsWith("错误") || tapped.startsWith("⚠️")) {
+                return@withQqBackground "错误：点击发送失败（$tapped）"
+            }
+
+            // 4) 校验（2026-10-26 三判据；US-3118 AC-4 / guardrail G-03 + R2-01 + R3-01）：
+            //   ① 聊天页最后一条气泡为「自己发出」且含消息片段 —— **最强**，先判
+            //   ② 输入框**确实**已清空（同一节点上取"存在性 + 文本"，需发送前含片段）
+            //   ③ 聊天记录区域文本含片段（**排除输入框子树**，否则"未发出但输入框留原文"
+            //      会被误判成已发送 —— R2-01）
+            var evidence = QqSendConfirmation.Evidence.NONE
+            var tries = 0
+            while (tries < 6 && evidence == QqSendConfirmation.Evidence.NONE) {
+                delay(SETTLE_SHORT_MS)
+                val bubble = runCatching { svc.lastMessageBubble(VIEW_ID_MSG_TEXT_CANDIDATES) }.getOrNull()
+                val bubbleOk = bubble != null && !bubble.first && bubble.second.contains(fragment)
+                // R3-01：存在性与文本必须来自**同一次**遍历（同一节点），否则树形变后错配
+                val inputNow = runCatching { svc.textOfViewId(VIEW_ID_INPUT) }
+                    .getOrElse { false to null }
+                val cleared = QqSendConfirmation.isInputCleared(
+                    inputNodePresent = inputNow.first,
+                    inputText = inputNow.second,
+                    typedFragment = fragment,
+                    beforeText = beforeInputText
+                )
+                evidence = QqSendConfirmation.decide(
+                    bubbleConfirmed = bubbleOk,
+                    inputCleared = cleared,
+                    pageTextHasFragment = false
+                )
+                tries++
+            }
+            if (!QqSendConfirmation.isSent(evidence)) {
+                // R2-01：兜底只看**聊天记录区域**（排除输入框子树）——输入框自身文本不算证据
+                val treeHasFragment = runCatching {
+                    svc.visibleTextExcluding(VIEW_ID_INPUT)?.contains(fragment) == true
+                }.getOrDefault(false)
+                evidence = QqSendConfirmation.decide(
+                    bubbleConfirmed = false,
+                    inputCleared = false,
+                    pageTextHasFragment = treeHasFragment
+                )
+            }
+            if (QqSendConfirmation.isSent(evidence)) {
+                Log.i(TAG, "发送确认判据=${evidence.name}")
+                "已发送消息给「${contact.take(20)}」（确认依据：${evidence.label}）"
+            } else {
+                // guardrail G-r4-05：文案必须与 QqFailureClassifier 的前缀**共用同一常量**，
+                // 否则改文案会静默失配，而失配方向正是"变回重复发送"。
+                MSG_SEND_UNCONFIRMED_PREFIX +
+                    "（可能因屏幕刷新延迟）。不要盲目重发（重复消息会显得不自然）"
+            }
+        }
+    }
+
+    /**
+     * 输入框是否已清空（US-3118 AC-4 判据 ②）。
+     *
+     * QQ 发送成功后输入框必然被清空；若仍保留原文说明"没点中发送"或"发送被拦"。
+     * 读不到输入框时返回 false（保守：交给其它判据）。
+     */
+    // ==================== qq__send_voice ====================
+
+    /**
+     * 以 Prism 音色包合成语音并通过协议端发送（PRD US-3113）。
+     *
+     * **仅协议端可用**（AC-1）：无障碍通道无法注入预生成音频；此时如实返回「不支持」并建议文本。
+     * **失败降级**（AC-4）：音色包未配置/合成失败时改发文本并在结果中明示，不静默丢失。
+     * **节流/熔断**（AC-5）：与文本发送共用 [configAndThrottleGate]。
+     */
+    private suspend fun sendVoice(arguments: Map<String, Any?>, confirmRequired: Boolean): String {
+        val contact = parseString(arguments, "contact")?.trim().orEmpty()
+        val text = (parseString(arguments, "message") ?: parseString(arguments, "text"))
+            ?.trim().orEmpty()
+        if (contact.isEmpty()) return "错误：缺少 contact 参数（好友备注名）"
+        if (text.isEmpty()) return "错误：缺少 message 参数（要朗读的文本）"
+        if (io.prism.phonecontrol.PhoneControlSecurity.isCredentialInput(text)) {
+            return "⚠️ 语音内容含凭据（密码/验证码/卡号），已硬拦截（不可执行，即便人工确认也不放行）"
+        }
+        if (text.length > VOICE_TEXT_MAX_LEN) {
+            return "错误：语音文本过长（${text.length} 字，上限 $VOICE_TEXT_MAX_LEN）。" +
+                "语音适合短句，请精简或改用 qq__send_message 发送文本"
+        }
+
+        val gate = configAndThrottleGate()
+        if (gate != null) return gate
+
+        if (confirmRequired) {
+            val confirm = highRiskGate("向「${contact.take(20)}」发送语音", text.take(40))
+            if (confirm != null) return confirm
+        }
+
+        val channel = protocolChannelOrNull()
+            ?: return "错误：语音消息仅支持协议端通道（当前无可用的 OneBot 连接）。" +
+                "无障碍通道无法注入音频——请改用 qq__send_message 发送文本"
+
+        val audio = try {
+            voiceSynthesizerProvider()?.synthesize(text)
+        } catch (e: CancellationException) {
+            throw e // guardrail M-05：中断必须透传
+        } catch (e: Exception) {
+            Log.w(TAG, "语音合成异常：${e::class.simpleName}")
+            null
+        }
+        if (audio == null || audio.samples.isEmpty()) {
+            // AC-4：合成失败降级文本并如实提示（不静默丢失）
+            return sendVoiceTextFallback(channel, contact, text, "语音合成失败（音色包未配置或不可用）")
+        }
+        val sent = channel.sendVoice(contact, audio.samples, audio.sampleRate)
+        // guardrail C2：只有**协议端明确拒绝**（retcode≥0 的响应）才降级文本；
+        // 传输异常/超时（retcode=-1）可能已送达，自动改发文本会造成重复，故不降级。
+        if (sent.startsWith(VOICE_SEND_REJECTED_PREFIX)) {
+            return sendVoiceTextFallback(channel, contact, text, "协议端拒绝语音")
+        }
+        if (sent.startsWith("已发送语音")) {
+            // guardrail C3/M-02：语音成功发送同样计入当日总数与最小间隔（不占定时配额）
+            recordVoiceSend()
+        } else if (sent.startsWith(VOICE_SEND_UNCONFIRMED_PREFIX)) {
+            // guardrail M-09/L-23：仅「未确认」记账（可能已送达）；解析失败/编码失败等
+            // **确定未发送**的错误不得消耗配额
+            recordVoiceSend()
+        }
+        return sent
+    }
+
+    /** 语音失败后的文本降级（同一联系人/同一通道；失败时如实拼接原因）。 */
+    private suspend fun sendVoiceTextFallback(
+        channel: io.prism.qq.channel.QqChannel,
+        contact: String,
+        text: String,
+        reason: String
+    ): String {
+        val fallback = channel.sendText(contact, text)
+        return if (fallback.startsWith("错误") || fallback.startsWith("⚠️")) {
+            "⚠️ $reason，文本降级亦未成功：$fallback"
+        } else {
+            // guardrail M-09：降级文本同样是实发消息，必须记账（防音色包缺失时无限循环）
+            recordVoiceSend()
+            "⚠️ $reason，已改为发送文本（$fallback）"
+        }
+    }
+
+    /** 记录一次语音/降级文本发送（当日总数 + 最小间隔基准；不占定时配额）。 */
+    private suspend fun recordVoiceSend() {
+        runCatching {
+            val now = System.currentTimeMillis()
+            runtimeRepoProvider()?.recordReplied(
+                now,
+                QqThrottle.todayKey(now, java.time.ZoneId.systemDefault())
+            )
+        }
+    }
+
+    // ==================== qq__set_signature ====================
+
+    private suspend fun setSignature(arguments: Map<String, Any?>, confirmRequired: Boolean): String {
+        val signature = parseString(arguments, "signature")?.trim().orEmpty()
+        if (signature.isEmpty()) return "错误：缺少 signature 参数"
+        // guardrail B-01：签名是**公开可见**字段，凭据泄漏后果更重——硬拦截同消息路径
+        if (io.prism.phonecontrol.PhoneControlSecurity.isCredentialInput(signature)) {
+            return "⚠️ 签名内容含凭据（密码/验证码/卡号），已硬拦截（不可执行，即便人工确认也不放行）"
+        }
+        if (signature.length > SIGNATURE_MAX_LEN) {
+            return "错误：签名过长（${signature.length} 字，上限 $SIGNATURE_MAX_LEN）"
+        }
+
+        val gate = configAndThrottleGate()
+        if (gate != null) return gate
+
+        if (confirmRequired) {
+            val confirm = highRiskGate("修改小号个性签名", signature.take(40))
+            if (confirm != null) return confirm
+        }
+
+        // 协议端主通道（ADR-064）：连接健康时经 OneBot 直接修改，不建屏。
+        protocolChannelOrNull()?.let { channel ->
+            return channel.setSignature(signature)
+        }
+
+        // 后台副屏执行（US-3102 AC-2 同理：资料修改同样不占用用户前台）。
+        return withQqBackground { _, svc ->
+            // 1) 回到 QQ 主界面（至多 2 次 back；后台走 shell keyevent 注入）
+            backToRoot(svc, times = 2)
+
+            // 2) 左上头像入口 → 抽屉（M0：desc='账户及设置'）
+            val drawerNid = svc.findNodeByTextNid("账户及设置")
+            if (drawerNid == null || svc.performTapNodeBoundsShell(drawerNid).startsWith("错误")) {
+                return@withQqBackground "错误：未找到 QQ 左上角头像入口（当前不在 QQ 主界面？）。" +
+                    "请核实小号 QQ 登录态后重试"
+            }
+            delay(SETTLE_MEDIUM_MS)
+
+            // 3) 抽屉页头像 → 个人资料页（M0：id=pr9，desc='头像'）
+            val avatarNid = svc.findNodeByViewIdNid(VIEW_ID_AVATAR) ?: svc.findNodeByTextNid("头像")
+            if (avatarNid == null || svc.performTapNodeBoundsShell(avatarNid).startsWith("错误")) {
+                return@withQqBackground "错误：已打开侧边栏但未找到头像入口（QQ 界面可能变化）"
+            }
+            delay(SETTLE_MEDIUM_MS)
+
+            // 4) 资料页「编辑个签」（M0 实证文本："编辑个签，展示我的独特态度。"）
+            val sigNid = svc.findNodeByTextNid("编辑个签")
+            if (sigNid == null || svc.performTapNodeBoundsShell(sigNid).startsWith("错误")) {
+                return@withQqBackground "错误：已进入资料页但未找到「编辑个签」入口。请核实小号 QQ 状态后重试"
+            }
+            delay(SETTLE_MEDIUM_MS)
+
+            // 5) 编辑框输入（ACTION_SET_TEXT 替换全文）→ 保存
+            val editNid = svc.findEditableNid()
+            if (editNid == null) return@withQqBackground "错误：个签编辑页未找到输入框"
+            val typed = svc.performType(editNid, 0, 0, signature)
+            if (typed.startsWith("错误")) return@withQqBackground "错误：签名输入失败（$typed）"
+            delay(SETTLE_SHORT_MS)
+            val saveNid = svc.findNodeByTextNid("保存") ?: svc.findNodeByTextNid("完成")
+            if (saveNid == null || svc.performTapNodeBoundsShell(saveNid).startsWith("错误")) {
+                return@withQqBackground "错误：签名已输入但未找到「保存/完成」按钮。签名可能未生效，请稍后重试"
+            }
+            delay(SETTLE_SEND_MS)
+
+            // DEF-116 同理：轮询确认（副屏渲染延迟易致单次检查假阴性）
+            val fragment = QqLocalToolExecutor.firstCodePoints(signature, VERIFY_FRAGMENT_LEN)
+            var confirmed = false
+            var tries = 0
+            while (tries < 6 && !confirmed) {
+                delay(SETTLE_SHORT_MS)
+                val tree = svc.getUiTreeText(maxNodes = 160)
+                confirmed = tree != null && tree.contains(fragment)
+                tries++
+            }
+            if (confirmed) {
+                "已修改小号个性签名（已在校验中确认生效）"
+            } else {
+                "⚠️ 已点击保存，但未能确认签名已生效。请稍后核实"
+            }
+        }
+    }
+
+    // ==================== qq__schedule_message ====================
+
+    private suspend fun scheduleMessage(arguments: Map<String, Any?>): String {
+        // fail-fast：action 白名单先于环境检查（非法参数与仓库状态无关）
+        val action = parseString(arguments, "action")?.trim()?.lowercase() ?: "status"
+        if (action !in setOf("status", "create", "cancel")) {
+            return "错误：action 仅支持 status/create/cancel"
+        }
+        val cfgRepo = configRepoProvider() ?: return "错误：QQ 配置仓库未装配"
+        return when (action) {
+            "status" -> {
+                val cfg = cfgRepo.get()
+                val rt = runtimeRepoProvider()?.get()
+                buildString {
+                    append("定时主动消息状态：总开关=${cfg.enabled}，风险确认=${cfg.riskAccepted}，")
+                    append("定时开关=${cfg.scheduleEnabled}，目标联系人=${cfg.targetContact.ifBlank { "未配置" }}，")
+                    append("活跃时段=${QqTimeOfDay.describe(cfg.windowStartMinute, cfg.windowEndMinute)}，")
+                    append("每日上限=${cfg.maxPerDay}，策略=${if (cfg.usePoisson) "泊松" else "均匀"}，")
+                    append("熄屏策略=${if (cfg.wakeOnScreenOff) "点亮屏幕执行" else "跳过并发通知"}")
+                    if (rt != null && rt.plannedTriggerAt > 0) {
+                        append("；下次计划=${formatEpoch(rt.plannedTriggerAt)}")
+                    }
+                    if (rt != null && rt.lastOutcome.isNotBlank()) {
+                        // G-r3-07：「未确认」= 可能已送达，不能让 LLM/用户误判为失败并补发
+                        val label = if (rt.lastOutcome.contains("SEND_UNCONFIRMED")) {
+                            "未确认（可能已送达）"
+                        } else {
+                            rt.lastOutcome
+                        }
+                        append("；上次=${formatEpoch(rt.lastOutcomeAtMs)} $label")
+                        if (rt.lastOutcomeReason.isNotBlank()) append("（${rt.lastOutcomeReason}）")
+                    }
+                    if (rt?.circuitOpen == true) append("；【已熔断，需在设置中恢复】")
+                }
+            }
+            "create" -> {
+                val current = cfgRepo.get()
+                if (!current.enabled || !current.riskAccepted) {
+                    return "错误：QQ 小号助手未开启或未完成风险确认（设置 → QQ 小号助手）。" +
+                        "定时主动消息依赖该前置"
+                }
+                // 2026-10-25：接受 HH:mm（window_start/window_end）；旧参数 window_start_min 兼容
+                val startText = parseString(arguments, "window_start")?.trim()
+                val endText = parseString(arguments, "window_end")?.trim()
+                val start = if (!startText.isNullOrEmpty()) {
+                    QqTimeOfDay.parse(startText) ?: return "错误：window_start 格式非法（应形如 07:00）"
+                } else {
+                    parseInt(arguments, "window_start_min") ?: QqConfig.DEFAULT_WINDOW_START_MINUTE
+                }
+                val end = if (!endText.isNullOrEmpty()) {
+                    QqTimeOfDay.parse(endText) ?: return "错误：window_end 格式非法（应形如 22:00）"
+                } else {
+                    parseInt(arguments, "window_end_min") ?: QqConfig.DEFAULT_WINDOW_END_MINUTE
+                }
+                if (!QqTimeOfDay.isValidWindow(start, end)) {
+                    return "错误：活跃时段非法（需 0:00~24:00，且起止不能相同；跨零点请让起点大于止点）"
+                }
+                // guardrail H-01（2026-10-19）：create 是"开启无人值守自动发送"的高危授权——
+                // 必须与交互路径同受三态策略（BLOCK 全拦截 / ALLOW 放行 / ASK 询问），
+                // 否则 BLOCK 模式下 LLM 仍可绕过用户授权开启定时发送
+                val confirm = highRiskGate(
+                    "创建定时主动消息",
+                    "将在 ${QqTimeOfDay.describe(start, end)} 时段内无人值守地自动向" +
+                        "「${parseString(arguments, "target_contact") ?: current.targetContact}」发消息"
+                )
+                if (confirm != null) return confirm
+                val contact = parseString(arguments, "target_contact")?.trim().orEmpty()
+                if (contact.isEmpty() && current.targetContact.isBlank()) {
+                    return "错误：缺少 target_contact（小号对你的备注名），无法确定发送目标"
+                }
+                if (contact.isNotEmpty()) cfgRepo.setTargetContact(contact)
+                cfgRepo.setWindow(start, end)
+                parseInt(arguments, "max_per_day")?.let { cfgRepo.setMaxPerDay(it) }
+                cfgRepo.setUsePoisson(parseString(arguments, "use_poisson")?.lowercase() == "true")
+                cfgRepo.setScheduleEnabled(true)
+                val cfg = cfgRepo.get()
+                "已创建定时主动消息：活跃时段 ${QqTimeOfDay.describe(cfg.windowStartMinute, cfg.windowEndMinute)}，" +
+                    "每日至多 ${cfg.maxPerDay} 次，发给「${cfg.targetContact}」。" +
+                    "Prism 将在该时段内随机时刻主动发消息（受节流与熔断约束）"
+            }
+            "cancel" -> {
+                cfgRepo.setScheduleEnabled(false)
+                "已取消定时主动消息（调度服务将自动停止）"
+            }
+            else -> "错误：action 仅支持 status/create/cancel"
+        }
+    }
+
+    // ==================== 闸门与辅助 ====================
+
+    /** epoch 毫秒 → 本地 `MM-dd HH:mm`（仅用于状态展示；0 返回「无」）。 */
+    private fun formatEpoch(ms: Long): String {
+        if (ms <= 0L) return "无"
+        return runCatching {
+            java.time.Instant.ofEpochMilli(ms)
+                .atZone(java.time.ZoneId.systemDefault())
+                .format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm"))
+        }.getOrDefault(ms.toString())
+    }
+
+    /**
+     * **被动应答作用域**（2026-10-26 真机修复）。
+     *
+     * 被动应答（回复对方刚发来的消息）经 `AccessibilityQqChannel.sendText` → 本执行器发送，
+     * 因而会命中 [configAndThrottleGate] 里的**主动**节流（minInterval/dailyCap/maxPerDay）。
+     * 真机实证：19:09 用户再发消息，回复被"已达定时主动消息当日上限（3 次）"拦掉。
+     *
+     * 这些配额的语义是"不要主动打扰用户"，不该约束"用户说话 → 系统回话"。
+     * `autoReplyLocked` 在调用发送前后置位本标记，闸门据此改走 [QqThrottle.decidePassive]
+     * （仍保留熔断、短间隔防双发、窗口上限防跑飞）。
+     */
+    private val passiveReplyScope: Boolean
+        get() = PASSIVE_REPLY_SCOPE.get()
+
+    /** 配置闸门（US-3101）+ 节流闸门（US-3105）。null=通过；否则返回可读拒绝文案。 */
+    private suspend fun configAndThrottleGate(): String? {
+        val repo = configRepoProvider() ?: return "错误：QQ 小号助手配置未装配"
+        val cfg = repo.get()
+        if (!cfg.enabled) {
+            return "QQ 小号助手当前未开启（设置 → QQ 小号助手）。请先开启并完成风险确认后再使用"
+        }
+        val runtimeRepo = runtimeRepoProvider()
+        if (runtimeRepo != null) {
+            val now = System.currentTimeMillis()
+            val state = runtimeRepo.get()
+            // 被动应答走被动规则；主动/定时消息仍受完整主动节流约束
+            val decision = if (passiveReplyScope) {
+                QqThrottle.decidePassive(state, now)
+            } else {
+                QqThrottle.decide(cfg, state, now)
+            }
+            when (decision) {
+                is QqThrottle.Decision.Deny -> return "错误：${decision.reason}（节流保护，稍后再试；" +
+                    "频繁操作易触发平台风控）"
+                QqThrottle.Decision.Allow -> Unit
+            }
+        }
+        return null
+    }
+
+    /**
+     * 高风险三态确认（交互路径）。返回 null=放行；否则返回 ask_user 标记或拦截文案。
+     */
+    private suspend fun highRiskGate(action: String, detail: String): String? {
+        return when (highRiskApprovalProvider()) {
+            io.prism.config.HighRiskApprovalMode.BLOCK ->
+                "错误：$action 已被「高危操作拦截」设置阻止（设置 → 手机操控 → 高危操作拦截）"
+            io.prism.config.HighRiskApprovalMode.ALLOW -> null
+            io.prism.config.HighRiskApprovalMode.ASK -> {
+                askUserNotifier?.let { n ->
+                    runCatching { n.request("QQ 小号助手：$action「$detail」，是否允许？") }
+                }
+                // guardrail M-02：主号/小号实例同为 com.tencent.mobileqq，a11y 层不可区分——
+                // 确认文案必须显式要求用户核对"当前前台是小号"，作为实例混淆的最后防线
+                AskUserLocalToolExecutor.RESULT_MARKER + askUserJson(
+                    "QQ 小号助手：$action「$detail」。请确认当前手机前台是【QQ 双开（小号）】而非主号，是否允许？",
+                    listOf("允许（已确认是小号）" to "确认执行", "取消" to "阻止本次操作")
+                )
+            }
+        }
+    }
+
+    /**
+     * 判定执行面是否处于**阻断性页面态**，命中则返回给调用方的可读错误（PRD US-3118）。
+     *
+     * 只读 UI 树的 `dialogTitle`/`dialogText`（无对话框返回 null），**不做任何点击**。
+     * 返回文案同时被 [QqFailureClassifier] 归为 `ACCOUNT_STATE_INVALID`（不重试/不熔断/不占配额）。
+     */
+    private fun pageStateBlock(svc: PhoneControlAccessibilityService): String? {
+        // guardrail R4-02：与发送确认统一寻址基准——用 textOfViewId **一次遍历**取
+        // (存在性, 文本)，不再"先取 nid 再按序号读文本"（树形变后会错配，可能漏判阻断页）。
+        val title = runCatching { svc.textOfViewId(VIEW_ID_DIALOG_TITLE) }
+            .getOrElse { false to null }
+        val text = runCatching { svc.textOfViewId(VIEW_ID_DIALOG_TEXT) }
+            .getOrElse { false to null }
+        val titleText = title.second
+        val dialogText = text.second
+
+        // 真机 18:27 修复：只看整页文本含"登录"会把**正常消息列表**判成未登录
+        // （QQ「我的电脑」会话预览就是"已在电脑登录…"）。这里采集**结构信号**，
+        // 由 QqPageState 按"对话框 > 主界面骨架 > 文本兜底"的优先级判定。
+        val signals = runCatching { svc.collectStructureSignals() }.getOrNull()
+        val hasMainUi = signals?.let { (ids, texts) ->
+            QqPageState.hasMainUiSignals(ids, texts)
+        } ?: false
+        // 文本兜底只在"没有主界面骨架"时才读（省一次遍历，也避免把聊天内容当证据）
+        val pageText = if (hasMainUi || titleText != null || dialogText != null) {
+            null
+        } else {
+            runCatching { svc.getUiTreeText(80) }.getOrNull()
+        }
+        val kind = QqPageState.detect(
+            QqPageState.Signals(
+                dialogTitle = titleText,
+                dialogText = dialogText,
+                pageText = pageText,
+                hasMainUi = hasMainUi
+            )
+        )
+        val message = QqPageState.blockMessage(kind) ?: return null
+        Log.i(TAG, "页面态阻断（kind=$kind，主界面骨架=$hasMainUi）：不点击、不重试")
+        return "错误：$message"
+    }
+
+    /**
+     * 确保**后台副屏执行面**就绪，随后在 [block] 内执行（finally 还原前台执行面）。
+     *
+     * 步骤（PRD US-3102 AC-2「发送在后台完成，不占用用户前台」）：
+     * 1. 前置守卫：无障碍实例 → 应用上下文 → API 30+ → 悬浮窗权限 → Shizuku 就绪；
+     * 2. [VirtualDisplayManager.ensureDisplay] 幂等创建**可信副屏**（Shizuku `overlay_display_devices`）；
+     * 3. [VirtualDisplayManager.launchAppForUser] 经 `am start --user 999 --display N` 把小号 QQ
+     *    拉到副屏顶层（跨用户 + 跨屏；force-stop 确保迁屏，杜绝落到主屏占用前台）；
+     * 4. `setExecutionDisplay(displayId)` 把节点感知/操作路由到副屏，[block] 执行，finally 还原。
+     *
+     * 任一步失败均返回可读错误（不占用用户前台、不静默失败）。副屏生命周期由
+     * [PhoneControlSessionManager] 空闲释放兜底（本方法首行刷新保活会话）。
+     */
+    private suspend fun prepareQqBackground(): Pair<Int, String?> {
+        PhoneControlSessionManager.onPhoneToolInvoked()
+        PhoneControlAccessibilityService.instance ?: return INVALID_DISPLAY to serviceUnavailable()
+        val ctx = appContextProvider() ?: return INVALID_DISPLAY to "错误：后台执行上下文未初始化（请重启应用后重试）"
+        if (!VirtualDisplayManager.isSupported()) {
+            return INVALID_DISPLAY to "错误：QQ 小号后台执行需要 Android 11（API 30）及以上系统（跨屏无障碍能力），本机不支持"
+        }
+        if (!VirtualDisplayManager.canLaunchBackground(ctx)) {
+            return INVALID_DISPLAY to "错误：后台执行需要「显示在其他应用上层」（悬浮窗）权限——系统对后台启动 Activity 的官方豁免条件。" +
+                "请在系统设置中授权 Prism 该权限后重试"
+        }
+        if (!ShizukuShell.isReady()) {
+            return INVALID_DISPLAY to "错误：QQ 小号后台执行需要 Shizuku（已安装并激活）——后台手势注入与跨用户副屏启动均依赖它。" +
+                "请在 Shizuku 中授权 Prism 后重试"
+        }
+        val displayId = VirtualDisplayManager.ensureDisplay(ctx)
+        if (displayId == INVALID_DISPLAY) {
+            return INVALID_DISPLAY to "错误：后台虚拟屏创建失败（系统可能限制虚拟显示器）。请稍后重试"
+        }
+        // 小号已在副屏顶层**且确实由本进程以小号身份启动过**则复用（免 force-stop 重启——
+        // 双向对话轮询节奏下尤其重要）。guardrail M-03：仅比对包名不够——主/小号同为
+        // com.tencent.mobileqq，若副屏顶层恰为主号实例会误判（故要求本进程小号启动记录匹配本 displayId）。
+        val topPkg = runCatching {
+            PhoneControlAccessibilityService.instance?.backgroundWindowPackage(displayId)
+        }.getOrNull()
+        val alreadyOnDisplay = topPkg == QQ_PACKAGE && lastLaunchedDisplayId == displayId
+        if (!alreadyOnDisplay) {
+            val launched = VirtualDisplayManager.launchAppForUser(ctx, QQ_PACKAGE, xSpaceUserId)
+            if (launched.startsWith("错误")) return INVALID_DISPLAY to launched
+            lastLaunchedDisplayId = displayId
+            // DEF-110（2026-10-19 真机 E2E）：`launchAppForUser` 只等到窗口渲染（可能仍在启动页），
+            // 紧随其后的节点查询常命中"未就绪"——补一段启动 settle，等小号进入主界面（消息列表）。
+            delay(SETTLE_LAUNCH_MS)
+        }
+        return displayId to null
+    }
+
+    /** 本进程最近一次以小号身份把 QQ 启动到的副屏 displayId（M-03 复用判定用；线程可见）。 */
+    @Volatile
+    private var lastLaunchedDisplayId: Int = android.view.Display.INVALID_DISPLAY
+
+    private suspend fun withQqBackground(
+        block: suspend (displayId: Int, svc: PhoneControlAccessibilityService) -> String
+    ): String = VirtualDisplayManager.executionFaceMutex.withLock {
+        val (displayId, err) = prepareQqBackground()
+        if (err != null) return@withLock err
+        val svc = PhoneControlAccessibilityService.instance ?: return@withLock serviceUnavailable()
+        svc.setExecutionDisplay(displayId)
+        try {
+            block(displayId, svc)
+        } finally {
+            svc.setExecutionDisplay(null)
+            // US-3119 AC-2 的清理**不在此处**执行（guardrail G-02：原实现在每次工具调用的
+            // finally 里跑 `dumpsys` + force-stop，暴露面过大且可能杀掉用户本人的 App）。
+            // 现在统一收敛到"执行面释放/会话收尾"一次（见 VirtualDisplayManager.releaseDisplay
+            // 与 PhoneControlSessionManager 的空闲回收）。
+        }
+    }
+
+    /**
+     * 双向对话（US-3109 新增）：读取与 [contact] 会话中**最后一条消息**的方向与文本（后台副屏）。
+     *
+     * 供 [QqProactiveGateway.autoReply] 链路判定"是否有新收到的消息需要回应"。全程后台
+     * （不占用用户前台），失败/无会话返回 null（调用方按"无可回应"处理，绝不误判）。
+     *
+     * @return [LastMessage]；读取失败或无消息返回 null
+     */
+    suspend fun lastMessageWith(contact: String): LastMessage? =
+        VirtualDisplayManager.executionFaceMutex.withLock {
+            val (displayId, err) = prepareQqBackground()
+            if (err != null) {
+                Log.w(TAG, "lastMessageWith: 后台准备失败（${err.take(60)}）")
+                return@withLock null
+            }
+            val svc = PhoneControlAccessibilityService.instance ?: return@withLock null
+            svc.setExecutionDisplay(displayId)
+            try {
+                // US-3118 AC-1（ac-verifier 复核缺口）：**读取路径也要判页面态**。
+                // PRD 写的是"发送/读取前判定"；此前只在发送侧拦截，读取侧会在验证弹窗上
+                // 读到空/旧气泡，导致上层误判"对方没回消息"。
+                pageStateBlock(svc)?.let {
+                    Log.w(TAG, "lastMessageWith: 页面态阻断，放弃本次读取")
+                    return@withLock null
+                }
+                // DEF-110（2026-10-19 真机 E2E）：与 sendMessage 一致先归位到「消息」列表页——
+                // 否则小号停在会话页/抽屉/启动页时 openConversation 必失败（实测恒"未读取到会话消息"）。
+                ensureMessageList(svc, displayId)
+                if (!openConversation(svc, contact)) {
+                    Log.i(TAG, "lastMessageWith: 未进入「${maskName(contact)}」会话（列表未就绪或联系人不存在）")
+                    null
+                } else {
+                    val bubble = svc.lastMessageBubble(VIEW_ID_MSG_TEXT_CANDIDATES)
+                    if (bubble == null) Log.i(TAG, "lastMessageWith: 会话页无可读消息气泡（候选=$VIEW_ID_MSG_TEXT_CANDIDATES）")
+                    bubble?.let { LastMessage(it.first, it.second) }
+                }
+            } finally {
+                svc.setExecutionDisplay(null)
+            }
+        }
+
+    /**
+     * 归位到 QQ「消息」列表页（后台副屏内）。
+     *
+     * DEF-106/107（2026-10-19 M2 真机实测；2026-10-19 改造为后台版）：QQ 可能停在抽屉/会话页/
+     * 任意页。判定"是否在会话页"以**聊天输入框 `id/input` 是否存在**为准（真机 DEF-115 取证：
+     * 「消息」tab 文本定位在会话页会命中无关节点，不可作为判据）：在会话页则 back 回列表
+     * （至多 2 次），再校验副屏顶层包名仍是 QQ——否则经 Shizuku 重新拉起小号，杜绝空转。
+     */
+    private suspend fun ensureMessageList(svc: PhoneControlAccessibilityService, displayId: Int) {
+        // DEF-115（2026-10-19 真机 E2E）：原实现用「消息」tab 文本定位后点击——真机取证该定位
+        // 在**会话页**会命中无关节点（返回非 null）导致"已在会话页却不按返回"，后续会话项定位
+        // 落到会话页的错误节点（中心 175,138 落空）。改为**按聊天页特征（id/input 存在）判定**：
+        // 在会话页则 back 回列表（至多 2 次）；再校正副屏顶层包名（必要时重新拉起小号）。
+        var backs = 0
+        while (backs < 2 && svc.findNodeByViewIdNid(VIEW_ID_INPUT) != null) {
+            svc.executeGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
+            delay(SETTLE_MEDIUM_MS)
+            backs++
+        }
+        val topPkg = runCatching { svc.backgroundWindowPackage(displayId) }.getOrNull()
+        if (topPkg != QQ_PACKAGE) {
+            ShizukuShell.amStartForUserOnDisplay(
+                QQ_MAIN_ACTIVITY, xSpaceUserId, displayId, forceStopFirst = true
+            )
+            delay(SETTLE_LAUNCH_MS)
+        }
+    }
+
+    /** 在消息列表中定位并进入联系人会话；未命中 back 一次重试。返回是否进入聊天页。 */
+    private suspend fun openConversation(svc: PhoneControlAccessibilityService, contact: String): Boolean {
+        repeat(2) { attempt ->
+            // DEF-114：会话项以 contentDescription 前缀精确定位（"<备注名>, ,…"），
+            // 聚合匹配会命中大容器导致点击落空；前缀法不可用时回退到原有文本匹配。
+            val nid = svc.findNodeByOwnTextNid(contact, descPrefix = "$contact,")
+                ?: svc.findNodeByTextNid(contact)
+            Log.i(TAG, "openConversation: attempt=$attempt contact=${maskName(contact)} nid=$nid")
+            if (nid != null) {
+                val tap = svc.performTapNodeBoundsShell(nid)
+                Log.i(TAG, "openConversation: tap=$tap")
+                if (!tap.startsWith("错误")) {
+                    // DEF-111（2026-10-19 真机 E2E）：副屏上冷启动的 QQ 会话页渲染慢于固定 1s——
+                    // 原单次 `delay(1s)` 后即查 id/input 会"已进入却判未进入"（实测恒失败）。
+                    // 改为轮询等待聊天页专属 id/input 出现（500ms ×6 ≈ 3s）。
+                    repeat(6) {
+                        delay(SETTLE_SHORT_MS)
+                        val inNid = svc.findNodeByViewIdNid(VIEW_ID_INPUT)
+                        Log.i(TAG, "openConversation: poll input nid=$inNid")
+                        if (inNid != null) return true
+                    }
+                }
+            }
+            if (attempt == 0) {
+                svc.executeGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
+                delay(SETTLE_SHORT_MS)
+            }
+        }
+        // guardrail L-02：不落屏内文本，只记长度用于诊断
+        val treeLen = runCatching { svc.getUiTreeText(60)?.length }.getOrDefault(0)
+        Log.i(TAG, "openConversation 失败；副屏树长度=$treeLen")
+        return false
+    }
+
+    private suspend fun backToRoot(svc: PhoneControlAccessibilityService, times: Int) {
+        repeat(times) {
+            svc.executeGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
+            delay(SETTLE_SHORT_MS)
+        }
+    }
+
+    private fun serviceUnavailable(): String =
+        "错误：手机操控无障碍服务未开启（QQ 小号助手依赖它读取并操作 QQ 界面）。" +
+            "请在系统「设置 → 无障碍」中开启 Prism"
+
+    /** ask_user 载荷（与 PhoneControlLocalToolExecutor.askUserJson 协议一致）。 */
+    internal fun askUserJson(question: String, options: List<Pair<String, String?>>): String {
+        val optionArray = JsonArray(options.map { (label, desc) ->
+            buildJsonObject {
+                put("label", label)
+                desc?.let { put("description", it) }
+            }
+        })
+        val questions = JsonArray(listOf(buildJsonObject {
+            put("question", question.take(200))
+            put("options", optionArray)
+            put("multiSelect", false)
+        }))
+        return JsonObject(mapOf("questions" to questions)).toString()
+    }
+
+    /** 会话中的最后一条消息（双向对话判定用；incoming=对方发来）。 */
+    data class LastMessage(val incoming: Boolean, val text: String)
+
+    companion object {
+        private const val TAG = "QqTool"
+
+        /**
+         * 进程级"当前处于被动应答发送中"标记（2026-10-26 真机修复）。
+         *
+         * 用 companion 的原因：[QqLocalToolExecutor] 是**多实例**类（按依赖注入构造），
+         * 而置位方（`PrismApplication.autoReplyLocked`）不持有执行器实例；被动应答由
+         * `autoReplyLocked` 的 Mutex 串行化，故进程级单标记即足够。
+         */
+        private val PASSIVE_REPLY_SCOPE = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        /** 进入被动应答作用域（返回上一次值，便于嵌套还原）。 */
+        fun enterPassiveReplyScope(): Boolean = PASSIVE_REPLY_SCOPE.getAndSet(true)
+
+        /** 退出被动应答作用域并还原为 [previous]。 */
+        fun exitPassiveReplyScope(previous: Boolean) {
+            PASSIVE_REPLY_SCOPE.set(previous)
+        }
+
+        /** 工具命名空间前缀。 */
+        const val NAMESPACE = "qq__"
+
+        const val QQ_PACKAGE = "com.tencent.mobileqq"
+        const val QQ_MAIN_ACTIVITY = "com.tencent.mobileqq/.activity.SplashActivity"
+
+        /** M0 实证的稳定 resource-id 尾段。 */
+        const val VIEW_ID_INPUT = "input"
+        const val VIEW_ID_SEND_BTN = "send_btn"
+        const val VIEW_ID_AVATAR = "pr9"
+
+        /** 消息气泡文本节点 resource-id 尾段（2026-10-19 真机结构实证；双向对话判定用）。 */
+        const val VIEW_ID_MSG_TEXT = "mjn"
+
+        /**
+         * 气泡文本节点的**候选** viewId 尾段（2026-10-26 真机修正）。
+         *
+         * QQ 会换混淆名：上一轮取证为 `mjn`，本轮同机实测已是 `mjm`。
+         * 硬编码单个 id 会让"气泡确认"永久失效、`lastMessageWith` 永远读不到消息。
+         */
+        val VIEW_ID_MSG_TEXT_CANDIDATES = listOf(VIEW_ID_MSG_TEXT, "mjm")
+
+        /** [VirtualDisplayManager.ensureDisplay] 失败哨兵（Display.INVALID_DISPLAY 非 const）。 */
+        private val INVALID_DISPLAY = android.view.Display.INVALID_DISPLAY
+
+        const val SIGNATURE_MAX_LEN = 120
+
+        /** QQ 对话框标题/正文的 resource-id 尾段（2026-10-26 真机 `tree` 实测）。 */
+        const val VIEW_ID_DIALOG_TITLE = "dialogTitle"
+        const val VIEW_ID_DIALOG_TEXT = "dialogText"
+
+        /** 消息长度上限（US-3102 AC-4；超长拒绝并提示分条）。 */
+        const val MESSAGE_MAX_LEN = 500
+
+        /** 语音文本上限（US-3113；语音适合短句，过长合成耗时与失败率上升）。 */
+        const val VOICE_TEXT_MAX_LEN = 200
+
+        /** 协议端**明确拒绝**语音的前缀（仅此情况可安全降级文本；传输异常/超时不得重发）。 */
+        internal const val VOICE_SEND_REJECTED_PREFIX = "错误：协议端语音发送失败"
+
+        /** 「可能已送达」的前缀（传输异常/超时）：不降级文本，但必须记账以限制重试频率。 */
+        internal const val VOICE_SEND_UNCONFIRMED_PREFIX = "⚠️ 语音发送未确认"
+
+        /**
+         * 文本发送「可能已送达」的固定前缀（guardrail G-r4-05）。
+         *
+         * **必须与 [io.prism.qq.QqFailureClassifier] 的前缀表共用同一常量**——两处各写字面量时，
+         * 改文案会让分类器失配，而失配方向恰好是"把未确认当普通失败 → 重试 → 重复消息"。
+         */
+        internal const val MSG_SEND_UNCONFIRMED_PREFIX = "⚠️ 已点击发送，但未能从聊天记录确认消息已出现"
+        private const val VERIFY_FRAGMENT_LEN = 10
+
+        /** 联系人在日志中脱敏（guardrail L-02）。 */
+        internal fun maskName(name: String): String =
+            if (name.length <= 1) "***" else "${name.first()}***"
+
+        /** guardrail L-02：按 Unicode code point 截取前 n 个字符（避免代理对被拆导致匹配假阴性）。 */
+        internal fun firstCodePoints(s: String, n: Int): String =
+            StringBuilder().also { sb ->
+                s.codePoints().limit(n.toLong()).forEach { sb.appendCodePoint(it) }
+            }.toString()
+
+        private const val SETTLE_SHORT_MS = 500L
+        private const val SETTLE_MEDIUM_MS = 1_000L
+        private const val SETTLE_SEND_MS = 1_500L
+        private const val SETTLE_LAUNCH_MS = 3_000L
+
+        internal fun parseString(arguments: Map<String, Any?>, key: String): String? {
+            val v = arguments[key] ?: return null
+            return when (v) {
+                is String -> v
+                else -> v.toString()
+            }
+        }
+
+        internal fun parseInt(arguments: Map<String, Any?>, key: String): Int? = when (val v = arguments[key]) {
+            null -> null
+            is Number -> v.toInt()
+            is String -> v.trim().toIntOrNull()
+            else -> null
+        }
+
+        /**
+         * 生成 `qq__*` 工具定义（恒注入——QQ 未开启时执行器返回可读说明，
+         * 不让工具集中途变化破坏 provider 前缀缓存；与桌宠范式一致）。
+         */
+        fun buildToolDefinitions(): List<io.prism.network.ToolDefinition> = listOf(
+            tool(
+                "send_message",
+                "以 QQ 小号身份给指定好友发送一条消息（用于像真人一样主动联系用户）。" +
+                    "默认经 OneBot 协议端发送；协议端不可用时自动回落后台 UI 链路。" +
+                    "contact 为小号对该好友的备注名；message 为消息正文。未开启 QQ 小号助手时会返回说明。",
+                """{"type":"object","properties":{"contact":{"type":"string","description":"好友备注名（小号视角）"},"message":{"type":"string","description":"消息正文（口语化，像真人）"}},"required":["contact","message"]}"""
+            ),
+            tool(
+                "send_voice",
+                "以 QQ 小号身份给指定好友发送一条**语音**（用 Prism 音色包合成，声音与你的播报音色一致）。" +
+                    "仅协议端（OneBot）可用；无障碍通道不支持语音，会建议改用 send_message。" +
+                    "文本上限 200 字；语音合成失败时会自动改发文本并在结果中说明。" +
+                    "contact 为小号对该好友的备注名；message 为要朗读的文本。",
+                """{"type":"object","properties":{"contact":{"type":"string","description":"好友备注名（小号视角）"},"message":{"type":"string","description":"要朗读的文本（口语化短句，≤200 字）"}},"required":["contact","message"]}"""
+            ),
+            tool(
+                "set_signature",
+                "修改 QQ 小号的个性签名（按生活实际更新，如心情/近况）。长度上限 120 字。",
+                """{"type":"object","properties":{"signature":{"type":"string","description":"新的个性签名"}},"required":["signature"]}"""
+            ),
+            tool(
+                "schedule_message",
+                "管理随机定时主动消息：status 查看状态；create 创建（在时间窗内随机时刻主动发消息）；cancel 取消。" +
+                    "**无需提供消息内容**——到点触发时由你（角色）结合人设与当前时段即兴生成一条像真人的消息发出，" +
+                    "这不是替用户传话，而是你主动想起对方时的问候/分享。",
+                """{"type":"object","properties":{"action":{"type":"string","enum":["status","create","cancel"]},"window_start":{"type":"string","description":"活跃时段起（HH:mm，如 07:00）"},"window_end":{"type":"string","description":"活跃时段止（HH:mm，如 22:00）；起>止表示跨零点（如 22:00-02:00）"},"window_start_min":{"type":"integer","description":"[兼容旧参数] 时间窗起（当日分钟，如 1200=20:00）；优先使用 window_start"},"window_end_min":{"type":"integer","description":"[兼容旧参数] 时间窗止（当日分钟，如 1380=23:00）；优先使用 window_end"},"max_per_day":{"type":"integer","description":"每日次数上限（1-20）"},"use_poisson":{"type":"string","enum":["true","false"],"description":"true=泊松随机间隔（更突发），false=窗内均匀采样"},"target_contact":{"type":"string","description":"create 时：小号对目标好友的备注名"}},"required":["action"]}"""
+            )
+        )
+
+        private fun tool(name: String, description: String, parametersJson: String): io.prism.network.ToolDefinition =
+            io.prism.network.ToolDefinition(
+                function = io.prism.network.ToolDefinition.FunctionDef(
+                    name = "$NAMESPACE$name",
+                    description = description,
+                    parameters = kotlinx.serialization.json.Json.parseToJsonElement(parametersJson)
+                )
+            )
+    }
+}

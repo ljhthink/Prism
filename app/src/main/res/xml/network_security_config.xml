@@ -1,10 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  US-006：网络安全配置。
-  仅对 localhost / 127.0.0.1 放行明文流量（Ollama 预设 http://localhost:11434），
-  其余域默认强制 HTTPS，避免全局 usesCleartextTraffic=true 的安全面过宽（ADR-004 4.6）。
+  US-006 / ADR-064：网络安全配置。
+
+  1) 回环地址：允许明文（Ollama http://localhost:11434、OneBot http://127.0.0.1:3000）。
+  2) 私网 IPv4（10/8、172.16/12、192.168/16）：Android NetworkSecurityConfig **无法表达
+     CIDR/网段**，而 OneBot 协议端按用户裁定部署在 PC/独立主机、默认仅提供 HTTP。
+     为使用户可连接自建私网协议端，此处显式放行明文（ADR-064 修订补充，接受该风险）。
+     运行时仍由 OneBotModels.isPrivateEndpoint 做严格 IP 字面量校验：只允许本机/私网，
+     任何域名或公网 IP 一律拒绝，token 不会被发往公网。
+  3) 诚实说明：因 NSC 无法表达网段，base-config 实际**全局允许明文**；应用各模块仍按
+     自身配置使用 HTTPS，OneBot 通道则由运行时白名单强制仅本机/私网 IP 字面量。
 -->
 <network-security-config>
+    <base-config cleartextTrafficPermitted="true"/>
+
     <domain-config cleartextTrafficPermitted="true">
         <domain includeSubdomains="false">localhost</domain>
         <domain includeSubdomains="false">127.0.0.1</domain>

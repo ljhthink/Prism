@@ -61,6 +61,12 @@ internal fun localCloneCacheKey(
     appendField("timeoutMs", config.timeoutMs.toString())
     // 段间停顿（播放层参数）也必须参与：它在流水线/引擎构造期定死，漏进键就会"改了没效果"（F-3 同型）
     appendField("sentenceGapMs", config.sentenceGapMs.toString())
+    // **总静音上界也参与**（批次30）：它是**代码常量**，改它不会改动任何 config 字段 ⇒ 不并入键就会
+    // 在**同一进程内**继续复用按旧上界构建的引擎实例，表现为"改了没效果"（与上面 sentenceGapMs 同一类坑）。
+    // ⚠️ 更正（code-archaeologist 复核）：本键**不持久化**（仅 `TextPlaybackController` 的内存字段
+    // `localCloneSig`，共 5 处：:97/:146/:334/:341/:353）⇒ 失效范围是"进程内重建一次"，
+    // **不存在旧磁盘缓存残留**。
+    appendField("maxTotalGapMs", LocalCloneSegmentGap.MAX_TOTAL_GAP_MS.toString())
     appendField("vitsNoiseScale", vits.noiseScale.toString())
     appendField("vitsNoiseScaleW", vits.noiseScaleW.toString())
 }

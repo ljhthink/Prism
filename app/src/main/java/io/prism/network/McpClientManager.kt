@@ -274,7 +274,7 @@ class McpClientManager(
                 McpErrorKind.INVALID_URL to "Base URL 非法（需以 http:// 或 https:// 开头）"
             e is java.net.UnknownServiceException || msg.contains("CLEARTEXT", ignoreCase = true) ->
                 McpErrorKind.PLAINTEXT_BLOCKED to
-                    "明文 http 被系统拦截（仅 localhost 放行）——USB 连接后执行 adb reverse，或改用 https 端点"
+                    "远端明文 http 已被应用层拒绝（仅本机/私网允许 http）——USB 连接后执行 adb reverse 映射到本机，或改用 https 端点"
             e is javax.net.ssl.SSLException || msg.contains("SSL", ignoreCase = true) ||
                 msg.contains("certificate", ignoreCase = true) ->
                 McpErrorKind.TLS to "TLS/证书错误（证书无效或不受信任）"
@@ -311,7 +311,9 @@ class McpClientManager(
         val hasCrlf = baseUrl.contains('\r') || baseUrl.contains('\n')
         val trimmed = baseUrl.trim()
         val hasScheme = trimmed.startsWith("http://") || trimmed.startsWith("https://")
-        return trimmed.isNotEmpty() && hasScheme && !hasCrlf
+        // ADR-064：base-config 允许明文后，远端 http 会泄漏凭据/内容 → 仅放行本机/私网 http
+        return trimmed.isNotEmpty() && hasScheme && !hasCrlf &&
+            io.prism.network.PrivateNetwork.isCleartextAllowed(trimmed)
     }
 
     /** 将请求头应用到 Ktor 请求构建器。 */

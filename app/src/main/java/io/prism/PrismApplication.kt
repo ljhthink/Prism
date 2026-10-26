@@ -640,6 +640,188 @@ class PrismApplication : Application() {
         io.prism.pet.PetConfigRepository(petConfigDataStore)
     }
 
+    /** QQ 小号助手配置仓库（ADR-062/063；PRD US-3101/3105/3108）。 */
+    val qqConfigRepository: io.prism.qq.QqConfigRepository by lazy {
+        io.prism.qq.QqConfigRepository(qqDataStore)
+    }
+
+    /** QQ 小号助手运行时状态仓库（计划时刻/计数/熔断；CR-3 去重与节流）。 */
+    val qqRuntimeStateRepository: io.prism.qq.QqRuntimeStateRepository by lazy {
+        io.prism.qq.QqRuntimeStateRepository(qqDataStore)
+    }
+
+    /**
+     * 「熄屏时是否临时点亮屏幕执行定时任务」的进程内缓存（ADR-063 修订 2026-10-25）。
+     *
+     * 环境守卫在**非挂起**上下文（`Dispatchers.Default` 的发送线程）被调用，不能在那里
+     * `runBlocking` 读 DataStore；由配置流统一刷新此值，默认 true（能真正把消息发出去）。
+     */
+    @Volatile
+    private var qqWakeOnScreenOffCache: Boolean = true
+
+    /**
+     * QQ 小号助手本地工具执行器（ADR-062 路线 R1；`qq__send_message` / `qq__set_signature` /
+     * `qq__schedule_message`）。复用手机操控无障碍服务与 Shizuku（小号在 XSpace 用户 999）。
+     */
+    val qqLocalToolExecutor: io.prism.qq.QqLocalToolExecutor by lazy {
+        io.prism.qq.QqLocalToolExecutor(
+            configRepoProvider = { qqConfigRepository },
+            runtimeRepoProvider = { qqRuntimeStateRepository },
+            highRiskApprovalProvider = {
+                try {
+                    highRiskApprovalRepository.getMode()
+                } catch (e: Exception) {
+                    io.prism.config.HighRiskApprovalMode.ASK
+                }
+            },
+            askUserNotifier = phoneControlAskUserNotifier,
+            // 2026-10-19 后台副屏改造：注入 applicationContext（副屏创建/跨用户启动需要）
+            appContextProvider = { applicationContext },
+            // 2026-10-21（ADR-064）：协议端为默认主通道；连接健康时直接走 OneBot，
+            // 未连接则自动回落到本执行器的无障碍后台链路。
+            oneBotChannelProvider = { oneBotChannel },
+            // 2026-10-21（US-3113）：语音消息使用 Prism 音色包合成（仅协议端可用）
+            voiceSynthesizerProvider = { qqVoiceSynthesizer }
+        )
+    }
+
+    /**
+     * QQ 语音合成器（PRD US-3113）—— 复用文本播报的本地音色链路
+     * （[rolePackLoader] + [voiceEnginePrefs] + [localVoicePackStore]），只把产物改为 PCM。
+     *
+     * 选择口径与 [io.prism.voice.TextPlaybackController.ensureLocalCloneEngine] 一致：
+     * 用户显式选择的音色包优先于角色包声明；签名覆盖全部生效输入，换包/改档位后自动重建。
+     */
+    val qqVoiceSynthesizer: io.prism.qq.QqVoiceSynthesizer by lazy {
+        io.prism.qq.QqVoiceSynthesizer(
+            selectionProvider = {
+                val pack = rolePackLoader.effectiveRolePack()
+                val voiceId = io.prism.voice.resolveLocalVoiceId(
+                    userSelected = voiceEnginePrefs.localVoiceIdOnce(),
+                    rolePackDeclared = pack.voice.local.voiceId
+                )
+                val status = voiceId?.let { localVoicePackStore.status(it) }
+                if (voiceId == null || status !is io.prism.voice.local.LocalVoiceStatus.Ready) {
+                    null
+                } else {
+                    val config = io.prism.voice.local.tieredLocalCloneConfig(
+                        base = status.pack.generation,
+                        rolePackNumSteps = pack.voice.local.numSteps
+                            .takeIf { voiceId == pack.voice.local.voiceId },
+                        tier = voiceEnginePrefs.localVoiceTierOnce()
+                    )
+                    io.prism.qq.QqVoiceSynthesizer.Selection(
+                        pack = status.pack,
+                        config = config,
+                        signature = io.prism.voice.local.localCloneCacheKey(
+                            voiceId = voiceId,
+                            tts = status.pack.tts,
+                            referenceCount = status.pack.references.size,
+                            config = config,
+                            vits = status.pack.vitsGeneration,
+                            playbackMode = io.prism.voice.LocalClonePlaybackMode.CONTINUOUS,
+                            modelIdentity = io.prism.voice.local.localCloneModelIdentity(
+                                status.pack.assetFiles + status.pack.assetDirs
+                            )
+                        )
+                    )
+                }
+            }
+        )
+    }
+
+    /**
+     * OneBot 11 客户端（ADR-064）。连接参数每次重连前从配置重读，设置页改配置即时生效。
+     * 仅在「总开关 + 风险确认 + transport=ONEBOT」时启动（见 onCreate 的配置收集）。
+     */
+    val oneBotClient: io.prism.qq.onebot.OneBotClient by lazy {
+        io.prism.qq.onebot.OneBotClient(
+            connectionProvider = {
+                val cfg = qqConfigRepository.get()
+                io.prism.qq.onebot.OneBotClient.OneBotConnection(
+                    baseUrl = cfg.oneBotBaseUrl,
+                    wsUrl = cfg.oneBotWsUrl,
+                    // token 只在内存中传给请求头，不写日志
+                    token = cfg.oneBotToken,
+                    selfId = cfg.oneBotSelfId
+                )
+            }
+        )
+    }
+
+    /** 协议端通道（US-3110 / US-3111 / US-3112）。 */
+    val oneBotChannel: io.prism.qq.channel.OneBotQqChannel by lazy {
+        io.prism.qq.channel.OneBotQqChannel(oneBotClient) { qqConfigRepository.get() }
+    }
+
+    /** 无障碍兜底通道（ADR-062 原主路线；协议端不可用时自动生效）。 */
+    val accessibilityQqChannel: io.prism.qq.channel.AccessibilityQqChannel by lazy {
+        io.prism.qq.channel.AccessibilityQqChannel(qqLocalToolExecutor)
+    }
+
+    /**
+     * 无障碍兜底通道的轻量新消息探针（US-3111 AC-4）：读通知摘要做散列比对，
+     * 无变化时不建副屏。见 [io.prism.qq.QqUnreadProbe]。
+     */
+    val qqUnreadProbe: io.prism.qq.QqUnreadProbe by lazy {
+        io.prism.qq.QqUnreadProbe(
+            snapshotProvider = { io.prism.phonecontrol.bg.ShizukuShell.notificationSnapshot() }
+        )
+    }
+
+    /**
+     * 当前生效的 QQ 通道：协议端已连接则用之，否则回落无障碍。
+     *
+     * 与 [qqLocalToolExecutor] 内的降级判定一致——发送路径由执行器自行判定，
+     * 读取路径（历史/上下文）统一走本方法。
+     */
+    suspend fun activeQqChannel(): io.prism.qq.channel.QqChannel {
+        if (qqConfigRepository.get().transport == io.prism.qq.channel.QqTransport.ONEBOT) {
+            val status = runCatching { oneBotChannel.status() }.getOrNull()
+            if (status?.connected == true) return oneBotChannel
+        }
+        return accessibilityQqChannel
+    }
+
+    /**
+     * **配置所选通道**的状态（用于设置页「连接测试」）。
+     *
+     * 与 [activeQqChannel] 的区别：后者会降级，导致协议端的「鉴权失败/地址不可达」
+     * 永远被无障碍状态掩盖（guardrail M-06）；本方法如实返回所选通道自身状态。
+     */
+    suspend fun configuredQqChannelStatus(): io.prism.qq.channel.QqChannelStatus =
+        if (qqConfigRepository.get().transport == io.prism.qq.channel.QqTransport.ONEBOT) {
+            oneBotChannel.status()
+        } else {
+            accessibilityQqChannel.status()
+        }
+
+    /**
+     * 定时主动消息文案生成器（ADR-063；US-3108 AC-3）。OpenAI 兼容非流式；
+     * HTTP 用 HttpURLConnection（IO 调度器执行，最小依赖）。
+     */
+    val qqProactiveComposer: io.prism.qq.QqProactiveComposer by lazy {
+        io.prism.qq.QqProactiveComposer { url, headers, bodyJson ->
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+                try {
+                    conn.requestMethod = "POST"
+                    conn.connectTimeout = 15_000
+                    conn.readTimeout = 60_000
+                    headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
+                    conn.doOutput = true
+                    conn.outputStream.use { it.write(bodyJson.toByteArray(Charsets.UTF_8)) }
+                    val code = conn.responseCode
+                    val stream = if (code in 200..299) conn.inputStream else conn.errorStream
+                    (stream?.bufferedReader(Charsets.UTF_8)?.readText() ?: "")
+                        .also { if (code !in 200..299) error("HTTP $code: ${it.take(200)}") }
+                } finally {
+                    conn.disconnect()
+                }
+            }
+        }
+    }
+
     /**
      * 批次24（ADR-051 D4）：桌宠形象安装器 —— 用户导入的 `.petpack` / 单图落
      * `filesDir/pets/<id>/`，**不入 APK、不入公开仓库**（与角色包同一私有资产边界）。
@@ -692,7 +874,9 @@ class PrismApplication : Application() {
                 // v1 批次17（US-1701）：TODO 任务规划工具（todo_write，ADR-043 D1）
                 todoLocalToolExecutor,
                 // 批次24（ADR-051 D8）：桌宠动作工具（pet__play_action）
-                petLocalToolExecutor
+                petLocalToolExecutor,
+                // QQ 小号助手（ADR-062）：qq__* 工具
+                qqLocalToolExecutor
             )
         )
     }
@@ -761,6 +945,48 @@ class PrismApplication : Application() {
      * 默认关闭；UI（ConversationViewModel）切换，phone_control 执行器守卫读取。
      */
     val backgroundControlEnabled = kotlinx.coroutines.flow.MutableStateFlow(false)
+
+    /**
+     * ADR-065（US-3114）：隐藏执行面偏好（默认开启）。由 [displayBackendConfigRepository]
+     * 热更新，[io.prism.phonecontrol.bg.VirtualDisplayManager] 在每次建屏时秒读。
+     */
+    private val hiddenDisplayEnabledFlow =
+        kotlinx.coroutines.flow.MutableStateFlow(io.prism.config.DisplayBackendConfigRepository.DEFAULT_HIDDEN_ENABLED)
+
+    /**
+     * ADR-046 修订（2026-10-26，PRD US-3116）：无障碍**自愈开关**（默认开，用户裁定）。
+     *
+     * 用轻量 SharedPreferences 而非新开 DataStore：只有一个布尔、读写都在主线程路径上，
+     * 且不希望为它再引入一个 DataStore 单例（多实例会崩）。
+     */
+    private val accessibilitySelfHealEnabledFlow = kotlinx.coroutines.flow.MutableStateFlow(
+        runCatching {
+            getSharedPreferences("prism_a11y", MODE_PRIVATE)
+                .getBoolean("self_heal_enabled", true)
+        }.getOrDefault(true)
+    )
+
+    /** 读/写无障碍自愈开关（设置页与 Monitor 共用）。 */
+    fun isAccessibilitySelfHealEnabled(): Boolean = accessibilitySelfHealEnabledFlow.value
+
+    fun setAccessibilitySelfHealEnabled(enabled: Boolean) {
+        accessibilitySelfHealEnabledFlow.value = enabled
+        runCatching {
+            getSharedPreferences("prism_a11y", MODE_PRIVATE).edit()
+                .putBoolean("self_heal_enabled", enabled).apply()
+        }
+    }
+
+    /** 无障碍服务实例是否可用（debug 探针/设置页共用）。 */
+    fun isAccessibilityService(): Boolean =
+        io.prism.phonecontrol.PhoneControlAccessibilityService.instance != null
+
+    /**
+     * ADR-065（US-3114）：执行面后端偏好仓库（隐藏执行面开关，DataStore 持久化）。
+     */
+    val displayBackendConfigRepository: io.prism.config.DisplayBackendConfigRepository by lazy {
+        io.prism.config.DisplayBackendConfigRepository(displayBackendConfigDataStore)
+    }
 
     /**
      * 手机操控高危动作（发送/删除/拨号）确认策略仓库（v1 真机二次修复 Issue 4b）。
@@ -1123,15 +1349,123 @@ class PrismApplication : Application() {
         UserProfileManager(openAICompatibleProvider, userProfileRepository)
     }
 
+    /**
+     * 内存压力回调（guardrail M-10）：系统提示内存紧张时释放 QQ 语音引擎的 native 模型，
+     * 避免与文本播报引擎各持一份 118/195MB 模型导致 OOM。
+     */
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        when (level) {
+            // guardrail L-27：只响应**内存压力**级别；不包含 TRIM_MEMORY_UI_HIDDEN（退后台
+            // 不等于内存紧张，不应立刻丢弃模型、让下次语音重付加载代价）
+            android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW,
+            android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL,
+            android.content.ComponentCallbacks2.TRIM_MEMORY_COMPLETE ->
+                runCatching { qqVoiceSynthesizer.releaseAsync() }
+            else -> Unit
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         // 批次21（ADR-046）：ShizukuShell 上下文注入（四态判定需 PackageManager 探测
         // Shizuku manager 包，区分"未安装"与"已安装未激活"）
         io.prism.phonecontrol.bg.ShizukuShell.init(this)
+        // ADR-046 修订（2026-10-26，PRD US-3116）：无障碍健康监测装配。
+        // - 自愈开关默认开（用户 2026-10-26 裁定）；可在设置页关闭；
+        // - 状态变化时发**可点通知**（HyperOS 清掉注册是常见现象，必须让用户知道而不是
+        //   "等工具失败才发现"）；
+        // - 检查由"App 进入前台 / 调用手机操控工具"打点触发，**不常驻轮询**。
+        io.prism.phonecontrol.health.AccessibilityHealthMonitor.selfHealEnabledProvider = {
+            runCatching { accessibilitySelfHealEnabledFlow.value }.getOrDefault(true)
+        }
+        io.prism.phonecontrol.health.AccessibilityHealthMonitor.onStateChanged = { old, new, message ->
+            android.util.Log.i("PrismApplication", "无障碍状态 $old → $new：$message")
+            // guardrail G-10：原实现在"自愈成功"时仍发「被系统关闭」通知（标题与正文矛盾）。
+            // 现在只在"仍处于 DISABLED 且未被恢复"时发通知；恢复成功只记日志 + 设置页可见。
+            if (new == io.prism.phonecontrol.health.AccessibilityHealth.State.DISABLED) {
+                io.prism.phonecontrol.PhoneControlAskUserNotifier.notifyAccessibilityLost(this, message)
+            }
+        }
+        // App 启动即做一次（限频；force=false，避免每次冷启动都写 settings）
+        appScope.launch {
+            runCatching {
+                io.prism.phonecontrol.health.AccessibilityHealthMonitor
+                    .notifyAppActive(this@PrismApplication)
+            }
+        }
+        // 每次回到前台再打点（间隔由 Monitor 内部 30s 限频）
+        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
+            override fun onActivityResumed(activity: android.app.Activity) {
+                appScope.launch {
+                    runCatching {
+                        io.prism.phonecontrol.health.AccessibilityHealthMonitor
+                            .notifyAppActive(this@PrismApplication)
+                    }
+                }
+            }
+
+            override fun onActivityCreated(activity: android.app.Activity, state: android.os.Bundle?) = Unit
+            override fun onActivityStarted(activity: android.app.Activity) = Unit
+            override fun onActivityPaused(activity: android.app.Activity) = Unit
+            override fun onActivityStopped(activity: android.app.Activity) = Unit
+            override fun onActivitySaveInstanceState(activity: android.app.Activity, outState: android.os.Bundle) = Unit
+            override fun onActivityDestroyed(activity: android.app.Activity) = Unit
+        })
+        // ADR-065（US-3114）：执行面后端偏好注入（默认隐藏虚拟屏）+ DataStore 热更新。
+        // 秒读 StateFlow（工具/建屏在 IO 协程）；读取失败保持默认值，不阻断后台执行。
+        io.prism.phonecontrol.bg.VirtualDisplayManager.hiddenDisplayEnabledProvider = {
+            hiddenDisplayEnabledFlow.value
+        }
+        appScope.launch {
+            try {
+                displayBackendConfigRepository.hiddenDisplayEnabled().collect {
+                    hiddenDisplayEnabledFlow.value = it
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                // DataStore 异常：保持默认（开启隐藏执行面）
+            }
+        }
         // 修复轮八：进程死亡残留对账（叠加小窗滞留兜底）——后台线程（Shizuku 绑定 +
         // settings get 最长 5s）；应用冷启动时 Shizuku 未就绪则 no-op，由 a11y 服务连接
         // 时再次对账
-        Thread { runCatching { io.prism.phonecontrol.bg.VirtualDisplayManager.reconcileStaleOverlay() } }.start()
+        Thread {
+            // ADR-046 修订（2026-10-26）：清理孤儿用户服务 → 补一次无障碍自愈 → 显示面对账。
+            // 动作序列与等待上限由 [StartupSelfHealPlan] 定义（guardrail R4-04：可单测）。
+            //
+            // 为什么需要"等 READY"：`onCreate` 时 Shizuku 往往尚未 READY（权限/服务枚举是
+            // 异步的），`cleanupOrphanUserServices()` 会直接返回空 → 孤儿永远清不掉。
+            // 为什么需要"补一次自愈"（真机 14:29 复现）：自愈若在 Shizuku 就绪**之前**尝试，
+            // 会以"需要 Shizuku"跳过，而后续没有重试触发点（只有回前台触发，后台执行期不回前台）。
+            var polls = 0
+            while (io.prism.phonecontrol.health.StartupSelfHealPlan.shouldKeepWaiting(
+                    polls, io.prism.phonecontrol.bg.ShizukuShell.isReady()
+                )
+            ) {
+                runCatching { Thread.sleep(io.prism.phonecontrol.health.StartupSelfHealPlan.POLL_INTERVAL_MS) }
+                polls++
+            }
+            val shizukuReady = io.prism.phonecontrol.bg.ShizukuShell.isReady()
+            io.prism.phonecontrol.health.StartupSelfHealPlan.steps(shizukuReady).forEach { step ->
+                runCatching {
+                    when (step) {
+                        io.prism.phonecontrol.health.StartupSelfHealPlan.Step.SWEEP_ORPHAN_USER_SERVICES -> {
+                            val killed = io.prism.phonecontrol.bg.ShizukuShell.cleanupOrphanUserServices()
+                            if (killed.isNotEmpty()) {
+                                android.util.Log.i("PrismApplication", "启动清理孤儿用户服务 ${killed.size} 个")
+                            }
+                        }
+                        io.prism.phonecontrol.health.StartupSelfHealPlan.Step.FORCE_ACCESSIBILITY_SELF_HEAL ->
+                            io.prism.phonecontrol.health.AccessibilityHealthMonitor
+                                .notifyAppActive(this, force = true)
+                        io.prism.phonecontrol.health.StartupSelfHealPlan.Step.RECONCILE_RESIDUAL_DISPLAY ->
+                            io.prism.phonecontrol.bg.VirtualDisplayManager.reconcileStaleOverlay(this)
+                    }
+                }
+            }
+        }.start()
         boxStore = MyObjectBox.builder()
             .androidContext(this)
             .build()
@@ -1175,6 +1509,367 @@ class PrismApplication : Application() {
         appScope.launch {
             runCatching { petManager.restoreIfEnabled() }.onFailure { e ->
                 android.util.Log.w("PrismApplication", "pet restore skipped (${e::class.simpleName})")
+            }
+        }
+        // QQ 小号助手（ADR-063 / CR-4 修复）：装配进程级持有器（使调度子系统可达），
+        // 并按持久化配置恢复「定时主动消息」——"打开 Prism 后常态化"的实现点：
+        // schedulingActive 四闸同开（总开关 + 风险确认 + 定时开关 + 目标联系人）时启动
+        // 调度服务，否则停止。用户关开关 → 服务随数据流自动停止（US-3106/US-3108 AC-5）。
+        io.prism.qq.QqConfigRepositoryHolder.repo = qqConfigRepository
+        io.prism.qq.QqRuntimeStateRepositoryHolder.repo = qqRuntimeStateRepository
+        // 2026-10-25（ADR-063 修订）：装配**执行环境守卫**的系统能力注入点。
+        // 背景：熄屏时隐藏虚拟屏 state=OFF，截图只有缓存旧帧、input 注入被系统丢弃 →
+        // 定时任务"点不动、发不出"。守卫在发送前判定并（按策略）临时点亮屏幕。
+        io.prism.qq.QqExecutionGuard.interactiveProvider = {
+            val pm = getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+            pm.isInteractive
+        }
+        io.prism.qq.QqExecutionGuard.displayStateProvider = { displayId ->
+            if (displayId == android.view.Display.INVALID_DISPLAY) {
+                null
+            } else {
+                runCatching {
+                    val dm = getSystemService(Context.DISPLAY_SERVICE)
+                        as android.hardware.display.DisplayManager
+                    dm.getDisplay(displayId)?.state
+                }.getOrNull()
+            }
+        }
+        io.prism.qq.QqExecutionGuard.wakeUpAction = {
+            // 必须 shell 身份：普通 App 无法注入全局按键
+            io.prism.phonecontrol.bg.ShizukuShell.wakeUp()
+        }
+        io.prism.qq.QqExecutionGuard.keepScreenOnAction = {
+            io.prism.phonecontrol.PhoneControlSessionManager.holdScreenForScheduledTask()
+        }
+        // guardrail G-02/G-07：唤醒**之前**先确认"唤醒后确实发得出去"（执行面的三项前置）。
+        // 顺序与 QqLocalToolExecutor.prepareQqBackground 一致，文案也保持一致。
+        io.prism.qq.QqExecutionGuard.preflightProvider = {
+            when {
+                io.prism.phonecontrol.PhoneControlAccessibilityService.instance == null ->
+                    "无障碍服务未开启（QQ 小号助手依赖它操作 QQ 界面）"
+                !io.prism.phonecontrol.bg.VirtualDisplayManager.canLaunchBackground(this) ->
+                    "缺少「显示在其他应用上层」权限（后台启动执行面所需）"
+                !io.prism.phonecontrol.bg.ShizukuShell.isReady() ->
+                    "Shizuku 未就绪（跨用户启动与手势注入所需）"
+                else -> null
+            }
+        }
+        io.prism.qq.QqExecutionGuard.wakeOnScreenOffProvider = { qqWakeOnScreenOffCache }
+        // 定时主动消息发送器装配（US-3108 AC-3）：LLM 生成文案（结合 RolePack 人设 + 当前时段）
+        // → 经 qqLocalToolExecutor.sendProactive 以小号身份发出（confirmRequired=false：
+        // 定时任务创建即显式授权；仍受节流/熔断约束）。失败返回可读文本，由调度器记录并计数熔断。
+        appScope.launch {
+            val composer = qqProactiveComposer
+            val executor = qqLocalToolExecutor
+            /** 应答临界区（方案 A3）：事件与轮询共用同一把锁，避免同一条消息被回应两次。 */
+            val replyMutex = Mutex()
+            suspend fun produceAndSend(): String {
+                val cfg = qqConfigRepository.get()
+                val provider = providerConfigRepository.activeProviderFlow.value
+                    ?: return "错误：无激活的 LLM Provider，无法生成主动消息"
+                val key = apiKeyRepository.readApiKeyOnce(provider.apiKeyRef)
+                    ?: return "错误：激活 Provider 的 API Key 不可用"
+                val persona = runCatching {
+                    rolePackLoader.effectiveRolePack().persona.systemPrompt
+                }.getOrNull()
+                val text = composer.compose(
+                    baseUrl = provider.baseUrl,
+                    apiKey = key,
+                    model = provider.models.firstOrNull().orEmpty(),
+                    personaSystemPrompt = persona,
+                    companionAddress = null
+                ) ?: return "错误：主动消息文案生成失败（端点/模型异常）"
+                return executor.sendProactive(cfg.targetContact, text)
+            }
+            io.prism.qq.QqProactiveGateway.sender = { produceAndSend() }
+
+            // 双向对话应答装配（US-3109）：读取小号会话的**新收到消息** → LLM 生成回复 → 后台发出。
+            // 去重（同一条消息只回应一次）+ 节流/熔断与主动消息共用（随机/被动均不豁免频控）。
+            // guardrail M-02：去重带时间窗——同文消息超出窗（视为新消息）允许再次回应。
+            /** L2 跨会话记忆 + L3 用户画像（US-3112 AC-3；失败按空处理，不阻断回复）。 */
+            suspend fun buildMemorySection(query: String): String? = runCatching {
+                val l2 = crossSessionMemoryManager.let { manager ->
+                    manager.formatMemoriesAsContext(manager.retrieveRelevantMemories(query))
+                }
+                val l3 = userProfileManager.formatProfilesAsContext()
+                listOfNotNull(
+                    l2?.takeIf { it.isNotBlank() },
+                    l3?.takeIf { it.isNotBlank() }
+                ).joinToString("\n").ifBlank { null }
+            }.onFailure {
+                android.util.Log.w(
+                    "PrismApplication",
+                    "QQ 记忆注入失败（按空处理）：${it::class.simpleName}"
+                )
+            }.getOrNull()
+
+            /**
+             * 应答主体（**必须经 [autoReplyOnce] 进入**，本函数不含临界区保护）。
+             *
+             * @param override 协议端事件携带的消息（事件驱动路径）；null=无障碍轮询路径
+             */
+            suspend fun autoReplyLocked(override: io.prism.qq.channel.QqMessage?): io.prism.qq.QqReplyOutcome.ReplyResult {
+                val cfg = qqConfigRepository.get()
+                val contact = cfg.targetContact
+                if (contact.isBlank()) return io.prism.qq.QqReplyOutcome.skipped("未配置目标联系人")
+                val channel = activeQqChannel()
+
+                // 2026-10-25（ADR-063 修订）：无障碍路径依赖 UI 自动化——屏幕熄灭时注入会被
+                // 系统丢弃、取到的只是旧帧。被动回复**不唤醒屏幕**（不打扰用户），直接如实跳过；
+                // 消息不会被标记已回复，用户点亮屏幕后仍可被探针捕获。
+                if (channel.transport == io.prism.qq.channel.QqTransport.ACCESSIBILITY) {
+                    val guard = io.prism.qq.QqExecutionGuard.ensureReady(
+                        displayId = io.prism.phonecontrol.bg.VirtualDisplayManager.currentDisplayId,
+                        requireDisplay = false,
+                        allowWake = false
+                    )
+                    if (guard.blocked) return io.prism.qq.QqReplyOutcome.skipped(guard.reason)
+                }
+
+                val incoming = override ?: run {
+                    // US-3111 AC-1（guardrail G-01）：轮询路径只服务**实际生效**的无障碍通道。
+                    // 判据统一走 QqAutoReplyDispatch（与单测同一实现）——不能用 cfg.transport，
+                    // 否则"协议端未配置 + 无障碍可用"这一原始故障场景仍然永久静默。
+                    //
+                    // 等价性说明：`activeQqChannel()` 本身即"按连接/可用性选出的通道"，
+                    // 因此 `channel.transport == ONEBOT` ⇔ 协议端已连接、
+                    // `== ACCESSIBILITY` ⇔ 无障碍可用——反推不引入乐观假设。
+                    val resolved = io.prism.qq.QqChannelResolver.resolve(
+                        preferred = cfg.transport,
+                        oneBotConnected = channel.transport == io.prism.qq.channel.QqTransport.ONEBOT,
+                        accessibilityAvailable = channel.transport == io.prism.qq.channel.QqTransport.ACCESSIBILITY
+                    )
+                    if (io.prism.qq.QqAutoReplyDispatch.shouldSkipForEventDriven(resolved)) {
+                        return io.prism.qq.QqReplyOutcome.skipped("等待协议端事件")
+                    }
+                    channel.recentMessages(contact, 1).firstOrNull()
+                        ?: return io.prism.qq.QqReplyOutcome.skipped("未读取到会话消息")
+                }
+                if (!incoming.incoming) return io.prism.qq.QqReplyOutcome.skipped("最后一条为自己发出")
+
+                val now = System.currentTimeMillis()
+                val rt = qqRuntimeStateRepository.get()
+                val hash = incoming.text.hashCode()
+                if (io.prism.qq.QqReplyDedup.isDuplicate(
+                        messageId = incoming.messageId,
+                        lastMessageId = rt.lastRepliedMessageId,
+                        hash = hash,
+                        lastHash = rt.lastRepliedMessageHash.toIntOrNull() ?: 0,
+                        lastRepliedAtMs = rt.lastRepliedAtMs,
+                        nowMs = now,
+                        repliedMessageIds = rt.repliedMessageIds
+                    )
+                ) {
+                    return io.prism.qq.QqReplyOutcome.skipped("该消息已回应过")
+                }
+                // 2026-10-26 真机修复：被动应答**不再套用主动消息的节流**。
+                // 用户 19:09 的实证：18:53 回过一次 → 19:09 的新消息被判"未达最小间隔
+                // （还需约 14 分钟）"直接丢弃。minInterval/dailyCap/maxPerDay 的语义是
+                // "不要主动打扰用户"，而"用户说话→系统回话"是被请求行为。
+                // 被动路径改走 decidePassive（保留熔断 + 短间隔防双发 + 窗口上限防跑飞）。
+                when (val d = io.prism.qq.QqThrottle.decidePassive(rt, now)) {
+                    is io.prism.qq.QqThrottle.Decision.Deny -> return io.prism.qq.QqReplyOutcome.skipped("节流：${d.reason}")
+                    io.prism.qq.QqThrottle.Decision.Allow -> Unit
+                }
+                val provider = providerConfigRepository.activeProviderFlow.value
+                    ?: return io.prism.qq.QqReplyOutcome.failed("无激活的 LLM Provider，无法生成回复")
+                val key = apiKeyRepository.readApiKeyOnce(provider.apiKeyRef)
+                    ?: return io.prism.qq.QqReplyOutcome.failed("激活 Provider 的 API Key 不可用")
+                val persona = runCatching {
+                    rolePackLoader.effectiveRolePack().persona.systemPrompt
+                }.getOrNull()
+
+                // US-3112 AC-1/AC-2：读取最近 N 条；失败逐级降级（API → 仅当前一条）
+                val history = runCatching { channel.recentMessages(contact, cfg.historyLimit) }
+                    .getOrDefault(emptyList())
+                    .let { list ->
+                        when {
+                            !incoming.messageId.isNullOrBlank() ->
+                                list.filterNot { it.messageId == incoming.messageId }
+                            list.isNotEmpty() && list.last().text == incoming.text ->
+                                list.dropLast(1)
+                            else -> list
+                        }
+                    }
+                // guardrail M-08：L2+L3 合并后硬上限 1200 字符，防 L3 全量画像撑爆 prompt
+                val memory = if (cfg.memoryInjectionEnabled) {
+                    buildMemorySection(incoming.text)?.take(MAX_MEMORY_SECTION_CHARS)
+                } else {
+                    null
+                }
+
+                val reply = composer.composeReply(
+                    baseUrl = provider.baseUrl,
+                    apiKey = key,
+                    model = provider.models.firstOrNull().orEmpty(),
+                    personaSystemPrompt = persona,
+                    companionAddress = null,
+                    incoming = incoming.text,
+                    history = history,
+                    memorySection = memory
+                ) ?: return io.prism.qq.QqReplyOutcome.failed("回复生成失败（端点/模型异常）")
+                // 2026-10-26 真机修复：被动回复经工具执行器发送时会命中**主动**节流
+                // （minInterval/dailyCap/maxPerDay）。这些配额语义是"不要主动打扰"，
+                // 不该拦"用户说话→系统回话"。此处置位被动作用域，闸门改走 decidePassive。
+                val previousScope = io.prism.qq.QqLocalToolExecutor.enterPassiveReplyScope()
+                val sendResult = try {
+                    channel.sendText(contact, reply)
+                } finally {
+                    io.prism.qq.QqLocalToolExecutor.exitPassiveReplyScope(previousScope)
+                }
+                val result = sendResult
+                val sentAt = System.currentTimeMillis()
+                val kind = io.prism.qq.QqFailureClassifier.classify(result)
+                val failed = result.startsWith("错误") || result.startsWith("⚠️")
+                when {
+                    // guardrail G-r4-01：「未确认」= 消息很可能已送达。这里**必须**与主动路径
+                    // 对齐：① 记账（否则 minInterval/dailyCap 失效）；② 标记已回复（否则去重失效，
+                    // 配合探针 15 分钟强制放行会变成"每 ~15 分钟重复回复同一条"）。
+                    // guardrail G-r5-01：用 recordUnconfirmedReplied（**不写** SCHEDULED_COUNT），
+                    // 因为 scheduledFiredCount 是"定时主动消息"的每日上限判据（M-06 不变量）；
+                    // 也不能用 recordReplied（它会清 FAILURE_STREAK，把假阴性"洗白"成成功）。
+                    failed && io.prism.qq.QqFailureClassifier.isUnconfirmedDelivery(kind) -> {
+                        android.util.Log.i("QqProactiveSchedule", "被动回复未确认（可能已送达）：记账并标记已回复")
+                        qqRuntimeStateRepository.recordUnconfirmedReplied(
+                            sentAt,
+                            io.prism.qq.QqThrottle.todayKey(sentAt, java.time.ZoneId.systemDefault())
+                        )
+                        qqRuntimeStateRepository.setLastReplied(incoming.text.hashCode().toString(), sentAt)
+                        incoming.messageId?.let { qqRuntimeStateRepository.setLastRepliedMessageId(it) }
+                    }
+                    failed -> {
+                        // guardrail G-08：只有内容/发送被拒才计入熔断；环境类失败（熄屏/显示面/
+                        // 通道/目标解析）不得累计——否则"睡觉时被动回复被跳过"会把功能熔断掉。
+                        android.util.Log.i("QqProactiveSchedule", "被动回复失败类别=$kind")
+                        if (io.prism.qq.QqFailureClassifier.countsTowardCircuit(kind)) {
+                            qqRuntimeStateRepository.recordFailure(
+                                io.prism.qq.QqThrottle.FAILURE_STREAK_THRESHOLD
+                            )
+                        }
+                    }
+                    else -> {
+                        // guardrail M-06：回复只计当日总数（每日上限仍生效），不消耗定时主动消息配额
+                        qqRuntimeStateRepository.recordReplied(
+                            sentAt, io.prism.qq.QqThrottle.todayKey(sentAt, java.time.ZoneId.systemDefault())
+                        )
+                        qqRuntimeStateRepository.setLastReplied(incoming.text.hashCode().toString(), sentAt)
+                        incoming.messageId?.let { qqRuntimeStateRepository.setLastRepliedMessageId(it) }
+                    }
+                }
+                // D-01：显式区分「已发送」（未确认送达也算已产出出站动作）
+                return io.prism.qq.QqReplyOutcome.sent(result)
+            }
+
+            /**
+             * 执行一次应答（**唯一入口**；方案 A3 临界区在此）。
+             *
+             * 事件与探针轮询可能同时命中同一条消息——去重是"读状态后判断"，两个协程并发时
+             * 都会读到"未回应"。串行化整段应答，使去重判断与写回落在同一临界区。
+             *
+             * （Kotlin 局部函数不支持前向引用，故 `autoReplyLocked` 先声明、本包装器后声明。）
+             */
+            suspend fun autoReplyOnce(
+                override: io.prism.qq.channel.QqMessage? = null
+            ): io.prism.qq.QqReplyOutcome.ReplyResult =
+                replyMutex.withLock { autoReplyLocked(override) }
+
+            io.prism.qq.QqProactiveGateway.autoReply = { autoReplyOnce() }
+
+            // 通道可用性判定（US-3110 AC-6）：协议端离线 + 无障碍不可用 → 调度器跳过且不记失败
+            io.prism.qq.QqProactiveGateway.onlineCheck = {
+                val protocolOnline = runCatching { oneBotChannel.status().connected }
+                    .getOrDefault(false)
+                protocolOnline || runCatching { accessibilityQqChannel.status().connected }
+                    .getOrDefault(false)
+            }
+
+            // US-3111 AC-4：无障碍兜底轮询前先做通知摘要探测（无变化则不建屏）
+            io.prism.qq.QqProactiveGateway.unreadProbe = { qqUnreadProbe.hasNewActivity() }
+
+            // 2026-10-25（ADR-064 修订）：通道解析改为**能力驱动**——协议端未连接时必须真的
+            // 走无障碍轮询。旧实现按 transport 配置硬判，导致"选了协议端但没配置"时自动回复永久静默。
+            io.prism.qq.QqProactiveGateway.channelMode = {
+                val cfg = qqConfigRepository.get()
+                val oneBotConnected = runCatching { oneBotChannel.status().connected }
+                    .getOrDefault(false)
+                val a11yAvailable = runCatching { accessibilityQqChannel.status().connected }
+                    .getOrDefault(false)
+                io.prism.qq.QqChannelResolver.resolve(cfg.transport, oneBotConnected, a11yAvailable)
+            }
+            io.prism.qq.QqProactiveGateway.protocolOnlineCheck = {
+                qqConfigRepository.get().transport == io.prism.qq.channel.QqTransport.ONEBOT &&
+                    runCatching { oneBotChannel.status().connected }.getOrDefault(false)
+            }
+            io.prism.qq.QqProactiveGateway.executionDisplayId = {
+                io.prism.phonecontrol.bg.VirtualDisplayManager.currentDisplayId
+            }
+
+            // US-3111：协议端事件驱动（替代 90s 轮询）。仅在双向对话激活时处理事件。
+            oneBotChannel.incoming().collect { message ->
+                if (!qqConfigRepository.get().autoReplyActive) return@collect
+                try {
+                    val result = autoReplyOnce(message)
+                    // guardrail L-02 + D-01：只记三态与原因类别，不回显联系人/消息正文
+                    android.util.Log.i(
+                        "QqProactiveSchedule",
+                        "（事件）" + result.logLine
+                    )
+                } catch (e: CancellationException) {
+                    // guardrail M-05：取消必须透传，不得当作业务失败
+                    throw e
+                } catch (e: Exception) {
+                    android.util.Log.w(
+                        "PrismApplication",
+                        "事件应答异常：${e::class.simpleName}"
+                    )
+                }
+            }
+        }
+        appScope.launch {
+            try {
+                // N-3：仅在"激活态发生变化"时启停（避免 runtime 写与 config 共用 DataStore
+                // 引发的反复启停抖动）；N-1：重新激活时清除熔断（用户重开开关即恢复）。
+                // 2026-10-19：激活含定时链路 **或** 双向对话链路（任一激活即保持服务运行）。
+                var lastActive: Boolean? = null
+                var lastProtocol: Boolean? = null
+                var lastConnKey: String? = null
+                qqConfigRepository.config().collect { cfg ->
+                    // ADR-064：协议端连接生命周期与调度服务解耦——只要总开关+风险确认且
+                    // transport=ONEBOT，就保持 WS 连接（事件到达即可应答，不依赖定时服务状态）。
+                    val protocol = cfg.enabled && cfg.riskAccepted &&
+                        cfg.transport == io.prism.qq.channel.QqTransport.ONEBOT
+                    // guardrail M-02：连接参数变化必须重建连接；token 只取 hashCode，不落日志
+                    val connKey = "${cfg.oneBotBaseUrl}|${cfg.oneBotWsUrl}|" +
+                        "${cfg.oneBotSelfId}|${cfg.oneBotToken.hashCode()}"
+                    if (protocol != lastProtocol ||
+                        (protocol && connKey != lastConnKey)
+                    ) {
+                        lastProtocol = protocol
+                        lastConnKey = connKey
+                        if (protocol) {
+                            oneBotClient.stop()
+                            oneBotClient.start()
+                        } else {
+                            oneBotClient.stop()
+                        }
+                    }
+                    // 2026-10-25：环境守卫需要的「熄屏策略」缓存（非挂起上下文中读取，见字段注释）
+                    qqWakeOnScreenOffCache = cfg.wakeOnScreenOff
+                    val active = cfg.schedulingActive || cfg.autoReplyActive
+                    if (active == lastActive) return@collect
+                    lastActive = active
+                    if (active) {
+                        qqRuntimeStateRepository.resetCircuit()
+                        io.prism.qq.ProactiveScheduleService.start(this@PrismApplication)
+                    } else {
+                        io.prism.qq.ProactiveScheduleService.stop(this@PrismApplication)
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("PrismApplication", "qq schedule observe failed (${e::class.simpleName})")
             }
         }
         // 异步加载持久化授权根目录到 SAF 访问层（ADR-006 5.3），与 registerFilesystemRoot 经
@@ -1290,7 +1985,16 @@ class PrismApplication : Application() {
     /** 搜索增强配置 DataStore 进程级单例（v1 批次15 US-1507：SearXNG 端点 + WebView 抓取开关）。 */
     private val Context.searchEnhancementDataStore by preferencesDataStore(name = "prism_search_enhancement")
 
+    /** QQ 小号助手（ADR-063）：配置 + 运行时状态共用同一 DataStore（单例，避免多实例崩溃）。 */
+    private val Context.qqDataStore by preferencesDataStore(name = "prism_qq")
+
+    /** 执行面后端偏好 DataStore 进程级单例（ADR-065，隐藏执行面开关持久化）。 */
+    private val Context.displayBackendConfigDataStore by preferencesDataStore(name = "prism_display_backend")
+
     companion object {
+        /** QQ 回复注入的记忆 section 硬上限（L2+L3 合并；guardrail M-08）。 */
+        private const val MAX_MEMORY_SECTION_CHARS = 1200
+
         /**
          * 默认切片大小（字符数，ADR-011 5.2）。
          *

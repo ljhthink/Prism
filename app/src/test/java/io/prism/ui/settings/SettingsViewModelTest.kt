@@ -141,12 +141,31 @@ class SettingsViewModelTest {
         val savedId = vm.saveProvider(
             draft.copy(name = "MyLocal", baseUrl = "http://localhost:8090", models = listOf("mixtral"))
         )
-        vm.setActive(savedId)
+        vm.setActive(savedId!!)
 
         assertEquals("MyLocal", vm.providers.value.single().name)
         assertEquals(savedId, vm.activeProvider.value?.id)
         job.cancel()
         activeJob.cancel()
+    }
+
+    @Test
+    fun `saveProvider remote cleartext returns null with readable error (L-34)`() = runTest(mainDispatcher) {
+        val vm = createViewModel()
+        val job = launch { vm.providers.collect { } }
+
+        val savedId = vm.saveProvider(
+            ProviderConfig(name = "Remote", baseUrl = "http://api.example.com/v1", apiKeyRef = "remote")
+        )
+
+        assertNull("被安全策略拒绝时应返回 null", savedId)
+        assertNotNull("应暴露可读错误", vm.providerSaveError.value)
+        assertTrue(
+            "错误文案应说明明文策略",
+            vm.providerSaveError.value!!.contains("明文")
+        )
+        assertTrue("被拒绝的配置不得进入列表", vm.providers.value.isEmpty())
+        job.cancel()
     }
 
     @Test

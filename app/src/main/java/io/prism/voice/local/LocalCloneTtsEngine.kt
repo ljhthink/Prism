@@ -164,6 +164,20 @@ interface LocalCloneStreamSession {
 }
 
 /**
+ * 可导出合成的最小契约（PRD US-3113）：把文本合成为 PCM 而不播放。
+ *
+ * 抽成接口的目的：QQ 语音链路可注入假引擎做 JVM 测试，不必实例化 native 合成器
+ * （guardrail M-11）。
+ */
+interface ExportableTtsEngine {
+    /** @return 合成音频；失败/未就绪/采样率未知时为 null */
+    suspend fun synthesizeForExport(text: String): LocalCloneAudio?
+
+    /** 释放 native 资源（幂等）。 */
+    fun release()
+}
+
+/**
  * LVC-1（ADR-053 决策 3）：端侧本地音色克隆 TTS 引擎（实现既有 [TtsEngine] 接口，**接口零改动**）。
  *
  * **语义对齐**（考古报告「不可破坏的不变量」）：
@@ -246,7 +260,7 @@ class LocalCloneTtsEngine(
      * **永不触发**，相关用例会退化为**空断言**（已被封口复审用变异 M1 实证）。
      */
     private val nowMs: () -> Long = { SystemClock.elapsedRealtime() }
-) : TtsEngine {
+) : TtsEngine, ExportableTtsEngine {
 
     private val idCounter = AtomicLong(0)
 
@@ -374,6 +388,72 @@ class LocalCloneTtsEngine(
         }
     }
 
+    /**
+     * 导出合成（PRD US-3113 AC-2）：把文本合成为 PCM 样本**但不播放**，供 QQ 语音消息等
+     * 需要音频文件的场景使用。
+     *
+     * **与 [speak] 的区别**：不经过播放器、不回调监听器、不参与「取代在途播报」状态机；
+     * 但**共用** [engineAccess] 单飞闸与同一 native 合成器（并发 `generate` 是未定义行为）。
+     *
+     * **取消**：无用户级取消入口；`release()` 后返回 null。native 调用不可中断，看门狗在此不启用
+     * （它只告警、不取消，对导出没有价值）。
+     *
+     * @return 合成音频（采样率来自引擎）；失败/无参考/未选择音色包时返回 null
+     */
+    override suspend fun synthesizeForExport(text: String): LocalCloneAudio? {
+        if (released) return null
+        val normalized = LocalCloneTextNormalizer.normalize(text)
+        if (normalized.isBlank()) return null
+        val reference: LocalReference? = if (pack.tts == LocalTtsKind.ZIPVOICE) {
+            LocalReferenceSelector.select(normalized, pack.references) ?: return null
+        } else {
+            null
+        }
+        return try {
+            engineAccess.withLock {
+                withContext(ioDispatcher) {
+                    val synth = ensureSynthesizer() ?: return@withContext null
+                    val rate = synth.sampleRate()
+                    if (rate <= 0) return@withContext null
+                    // 长文本切段与播报路径一致（避免单次无界合成的内存/耗时尖峰）；
+                    // 导出不插段间静音（语音消息应连续）。
+                    val segments = segmentForSynthesis(
+                        normalized,
+                        DEFAULT_SEGMENT_CHARS,
+                        FIRST_SEGMENT_CHARS,
+                        splitSentences = false
+                    )
+                    val pieces = ArrayList<FloatArray>(segments.size)
+                    var total = 0
+                    for (segment in segments) {
+                        val audio = synth.synthesize(segment, reference, config, { released })
+                        if (audio.samples.isEmpty() || audio.truncated) return@withContext null
+                        // guardrail M-04：分段采样率不一致不得拼接（按错误采样率导出 = 变调变速）
+                        if (audio.sampleRate != rate) {
+                            Log.w(TAG, "导出合成分段采样率不一致（${audio.sampleRate} != $rate），放弃本次导出")
+                            return@withContext null
+                        }
+                        pieces += audio.samples
+                        total += audio.samples.size
+                    }
+                    if (total == 0) return@withContext null
+                    val merged = FloatArray(total)
+                    var pos = 0
+                    for (chunk in pieces) {
+                        chunk.copyInto(merged, pos)
+                        pos += chunk.size
+                    }
+                    LocalCloneAudio(merged, rate)
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.w(TAG, "导出合成失败：${e::class.simpleName}")
+            null
+        }
+    }
+
     // ==================== 内部实现 ====================
 
     private fun newUtteranceId(): String = "prism-local-${idCounter.incrementAndGet()}"
@@ -476,6 +556,11 @@ class LocalCloneTtsEngine(
                     }
                     var started = false
                     if (streamSession != null) {
+                        // 段间停顿的**唯一计划**（批次30）：按引擎回报的采样率一次性算好，
+                        // 内含"单次播报总静音上界"（DEF-01）。循环内只读不重算。
+                        val gapPlan = LocalCloneSegmentGap.gapPlanFor(
+                            segments, config.sentenceGapMs, streamRate
+                        )
                         // ---- 流式：合成回调的**每个内部句子分段**立即写入同一条常开音轨 ----
                         // 上游 `offline-tts-zipvoice-impl.h` 每段生成完即 `callback(cur.samples...)`，
                         // 且块是**增量音频**（实测各块样本数之和恰等于整段样本数）⇒ 首声只需等第一句。
@@ -522,11 +607,11 @@ class LocalCloneTtsEngine(
                                 // 故此处非空仍返回 false ⇒ 输出栈失效）。
                                 if (index != segments.lastIndex) {
                                     // 边界类型判定（**段边界 ≠ 句边界**）：只有真句末给满额，
-                                    // 子句（逗号/分号/冒号）打折，硬切/无标点一律 0
-                                    val gap = LocalCloneSegmentGap.silence(
-                                        LocalCloneSegmentGap.gapMsFor(segment, config.sentenceGapMs),
-                                        streamRate
-                                    )
+                                    // 子句（逗号/分号/冒号）打折，硬切/无标点一律 0；
+                                    // 且受**单次播报总静音上界**约束（批次30 / DEF-01）。
+                                    // 计划由 LocalCloneSegmentGap.gapPlanFor 统一产出，流式与非流式共用同一份定义。
+                                    val gapSamples = gapPlan.getOrElse(index) { 0 }
+                                    val gap = if (gapSamples > 0) FloatArray(gapSamples) else FloatArray(0)
                                     if (gap.isNotEmpty()) {
                                         request.touch()
                                         if (streamSession.write(gap)) {
@@ -613,6 +698,11 @@ class LocalCloneTtsEngine(
                         var playedSegments = 0
                         var playedSamples = 0
                         var playedRate = 0
+                        // 段间停顿的**唯一计划**（批次30），延迟到拿到第一段音频的采样率再算：
+                        // 本路径的采样率来自 `audio.sampleRate`（引擎回报），此处不硬编码 24k/16k。
+                        var gapPlan: IntArray? = null
+                        /** 计算 [gapPlan] 时用的采样率（静音片必须按它标注，见 guardrail F4）。 */
+                        var gapPlanRate = 0
                         val roundStartNanos = System.nanoTime()
                         val producer = scope.launch(ioDispatcher) {
                             try {
@@ -642,19 +732,28 @@ class LocalCloneTtsEngine(
                                     if (index != segments.lastIndex) {
                                         // 边界类型判定（**段边界 ≠ 句边界**：切分可能退到子句标点甚至硬切）：
                                         // 真句末给满额、子句打折、硬切/无标点 0 —— 否则逗号处顿挫、
-                                        // 硬切处出现"词中间停顿"，比改动前更糟。
-                                        val gap = LocalCloneSegmentGap.silence(
-                                            LocalCloneSegmentGap.gapMsFor(
-                                                segments[index], config.sentenceGapMs
-                                            ),
-                                            audio.sampleRate
-                                        )
+                                        // 硬切处出现"词中间停顿"，比改动前更糟；
+                                        // 且受**单次播报总静音上界**约束（批次30 / DEF-01）。
+                                        // 计划与流式路径**共用** LocalCloneSegmentGap.gapPlanFor 同一份定义。
+                                        // ⚠️ 采样率必须**跟着计划走**（guardrail F4）：样本数是按
+                                        // "首段回报的采样率"折算的，故静音片必须标注**同一采样率**；
+                                        // 若标成当前段的采样率，跨采样率时会播放出错误时长（两路亦不等价）。
+                                        val plan = gapPlan
+                                            ?: LocalCloneSegmentGap.gapPlanFor(
+                                                segments, config.sentenceGapMs, audio.sampleRate
+                                            ).also {
+                                                gapPlan = it
+                                                gapPlanRate = audio.sampleRate
+                                            }
+                                        val gapSamples = plan.getOrElse(index) { 0 }
+                                        val gap =
+                                            if (gapSamples > 0) FloatArray(gapSamples) else FloatArray(0)
                                         if (gap.isNotEmpty()) {
                                             request.touch()
                                             queue.send(
                                                 LocalCloneAudio(
                                                     samples = gap,
-                                                    sampleRate = audio.sampleRate,
+                                                    sampleRate = gapPlanRate,
                                                     truncated = false
                                                 )
                                             )

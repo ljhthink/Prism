@@ -22,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -65,6 +66,9 @@ import java.util.Locale
 /** v1 US-201：手机操控无障碍服务状态轮询间隔（毫秒）。 */
 private const val PHONE_CONTROL_POLL_MS = 1_000L
 
+/** QQ 小号助手分区轮询间隔（熔断态刷新；guardrail L-04：不复用手机操控常量）。 */
+private const val QQ_POLL_MS = 2_000L
+
 /**
  * 设置屏幕 —— 深空玻璃肌理（设计规范 v0.4 第 8.4 节）。
  *
@@ -102,6 +106,10 @@ fun SettingsScreen(
     // v1 US-301（方案 B 识图）：视觉旁路授权 + 自动开关
     val visionConsent by viewModel.visionConsent.collectAsState()
     val visionAutoBypass by viewModel.visionAutoBypass.collectAsState()
+    // ADR-065（US-3114）：隐藏执行面开关（DataStore 持久化）
+    val hiddenDisplayEnabled by viewModel.hiddenDisplayEnabled.collectAsState()
+    // guardrail r1 Q-08：保存失败必须可见（否则开关"弹回"却无原因）
+    val hiddenDisplaySaveError by viewModel.hiddenDisplaySaveError.collectAsState()
     // v1 真机反馈（Issue 4）：云端视觉旁路需一个被标记为视觉回退的 Provider；
     // 未配置时向用户明示（用户此前误以为"在设置里没有显示"、功能不可用）。
     val visionFallbackName = providers.firstOrNull { it.isVisionFallback }?.name
@@ -142,6 +150,10 @@ fun SettingsScreen(
     // 批次21（SZ-004，ADR-046）：Shizuku 四态（未安装/已装未激活/未授权/就绪）——轮询刷新；未授权点击请求授权。
     // 真机修复 R3：用户装了 Shizuku App 但未激活 server 时，原三态误报"未安装"——拆分 NOT_RUNNING 并给激活指引。
     var shizukuState by remember { mutableStateOf(io.prism.phonecontrol.bg.ShizukuShell.currentState()) }
+    // ADR-065（US-3114）：执行面形态说明 / Watch 运行态（轮询刷新，组合期快照会过期）
+    var backendNote by remember { mutableStateOf(io.prism.phonecontrol.bg.VirtualDisplayManager.lastBackendNote) }
+    var watchRunning by remember { mutableStateOf(io.prism.phonecontrol.bg.DisplayWatchOverlay.isRunning) }
+    var watchError by remember { mutableStateOf("") }
     val shizukuSubtitle = when (shizukuState) {
         io.prism.phonecontrol.bg.ShizukuShell.State.NOT_INSTALLED ->
             "未安装 Shizuku（免费开源）· 完整后台化需安装并激活：shizuku.rikka.app"
@@ -153,6 +165,19 @@ fun SettingsScreen(
             "Shizuku 就绪 · 后台模式全能力（手势/滑动/返回均可用）"
     }
 
+    // ADR-065（US-3114）：Watch 开关（运行时；关闭只移除悬浮窗，不中断执行）
+    val toggleWatch: (Boolean) -> Unit = { enabled ->
+        if (enabled) {
+            val result = io.prism.phonecontrol.bg.DisplayWatchOverlay.start(context)
+            watchRunning = io.prism.phonecontrol.bg.DisplayWatchOverlay.isRunning
+            watchError = if (result.startsWith("错误")) result else ""
+        } else {
+            io.prism.phonecontrol.bg.DisplayWatchOverlay.stop()
+            watchRunning = false
+            watchError = ""
+        }
+    }
+
     // v1 US-201：UI 侧轮询无障碍服务连接状态（用户在系统设置开关后返回本页自动刷新引导）。
     // VM 侧无循环（避免 JVM 单测 runTest 调度器挂起），轮询放 Composable LaunchedEffect。
     LaunchedEffect(Unit) {
@@ -162,8 +187,352 @@ fun SettingsScreen(
             canDrawOverlays = android.provider.Settings.canDrawOverlays(context)
             // 批次21（SZ-004）：同步刷新 Shizuku 三态
             shizukuState = io.prism.phonecontrol.bg.ShizukuShell.currentState()
+            // ADR-065（US-3114）：同步执行面回落说明与 Watch 运行态
+            backendNote = io.prism.phonecontrol.bg.VirtualDisplayManager.lastBackendNote
+            watchRunning = io.prism.phonecontrol.bg.DisplayWatchOverlay.isRunning
             kotlinx.coroutines.delay(PHONE_CONTROL_POLL_MS)
         }
+    }
+
+    // ==================== QQ 小号助手（ADR-062/063；US-3101/3105/3108） ====================
+    // 状态直连仓库 Flow（与 VM 解耦的最小集成；写操作经 scope 调仓库 setter，写侧即钳制）。
+    // guardrail L-01：安全转型（applicationContext 理论上恒为 PrismApplication，但不硬崩）
+    val qqApp = context.applicationContext as? io.prism.PrismApplication
+    val qqConfig by (qqApp?.qqConfigRepository?.config()
+        ?: kotlinx.coroutines.flow.flowOf(io.prism.qq.QqConfig.DEFAULT))
+        .collectAsState(initial = io.prism.qq.QqConfig.DEFAULT)
+    val qqScope = rememberCoroutineScope()
+    var qqRiskDialogVisible by remember { mutableStateOf(false) }
+    var qqContactDialogVisible by remember { mutableStateOf(false) }
+    var qqContactDraft by remember { mutableStateOf("") }
+    // ADR-064 / US-3110：协议端连接配置与状态
+    var qqOneBotDialogVisible by remember { mutableStateOf(false) }
+    var qqBaseUrlDraft by remember { mutableStateOf("") }
+    var qqWsUrlDraft by remember { mutableStateOf("") }
+    var qqTokenDraft by remember { mutableStateOf("") }
+    var qqSelfIdDraft by remember { mutableStateOf("") }
+    var qqTargetIdDraft by remember { mutableStateOf("") }
+    var qqClearToken by remember { mutableStateOf(false) }
+    var qqChannelStatusText by remember { mutableStateOf("") }
+    // US-3115：自由编辑（活跃时段 / 上限 / 最小间隔 / 历史条数）
+    var qqScheduleDialogVisible by remember { mutableStateOf(false) }
+    var qqWindowStartDraft by remember { mutableStateOf("") }
+    var qqWindowEndDraft by remember { mutableStateOf("") }
+    var qqCapDraft by remember { mutableStateOf("") }
+    var qqIntervalDraft by remember { mutableStateOf("") }
+    var qqHistoryDialogVisible by remember { mutableStateOf(false) }
+    var qqHistoryDraft by remember { mutableStateOf("") }
+    // D-05：校验错误必须在**弹窗内**可见（写到列表行会被弹窗遮住）
+    var qqScheduleError by remember { mutableStateOf("") }
+    var qqHistoryError by remember { mutableStateOf("") }
+    // 熔断态（读 runtime；仅在进入本页/轮询时刷新）
+    var qqCircuitOpen by remember { mutableStateOf(false) }
+    // 2026-10-25：上次定时任务的**结果与原因**（PRD US-3115 AC-6；不再只有"熔断/未熔断"）
+    var qqLastOutcomeText by remember { mutableStateOf("") }
+    // D-01（ac-verifier）：当前**生效**通道与降级原因（所选协议端不可用时如实展示）
+    var qqEffectiveChannelText by remember { mutableStateOf("") }
+    // guardrail L-04：QQ 分区独立轮询间隔（不复用手机操控的常量，避免语义耦合）
+    LaunchedEffect(qqApp, qqConfig.transport) {
+        while (qqApp != null) {
+            qqCircuitOpen = runCatching { qqApp?.qqRuntimeStateRepository?.get()?.circuitOpen == true }
+                .getOrDefault(false)
+            qqLastOutcomeText = runCatching {
+                val rt = qqApp?.qqRuntimeStateRepository?.get() ?: return@runCatching ""
+                if (rt.lastOutcome.isBlank()) return@runCatching ""
+                val at = if (rt.lastOutcomeAtMs > 0) {
+                    java.time.Instant.ofEpochMilli(rt.lastOutcomeAtMs)
+                        .atZone(java.time.ZoneId.systemDefault())
+                        .format(java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm"))
+                } else {
+                    ""
+                }
+                val label = when {
+                    // guardrail G-r3-07：「未确认」在语义上是"可能已送达"，不能显示成"失败"，
+                    // 否则用户会以为没发出去而手动补发，反而制造重复消息。
+                    rt.lastOutcome.contains("SEND_UNCONFIRMED") -> "上次未确认（可能已送达）"
+                    // US-3118 AC-3（ac-verifier 复核缺口）：账号态不可用必须显示**可执行的原因**，
+                    // 否则用户只看到"上次失败"，不知道该去小号上重新验证。
+                    rt.lastOutcome.contains("ACCOUNT_STATE_INVALID") ->
+                        "上次未发送：小号登录态失效，需要重新验证"
+                    rt.lastOutcome.startsWith("SUCCESS") -> "上次成功"
+                    rt.lastOutcome.startsWith("SKIP") -> "上次跳过"
+                    else -> "上次失败"
+                }
+                "$label $at${if (rt.lastOutcomeReason.isBlank()) "" else " · ${rt.lastOutcomeReason}"}"
+            }.getOrDefault("")
+            qqEffectiveChannelText = runCatching {
+                val app = qqApp ?: return@runCatching ""
+                val active = app.activeQqChannel()
+                val configured = app.configuredQqChannelStatus()
+                val name = if (active.transport == io.prism.qq.channel.QqTransport.ONEBOT) "协议端" else "无障碍"
+                if (configured.connected) "当前生效：$name"
+                else "当前生效：$name（降级原因：${configured.detail.ifBlank { "未连接" }}）"
+            }.getOrDefault("")
+            kotlinx.coroutines.delay(QQ_POLL_MS)
+        }
+    }
+
+
+    // US-3101 AC-2：风险告知确认（未确认时开启总开关的唯一入口）
+    if (qqRiskDialogVisible) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { qqRiskDialogVisible = false },
+            title = { Text("QQ 小号助手 · 风险告知") },
+            text = {
+                Text(
+                    "开启后，Prism 将通过无障碍能力以你的 QQ 小号身份执行自动化操作（发消息、修改签名等）。请知悉并确认：\n\n" +
+                        "1. 自动化操作违反平台自动化条款，小号存在被限制功能、冻结甚至关闭的风险，且解封不可控；\n" +
+                        "2. 请仅使用可弃用的独立小号，与主号保持隔离（不同设备/网络更佳），切勿用主号承载；\n" +
+                        "3. Prism 已内置低频节流、失败熔断与一键停用，但不承诺零风险；\n" +
+                        "4. 仅供个人自用，禁止用于营销、群发等批量场景。\n\n" +
+                        "确认后即视为你已理解并自愿承担上述风险。"
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    qqRiskDialogVisible = false
+                    qqScope.launch {
+                        qqApp?.qqConfigRepository?.setRiskAccepted(true)
+                        qqApp?.qqConfigRepository?.setEnabled(true)
+                    }
+                }) { Text("我已知悉并承担风险") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { qqRiskDialogVisible = false }) { Text("取消") }
+            }
+        )
+    }
+    // US-3108 AC-3：目标联系人（小号对用户主号的备注名）
+    if (qqContactDialogVisible) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { qqContactDialogVisible = false },
+            title = { Text("定时消息联系人") },
+            text = {
+                androidx.compose.material3.OutlinedTextField(
+                    value = qqContactDraft,
+                    onValueChange = { qqContactDraft = it },
+                    singleLine = true,
+                    label = { Text("小号对你的备注名") }
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    qqContactDialogVisible = false
+                    val v = qqContactDraft
+                    qqScope.launch {
+                        qqApp?.qqConfigRepository?.setTargetContact(v)
+                        // 联系人变更必须让协议端解析缓存失效（guardrail B-01）
+                        qqApp?.oneBotChannel?.invalidateTarget()
+                    }
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { qqContactDialogVisible = false }) { Text("取消") }
+            }
+        )
+    }
+
+    // ADR-064 / US-3110：协议端连接配置（HTTP/WS/token/self_id/目标 QQ 号）
+    if (qqOneBotDialogVisible) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { qqOneBotDialogVisible = false },
+            title = { Text("OneBot 11 协议端连接") },
+            text = {
+                androidx.compose.foundation.layout.Column {
+                    Text(
+                        "需由你在 PC/独立主机自行部署 NapCat 或 SnowLuma（个人自用、非商业）。" +
+                            "访问令牌必填，仅保存在本机应用私有目录。" +
+                            "数据流：消息正文 → 你自建的协议端 → QQ；消息与历史 → 你配置的模型端点。"
+                    )
+                    androidx.compose.material3.OutlinedTextField(
+                        value = qqBaseUrlDraft,
+                        onValueChange = { qqBaseUrlDraft = it },
+                        singleLine = true,
+                        label = { Text("HTTP 地址（如 http://192.168.1.10:3000）") }
+                    )
+                    androidx.compose.material3.OutlinedTextField(
+                        value = qqWsUrlDraft,
+                        onValueChange = { qqWsUrlDraft = it },
+                        singleLine = true,
+                        label = { Text("WS 地址（如 ws://192.168.1.10:3001）") }
+                    )
+                    androidx.compose.material3.OutlinedTextField(
+                        value = qqTokenDraft,
+                        onValueChange = { qqTokenDraft = it; qqClearToken = false },
+                        singleLine = true,
+                        label = { Text("access_token（留空=保持不变）") }
+                    )
+                    if (qqConfig.oneBotToken.isNotBlank()) {
+                        Text(
+                            "已保存令牌（已隐藏）。清空令牌请点击下方文字。",
+                            color = Color(0xFF7A8699)
+                        )
+                        Text(
+                            if (qqClearToken) "✓ 保存后将清除令牌（再点一次取消）" else "点击此处标记清除令牌",
+                            color = Color(0xFFFF7A6B),
+                            modifier = Modifier.clickable {
+                                qqClearToken = !qqClearToken
+                            }
+                        )
+                    }
+                    androidx.compose.material3.OutlinedTextField(
+                        value = qqSelfIdDraft,
+                        onValueChange = { qqSelfIdDraft = it },
+                        singleLine = true,
+                        label = { Text("小号 QQ 号（self_id）") }
+                    )
+                    androidx.compose.material3.OutlinedTextField(
+                        value = qqTargetIdDraft,
+                        onValueChange = { qqTargetIdDraft = it },
+                        singleLine = true,
+                        label = { Text("目标（主号）QQ 号；留空则按备注名解析") }
+                    )
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    qqOneBotDialogVisible = false
+                    qqScope.launch {
+                        qqApp?.qqConfigRepository?.setOneBotConnection(
+                            baseUrl = qqBaseUrlDraft,
+                            wsUrl = qqWsUrlDraft,
+                            token = qqTokenDraft,
+                            selfId = qqSelfIdDraft.trim().toLongOrNull() ?: 0L,
+                            targetUserId = qqTargetIdDraft.trim().toLongOrNull() ?: 0L,
+                            clearToken = qqClearToken
+                        )
+                        qqClearToken = false
+                        qqTokenDraft = ""
+                        qqApp?.oneBotChannel?.invalidateTarget()
+                    }
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { qqOneBotDialogVisible = false }) { Text("取消") }
+            }
+        )
+    }
+
+    // US-3115（2026-10-25 修订）：活跃时段改用 HH:mm，并提供常用预设
+    if (qqScheduleDialogVisible) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { qqScheduleDialogVisible = false },
+            title = { Text("定时参数") },
+            text = {
+                androidx.compose.foundation.layout.Column {
+                    Text("活跃时段用 24 小时制「时:分」填写，例如 07:00。允许跨零点（如 22:00 - 02:00）。")
+                    androidx.compose.material3.OutlinedTextField(
+                        value = qqWindowStartDraft,
+                        onValueChange = { qqWindowStartDraft = it },
+                        singleLine = true,
+                        label = { Text("活跃时段起（HH:mm）") },
+                        placeholder = { Text("07:00") }
+                    )
+                    androidx.compose.material3.OutlinedTextField(
+                        value = qqWindowEndDraft,
+                        onValueChange = { qqWindowEndDraft = it },
+                        singleLine = true,
+                        label = { Text("活跃时段止（HH:mm）") },
+                        placeholder = { Text("22:00") }
+                    )
+                    // 常用预设：一键填入起止，减少打字
+                    Text("常用时段", fontSize = 12.sp, color = Color(0xFF9BB8FF))
+                    androidx.compose.foundation.layout.Row {
+                        listOf(
+                            "07:00" to "22:00",
+                            "08:00" to "23:00",
+                            "20:00" to "23:00"
+                        ).forEach { (s, e) ->
+                            androidx.compose.material3.TextButton(onClick = {
+                                qqWindowStartDraft = s
+                                qqWindowEndDraft = e
+                                qqScheduleError = ""
+                            }) { Text("$s-$e", fontSize = 12.sp) }
+                        }
+                    }
+                    androidx.compose.material3.OutlinedTextField(
+                        value = qqCapDraft,
+                        onValueChange = { qqCapDraft = it },
+                        singleLine = true,
+                        label = { Text("每日消息上限（1~200）") }
+                    )
+                    androidx.compose.material3.OutlinedTextField(
+                        value = qqIntervalDraft,
+                        onValueChange = { qqIntervalDraft = it },
+                        singleLine = true,
+                        label = { Text("最小间隔（分钟，≥1）") }
+                    )
+                    if (qqScheduleError.isNotBlank()) {
+                        Text(text = qqScheduleError, color = Color(0xFFFF7A6B), fontSize = 12.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    val start = io.prism.qq.QqTimeOfDay.parse(qqWindowStartDraft)
+                    val end = io.prism.qq.QqTimeOfDay.parse(qqWindowEndDraft)
+                    val cap = qqCapDraft.trim().toIntOrNull()
+                    val intervalMin = qqIntervalDraft.trim().toLongOrNull()
+                    if (start == null || end == null ||
+                        !io.prism.qq.QqTimeOfDay.isValidWindow(start, end)
+                    ) {
+                        qqScheduleError = "错误：活跃时段非法。请填写 0:00~24:00 的「时:分」，且起止不能相同"
+                        return@TextButton
+                    }
+                    qqScheduleDialogVisible = false
+                    qqScope.launch {
+                        qqApp?.qqConfigRepository?.setWindow(start, end)
+                        cap?.let { qqApp?.qqConfigRepository?.setDailyCap(it) }
+                        intervalMin?.let {
+                            qqApp?.qqConfigRepository?.setMinIntervalMs(
+                                (it * 60_000L).coerceAtLeast(io.prism.qq.QqConfig.MIN_INTERVAL_MS_FLOOR)
+                            )
+                        }
+                    }
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { qqScheduleDialogVisible = false }) { Text("取消") }
+            }
+        )
+    }
+
+    // US-3112：历史上下文条数
+    if (qqHistoryDialogVisible) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { qqHistoryDialogVisible = false },
+            title = { Text("历史上下文条数") },
+            text = {
+                androidx.compose.foundation.layout.Column {
+                    Text("回复时读取最近 N 条消息（6~30）。消息与相关记忆会发送至你配置的模型端点。")
+                    androidx.compose.material3.OutlinedTextField(
+                        value = qqHistoryDraft,
+                        onValueChange = { qqHistoryDraft = it },
+                        singleLine = true,
+                        label = { Text("N（6~30）") }
+                    )
+                    if (qqHistoryError.isNotBlank()) {
+                        Text(text = qqHistoryError, color = Color(0xFFFF7A6B), fontSize = 12.sp)
+                    }
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    val n = qqHistoryDraft.trim().toIntOrNull()
+                    if (n == null || n < io.prism.qq.QqConfig.MIN_HISTORY_LIMIT ||
+                        n > io.prism.qq.QqConfig.MAX_HISTORY_LIMIT
+                    ) {
+                        qqHistoryError = "错误：历史条数需在 6~30 之间"
+                        return@TextButton
+                    }
+                    qqHistoryDialogVisible = false
+                    qqScope.launch { qqApp?.qqConfigRepository?.setHistoryLimit(n) }
+                }) { Text("保存") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { qqHistoryDialogVisible = false }) { Text("取消") }
+            }
+        )
     }
 
     Box {
@@ -253,6 +622,55 @@ fun SettingsScreen(
                     }
                 )
             }
+            // ADR-046 修订（2026-10-26；PRD US-3116）：无障碍自愈 + Shizuku 单实例说明。
+            // 真机实测 HyperOS 安全中心会清掉本应用的无障碍注册，故这里给"状态 + 一键恢复 + 开关"。
+            item {
+                val a11yState = io.prism.phonecontrol.health.AccessibilityHealthMonitor.currentState
+                val selfHeal = (context.applicationContext as? io.prism.PrismApplication)
+                    ?.isAccessibilitySelfHealEnabled() ?: true
+                SetRow(
+                    icon = "♻",
+                    iconColor = if (a11yState == io.prism.phonecontrol.health.AccessibilityHealth.State.OK) {
+                        PrismMint
+                    } else {
+                        Color(0xFFFF7A6B)
+                    },
+                    title = "无障碍自动恢复",
+                    subtitle = buildString {
+                        append(
+                            when (a11yState) {
+                                io.prism.phonecontrol.health.AccessibilityHealth.State.OK -> "当前状态：正常"
+                                io.prism.phonecontrol.health.AccessibilityHealth.State.REBINDING ->
+                                    "当前状态：重连中（通常数秒内自动恢复）"
+                                io.prism.phonecontrol.health.AccessibilityHealth.State.DISABLED ->
+                                    "当前状态：已被系统关闭（HyperOS 常见）"
+                            }
+                        )
+                        append(" · ")
+                        append(if (selfHeal) "自动恢复已开（仅写回本应用，不动你的其它无障碍服务）" else "自动恢复已关")
+                        val last = io.prism.phonecontrol.health.AccessibilityRestorer.lastResult
+                        if (last.isNotBlank()) append("\n最近：").append(last)
+                    },
+                    trailing = {
+                        PrismSwitch(
+                            checked = selfHeal,
+                            onCheckedChange = { on ->
+                                (context.applicationContext as? io.prism.PrismApplication)
+                                    ?.setAccessibilitySelfHealEnabled(on)
+                                if (on) {
+                                    // 打开开关立即尝试一次（不等待下次前台打点）
+                                    Thread {
+                                        runCatching {
+                                            io.prism.phonecontrol.health.AccessibilityHealthMonitor
+                                                .notifyAppActive(context, force = true)
+                                        }
+                                    }.start()
+                                }
+                            }
+                        )
+                    }
+                )
+            }
             // v1 US-201（LLM 操控手机）：无障碍服务引导 + 用途声明（prominent disclosure）
             item { SetSection("手机操控（LLM 操控手机）") }
             item {
@@ -291,13 +709,70 @@ fun SettingsScreen(
                 SetRow(
                     icon = "🪟",
                     iconColor = PrismIndigo,
-                    title = "后台操控（虚拟屏）",
-                    subtitle = "聊天页开启「后台操控」后，AI 把应用启动到后台虚拟屏执行，你可同时使用手机。" +
-                        if (canDrawOverlays) "悬浮窗权限：已授权" else "悬浮窗权限：未授权（后台启动需要，点此去授权）",
+                    title = "后台操控（执行面）",
+                    subtitle = buildString {
+                        append(
+                            if (hiddenDisplayEnabled) "隐藏虚拟屏：主屏不出现小窗（需 Shizuku）"
+                            else "兼容模式：overlay 小窗可能出现在主屏"
+                        )
+                        append(" · ")
+                        append(if (canDrawOverlays) "悬浮窗权限已授权" else "悬浮窗权限未授权（点此去授权）")
+                        // US-3117 AC-1（ac-verifier 复核缺口）：`daemon(false)` 后用户服务随 App
+                        // 进程退出回收，下次需重新连接——把代价如实告知，避免用户以为"掉了"。
+                        append("\nShizuku 服务随 App 退出回收，下次使用会重新连接（约数百毫秒）")
+                        backendNote?.let { append("\n最近回落：").append(it) }
+                    },
                     onClick = {
                         if (!canDrawOverlays) {
                             openOverlaySettings()
                         }
+                    }
+                )
+            }
+            // ADR-065（US-3114 AC-1/AC-5）：隐藏执行面开关（默认开；失败自动回落兼容模式）
+            item {
+                SetRow(
+                    icon = "👁",
+                    iconColor = PrismIndigo,
+                    title = "隐藏执行面",
+                    subtitle = if (hiddenDisplaySaveError != null) {
+                        hiddenDisplaySaveError ?: ""
+                    } else if (hiddenDisplayEnabled) {
+                        "开启 · 优先 shell 隐藏虚拟屏；创建失败自动回落兼容模式（主屏可能出现小窗）"
+                    } else {
+                        "关闭 · 使用兼容模式（overlay / 自建虚拟屏，主屏可能出现可见小窗）"
+                    },
+                    trailing = {
+                        PrismSwitch(
+                            checked = hiddenDisplayEnabled,
+                            onCheckedChange = { viewModel.setHiddenDisplayEnabled(it) }
+                        )
+                    },
+                    onClick = { viewModel.setHiddenDisplayEnabled(!hiddenDisplayEnabled) }
+                )
+            }
+            // ADR-065（US-3114 AC-3）：Watch 悬浮窗（≤2fps；关闭不中断执行）
+            item {
+                SetRow(
+                    icon = "📺",
+                    iconColor = PrismIndigo,
+                    title = "观看 AI 操作（Watch）",
+                    subtitle = when {
+                        watchError.isNotEmpty() -> watchError
+                        !canDrawOverlays -> "需要「显示在其他应用上层」权限（点此去授权）"
+                        watchRunning -> "已开启 · 悬浮窗实时显示执行面（≤2fps，画面会显示在屏幕上、可能被录屏）；关闭不影响执行"
+                        else -> "关闭 · 开启后可在悬浮窗实时查看 AI 在后台做什么（画面会显示在屏幕上）"
+                    },
+                    trailing = {
+                        PrismSwitch(
+                            checked = watchRunning,
+                            onCheckedChange = { on ->
+                                if (on && !canDrawOverlays) openOverlaySettings() else toggleWatch(on)
+                            }
+                        )
+                    },
+                    onClick = {
+                        if (!watchRunning && !canDrawOverlays) openOverlaySettings() else toggleWatch(!watchRunning)
                     }
                 )
             }
@@ -352,6 +827,294 @@ fun SettingsScreen(
                 )
             }
             // 批次22 修复轮五（2026-09-07）：语音通话热词（同音字偏置，用户词库）
+            // ==================== QQ 小号助手（ADR-062/063；US-3101/3105/3108） ====================
+            item { SetSection("QQ 小号助手") }
+            // US-3101 AC-1/AC-2：总开关（默认关）+ 风险告知确认前置
+            item {
+                SetRow(
+                    icon = "🐧",
+                    iconColor = PrismMint,
+                    title = "QQ 小号助手",
+                    subtitle = if (qqConfig.enabled) "已开启 · AI 可以小号身份发消息/改签名" else "未开启 · 开启前需确认风险告知",
+                    trailing = {
+                        PrismSwitch(
+                            checked = qqConfig.enabled,
+                            onCheckedChange = { on ->
+                                if (on && !qqConfig.riskAccepted) {
+                                    qqRiskDialogVisible = true
+                                } else {
+                                    qqScope.launch { qqApp?.qqConfigRepository?.setEnabled(on) }
+                                }
+                            }
+                        )
+                    }
+                )
+            }
+            item {
+                SetRow(
+                    icon = "⚠️",
+                    iconColor = Color(0xFFFF7A6B),
+                    title = "风险告知",
+                    subtitle = if (qqConfig.riskAccepted) "已确认（自动化操作小号存在被平台限制/冻结的可能）" else "未确认 · 开启总开关前必须确认",
+                    onClick = { qqRiskDialogVisible = true }
+                )
+            }
+            // ADR-064 / US-3110：传输通道（默认协议端；无障碍为兜底）
+            item {
+                SetRow(
+                    icon = "🔌",
+                    iconColor = PrismIndigo,
+                    title = "传输通道",
+                    subtitle = (if (qqConfig.transport == io.prism.qq.channel.QqTransport.ONEBOT) {
+                        "首选协议端 OneBot 11（未连接时自动改用无障碍兜底）· 点击切换为仅无障碍"
+                    } else {
+                        "首选无障碍（可能显示副屏小窗）· 点击切换回协议端优先"
+                    }) + if (qqConfig.transport == io.prism.qq.channel.QqTransport.ONEBOT &&
+                        qqConfig.oneBotToken.isBlank()
+                    ) {
+                        "\n⚠ 协议端未配置 access_token，当前实际走无障碍兜底"
+                    } else {
+                        ""
+                    } + if (qqEffectiveChannelText.isBlank()) "" else "\n${qqEffectiveChannelText}",
+                    onClick = {
+                        qqScope.launch {
+                            val next = if (qqConfig.transport == io.prism.qq.channel.QqTransport.ONEBOT) {
+                                io.prism.qq.channel.QqTransport.ACCESSIBILITY
+                            } else {
+                                io.prism.qq.channel.QqTransport.ONEBOT
+                            }
+                            qqApp?.qqConfigRepository?.setTransport(next)
+                        }
+                    }
+                )
+            }
+            // US-3110 AC-1/AC-3/AC-7：协议端连接配置与状态
+            item {
+                SetRow(
+                    icon = "🌐",
+                    iconColor = PrismIndigo,
+                    title = "协议端连接",
+                    subtitle = qqChannelStatusText.ifBlank {
+                        if (qqConfig.oneBotToken.isBlank()) {
+                            "未配置 · 需自建 NapCat/SnowLuma（个人自用）并填写 access_token"
+                        } else {
+                            "HTTP ${qqConfig.oneBotBaseUrl} · WS ${qqConfig.oneBotWsUrl} · token 已隐藏（点击编辑）"
+                        }
+                    },
+                    onClick = {
+                        qqBaseUrlDraft = qqConfig.oneBotBaseUrl
+                        qqWsUrlDraft = qqConfig.oneBotWsUrl
+                        // 不回填 token（PRD US-3110 AC-3 展示脱敏）；留空=保持原值
+                        qqTokenDraft = ""
+                        qqClearToken = false
+                        qqSelfIdDraft = qqConfig.oneBotSelfId.takeIf { it > 0 }?.toString().orEmpty()
+                        qqTargetIdDraft = qqConfig.oneBotTargetUserId.takeIf { it > 0 }?.toString().orEmpty()
+                        qqOneBotDialogVisible = true
+                    }
+                )
+            }
+            // US-3110 AC-1：连接测试（实时探测当前通道）
+            item {
+                SetRow(
+                    icon = "📡",
+                    iconColor = PrismMint,
+                    title = "连接测试",
+                    subtitle = "点击检测当前生效通道与连接状态",
+                    onClick = {
+                        qqScope.launch {
+                            // 如实展示**配置所选通道**的状态（协议端失败原因不再被兜底掩盖）
+                            qqChannelStatusText = runCatching {
+                                qqApp?.configuredQqChannelStatus()?.detail
+                            }.getOrNull() ?: "未初始化（请重启应用后重试）"
+                        }
+                    }
+                )
+            }
+            // US-308 AC-3（原文保留）：目标联系人（小号对用户主号的备注名）
+            item {
+                SetRow(
+                    icon = "👤",
+                    iconColor = PrismIndigo,
+                    title = "定时消息联系人",
+                    subtitle = qqConfig.targetContact.ifBlank { "未配置 · 小号对你的备注名（定时消息发给谁）" },
+                    onClick = {
+                        qqContactDraft = qqConfig.targetContact
+                        qqContactDialogVisible = true
+                    }
+                )
+            }
+            // US-3108 AC-1/AC-2：随机定时主动消息
+            item {
+                SetRow(
+                    icon = "⏰",
+                    iconColor = PrismIndigo,
+                    title = "随机定时主动消息",
+                    subtitle = if (qqConfig.scheduleEnabled) {
+                        "已开启 · %s 时段内随机联系你（每日至多 ${qqConfig.maxPerDay} 次，${if (qqConfig.usePoisson) "泊松" else "均匀"}随机）".format(
+                            io.prism.qq.QqTimeOfDay.describe(
+                                qqConfig.windowStartMinute, qqConfig.windowEndMinute
+                            )
+                        )
+                    } else {
+                        "未开启 · 在设定时段内随机时刻主动发消息（营造真实感）"
+                    },
+                    trailing = {
+                        PrismSwitch(
+                            checked = qqConfig.scheduleEnabled,
+                            onCheckedChange = { on -> qqScope.launch { qqApp?.qqConfigRepository?.setScheduleEnabled(on) } }
+                        )
+                    }
+                )
+            }
+            // US-3109：双向对话（你发消息给小号 → AI 后台以小号身份自动回复）
+            item {
+                SetRow(
+                    icon = "💬",
+                    iconColor = PrismIndigo,
+                    title = "双向对话（自动回复）",
+                    subtitle = if (qqConfig.autoReplyEnabled) {
+                        "已开启 · 你给小号发消息后，AI 会在后台以小号身份回你（消息正文会发送至你配置的模型端点以生成回复）"
+                    } else {
+                        "未开启 · 开启后你发消息给小号，AI 会像真人一样回你（正文将发往模型端点）"
+                    },
+                    trailing = {
+                        PrismSwitch(
+                            checked = qqConfig.autoReplyEnabled,
+                            onCheckedChange = { on ->
+                                qqScope.launch { qqApp?.qqConfigRepository?.setAutoReplyEnabled(on) }
+                            }
+                        )
+                    }
+                )
+            }
+            // US-3115 AC-1/AC-2：活跃时段 / 每日上限 / 最小间隔**自由编辑**（不再循环预设）
+            item {
+                SetRow(
+                    icon = "🕐",
+                    iconColor = PrismIndigo,
+                    title = "活跃时段",
+                    subtitle = "%s - %s（点击自由编辑）".format(
+                        io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute),
+                        io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
+                    ),
+                    onClick = {
+                        qqWindowStartDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute)
+                        qqWindowEndDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
+                        qqCapDraft = qqConfig.dailyCap.toString()
+                        qqIntervalDraft = (qqConfig.minIntervalMs / 60_000L).toString()
+                        qqScheduleError = ""
+                        qqScheduleDialogVisible = true
+                    }
+                )
+            }
+            item {
+                SetRow(
+                    icon = "🚦",
+                    iconColor = PrismIndigo,
+                    title = "每日消息上限",
+                    subtitle = "${qqConfig.dailyCap} 条 / 天 · 最小间隔 ${qqConfig.minIntervalMs / 60000} 分钟（点击自由编辑）",
+                    onClick = {
+                        qqWindowStartDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute)
+                        qqWindowEndDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
+                        qqCapDraft = qqConfig.dailyCap.toString()
+                        qqIntervalDraft = (qqConfig.minIntervalMs / 60_000L).toString()
+                        qqScheduleError = ""
+                        qqScheduleDialogVisible = true
+                    }
+                )
+            }
+            // 2026-10-25（US-3115 AC-6）：熄屏策略 + 上次执行结果（不再"只能看熔断"）
+            item {
+                SetRow(
+                    icon = "🌙",
+                    iconColor = PrismIndigo,
+                    title = "熄屏时点亮屏幕执行",
+                    subtitle = if (qqConfig.wakeOnScreenOff) {
+                        "已开启 · 到点若屏幕熄灭，会临时点亮并保持亮屏把消息发出（执行后不强制熄屏）"
+                    } else {
+                        "已关闭 · 熄屏时跳过本次定时消息并记录原因（仅在协议端可用时不受影响）"
+                    },
+                    trailing = {
+                        PrismSwitch(
+                            checked = qqConfig.wakeOnScreenOff,
+                            onCheckedChange = { on ->
+                                qqScope.launch { qqApp?.qqConfigRepository?.setWakeOnScreenOff(on) }
+                            }
+                        )
+                    }
+                )
+            }
+            item {
+                SetRow(
+                    icon = "📋",
+                    iconColor = PrismMint,
+                    title = "定时任务最近状态",
+                    subtitle = qqLastOutcomeText.ifBlank {
+                        "尚无执行记录（到点后这里会展示成功/跳过/失败与原因）"
+                    } + if (qqCircuitOpen) " · 已熔断（需手动恢复）" else ""
+                )
+            }
+            // US-3112 AC-1/AC-4：历史上下文条数 + 记忆注入开关（含数据外发披露）
+            item {
+                SetRow(
+                    icon = "🧠",
+                    iconColor = PrismIndigo,
+                    title = "历史上下文条数",
+                    subtitle = "最近 ${qqConfig.historyLimit} 条（点击编辑）· 消息与记忆会发送至模型端点",
+                    onClick = {
+                        qqHistoryDraft = qqConfig.historyLimit.toString()
+                        qqHistoryError = ""
+                        qqHistoryDialogVisible = true
+                    }
+                )
+            }
+            item {
+                SetRow(
+                    icon = "📚",
+                    iconColor = PrismIndigo,
+                    title = "注入 Prism 记忆",
+                    subtitle = if (qqConfig.memoryInjectionEnabled) {
+                        "已开启 · 回复时参考跨会话记忆与用户画像（相关片段会发送至模型端点）"
+                    } else {
+                        "已关闭 · 仅使用最近对话，不注入记忆"
+                    },
+                    trailing = {
+                        PrismSwitch(
+                            checked = qqConfig.memoryInjectionEnabled,
+                            onCheckedChange = { on ->
+                                qqScope.launch { qqApp?.qqConfigRepository?.setMemoryInjectionEnabled(on) }
+                            }
+                        )
+                    }
+                )
+            }
+            // 随机策略（US-3108 AC-2；用户裁定"择优真人感"——泊松更突发，均匀更平缓）
+            item {
+                SetRow(
+                    icon = "🎲",
+                    iconColor = PrismIndigo,
+                    title = "随机策略",
+                    subtitle = if (qqConfig.usePoisson) "泊松过程 · 偶发成串，更像真人想起你（点击切换）" else "时间窗内均匀采样 · 平缓随机（点击切换）",
+                    onClick = { qqScope.launch { qqApp?.qqConfigRepository?.setUsePoisson(!qqConfig.usePoisson) } }
+                )
+            }
+            // US-3105 AC-3/AC-4：熔断状态与恢复
+            if (qqCircuitOpen) {
+                item {
+                    SetRow(
+                        icon = "⛔",
+                        iconColor = Color(0xFFFF7A6B),
+                        title = "已熔断",
+                        subtitle = "连续多次发送失败已自动停止（保护小号账号）。点击手动恢复",
+                        onClick = {
+                            qqScope.launch {
+                                qqApp?.qqRuntimeStateRepository?.resetCircuit()
+                                qqCircuitOpen = false
+                            }
+                        }
+                    )
+                }
+            }
             item { SetSection("语音通话") }
             item { VoiceHotwordsEditor() }
             // 批次23-A（ADR-048，A4）：语音引擎（ASR/TTS 云端双轨手选 + Key 配置 + 连通性自检）
@@ -1012,6 +1775,8 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
         }
     }
     var showValidation by remember(config.id) { mutableStateOf(false) }
+    // guardrail L-28：保存被安全策略拒绝时的可读错误（如远端明文 http）
+    val saveError by viewModel.providerSaveError.collectAsState()
 
     // 仅首次进入弹层时回显已存 Key，避免重组覆盖用户输入（与 ApiKeySheet 守卫一致）
     if (!apiKeyLoaded) {
@@ -1026,7 +1791,8 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
     // 防止经 buildEndpoint / applyCustomHeaders 注入首部（OkHttp 引擎虽已 fail-closed，此处兜底）。
     val nameValid = name.trim().isNotEmpty()
     val baseUrlTrimmed = baseUrl.trim()
-    val urlValid = baseUrlTrimmed.startsWith("http://") || baseUrlTrimmed.startsWith("https://")
+    val urlValid = (baseUrlTrimmed.startsWith("http://") || baseUrlTrimmed.startsWith("https://")) &&
+        io.prism.network.PrivateNetwork.isCleartextAllowed(baseUrlTrimmed)
     val urlSafe = urlValid && !baseUrlTrimmed.contains('\r') && !baseUrlTrimmed.contains('\n')
     val canSave = nameValid && urlValid && urlSafe
     val validHeaders = headers
@@ -1059,11 +1825,16 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
                             supportsVisionSet = supportsVisionTouched
                         )
                     )
-                    if (activateAfterSave) {
+                    // savedId=null 表示被安全策略拒绝（错误文案经 providerSaveError 展示）
+                    if (savedId != null && activateAfterSave) {
                         viewModel.setActive(savedId)
                     }
                 }
             )
+            if (saveError != null) {
+                Spacer(Modifier.height(8.dp))
+                ValidationError(saveError!!)
+            }
             if (showValidation && !canSave) {
                 Spacer(Modifier.height(8.dp))
                 ValidationError("请修正以上无效输入后再保存")

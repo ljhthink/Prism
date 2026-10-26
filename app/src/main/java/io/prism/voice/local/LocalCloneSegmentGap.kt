@@ -41,6 +41,33 @@ internal object LocalCloneSegmentGap {
     private const val MAX_SILENCE_SAMPLES = 192_000
 
     /**
+     * **单次播报**允许插入的静音**总时长**上界（毫秒）。
+     *
+     * 为什么要它（批次29 验收 DEF-01）：[gapMsFor] 只按"边界类型"逐边界给停顿，**没有任何总量概念**
+     * ⇒ 插入静音随输入长度**线性增长**。实测（批次29 验收 §3.5，`gapMs = 2000`＝合法域上界）：
+     * 40 字 ⇒ 40 段 / **78.0 s**；4000 字 ⇒ 201 段 / **400 s**；20000 字 ⇒ 1001 段 / **2000 s（33 分钟）**。
+     * 换成生产要启用的 500 ms 仍有 ≈25 ms/字（2000 字回复 ⇒ 50 s 静音）——**属体验灾难级**。
+     * 不 OOM 也不 SIGKILL（单边界硬顶 [MAX_SILENCE_SAMPLES]、无溢出），但"播报中间静默几十秒"
+     * 与"语速过快"是同一类用户可感缺陷。
+     *
+     * ## 为什么取 20 秒
+     * 真人语料的**整句**停顿最长 680~780 ms；本值不是"自然语言的合理停顿"，而是
+     * **"异常兜底"**——正常回复根本触不到它：
+     * 500 ms 档下可容纳 **40 个句末边界**（20 000 ÷ 500；子句档 0.4×500=200 ms 则可容纳 100 个）。
+     * 触到即说明文本异常长，此时**牺牲尾部停顿保播报完整**比"安静几十秒"更可接受。
+     * （勘误：初版此处误写"960 个"，把量级算错 24 倍，guardrail F3 指出。）
+     *
+     * ## 语义（与 [gapPlanFor] 严格一致）
+     * 预算**按毫秒累计**，达到上界后**其后所有边界一律 0**（硬停，不是"绕过后再试小的"）——
+     * 硬停让行为**单调可预测**：文本越长，尾部停顿越早退化为无停顿，不会出现
+     * "中间某处又冒出停顿"的跳变。
+     *
+     * ⚠️ **本值参与缓存键**（[localCloneCacheKey] 的 `maxTotalGapMs`）：它是**代码常量**，
+     * 改它不会改变任何 `config` 字段 ⇒ 不并入键就会出现"改了没效果"（F-3 同型）。
+     */
+    const val MAX_TOTAL_GAP_MS = 20_000
+
+    /**
      * 按**上一段的结尾字符**判定该边界该插多少静音。
      *
      * 判定前 `trimEnd()` 取最后一个**非空白**字符（清单/切分可能留下尾随空白）。
@@ -94,5 +121,48 @@ internal object LocalCloneSegmentGap {
     fun silence(gapMs: Int, sampleRate: Int): FloatArray {
         val n = silenceSamples(gapMs, sampleRate)
         return if (n <= 0) FloatArray(0) else FloatArray(n)
+    }
+
+    /**
+     * 为一次播报算出**每个段边界**应插入的静音样本数（末段恒 0），并施加总时长上界。
+     *
+     * 这是段间停顿的**唯一出口**：流式与非流式两条播放路径都必须消费本函数的返回值，
+     * 不得各自再调 [gapMsFor]/[silenceSamples]——批次29 时两路各有一份等价实现
+     * （引擎内两处独立 `gapMsFor` + `silence` 调用），属同一语义两处实现，是漂移点；
+     * 本函数把它们收敛为一处（批次30）。
+     *
+     * ## 规则
+     * 1. 逐边界按 [gapMsFor] 定档（句末满额 / 子句 0.4 / 硬切 0），再按 [silenceSamples] 折算样本；
+     * 2. **按毫秒累计**已用预算；某边界会使累计**超过** [maxTotalGapMs] 时，
+     *    该边界及**其后所有边界**一律 0（硬停，见 [MAX_TOTAL_GAP_MS] 的语义说明）；
+     * 3. 末段之后不插（`plan[lastIndex]` 恒 0）。
+     *
+     * @param segments 本次播报的全部段（顺序即播放顺序）
+     * @param baseGapMs 清单里的基准段间停顿（`<= 0` ⇒ 全 0，即"默认不改变行为"）
+     * @param sampleRate 采样率（由引擎回报）
+     * @param maxTotalGapMs 总静音上界（默认 [MAX_TOTAL_GAP_MS]；`<= 0` 视为 0 ⇒ 全 0，
+     *   与"越界/脏值一律不插"的既有约定一致，**不**解释为"无上限"）
+     * @return 长度恒等于 `segments.size` 的样本数数组；调用方按 `plan[i] > 0` 决定是否插入
+     */
+    fun gapPlanFor(
+        segments: List<String>,
+        baseGapMs: Int,
+        sampleRate: Int,
+        maxTotalGapMs: Int = MAX_TOTAL_GAP_MS
+    ): IntArray {
+        val plan = IntArray(segments.size)
+        if (baseGapMs <= 0 || sampleRate <= 0 || maxTotalGapMs <= 0) return plan
+        var usedMs = 0L
+        for (i in 0 until segments.size - 1) {
+            val gapMs = gapMsFor(segments[i], baseGapMs)
+            if (gapMs <= 0) continue
+            // 硬停：预算不足以再容纳一个完整边界时，其后全部为 0（不"跳过它再试更小的"）
+            if (usedMs + gapMs > maxTotalGapMs) break
+            val samples = silenceSamples(gapMs, sampleRate)
+            if (samples <= 0) continue
+            plan[i] = samples
+            usedMs += gapMs
+        }
+        return plan
     }
 }
