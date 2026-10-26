@@ -352,15 +352,65 @@ AI 协作规则位于 [AGENTS.md](AGENTS.md)（入口）与 `rules/` 模块，�
 
 提交信息建议遵循 `type(scope): 摘要` 形式（如 `fix(qq): …`），并在正文说明取证与验证方式。
 
-## 许可证与致谢
+## 开源声明与致谢
 
-基于 [Apache License 2.0](LICENSE) 开源，第三方组件署名见 [NOTICE](NOTICE)。
+Prism 基于 [Apache License 2.0](LICENSE) 开源。
 
-特别致谢：
+### 运行时依赖
 
-- [Shizuku](https://shizuku.rikka.app/) —— 提供免 root 的 shell 能力通道
-- [OpenCyvis](https://github.com/opencyvis/opencyvis-phone) —— 隐藏虚拟显示方案的参考实现
-- [pixi.js](https://pixijs.com/) / [pixi-live2d-display](https://github.com/guansss/pixi-live2d-display) / [Live2D Cubism](https://www.live2d.com/) —— 桌宠渲染栈
-- [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) / [ONNX Runtime](https://onnxruntime.ai/) —— 端侧语音与嵌入推理
+以下开源项目随 APK 分发，完整署名与许可证原文见 [NOTICE](NOTICE)。
 
-> 本项目仅供个人学习与自用。使用手机操控、QQ 小号助手等能力时，请自行确认是否符合目标平台的服务条款与当地法律法规。
+| 项目 | 用途 | 许可证 |
+|---|---|---|
+| [Kotlin](https://kotlinlang.org/) / [kotlinx.coroutines](https://github.com/Kotlin/kotlinx.coroutines) / [kotlinx.serialization](https://github.com/Kotlin/kotlinx.serialization) | 语言与并发、序列化 | Apache-2.0 |
+| [Jetpack Compose](https://developer.android.com/jetpack/compose) / [AndroidX](https://developer.android.com/jetpack) / [Material 3](https://m3.material.io/) | 声明式 UI 与设计系统 | Apache-2.0 |
+| [ObjectBox](https://objectbox.io/) | 端侧数据库（对话、记忆、知识库索引） | Apache-2.0 |
+| [Ktor](https://ktor.io/) | HTTP / SSE / WebSocket 客户端 | Apache-2.0 |
+| [MCP Kotlin SDK](https://github.com/modelcontextprotocol/kotlin-sdk) | Model Context Protocol 客户端与服务端 | MIT（迁移至 Apache-2.0 中） |
+| [ONNX Runtime](https://onnxruntime.ai/) | 端侧嵌入与语音推理 | MIT |
+| [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | 端侧流式 ASR 与 VITS 语音合成 | Apache-2.0 |
+| [Tink](https://github.com/tink-crypto/tink-java) | 密钥加密封装（配合 Android Keystore） | Apache-2.0 |
+| [Shizuku API](https://github.com/RikkaApps/Shizuku-API) | 免 root shell 能力通道 | MIT |
+| [Apache PDFBox](https://pdfbox.apache.org/)（经 [pdfbox-android](https://github.com/TomRoush/PdfBox-Android)） | PDF 解析 | Apache-2.0 |
+| [Apache POI](https://poi.apache.org/) | DOCX / XLSX 解析与生成 | Apache-2.0 |
+| [snakeyaml-engine-kmp](https://github.com/krzema12/snakeyaml-engine-kmp) | SKILL.md frontmatter 解析 | Apache-2.0 |
+| [multiplatform-markdown-renderer](https://github.com/mikepenz/multiplatform-markdown-renderer) | Compose 原生 Markdown 渲染 | Apache-2.0 |
+| [jsoup](https://jsoup.org/) | HTML 解析 | MIT |
+| [Readability4J](https://github.com/dankito/Readability4J) | 网页正文提纯（Mozilla Readability 移植） | Apache-2.0 |
+| [Lottie](https://github.com/airbnb/lottie-android) | 动画渲染 | Apache-2.0 |
+| [pixi.js](https://pixijs.com/) / [pixi-live2d-display](https://github.com/guansss/pixi-live2d-display) | 桌宠渲染（`assets/pet/vendor/`，含 MIT 许可证原文） | MIT |
+| [Robolectric](https://robolectric.org/) | JVM 单元测试（仅测试期） | MIT |
+
+另有两处**非开源**组件，已确认使用条款：
+
+- **Live2D Cubism Core**（`live2dcubismcore.min.js`）—— Live2D 专有软件许可，仅用于渲染用户自行导入的模型资产
+- **ML Kit 文字识别**（`text-recognition-chinese`）—— Google APIs 服务条款，仅在纯文本模型需要 OCR 时本地调用，不联网上传
+
+### 借鉴与参考的项目
+
+Prism 的若干设计并非从零发明，而是基于上游项目的研究与移植。下表说明**借鉴了什么**以及**边界**（详细决策见括号内 ADR）：
+
+| 上游项目 | 借鉴内容 | 边界 / 许可 |
+|---|---|---|
+| [OpenClaw](https://docs.openclaw.ai/tools/skills) | `SKILL.md` 格式、6 层加载优先级、渐进式披露、工具声明与门控机制 | **纯 Kotlin 重实现设计，无代码复用**（TS 无法运行于 Android）。MIT。见 [ADR-001](docs/decisions/ADR-001-prism-tech-stack.md) / [ADR-013](docs/decisions/ADR-013-m4-skills-system-architecture.md) |
+| [OpenCyvis](https://github.com/opencyvis/opencyvis-phone) | 隐藏虚拟屏的创建方式与 flags 逐级降级策略（`DisplayBackend` / `ShizukuShell`） | 仅移植该路线，未引入其产品外壳或无关源码。Apache-2.0，署名见 [NOTICE](NOTICE)。见 [ADR-065](docs/decisions/ADR-065-display-backend-abstraction-watch-takeover.md) |
+| [Open-AutoGLM](https://github.com/zai-org/Open-AutoGLM) | 手机操控的能力形态与工具集设计（LLM 直接操作手机） | **明确不移植其 PC 端 ADB 方案**，改以 Android 本地无障碍重建。见 [ADR-036](docs/decisions/ADR-036-v1-phone-control.md) |
+| [Operator-on-Android](https://github.com/xjyzs/Operator-on-Android) · ShadowAuto · Canvas · scrcpy | 作为「root / shell / 虚拟屏」三条路线的可行性证据与方案对比 | **仅作为调研证据与技术对照，未采用其代码**。见 [ADR-045](docs/decisions/ADR-045-virtual-display-bg-control.md) / [ADR-047](docs/decisions/ADR-047-voice-v2-and-task-move.md) |
+| [Cyrene-Agent](https://github.com/clark970417-eng/Cyrene-Agent) | 角色包人设结构、桌宠渲染与交互（命中区、口型、表情复位、动作别名）的移植来源 | 上游资产按语义移植，**产物仅进入用户设备、不入公开仓库**（角色资产属用户私有）。见 [ADR-049](docs/decisions/ADR-049-roleplay-fidelity-fix.md) / [ADR-051](docs/decisions/ADR-051-rolepack-pet-live2d.md) / [ADR-052](docs/decisions/ADR-052-cyrene-rolecard-v7.md) |
+| [TencentDB-Agent-Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory) | L2 记忆的原子记忆抽取思路 | 设计参考，未引入代码。见 [ADR-033](docs/decisions/ADR-033-uxr11-real-device-fixes.md) |
+| mem0 · CALMem | 三层记忆架构的业界方案对比 | 调研参考。见 [ADR-015](docs/decisions/ADR-015-m5-memory-system-architecture.md) |
+| [Continuous-learning](https://github.com/ljhthink)（作者前作） | Skills 与记忆的架构设计、知识库美术资源索引的选型方法论 | 自有项目，**复用设计而非代码**。见 [ADR-001](docs/decisions/ADR-001-prism-tech-stack.md) / [ADR-002](docs/decisions/ADR-002-prism-chat-ui-architecture.md) |
+| gstack | 代码评审模板的结构 | 融入内置 `code-reviewer` Skill 的模板结构。见 [ADR-029](docs/decisions/ADR-029-uxr8-b2-optimizations.md) |
+| [OneBot 11](https://github.com/botuniverse/onebot-11) | QQ 协议端的消息与事件规范 | 公开协议标准，自带客户端实现。见 [ADR-064](docs/decisions/ADR-064-qq-dual-transport-onebot-primary.md) |
+
+**仅连接、不分发**：QQ 小号助手的协议端依赖用户自建的 [NapCat](https://github.com/NapNeko/NapCatQQ) 或 SnowLuma 实例。这两个项目采用非 OSI 的「源码可见、禁商用 / 禁未授权再分发」许可，Prism **不内置、不捆绑、不修改后分发**，只通过 HTTP / WebSocket 连接用户自己部署的实例；若不使用协议端，可完全走无障碍通道。见 [ADR-062](docs/decisions/ADR-062-qq-burner-account-android-control.md)。
+
+**选型后否决**：AstrBot（AGPL-3.0）/ LangBot / MaiBot 等完整机器人平台因职责重叠与许可证传染性未被使用；豆包 RealtimeAPI / TEN Framework 仅参与语音方案对比。
+
+### 许可边界
+
+- 本项目代码为 Apache-2.0；**用户导入的角色包、形象资产、音色包、训练素材不随本项目分发**，其授权由用户自行确认
+- 角色 IP 与模型版权归原作者所有（示例：Live2D 模型作者为 B 站 UP 主 [是依七哒](https://space.bilibili.com/457683484)，角色 IP 属米哈游 / HoYoverse 且禁止商用）
+- 手机操控、QQ 小号助手等能力涉及第三方 App 的自动化与账号操作，请自行确认是否符合目标平台条款与当地法规
+
+> 本项目仅供个人学习与自用。
