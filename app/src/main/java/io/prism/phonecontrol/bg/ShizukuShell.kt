@@ -1,4 +1,4 @@
-package io.prism.phonecontrol.bg
+﻿package io.prism.phonecontrol.bg
 
 import android.content.ComponentName
 import android.content.ServiceConnection
@@ -44,8 +44,10 @@ object ShizukuShell {
      *  ADR-065（US-3114）：+隐藏虚拟屏三方法 → 升 3；guardrail r1 C-4：截屏加 maxWidth → 升 4。
      *  2026-10-25（帧健康）：+captureHiddenFrameJpeg / hiddenFrameInfo → 升 5
      *  （破坏性签名变更：旧用户服务进程不含新方法，必须重建）。
-     *  2026-10-26（孤儿清理）：+selfPid → 升 6（同上，旧进程需重建）。 */
-    private const val USER_SERVICE_VERSION = 6
+     *  2026-10-26（孤儿清理）：+selfPid → 升 6（同上，旧进程需重建）。
+     *  2026-10-26（通知探针）：+notificationSnapshotFor → 升 7（同上；660KB 原始 dump
+     *    超 Binder 上限，必须改为服务端过滤后回传）。 */
+    private const val USER_SERVICE_VERSION = 7
 
     private val bindLock = Any()
 
@@ -226,7 +228,16 @@ object ShizukuShell {
      * 固定命令、不接受任何自由输入（无注入面）；shell 持有 DUMP 权限，可看到全用户通知。
      * 输出可能较大，调用方必须限频（默认 90s）并只做散列比对，不解析具体内容。
      */
-    fun notificationSnapshot(): String? = execOutput("dumpsys", "notification")
+    fun notificationSnapshot(): String? {
+        // 2026-10-26 真机修复：**不能**把 `dumpsys notification` 的原始输出（约 660KB）
+        // 跨 Binder 传回——UTF-16 编码超过 1MB 事务上限，调用方只会拿到 null。
+        // 改为让用户服务进程内先过滤（只回传目标包相关行，几 KB）。
+        val svc = ensureUserService() ?: return null
+        return runCatching { svc.notificationSnapshotFor(SNAPSHOT_FILTER_PACKAGE) }.getOrNull()
+    }
+
+    /** 通知摘要过滤用的包名（QQ 主/小号同包名；仅作"有变化"信号，不做实例区分）。 */
+    private const val SNAPSHOT_FILTER_PACKAGE = "com.tencent.mobileqq"
 
     /**
      * 清理**孤儿**用户服务进程（ADR-046 修订 2026-10-26；PRD US-3117 AC-3）。
@@ -750,6 +761,9 @@ class ShizukuUserService(private val context: android.content.Context?) : IShizu
     /** 与 ShizukuShell.EXEC_TIMEOUT_MS 一致的等待上限（UserService 进程内独立常量）。 */
     private val EXEC_TIMEOUT_MS = 5_000L
 
+    /** 过滤后通知摘要的上限（匹配行通常只有几 KB；上限仅作兜底防异常大的通知栈）。 */
+    private val MAX_SNAPSHOT_CHARS = 64_000
+
     override fun exec(commands: Array<out String>?): Int {
         if (commands.isNullOrEmpty()) return -1
         return try {
@@ -977,6 +991,29 @@ class ShizukuUserService(private val context: android.content.Context?) : IShizu
      * 故由服务端自报。`Process.myPid()` 在本进程内恒为自身，无欺骗面。
      */
     override fun selfPid(): Int = android.os.Process.myPid()
+
+    /**
+     * 过滤后的通知摘要（2026-10-26 真机修复）。
+     *
+     * **背景**：`dumpsys notification` 原始输出约 660KB；AIDL 以 `String`（UTF-16）返回会
+     * 超过 Binder 事务上限（约 1MB）→ 抛异常 → 调用方只能拿到 null。真机症状：新消息探针
+     * 每 90s 返回 null（日志 `探针结果=null → 跳过（零建屏）`），于是"收到消息不回复"。
+     *
+     * 修法：在**本进程内**按包名过滤后只回传匹配行（几 KB），跨进程传输量降两个数量级。
+     *
+     * @param packageName 仅用于文本包含判断（不拼进 shell 命令，无注入面）
+     */
+    override fun notificationSnapshotFor(packageName: String?): String? {
+        val pkg = packageName?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        // 用绝对路径，避免用户服务进程 PATH 缺 /system/bin（真机 `settings` 已实证该问题）
+        val raw = execWithOutput(arrayOf("/system/bin/dumpsys", "notification")) ?: return null
+        val sb = StringBuilder()
+        raw.lineSequence().forEach { line ->
+            if (sb.length >= MAX_SNAPSHOT_CHARS) return@forEach
+            if (line.contains(pkg)) sb.append(line.trim()).append('\n')
+        }
+        return if (sb.isEmpty()) null else sb.toString()
+    }
 
     /**
      * 帧编码（JPEG/PNG）+ **自适应降级**（2026-10-25 帧健康整改）。

@@ -1,4 +1,4 @@
-package io.prism.debug
+﻿package io.prism.debug
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -163,6 +163,16 @@ class QqDebugReceiver : BroadcastReceiver() {
                             "page kind=$kind titleSet=${title != null} textSet=${text != null}"
                         }
                     }
+                    // 2026-10-26 排障：通知探针原文（验证"过滤后回传"是否真的拿到内容）
+                    ACTION_PROBE_RAW -> {
+                        val snap = io.prism.phonecontrol.bg.ShizukuShell.notificationSnapshot()
+                        if (snap == null) {
+                            "probe=null"
+                        } else {
+                            "probe len=${snap.length} lines=${snap.count { it == '\n' }} " +
+                                "head=${snap.take(120).replace('\n', '|')}"
+                        }
+                    }
                     ACTION_CONFIG -> runBlocking {
                         val repo = app.qqConfigRepository
                         intent.getStringExtra(EXTRA_MAX_PER_DAY)?.toIntOrNull()
@@ -277,6 +287,7 @@ class QqDebugReceiver : BroadcastReceiver() {
         const val ACTION_CONFIG = "config"
         const val ACTION_TREE = "tree"
         const val ACTION_A11Y = "a11y"
+        const val ACTION_PROBE_RAW = "probe_raw"
         const val ACTION_INSTANCES = "instances"
         const val ACTION_PAGE = "page"
         const val EXTRA_LIMIT = "limit"

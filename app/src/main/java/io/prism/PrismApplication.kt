@@ -1663,7 +1663,12 @@ class PrismApplication : Application() {
                 ) {
                     return io.prism.qq.QqReplyOutcome.skipped("该消息已回应过")
                 }
-                when (val d = io.prism.qq.QqThrottle.decide(cfg, rt, now)) {
+                // 2026-10-26 真机修复：被动应答**不再套用主动消息的节流**。
+                // 用户 19:09 的实证：18:53 回过一次 → 19:09 的新消息被判"未达最小间隔
+                // （还需约 14 分钟）"直接丢弃。minInterval/dailyCap/maxPerDay 的语义是
+                // "不要主动打扰用户"，而"用户说话→系统回话"是被请求行为。
+                // 被动路径改走 decidePassive（保留熔断 + 短间隔防双发 + 窗口上限防跑飞）。
+                when (val d = io.prism.qq.QqThrottle.decidePassive(rt, now)) {
                     is io.prism.qq.QqThrottle.Decision.Deny -> return io.prism.qq.QqReplyOutcome.skipped("节流：${d.reason}")
                     io.prism.qq.QqThrottle.Decision.Allow -> Unit
                 }
@@ -1704,7 +1709,16 @@ class PrismApplication : Application() {
                     history = history,
                     memorySection = memory
                 ) ?: return io.prism.qq.QqReplyOutcome.failed("回复生成失败（端点/模型异常）")
-                val result = channel.sendText(contact, reply)
+                // 2026-10-26 真机修复：被动回复经工具执行器发送时会命中**主动**节流
+                // （minInterval/dailyCap/maxPerDay）。这些配额语义是"不要主动打扰"，
+                // 不该拦"用户说话→系统回话"。此处置位被动作用域，闸门改走 decidePassive。
+                val previousScope = io.prism.qq.QqLocalToolExecutor.enterPassiveReplyScope()
+                val sendResult = try {
+                    channel.sendText(contact, reply)
+                } finally {
+                    io.prism.qq.QqLocalToolExecutor.exitPassiveReplyScope(previousScope)
+                }
+                val result = sendResult
                 val sentAt = System.currentTimeMillis()
                 val kind = io.prism.qq.QqFailureClassifier.classify(result)
                 val failed = result.startsWith("错误") || result.startsWith("⚠️")

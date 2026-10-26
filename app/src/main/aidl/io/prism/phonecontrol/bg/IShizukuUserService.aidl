@@ -78,4 +78,17 @@ interface IShizukuUserService {
      * @return `Process.myPid()`（正整数）
      */
     int selfPid();
+
+    /**
+     * 2026-10-26（真机修复）：**过滤后的**通知摘要，只回传与 [packageName] 相关的行。
+     *
+     * **为什么不能在调用方过滤**：`dumpsys notification` 原始输出约 660KB，AIDL 以
+     * `String`（UTF-16）回传会超过 Binder 单次事务上限（约 1MB）→ 抛异常 → 调用方拿到
+     * null。真机实证：新消息探针每 90s 返回 null，导致「收到消息却不回复」。
+     * 过滤在**用户服务进程内**完成，回传量降到几 KB。
+     *
+     * @param packageName 目标包名（仅用于文本过滤，不作 shell 参数，无注入面）
+     * @return 匹配行（已去首尾空白、`\n` 连接）；无匹配或读取失败返回 null
+     */
+    String notificationSnapshotFor(String packageName);
 }

@@ -1,4 +1,4 @@
-﻿package io.prism.qq
+package io.prism.qq
 
 import android.util.Log
 import io.prism.phonecontrol.PhoneControlAccessibilityService
@@ -534,6 +534,20 @@ class QqLocalToolExecutor(
         }.getOrDefault(ms.toString())
     }
 
+    /**
+     * **被动应答作用域**（2026-10-26 真机修复）。
+     *
+     * 被动应答（回复对方刚发来的消息）经 `AccessibilityQqChannel.sendText` → 本执行器发送，
+     * 因而会命中 [configAndThrottleGate] 里的**主动**节流（minInterval/dailyCap/maxPerDay）。
+     * 真机实证：19:09 用户再发消息，回复被"已达定时主动消息当日上限（3 次）"拦掉。
+     *
+     * 这些配额的语义是"不要主动打扰用户"，不该约束"用户说话 → 系统回话"。
+     * `autoReplyLocked` 在调用发送前后置位本标记，闸门据此改走 [QqThrottle.decidePassive]
+     * （仍保留熔断、短间隔防双发、窗口上限防跑飞）。
+     */
+    private val passiveReplyScope: Boolean
+        get() = PASSIVE_REPLY_SCOPE.get()
+
     /** 配置闸门（US-3101）+ 节流闸门（US-3105）。null=通过；否则返回可读拒绝文案。 */
     private suspend fun configAndThrottleGate(): String? {
         val repo = configRepoProvider() ?: return "错误：QQ 小号助手配置未装配"
@@ -544,8 +558,15 @@ class QqLocalToolExecutor(
         val runtimeRepo = runtimeRepoProvider()
         if (runtimeRepo != null) {
             val now = System.currentTimeMillis()
-            when (val d = QqThrottle.decide(cfg, runtimeRepo.get(), now)) {
-                is QqThrottle.Decision.Deny -> return "错误：${d.reason}（节流保护，稍后再试；" +
+            val state = runtimeRepo.get()
+            // 被动应答走被动规则；主动/定时消息仍受完整主动节流约束
+            val decision = if (passiveReplyScope) {
+                QqThrottle.decidePassive(state, now)
+            } else {
+                QqThrottle.decide(cfg, state, now)
+            }
+            when (decision) {
+                is QqThrottle.Decision.Deny -> return "错误：${decision.reason}（节流保护，稍后再试；" +
                     "频繁操作易触发平台风控）"
                 QqThrottle.Decision.Allow -> Unit
             }
@@ -824,6 +845,23 @@ class QqLocalToolExecutor(
 
     companion object {
         private const val TAG = "QqTool"
+
+        /**
+         * 进程级"当前处于被动应答发送中"标记（2026-10-26 真机修复）。
+         *
+         * 用 companion 的原因：[QqLocalToolExecutor] 是**多实例**类（按依赖注入构造），
+         * 而置位方（`PrismApplication.autoReplyLocked`）不持有执行器实例；被动应答由
+         * `autoReplyLocked` 的 Mutex 串行化，故进程级单标记即足够。
+         */
+        private val PASSIVE_REPLY_SCOPE = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        /** 进入被动应答作用域（返回上一次值，便于嵌套还原）。 */
+        fun enterPassiveReplyScope(): Boolean = PASSIVE_REPLY_SCOPE.getAndSet(true)
+
+        /** 退出被动应答作用域并还原为 [previous]。 */
+        fun exitPassiveReplyScope(previous: Boolean) {
+            PASSIVE_REPLY_SCOPE.set(previous)
+        }
 
         /** 工具命名空间前缀。 */
         const val NAMESPACE = "qq__"
