@@ -195,6 +195,19 @@ class QqDebugReceiver : BroadcastReceiver() {
                             }
                         }
                     }
+                    // 2026-10-26（US-3124）：表情发送链路真机取证（会真的发一条表情）。
+                    // extras：emotion（默认"开心"）；可指定 contact。
+                    "sticker" -> runBlocking {
+                        val cfg = app.qqConfigRepository.get()
+                        val contact = intent.getStringExtra("contact")
+                            ?.takeIf { it.isNotBlank() } ?: cfg.targetContact
+                        val emotion = intent.getStringExtra("emotion") ?: "开心"
+                        if (contact.isBlank()) {
+                            "sticker=未配置目标联系人"
+                        } else {
+                            app.oneBotChannel.sendSticker(contact, emotion, null)
+                        }
+                    }
                     ACTION_CONFIG -> runBlocking {
                         val repo = app.qqConfigRepository
                         intent.getStringExtra(EXTRA_MAX_PER_DAY)?.toIntOrNull()

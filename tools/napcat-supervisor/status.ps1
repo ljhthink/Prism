@@ -46,12 +46,12 @@ if ($null -eq $cred) {
 } else {
     $list = Invoke-WebUiApi -Port $port -Credential $cred -Path 'QQLogin/GetQuickLoginList'
     $auto = Invoke-WebUiApi -Port $port -Credential $cred -Path 'QQLogin/GetQuickLoginQQ'
-    if ($null -ne $list) { Write-Host ("快登列表：{0}" -f $list.data) }
+    if ($null -ne $list) { Write-Host ("快登列表：{0}" -f ([string]($list.data -join ","))) }
     if ($null -ne $auto) {
         if ([string]::IsNullOrWhiteSpace([string]$auto.data)) {
             Write-Host '自动登录：未设置（掉线后需扫码；运行 install.ps1 可修复）'
         } else {
-            Write-Host ("自动登录：{0}" -f $auto.data)
+            Write-Host ("自动登录：{0}" -f ([string]$auto.data))
         }
     }
 }

@@ -2,20 +2,22 @@
 # 约定：
 #   - 不输出/不记录 token 明文；HTTP 头里带 hash 或 Bearer；
 #   - 所有网络调用有超时，失败返回 $null 而非抛异常（监管循环不能因一次失败退出）。
+#
+# 注意：本文件必须 UTF-8 **带 BOM** 保存（PS 5.1 否则按 GBK 解码中文注释 → 假语法错误）。
 
 $ErrorActionPreference = 'Stop'
 
 function Get-NapCatPaths {
     param([string]$Root = 'D:\s0611\napcat')
     [pscustomobject]@{
-        Root        = $Root
-        ComposeFile = Join-Path $Root 'compose.yaml'
-        ConfigDir   = Join-Path $Root 'data\config'
-        WebUiConfig = Join-Path $Root 'data\config\webui.json'
+        Root         = $Root
+        ComposeFile  = Join-Path $Root 'compose.yaml'
+        ConfigDir    = Join-Path $Root 'data\config'
+        WebUiConfig  = Join-Path $Root 'data\config\webui.json'
         OneBotConfig = Join-Path $Root 'data\config\onebot11.json'
-        LogDir      = Join-Path $Root 'logs'
-        StateFile   = Join-Path $Root 'logs\supervisor-state.json'
-        CredFile    = Join-Path $Root 'logs\webui-credential.json'
+        LogDir       = Join-Path $Root 'logs'
+        StateFile    = Join-Path $Root 'logs\supervisor-state.json'
+        CredFile     = Join-Path $Root 'logs\webui-credential.json'
     }
 }
 
@@ -56,7 +58,7 @@ function Get-Sha256Hex {
     } finally { $sha.Dispose() }
 }
 
-# WebUI 登录 → 返回 Credential（失败 $null）
+# WebUI 登录 -> 返回 Credential（失败 $null）
 #
 # 2026-10-26 实测：webui.json 的 loginRate=3（每分钟最多 3 次登录）。巡检任务 +
 # install/status 手工调用很容易撞上 "login rate limit"，表现为"登录失败"。
@@ -84,7 +86,7 @@ function Get-WebUiCredential {
         $resp = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/api/auth/login" `
             -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 10
         if ($resp.code -ne 0) {
-            # 把服务端原因带出去（"login rate limit" / "token is invalid" 语义完全不同）
+            # 把服务端原因带出去（"login rate limit" 与 "token is invalid" 语义完全不同）
             Write-Verbose ("WebUI 登录失败：{0}" -f $resp.message)
             return $null
         }
@@ -93,10 +95,8 @@ function Get-WebUiCredential {
             try {
                 $dir = Split-Path $CacheFile -Parent
                 if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-                [System.IO.File]::WriteAllText(
-                    $CacheFile,
-                    (@{ Credential = $cred; At = (Get-Date).ToString('o') } | ConvertTo-Json),
-                    [System.Text.UTF8Encoding]::new($false))
+                $payload = @{ Credential = $cred; At = (Get-Date).ToString('o') } | ConvertTo-Json
+                [System.IO.File]::WriteAllText($CacheFile, $payload, [System.Text.UTF8Encoding]::new($false))
             } catch { }
         }
         return $cred
@@ -124,13 +124,14 @@ function Get-OneBotBaseUrl {
         $cfg = Get-Content $OneBotConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
         $srv = $cfg.network.httpServers | Where-Object { $_.enable -eq $true } | Select-Object -First 1
         if ($null -eq $srv) { return $null }
-        $token = [string]$srv.token
-        $port = [int]$srv.port
-        return [pscustomobject]@{ BaseUrl = "http://127.0.0.1:$port"; Token = $token }
+        return [pscustomobject]@{
+            BaseUrl = "http://127.0.0.1:$([int]$srv.port)"
+            Token   = [string]$srv.token
+        }
     } catch { return $null }
 }
 
-# OneBot 调用（返回 data，失败 $null）
+# OneBot 调用（返回原始响应对象，失败 $null）
 function Invoke-OneBot {
     param([string]$BaseUrl, [string]$Token, [string]$Action, [hashtable]$Payload = @{})
     if ([string]::IsNullOrWhiteSpace($BaseUrl)) { return $null }
@@ -142,10 +143,11 @@ function Invoke-OneBot {
     } catch { return $null }
 }
 
+# 返回 $true=在线 / $false=账号离线 / $null=协议端不可达（三态必须区分，否则"离线"会被当成"没启动"反复重启）
 function Test-QqOnline {
     param([string]$BaseUrl, [string]$Token)
     $r = Invoke-OneBot -BaseUrl $BaseUrl -Token $Token -Action 'get_status'
-    if ($null -eq $r -or $r.retcode -ne 0) { return $null }   # 协议端不可达
+    if ($null -eq $r -or $r.retcode -ne 0) { return $null }
     return [bool]$r.data.online
 }
 
@@ -164,19 +166,27 @@ function Write-SupervisorLog {
 
 function Read-SupervisorState {
     param([string]$StateFile)
-    if (-not (Test-Path $StateFile)) {
-        return [pscustomobject]@{ HourKey = ''; Restarts = 0; LastOnlineAt = ''; LastRecoverAt = '' }
+    # 字段必须与 supervisor.ps1 读写的一致；漏一个字段会让"缺失即跳过"的保护失效
+    # （2026-10-26 实测：漏了 LastRestartAt ⇒ 10 分钟重启冷却形同虚设）。
+    $empty = [pscustomobject]@{
+        HourKey       = ''
+        Restarts      = 0
+        LastOnlineAt  = ''
+        LastRecoverAt = ''
+        LastRestartAt = ''
     }
+    if (-not (Test-Path $StateFile)) { return $empty }
     try {
         $s = Get-Content $StateFile -Raw -Encoding UTF8 | ConvertFrom-Json
         return [pscustomobject]@{
-            HourKey      = [string]$s.HourKey
-            Restarts     = [int]$s.Restarts
-            LastOnlineAt = [string]$s.LastOnlineAt
+            HourKey       = [string]$s.HourKey
+            Restarts      = [int]$s.Restarts
+            LastOnlineAt  = [string]$s.LastOnlineAt
             LastRecoverAt = [string]$s.LastRecoverAt
+            LastRestartAt = [string]$s.LastRestartAt
         }
     } catch {
-        return [pscustomobject]@{ HourKey = ''; Restarts = 0; LastOnlineAt = ''; LastRecoverAt = '' }
+        return $empty
     }
 }
 

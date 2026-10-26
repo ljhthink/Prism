@@ -19,11 +19,32 @@ $paths = Get-NapCatPaths -Root $Root
 $state = Read-SupervisorState -StateFile $paths.StateFile
 $hourKey = Get-Date -Format 'yyyyMMddHH'
 
-# 跨小时 → 重置重启配额
+# 跨小时 → 重置重启配额（Last* 字段必须原样带过去，否则冷却判定永远读到空值）
 if ($state.HourKey -ne $hourKey) {
     $state = [pscustomobject]@{
-        HourKey = $hourKey; Restarts = 0
-        LastOnlineAt = $state.LastOnlineAt; LastRecoverAt = $state.LastRecoverAt
+        HourKey       = $hourKey
+        Restarts      = 0
+        LastOnlineAt  = $state.LastOnlineAt
+        LastRecoverAt = $state.LastRecoverAt
+        LastRestartAt = $state.LastRestartAt
+    }
+}
+
+# ===== 重启冷却（**必须最先判定**）=====
+# 2026-10-26 实测教训：短时间连续重启会让 QQ 直接下发 KickedOffLine
+# （"登录已失效"），随后快速登录返回"用户身份已失效"，只能人工扫码。
+# 因此重启是**慢动作**：任意两次重启之间至少间隔 10 分钟。
+# 放在最前面是因为"协议端不可达"分支也会拉起容器——同样算一次重启。
+$lastRestartAt = $null
+if (-not [string]::IsNullOrWhiteSpace($state.LastRestartAt)) {
+    try { $lastRestartAt = [datetime]$state.LastRestartAt } catch { }
+}
+if ($null -ne $lastRestartAt) {
+    $sinceMin = ((Get-Date) - $lastRestartAt).TotalMinutes
+    if ($sinceMin -ge 0 -and $sinceMin -lt 10) {
+        Write-SupervisorLog -LogDir $paths.LogDir -Message `
+            ("冷却中：距上次重启仅 {0:N0} 分钟（下限 10 分钟），本轮不动作" -f $sinceMin)
+        exit 0
     }
 }
 
@@ -37,14 +58,25 @@ $online = Test-QqOnline -BaseUrl $oneBot.BaseUrl -Token $oneBot.Token
 if ($null -eq $online) {
     Write-SupervisorLog -LogDir $paths.LogDir -Message '协议端不可达（HTTP 无响应），尝试启动容器'
     $null = docker start napcat 2>&1
+    $state.Restarts = $state.Restarts + 1
+    $state | Add-Member -NotePropertyName LastRestartAt -NotePropertyValue ((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')) -Force
+    Save-SupervisorState -StateFile $paths.StateFile -State $state
     Start-Sleep -Seconds 20
     $online = Test-QqOnline -BaseUrl $oneBot.BaseUrl -Token $oneBot.Token
 }
 
 if ($online -eq $true) {
+    # 心跳可验证性：-Quiet 下不刷屏，但**每小时至少留一行**，
+    # 否则"任务到底有没有在跑"在日志里无法回答（status.ps1 只能靠猜）。
+    $prevHour = ''
+    if (-not [string]::IsNullOrWhiteSpace($state.LastOnlineAt)) {
+        try { $prevHour = ([datetime]$state.LastOnlineAt).ToString('yyyyMMddHH') } catch { }
+    }
     $state.LastOnlineAt = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     Save-SupervisorState -StateFile $paths.StateFile -State $state
-    if (-not $Quiet) { Write-SupervisorLog -LogDir $paths.LogDir -Message 'QQ 在线，无需处理' }
+    if ((-not $Quiet) -or ($prevHour -ne $hourKey)) {
+        Write-SupervisorLog -LogDir $paths.LogDir -Message 'QQ 在线，无需处理'
+    }
     exit 0
 }
 
@@ -54,6 +86,31 @@ Write-SupervisorLog -LogDir $paths.LogDir -Message "检测到 QQ 离线（本小
 if ($state.Restarts -ge 3) {
     Write-SupervisorLog -LogDir $paths.LogDir -Message `
         '本小时重启已达 3 次上限，停止自动重启（可能需要在 PC 上手动扫码登录）'
+    exit 0
+}
+
+# 2026-10-26 实测教训：**短时间连续重启会让 QQ 判定"登录已失效"**——
+# 21:50 与 21:51 两次重启后，21:55:59 QQ 直接下发 KickedOffLine，
+# 随后快速登录返回"用户身份已失效，为保证账号安全，请你重新登录"（必须人工扫码）。
+# 因此加**最小重启间隔**（10 分钟）：重启是有代价的动作，不是重试手段。
+$lastRestartAt = $null
+if (-not [string]::IsNullOrWhiteSpace($state.LastRestartAt)) {
+    try { $lastRestartAt = [datetime]$state.LastRestartAt } catch { }
+}
+if ($null -ne $lastRestartAt) {
+    $sinceMin = ((Get-Date) - $lastRestartAt).TotalMinutes
+    if ($sinceMin -ge 0 -and $sinceMin -lt 10) {
+        Write-SupervisorLog -LogDir $paths.LogDir -Message `
+            ("距上次重启仅 {0:N0} 分钟（下限 10 分钟），本轮不动作，避免触发 QQ 登录失效" -f $sinceMin)
+        exit 0
+    }
+}
+
+# 若上一次重启后仍未恢复，且已经等待足够久 → 基本可判定"身份失效，需人工扫码"，
+# 继续重启只会加重风控，改为只告警。
+if ($state.Restarts -ge 2 -and -not [string]::IsNullOrWhiteSpace($state.LastRestartAt)) {
+    Write-SupervisorLog -LogDir $paths.LogDir -Message `
+        '连续 2 次重启仍未恢复，疑似「登录身份已失效」——请在 http://127.0.0.1:6099/webui 扫码登录（本小时不再自动重启）'
     exit 0
 }
 
@@ -96,6 +153,7 @@ if (-not $recovered) {
 }
 
 $state.Restarts = $state.Restarts + 1
+$state | Add-Member -NotePropertyName LastRestartAt -NotePropertyValue ((Get-Date).ToString('yyyy-MM-dd HH:mm:ss')) -Force
 if ($recovered) {
     $state.LastRecoverAt = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
     $state.LastOnlineAt = $state.LastRecoverAt
