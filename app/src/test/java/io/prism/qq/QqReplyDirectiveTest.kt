@@ -100,6 +100,8 @@ class QqReplyDirectiveTest {
         assertTrue(QqReplyDirective.promptHint(false, true).contains("voice"))
         // 2026-10-26：提示必须明确"对方要求时必加"，否则模型仍然不写
         assertTrue(QqReplyDirective.promptHint(true, true).contains("必须"))
+        // 2026-10-26 真机：历史里"发不出图"的旧对话会让模型继续自我否定，提示要纠正能力认知
+        assertTrue(QqReplyDirective.promptHint(true, false).contains("可以正常发表情"))
     }
 }
 

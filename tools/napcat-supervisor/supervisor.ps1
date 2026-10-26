@@ -118,6 +118,16 @@ $port = Get-NapCatHttpPort -WebUiConfigPath $paths.WebUiConfig
 $token = Get-NapCatToken -WebUiConfigPath $paths.WebUiConfig
 $cred = Get-WebUiCredential -Port $port -Token $token -CacheFile $paths.CredFile
 
+# 2026-10-26 实测：被 QQ 踢下线后**快登会话会被清空**（踢前有 3904755943，重扫码后为空），
+# 此时重启必然弹二维码 ⇒ 免扫码失效。先查凭据：没有就只告警、不重启
+# （重启只会让"需要扫码"更晚被发现，还加重风控）。
+$quickLogin = Test-QuickLoginAvailable -Port $port -Credential $cred
+if ($quickLogin -eq $false) {
+    Write-SupervisorLog -LogDir $paths.LogDir -Message `
+        'QQ 离线且无快登凭据（曾被踢下线）——重启无用，请打开 http://127.0.0.1:6099/webui 扫码登录'
+    exit 0
+}
+
 if ($null -ne $cred) {
     # 优先：RestartNapCat（重启 Worker → 触发快速登录）
     $resp = Invoke-WebUiApi -Port $port -Credential $cred -Path 'QQLogin/RestartNapCat'

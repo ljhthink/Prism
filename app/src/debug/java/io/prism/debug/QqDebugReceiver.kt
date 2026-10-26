@@ -208,6 +208,48 @@ class QqDebugReceiver : BroadcastReceiver() {
                             app.oneBotChannel.sendSticker(contact, emotion, null)
                         }
                     }
+                    // 2026-10-26（US-3124）：端到端模拟一条"对方发来图片/表情包"的入站消息，
+                    // 走完整的 autoReply 链路（媒体解析 → 下载 → 视觉/OCR → 生成 → 发送 → 表情指令）。
+                    // 会真的回一条消息给目标联系人；仅 debug 构建可用。
+                    "simulate_inbound" -> runBlocking {
+                        val url = intent.getStringExtra("url").orEmpty()
+                        val summary = intent.getStringExtra("summary") ?: ""
+                        val isSticker = intent.getStringExtra("sub_type") == "1"
+                        val textExtra = intent.getStringExtra("text")
+                        val media = if (url.isBlank()) {
+                            emptyList()
+                        } else {
+                            listOf(
+                                io.prism.qq.channel.QqMediaRef(
+                                    kind = if (isSticker) {
+                                        io.prism.qq.channel.QqMediaKind.STICKER
+                                    } else {
+                                        io.prism.qq.channel.QqMediaKind.IMAGE
+                                    },
+                                    url = url,
+                                    fileName = intent.getStringExtra("file") ?: "sim.jpg",
+                                    fileSize = intent.getStringExtra("file_size")?.toLongOrNull() ?: 0L,
+                                    summary = summary
+                                )
+                            )
+                        }
+                        val text = textExtra ?: when {
+                            isSticker -> "[表情包]"
+                            media.isNotEmpty() -> "[图片]"
+                            else -> "在吗"
+                        }
+                        val probe = io.prism.qq.channel.QqMessage(
+                            messageId = "sim-" + System.currentTimeMillis(),
+                            incoming = true,
+                            text = text,
+                            timestampMs = System.currentTimeMillis(),
+                            media = media
+                        )
+                        val reply = app.qqAutoReplyForDebug
+                            ?: return@runBlocking "simulate_inbound=debug 入口未装配"
+                        val result = reply(probe)
+                        "simulate_inbound=${result.logLine} media=${media.size}"
+                    }
                     ACTION_CONFIG -> runBlocking {
                         val repo = app.qqConfigRepository
                         intent.getStringExtra(EXTRA_MAX_PER_DAY)?.toIntOrNull()
@@ -221,6 +263,11 @@ class QqDebugReceiver : BroadcastReceiver() {
                         intent.getStringExtra(EXTRA_WAKE_ON_SCREEN_OFF)?.let {
                             repo.setWakeOnScreenOff(it.equals("true", ignoreCase = true))
                         }
+                        // 2026-10-26（US-3124 验收）：验证"用户要表情 → 代码兜底"分支。
+                        // 置 0 会同时关闭 prompt 里的表情提示（模型不再写标记），
+                        // 从而只剩"意图直触发"这一条路径可走。
+                        intent.getStringExtra(EXTRA_STICKER_CHANCE)?.toIntOrNull()
+                            ?.let { repo.setStickerChancePercent(it) }
                         intent.getStringExtra(EXTRA_TRANSPORT)?.let { t ->
                             when (t.lowercase()) {
                                 "onebot" -> repo.setTransport(io.prism.qq.channel.QqTransport.ONEBOT)
@@ -316,6 +363,7 @@ class QqDebugReceiver : BroadcastReceiver() {
         const val EXTRA_MIN_INTERVAL_MIN = "min_interval_min"
         const val EXTRA_MIN_INTERVAL_SEC = "min_interval_sec"
         const val EXTRA_WAKE_ON_SCREEN_OFF = "wake_on_screen_off"
+        const val EXTRA_STICKER_CHANCE = "sticker_chance"
         const val EXTRA_TRANSPORT = "transport"
         const val EXTRA_WINDOW_START = "window_start"
         const val EXTRA_WINDOW_END = "window_end"

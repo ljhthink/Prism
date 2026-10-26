@@ -46,7 +46,17 @@ if ($null -eq $cred) {
 } else {
     $list = Invoke-WebUiApi -Port $port -Credential $cred -Path 'QQLogin/GetQuickLoginList'
     $auto = Invoke-WebUiApi -Port $port -Credential $cred -Path 'QQLogin/GetQuickLoginQQ'
-    if ($null -ne $list) { Write-Host ("快登列表：{0}" -f ([string]($list.data -join ","))) }
+    if ($null -ne $list) {
+        $quick = Test-QuickLoginAvailable -Port $port -Credential $cred
+        $known = @($list.data) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+        if ($quick -eq $true) {
+            Write-Host ("快登凭据：可用（{0}）→ 重启免扫码" -f ($known -join ','))
+        } elseif ($quick -eq $false) {
+            Write-Host '快登凭据：**不可用** → 下次重启会要求扫码（被踢下线后 QQ 会清空快登会话）'
+        } else {
+            Write-Host '快登凭据：查询失败'
+        }
+    }
     if ($null -ne $auto) {
         if ([string]::IsNullOrWhiteSpace([string]$auto.data)) {
             Write-Host '自动登录：未设置（掉线后需扫码；运行 install.ps1 可修复）'

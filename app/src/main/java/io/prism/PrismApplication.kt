@@ -1162,6 +1162,17 @@ class PrismApplication : Application() {
     val qqMlKitOcrTextExtractor: MlKitOcrTextExtractor get() = mlKitOcrTextExtractor
 
     /**
+     * debug 探针入口（2026-10-26；US-3124 验收）：用合成入站消息跑完整应答链路。
+     *
+     * **只由 `src/debug` 的 `QqDebugReceiver` 赋值/调用**，release 构建中恒为 null 且无调用方。
+     * 存在的理由：真机验收"图片能不能被看到"必须端到端跑一次，
+     * 而这要求"对方发来一条带图消息"——不能让用户为每次验证手动发图。
+     */
+    var qqAutoReplyForDebug: (suspend (io.prism.qq.channel.QqMessage)
+        -> io.prism.qq.QqReplyOutcome.ReplyResult)? = null
+        private set
+
+    /**
      * v1 US-301/302：视觉旁路编排器（纯文本模型识图方案 B）。
      *
      * 主 Provider 为纯文本模型（图片直传 400 + 视觉不支持信号）时：
@@ -1876,15 +1887,26 @@ class PrismApplication : Application() {
                 // 现在：① 模型给了标记 → 一定发；② 用户明确要表情 → 代码兜底发；
                 // ③ 都没有才按概率随机附带。
                 val wantsSticker = io.prism.qq.QqMediaIntent.wantsSticker(incoming.text)
+                // 记录本轮的"决策来源"，用于真机对账（BR-observability-005 精神：
+                // 只有结果没有来源，无法判断"是模型配合还是代码兜底"）。
+                var stickerSource = "none"
                 val stickerEmotion = when {
                     !allowMedia -> null
-                    parsed.stickerEmotion != null -> parsed.stickerEmotion
-                    wantsSticker -> io.prism.qq.QqMediaIntent.guessEmotion(incoming.text)
-                        ?: io.prism.qq.QqMediaIntent.DEFAULT_EMOTION
-                    cfg.stickerChancePercent > 0 &&
-                        kotlin.random.Random.nextInt(100) < cfg.stickerChancePercent ->
+                    parsed.stickerEmotion != null -> {
+                        stickerSource = "指令"
+                        parsed.stickerEmotion
+                    }
+                    wantsSticker -> {
+                        stickerSource = "意图"
                         io.prism.qq.QqMediaIntent.guessEmotion(incoming.text)
                             ?: io.prism.qq.QqMediaIntent.DEFAULT_EMOTION
+                    }
+                    cfg.stickerChancePercent > 0 &&
+                        kotlin.random.Random.nextInt(100) < cfg.stickerChancePercent -> {
+                        stickerSource = "概率"
+                        io.prism.qq.QqMediaIntent.guessEmotion(incoming.text)
+                            ?: io.prism.qq.QqMediaIntent.DEFAULT_EMOTION
+                    }
                     else -> null
                 }
                 // 语音同理：模型给标记就发，用户点名要语音也发；不再二次随机
@@ -1893,7 +1915,7 @@ class PrismApplication : Application() {
                 android.util.Log.i(
                     "QqProactiveSchedule",
                     "媒体指令=${if (parsed.hasDirective) "有" else "无"} " +
-                        "sticker=${stickerEmotion ?: "none"} voice=$wantVoice " +
+                        "sticker=${stickerEmotion ?: "none"}（源=$stickerSource） voice=$wantVoice " +
                         "intent=${if (wantsSticker) "要表情" else "-"}"
                 )
                 // 只发媒体（模型只给了标记）时不能发空文本
@@ -2020,6 +2042,11 @@ class PrismApplication : Application() {
                 replyMutex.withLock { autoReplyLocked(override) }
 
             io.prism.qq.QqProactiveGateway.autoReply = { autoReplyOnce() }
+
+            // 2026-10-26（US-3124 验收）：debug 探针的端到端入口——用**合成入站消息**
+            // 走完整应答链路（媒体解析 → 下载 → 视觉/OCR → 生成 → 发送 → 表情指令）。
+            // 仅 debug 接收器调用；release 无调用方。
+            qqAutoReplyForDebug = { probe -> autoReplyOnce(probe) }
 
             // 2026-10-26（US-3125）：协议端账号在线态周期探测（60s）。
             // 真机实证：WS 连着但 QQ 已离线时，用户只会觉得"又不回了"，必须显式可见。

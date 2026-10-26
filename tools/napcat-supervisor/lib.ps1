@@ -197,3 +197,20 @@ function Save-SupervisorState {
     [System.IO.File]::WriteAllText($StateFile, ($State | ConvertTo-Json -Depth 5),
         [System.Text.UTF8Encoding]::new($false))
 }
+
+# 快登凭据是否可用（2026-10-26 实测新增）
+#
+# 背景：`autoLoginAccount` 只决定"登录哪个号"，真正免扫码靠 QQ 客户端保存的**快登会话**
+# （`GetQuickLoginList`）。被 QQ 踢下线（KickedOffLine / 身份失效）后这份会话会被清空
+# （实测：踢下线前列表有 3904755943，踢下线并重新扫码后列表变空）。
+# 此时再重启容器只会弹二维码 —— 白折腾且加重风控，所以要先查再决定要不要重启。
+#
+# @return $true=有快登凭据（重启免扫码）；$false=无凭据（重启也必须扫码）；$null=查询失败
+function Test-QuickLoginAvailable {
+    param([int]$Port, [string]$Credential)
+    if ([string]::IsNullOrWhiteSpace($Credential)) { return $null }
+    $resp = Invoke-WebUiApi -Port $Port -Credential $Credential -Path 'QQLogin/GetQuickLoginList'
+    if ($null -eq $resp -or $resp.code -ne 0) { return $null }
+    $list = @($resp.data) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+    return ($list.Count -gt 0)
+}
