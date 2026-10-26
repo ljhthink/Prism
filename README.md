@@ -1,4 +1,4 @@
-# Prism
+﻿# Prism
 
 <p align="center">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg"></a>
@@ -132,7 +132,7 @@ Prism 是一款 **Android 原生、零后端**的个人 Agent 应用。它不只
 - **AI 联动**：`pet__play_action` 工具让角色配合说话内容做动作，回复以气泡显示在形象旁
 - 默认关闭，显式开启；窗口可见、通知即入口、关闭即停服，无开机自启
 
-> 形象资产请自行确认使用权。以示例角色为例，其 Live2D 模型作者为 B 站 UP 主 [是依七哒](https://space.bilibili.com/457683484)，角色 IP 属米哈游 / HoYoverse 且禁止商用。
+> 形象资产请自行确认使用权。
 
 ### ⚙️ 设备适配
 
@@ -308,39 +308,6 @@ flowchart TB
 | 静态检查 | lint 0 error |
 | 最低验证设备 | Android 16 真机（HyperOS） |
 
-文档质量由 CI 把关：Markdown 规范检查、文档索引一致性校验、本地链接检查。
-
-## 文档
-
-| 文档 | 内容 |
-|---|---|
-| [docs/progress.md](docs/progress.md) | 项目进展记录（唯一进展事实来源） |
-| [docs/PRD.md](docs/PRD.md) | 产品需求基线 |
-| [docs/decisions/](docs/decisions/README.md) | 架构决策记录（ADR 索引） |
-| [docs/reports/](docs/reports/README.md) | 一次性调研 / 审查 / 验收报告归档 |
-| [docs/templates/](docs/templates/README.md) | PRD / ADR / 报告模板 |
-| [docs/design/deep-space-glass-design-spec.md](docs/design/deep-space-glass-design-spec.md) | 视觉设计规范 |
-| [docs/behavioral-rules.md](docs/behavioral-rules.md) | 行为规则累积层 |
-
-按功能分域的 PRD：
-
-- [docs/prd-v1-features.md](docs/prd-v1-features.md) —— 基础能力集
-- [docs/prd-search-fetch-enhancement.md](docs/prd-search-fetch-enhancement.md) —— 搜索与抓取增强
-- [docs/prd-mcp-api-enhancement.md](docs/prd-mcp-api-enhancement.md) —— MCP 能力扩展
-- [docs/prd-v1-b20-voice-bg-control.md](docs/prd-v1-b20-voice-bg-control.md) —— 语音通话与手机操控
-- [docs/prd-v1-b21-shizuku-bg-control.md](docs/prd-v1-b21-shizuku-bg-control.md) —— Shizuku 后台化
-- [docs/prd-local-voice-clone.md](docs/prd-local-voice-clone.md) —— 端侧音色克隆
-- [docs/prd-v1-b24-rolepack-pet.md](docs/prd-v1-b24-rolepack-pet.md) —— 角色包与桌宠
-- [docs/prd-qq-burner-account.md](docs/prd-qq-burner-account.md) —— QQ 小号助手
-
-运维手册：
-
-- [docs/runbooks/setup-local-voice-clone.md](docs/runbooks/setup-local-voice-clone.md) —— 音色包侧载与启用
-- [docs/runbooks/searxng-selfhost.md](docs/runbooks/searxng-selfhost.md) —— 自建 SearXNG 搜索
-- [docs/runbooks/miui-logcat-real-device.md](docs/runbooks/miui-logcat-real-device.md) —— 真机日志抓取
-
-AI 协作规则位于 [AGENTS.md](AGENTS.md)（入口）与 `rules/` 模块，规则文件与进展记录为本地专属、不推送到远程。
-
 ## 参与贡献
 
 欢迎 Issue 与 PR：
@@ -348,7 +315,6 @@ AI 协作规则位于 [AGENTS.md](AGENTS.md)（入口）与 `rules/` 模块，�
 1. Fork 并基于 `main` 开分支
 2. 保持改动聚焦，附带测试或真机证据
 3. 运行 `./gradlew :app:testDebugUnitTest :app:lintDebug` 保证本地绿灯
-4. 若新增或重命名文档，请同步更新 [docs/progress.md](docs/progress.md) 与文档索引
 
 提交信息建议遵循 `type(scope): 摘要` 形式（如 `fix(qq): …`），并在正文说明取证与验证方式。
 
@@ -388,29 +354,26 @@ Prism 基于 [Apache License 2.0](LICENSE) 开源。
 
 ### 借鉴与参考的项目
 
-Prism 的若干设计并非从零发明，而是基于上游项目的研究与移植。下表说明**借鉴了什么**以及**边界**（详细决策见括号内 ADR）：
+Prism 的若干设计并非从零发明，而是基于上游项目的研究与移植。下表说明**借鉴了什么**以及**边界**：
 
 | 上游项目 | 借鉴内容 | 边界 / 许可 |
 |---|---|---|
-| [OpenClaw](https://docs.openclaw.ai/tools/skills) | `SKILL.md` 格式、6 层加载优先级、渐进式披露、工具声明与门控机制 | **纯 Kotlin 重实现设计，无代码复用**（TS 无法运行于 Android）。MIT。见 [ADR-001](docs/decisions/ADR-001-prism-tech-stack.md) / [ADR-013](docs/decisions/ADR-013-m4-skills-system-architecture.md) |
-| [OpenCyvis](https://github.com/opencyvis/opencyvis-phone) | 隐藏虚拟屏的创建方式与 flags 逐级降级策略（`DisplayBackend` / `ShizukuShell`） | 仅移植该路线，未引入其产品外壳或无关源码。Apache-2.0，署名见 [NOTICE](NOTICE)。见 [ADR-065](docs/decisions/ADR-065-display-backend-abstraction-watch-takeover.md) |
-| [Open-AutoGLM](https://github.com/zai-org/Open-AutoGLM) | 手机操控的能力形态与工具集设计（LLM 直接操作手机） | **明确不移植其 PC 端 ADB 方案**，改以 Android 本地无障碍重建。见 [ADR-036](docs/decisions/ADR-036-v1-phone-control.md) |
-| [Operator-on-Android](https://github.com/xjyzs/Operator-on-Android) · ShadowAuto · Canvas · scrcpy | 作为「root / shell / 虚拟屏」三条路线的可行性证据与方案对比 | **仅作为调研证据与技术对照，未采用其代码**。见 [ADR-045](docs/decisions/ADR-045-virtual-display-bg-control.md) / [ADR-047](docs/decisions/ADR-047-voice-v2-and-task-move.md) |
-| [Cyrene-Agent](https://github.com/clark970417-eng/Cyrene-Agent) | 角色包人设结构、桌宠渲染与交互（命中区、口型、表情复位、动作别名）的移植来源 | 上游资产按语义移植，**产物仅进入用户设备、不入公开仓库**（角色资产属用户私有）。见 [ADR-049](docs/decisions/ADR-049-roleplay-fidelity-fix.md) / [ADR-051](docs/decisions/ADR-051-rolepack-pet-live2d.md) / [ADR-052](docs/decisions/ADR-052-cyrene-rolecard-v7.md) |
-| [TencentDB-Agent-Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory) | L2 记忆的原子记忆抽取思路 | 设计参考，未引入代码。见 [ADR-033](docs/decisions/ADR-033-uxr11-real-device-fixes.md) |
-| mem0 · CALMem | 三层记忆架构的业界方案对比 | 调研参考。见 [ADR-015](docs/decisions/ADR-015-m5-memory-system-architecture.md) |
-| [Continuous-learning](https://github.com/ljhthink)（作者前作） | Skills 与记忆的架构设计、知识库美术资源索引的选型方法论 | 自有项目，**复用设计而非代码**。见 [ADR-001](docs/decisions/ADR-001-prism-tech-stack.md) / [ADR-002](docs/decisions/ADR-002-prism-chat-ui-architecture.md) |
-| gstack | 代码评审模板的结构 | 融入内置 `code-reviewer` Skill 的模板结构。见 [ADR-029](docs/decisions/ADR-029-uxr8-b2-optimizations.md) |
-| [OneBot 11](https://github.com/botuniverse/onebot-11) | QQ 协议端的消息与事件规范 | 公开协议标准，自带客户端实现。见 [ADR-064](docs/decisions/ADR-064-qq-dual-transport-onebot-primary.md) |
+| [OpenClaw](https://docs.openclaw.ai/tools/skills) | `SKILL.md` 格式、6 层加载优先级、渐进式披露、工具声明与门控机制 | **纯 Kotlin 重实现设计，无代码复用**（TS 无法运行于 Android）。MIT。见 ADR-001 / ADR-013 |
+| [OpenCyvis](https://github.com/opencyvis/opencyvis-phone) | 隐藏虚拟屏的创建方式与 flags 逐级降级策略（`DisplayBackend` / `ShizukuShell`） | 仅移植该路线，未引入其产品外壳或无关源码。Apache-2.0，署名见 [NOTICE](NOTICE)。见 ADR-065 |
+| [Open-AutoGLM](https://github.com/zai-org/Open-AutoGLM) | 手机操控的能力形态与工具集设计（LLM 直接操作手机） | **明确不移植其 PC 端 ADB 方案**，改以 Android 本地无障碍重建。见 ADR-036 |
+| [Operator-on-Android](https://github.com/xjyzs/Operator-on-Android) · ShadowAuto · Canvas · scrcpy | 作为「root / shell / 虚拟屏」三条路线的可行性证据与方案对比 | **仅作为调研证据与技术对照，未采用其代码**。见 ADR-045 / ADR-047 |
+| [TencentDB-Agent-Memory](https://github.com/TencentCloud/TencentDB-Agent-Memory) | L2 记忆的原子记忆抽取思路 | 设计参考，未引入代码。见 ADR-033 |
+| mem0 · CALMem | 三层记忆架构的业界方案对比 | 调研参考。见 ADR-015 |
+| [Continuous-learning](https://github.com/ljhthink)（作者前作） | Skills 与记忆的架构设计、知识库美术资源索引的选型方法论 | 自有项目，**复用设计而非代码**。见 ADR-001 / ADR-002 |
+| gstack | 代码评审模板的结构 | 融入内置 `code-reviewer` Skill 的模板结构。见 ADR-029 |
+| [OneBot 11](https://github.com/botuniverse/onebot-11) | QQ 协议端的消息与事件规范 | 公开协议标准，自带客户端实现。见 ADR-064 |
 
-**仅连接、不分发**：QQ 小号助手的协议端依赖用户自建的 [NapCat](https://github.com/NapNeko/NapCatQQ) 或 SnowLuma 实例。这两个项目采用非 OSI 的「源码可见、禁商用 / 禁未授权再分发」许可，Prism **不内置、不捆绑、不修改后分发**，只通过 HTTP / WebSocket 连接用户自己部署的实例；若不使用协议端，可完全走无障碍通道。见 [ADR-062](docs/decisions/ADR-062-qq-burner-account-android-control.md)。
-
-**选型后否决**：AstrBot（AGPL-3.0）/ LangBot / MaiBot 等完整机器人平台因职责重叠与许可证传染性未被使用；豆包 RealtimeAPI / TEN Framework 仅参与语音方案对比。
+**仅连接、不分发**：QQ 小号助手的协议端依赖用户自建的 [NapCat](https://github.com/NapNeko/NapCatQQ) 或 SnowLuma 实例。这两个项目采用非 OSI 的「源码可见、禁商用 / 禁未授权再分发」许可，Prism **不内置、不捆绑、不修改后分发**，只通过 HTTP / WebSocket 连接用户自己部署的实例；若不使用协议端，可完全走无障碍通道。见 ADR-062。
 
 ### 许可边界
 
 - 本项目代码为 Apache-2.0；**用户导入的角色包、形象资产、音色包、训练素材不随本项目分发**，其授权由用户自行确认
-- 角色 IP 与模型版权归原作者所有（示例：Live2D 模型作者为 B 站 UP 主 [是依七哒](https://space.bilibili.com/457683484)，角色 IP 属米哈游 / HoYoverse 且禁止商用）
+- 角色 IP 与模型版权归原作者所有
 - 手机操控、QQ 小号助手等能力涉及第三方 App 的自动化与账号操作，请自行确认是否符合目标平台条款与当地法规
 
 > 本项目仅供个人学习与自用。
