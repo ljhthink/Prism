@@ -1,5 +1,7 @@
 package io.prism.qq.onebot
 
+import io.prism.qq.channel.QqMediaKind
+import io.prism.qq.channel.QqMediaRef
 import io.prism.qq.channel.QqMessage
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -183,7 +185,8 @@ object OneBotModels {
             messageId = messageId,
             incoming = senderId != selfId,
             text = text,
-            timestampMs = if (timeSec > 0) timeSec * 1000 else 0L
+            timestampMs = if (timeSec > 0) timeSec * 1000 else 0L,
+            media = parseMediaItems(messageElement)
         )
     }
 
@@ -219,8 +222,73 @@ object OneBotModels {
                 messageId = message["message_id"]?.let { elementToId(it) },
                 incoming = senderId != selfId,
                 text = text,
-                timestampMs = if (timeSec > 0) timeSec * 1000 else 0L
+                timestampMs = if (timeSec > 0) timeSec * 1000 else 0L,
+                media = parseMediaItems(messageElement)
             )
+        }
+    }
+
+    /**
+     * 提取消息段中的媒体引用（2026-10-26 新增；PRD US-3124）。
+     *
+     * 真机取证：NapCat 图片段形如
+     * `{"type":"image","data":{"summary":"[动画表情]","file":"...jpg","sub_type":1,"url":"https://multimedia.nt.qq.com.cn/download?...","file_size":"10508"}}`
+     * —— `sub_type=1` 为表情包，`0` 为普通图片。
+     *
+     * @return 媒体引用列表（无媒体返回空列表；不做任何网络访问）
+     */
+    fun parseMediaItems(message: JsonElement?): List<QqMediaRef> {
+        val array = message as? JsonArray ?: return emptyList()
+        return array.mapNotNull { element ->
+            val obj = element as? JsonObject ?: return@mapNotNull null
+            val type = obj["type"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            val data = obj["data"] as? JsonObject
+            val subType = data?.get("sub_type")?.jsonPrimitive?.contentOrNull
+            val summary = data?.get("summary")?.jsonPrimitive?.contentOrNull
+            val url = data?.get("url")?.jsonPrimitive?.contentOrNull
+            val fileName = data?.get("file")?.jsonPrimitive?.contentOrNull
+            val fileSize = data?.get("file_size")?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L
+            when (type) {
+                "image" -> {
+                    val isSticker = subType == "1" || summary?.contains("表情") == true
+                    QqMediaRef(
+                        kind = if (isSticker) QqMediaKind.STICKER else QqMediaKind.IMAGE,
+                        url = url,
+                        fileName = fileName,
+                        fileSize = fileSize,
+                        summary = summary
+                    )
+                }
+
+                "mface" -> QqMediaRef(
+                    kind = QqMediaKind.STICKER,
+                    url = url,
+                    fileName = fileName,
+                    fileSize = fileSize,
+                    summary = summary
+                )
+
+                "face" -> QqMediaRef(
+                    kind = QqMediaKind.FACE,
+                    summary = data?.get("id")?.jsonPrimitive?.contentOrNull
+                )
+
+                "record" -> QqMediaRef(
+                    kind = QqMediaKind.VOICE,
+                    url = url,
+                    fileName = fileName,
+                    summary = summary
+                )
+
+                "video" -> QqMediaRef(
+                    kind = QqMediaKind.VIDEO,
+                    url = url,
+                    fileName = fileName,
+                    fileSize = fileSize
+                )
+
+                else -> null
+            }
         }
     }
 
@@ -251,11 +319,17 @@ object OneBotModels {
         is JsonPrimitive -> message.contentOrNull?.takeIf { !it.contains("[CQ:") }
         is JsonArray -> message.mapNotNull { segment ->
             val obj = segment as? JsonObject ?: return@mapNotNull null
+            val data = obj["data"] as? JsonObject
             when (obj["type"]?.jsonPrimitive?.contentOrNull) {
-                "text" -> obj["data"]?.jsonObject?.get("text")
-                    ?.jsonPrimitive?.contentOrNull
-                "face", "mface" -> "[表情]"
-                "image" -> "[图片]"
+                "text" -> data?.get("text")?.jsonPrimitive?.contentOrNull
+                "face" -> "[表情]"
+                "mface" -> "[表情包]"
+                "image" -> {
+                    // 真机取证：NapCat 用 image 段上报表情包，sub_type=1 或 summary 含「表情」
+                    val subType = data?.get("sub_type")?.jsonPrimitive?.contentOrNull
+                    val summary = data?.get("summary")?.jsonPrimitive?.contentOrNull.orEmpty()
+                    if (subType == "1" || summary.contains("表情")) "[表情包]" else "[图片]"
+                }
                 "record" -> "[语音]"
                 "video" -> "[视频]"
                 else -> null

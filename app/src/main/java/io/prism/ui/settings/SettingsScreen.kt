@@ -214,6 +214,23 @@ fun SettingsScreen(
     var qqTargetIdDraft by remember { mutableStateOf("") }
     var qqClearToken by remember { mutableStateOf(false) }
     var qqChannelStatusText by remember { mutableStateOf("") }
+    // 2026-10-26（US-3125）：协议端账号在线态（WS 连接 ≠ QQ 在线）
+    val qqProtocolStatus by (qqApp?.qqProtocolStatus
+        ?: kotlinx.coroutines.flow.flowOf(null))
+        .collectAsState(initial = null)
+    val qqProtocolStateText: String? = remember(qqProtocolStatus) {
+        val s = qqProtocolStatus ?: return@remember null
+        when (s.state) {
+            io.prism.qq.QqProtocolHealth.State.ONLINE ->
+                "QQ 在线：${s.nickname.ifBlank { "未知昵称" }}" +
+                    (if (s.selfId > 0) "（${s.selfId}）" else "") +
+                    if (s.appVersion.isNotBlank()) " · NapCat ${s.appVersion}" else ""
+            io.prism.qq.QqProtocolHealth.State.QQ_OFFLINE ->
+                "⚠ QQ 已离线（需在 PC 上重新登录协议端）"
+            io.prism.qq.QqProtocolHealth.State.UNREACHABLE ->
+                "⚠ 协议端不可达（${s.detail}）"
+        }
+    }
     // 2026-10-26（ADR-066）：协议端地址单输入 + 真实连接诊断
     var qqHostDraft by remember { mutableStateOf("") }
     var qqDiagText by remember { mutableStateOf("") }
@@ -965,12 +982,18 @@ fun SettingsScreen(
                     icon = "🌐",
                     iconColor = PrismIndigo,
                     title = "协议端连接",
-                    subtitle = qqChannelStatusText.ifBlank {
-                        if (qqConfig.oneBotToken.isBlank()) {
-                            "未配置 · 需自建 NapCat/SnowLuma（个人自用）并填写 access_token"
-                        } else {
-                            "HTTP ${qqConfig.oneBotBaseUrl} · WS ${qqConfig.oneBotWsUrl} · token 已隐藏（点击编辑）"
-                        }
+                    subtitle = buildString {
+                        // 2026-10-26（US-3125）：WS 连接 ≠ QQ 在线，必须分开展示
+                        qqProtocolStateText?.let { appendLine(it) }
+                        append(
+                            qqChannelStatusText.ifBlank {
+                                if (qqConfig.oneBotToken.isBlank()) {
+                                    "未配置 · 需自建 NapCat/SnowLuma（个人自用）并填写 access_token"
+                                } else {
+                                    "HTTP ${qqConfig.oneBotBaseUrl} · WS ${qqConfig.oneBotWsUrl} · token 已隐藏（点击编辑）"
+                                }
+                            }
+                        )
                     },
                     onClick = {
                         qqBaseUrlDraft = qqConfig.oneBotBaseUrl

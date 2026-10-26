@@ -73,7 +73,20 @@ data class QqRuntimeState(
      */
     val retryWindowAnchor: Long = 0L,
     /** 当前窗口实例内已执行的「环境类跳过」重试次数（成功/换窗口清零）。 */
-    val retryCount: Int = 0
+    val retryCount: Int = 0,
+    /**
+     * 最近一次协议端健康探测的结论（2026-10-26；US-3125）。
+     *
+     * 取值：`ONLINE` / `QQ_OFFLINE` / `UNREACHABLE` / 空=尚未探测。
+     * **WS 连接态不足以代表"能收发"**——账号态会周期性失效。
+     */
+    val lastProtocolState: String = "",
+    /** 最近一次探测的可读说明（已脱敏）。 */
+    val lastProtocolDetail: String = "",
+    /** 最近一次探测时刻（0=从未）。 */
+    val lastProtocolCheckedAtMs: Long = 0L,
+    /** 最近一次检测到「QQ 离线」的时刻（0=从未；用于 UI 显示"最近离线"）。 */
+    val lastProtocolOfflineAtMs: Long = 0L
 ) {
     companion object {
         /** 幂等集合上限（防无限增长；远大于一次重连可能补投的条数）。 */

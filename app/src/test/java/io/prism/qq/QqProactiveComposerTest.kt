@@ -184,4 +184,50 @@ class QqProactiveComposerTest {
         val context = QqProactiveComposer.buildReplyUserContext(emptyList(), "在吗")
         assertEquals("对方刚发来：「在吗」", context)
     }
+
+    // ==================== US-3124：图片真的进 prompt ====================
+
+    @Test
+    fun `带图片时 user content 为多模态数组`() {
+        val dataUrl = "data:image/jpeg;base64,/9j/AAAA"
+        val body = QqProactiveComposer.buildRequestJson(
+            model = "m",
+            system = "s",
+            userContext = "对方刚发来：「[图片]」",
+            reply = true,
+            imageDataUrl = dataUrl
+        )
+        assertTrue(body.contains("\"type\":\"image_url\""))
+        assertTrue(body.contains(dataUrl))
+        assertTrue(body.contains("\"type\":\"text\""))
+        // 纯文本形态不得出现
+        assertTrue(!body.contains("\"content\":\"对方刚发来"))
+    }
+
+    @Test
+    fun `无图片时保持纯文本 content（兼容旧端点）`() {
+        val body = QqProactiveComposer.buildRequestJson("m", "s", "你好", reply = true)
+        assertTrue(body.contains("\"content\":\"你好\""))
+        assertTrue(!body.contains("image_url"))
+    }
+
+    @Test
+    fun `媒体说明注入 user 上下文`() {
+        val context = QqProactiveComposer.buildReplyUserContext(
+            history = emptyList(),
+            incoming = "[图片]",
+            mediaNote = "对方发来一张图片；图片中的文字（OCR，可能有误）：你好世界"
+        )
+        assertTrue(context.contains("[图片]"))
+        assertTrue(context.contains("OCR"))
+        assertTrue(context.contains("你好世界"))
+    }
+
+    @Test
+    fun `无媒体说明时不加括号尾巴`() {
+        assertEquals(
+            "对方刚发来：「在吗」",
+            QqProactiveComposer.buildReplyUserContext(emptyList(), "在吗", mediaNote = "  ")
+        )
+    }
 }

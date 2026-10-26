@@ -777,6 +777,24 @@ class PrismApplication : Application() {
         io.prism.qq.QqConversationStore(filesDir)
     }
 
+    /** QQ 媒体下载器（2026-10-26；US-3124）：白名单 + 尺寸上限 + LRU 缓存。 */
+    val qqMediaFetcher: io.prism.qq.QqMediaFetcher by lazy { io.prism.qq.QqMediaFetcher() }
+
+    /**
+     * 协议端账号在线态探测（2026-10-26；US-3125）。
+     *
+     * WS 连接 ≠ QQ 在线：账号态会周期性失效（需扫码），必须单独探测并在 UI 如实展示。
+     */
+    val qqProtocolHealth: io.prism.qq.QqProtocolHealth by lazy {
+        io.prism.qq.QqProtocolHealth(oneBotClient)
+    }
+
+    /** 最近一次协议健康探测结果（设置页直接展示；null=尚未探测）。 */
+    private val _qqProtocolStatus = kotlinx.coroutines.flow.MutableStateFlow<
+        io.prism.qq.QqProtocolHealth.Status?>(null)
+    val qqProtocolStatus: kotlinx.coroutines.flow.StateFlow<
+        io.prism.qq.QqProtocolHealth.Status?> = _qqProtocolStatus
+
     /** 无障碍兜底通道（ADR-062 原主路线；协议端不可用时自动生效）。 */
     val accessibilityQqChannel: io.prism.qq.channel.AccessibilityQqChannel by lazy {
         io.prism.qq.channel.AccessibilityQqChannel(qqLocalToolExecutor)
@@ -1139,6 +1157,9 @@ class PrismApplication : Application() {
      * 避免每次 OCR 新建导致资源泄漏）。
      */
     private val mlKitOcrTextExtractor: MlKitOcrTextExtractor by lazy { MlKitOcrTextExtractor(this) }
+
+    /** 仅供 debug 探针（`QqDebugReceiver`）取证媒体链路；不参与业务逻辑。 */
+    val qqMlKitOcrTextExtractor: MlKitOcrTextExtractor get() = mlKitOcrTextExtractor
 
     /**
      * v1 US-301/302：视觉旁路编排器（纯文本模型识图方案 B）。
@@ -1673,6 +1694,16 @@ class PrismApplication : Application() {
                 if (contact.isBlank()) return io.prism.qq.QqReplyOutcome.skipped("未配置目标联系人")
                 val channel = activeQqChannel()
 
+                // 2026-10-26（US-3125）：QQ 已离线时明确跳过。
+                // 真机实证：账号态周期性失效后，回复链路会一路走到发送失败并累计熔断，
+                // 而用户看到的只是"不回"。这里直接给出可执行原因（需在 PC 上重新登录），
+                // 且**不计失败、不熔断**——离线是协议端状态，不是账号故障。
+                if (channel.transport == io.prism.qq.channel.QqTransport.ONEBOT &&
+                    _qqProtocolStatus.value?.state == io.prism.qq.QqProtocolHealth.State.QQ_OFFLINE
+                ) {
+                    return io.prism.qq.QqReplyOutcome.skipped("QQ 已离线（需在 PC 上重新登录协议端）")
+                }
+
                 // 2026-10-25（ADR-063 修订）：无障碍路径依赖 UI 自动化——屏幕熄灭时注入会被
                 // 系统丢弃、取到的只是旧帧。被动回复**不唤醒屏幕**（不打扰用户），直接如实跳过；
                 // 消息不会被标记已回复，用户点亮屏幕后仍可被探针捕获。
@@ -1768,6 +1799,46 @@ class PrismApplication : Application() {
                     null
                 }
 
+                // 2026-10-26（US-3124）：图片/表情包要真的"给模型看"。
+                // 真机取证：NapCat 事件带 https CDN 地址，但原实现只留 `[图片]` 占位符。
+                // 策略：下载 → 支持视觉就传图；否则 OCR 提字；都不行则诚实说明（禁止编造）。
+                val mediaRef = incoming.media.firstOrNull {
+                    it.kind == io.prism.qq.channel.QqMediaKind.IMAGE ||
+                        it.kind == io.prism.qq.channel.QqMediaKind.STICKER
+                }
+                var imageDataUrl: String? = null
+                var mediaNote: String? = null
+                if (mediaRef != null) {
+                    val dataUrl = qqMediaFetcher.dataUrl(mediaRef)
+                    val modelName = provider.models.firstOrNull().orEmpty()
+                    val vision = provider.supportsVision ||
+                        io.prism.data.ProviderConfig.detectVisionSupport(modelName)
+                    val isSticker = mediaRef.kind == io.prism.qq.channel.QqMediaKind.STICKER
+                    mediaNote = buildString {
+                        append(if (isSticker) "对方发来一个表情包" else "对方发来一张图片")
+                        mediaRef.summary?.takeIf { it.isNotBlank() }?.let { append("，摘要：$it") }
+                        if (mediaRef.fileSize > 0) append("，约 ${mediaRef.fileSize / 1024}KB")
+                    }
+                    if (dataUrl != null && vision) {
+                        imageDataUrl = dataUrl
+                    } else if (dataUrl != null) {
+                        // 无视觉能力 → 本地 OCR 兜底（中文 ML Kit，离线）
+                        val ocr = runCatching { mlKitOcrTextExtractor.extractText(dataUrl) }.getOrNull()
+                        mediaNote += if (!ocr.isNullOrBlank()) {
+                            "；图片中的文字（OCR，可能有误）：${ocr.take(MAX_OCR_CHARS)}"
+                        } else {
+                            "；当前模型无法识别画面内容"
+                        }
+                    } else {
+                        mediaNote += "；图片内容未能获取"
+                    }
+                    android.util.Log.i(
+                        "QqProactiveSchedule",
+                        "媒体：kind=${mediaRef.kind} vision=$vision 有图=${dataUrl != null} " +
+                            "OCR=${if (mediaNote.contains("OCR")) "yes" else "no"}"
+                    )
+                }
+
                 val reply = composer.composeReply(
                     baseUrl = provider.baseUrl,
                     apiKey = key,
@@ -1787,7 +1858,9 @@ class PrismApplication : Application() {
                         )
                     } else {
                         null
-                    }
+                    },
+                    imageDataUrl = imageDataUrl,
+                    mediaNote = mediaNote
                 ) ?: return io.prism.qq.QqReplyOutcome.failed("回复生成失败（端点/模型异常）")
                 // 2026-10-26 真机修复：被动回复经工具执行器发送时会命中**主动**节流
                 // （minInterval/dailyCap/maxPerDay）。这些配额语义是"不要主动打扰"，
@@ -1797,21 +1870,54 @@ class PrismApplication : Application() {
                 // 媒体是**增强**：文本先发，媒体失败只记日志，绝不让回复丢失。
                 val allowMedia = cfg.mediaReplyEnabled
                 val parsed = io.prism.qq.QqReplyDirective.parse(reply, allowMedia)
+                // 2026-10-26 真机修复（US-3122 AC-2 修订）：原实现是**双重概率门**——
+                // 模型必须写出标记（概率不高）**且**撞中 25% 随机才发。真机上用户明说
+                // "发个表情包"，模型回了纯文字，于是永远发不出去。
+                // 现在：① 模型给了标记 → 一定发；② 用户明确要表情 → 代码兜底发；
+                // ③ 都没有才按概率随机附带。
+                val wantsSticker = io.prism.qq.QqMediaIntent.wantsSticker(incoming.text)
+                val stickerEmotion = when {
+                    !allowMedia -> null
+                    parsed.stickerEmotion != null -> parsed.stickerEmotion
+                    wantsSticker -> io.prism.qq.QqMediaIntent.guessEmotion(incoming.text)
+                        ?: io.prism.qq.QqMediaIntent.DEFAULT_EMOTION
+                    cfg.stickerChancePercent > 0 &&
+                        kotlin.random.Random.nextInt(100) < cfg.stickerChancePercent ->
+                        io.prism.qq.QqMediaIntent.guessEmotion(incoming.text)
+                            ?: io.prism.qq.QqMediaIntent.DEFAULT_EMOTION
+                    else -> null
+                }
+                // 语音同理：模型给标记就发，用户点名要语音也发；不再二次随机
+                val wantVoice = allowMedia && (parsed.voice ||
+                    io.prism.qq.QqMediaIntent.wantsVoice(incoming.text))
+                android.util.Log.i(
+                    "QqProactiveSchedule",
+                    "媒体指令=${if (parsed.hasDirective) "有" else "无"} " +
+                        "sticker=${stickerEmotion ?: "none"} voice=$wantVoice " +
+                        "intent=${if (wantsSticker) "要表情" else "-"}"
+                )
+                // 只发媒体（模型只给了标记）时不能发空文本
+                val textToSend = parsed.text.ifBlank {
+                    if (stickerEmotion != null || wantVoice) "" else reply
+                }
                 val previousScope = io.prism.qq.QqLocalToolExecutor.enterPassiveReplyScope()
                 val sendResult = try {
-                    channel.sendText(contact, parsed.text)
+                    if (textToSend.isBlank()) {
+                        // 纯媒体回复：以媒体发送结果作为整体结果
+                        "SKIP:TEXT_EMPTY"
+                    } else {
+                        channel.sendText(contact, textToSend)
+                    }
                 } finally {
                     io.prism.qq.QqLocalToolExecutor.exitPassiveReplyScope(previousScope)
                 }
-                // 文本成功才继续媒体（文本失败时媒体没有意义，且会造成"半个回复"）
-                if (!sendResult.startsWith("错误") && !sendResult.startsWith("⚠️") &&
-                    channel.transport == io.prism.qq.channel.QqTransport.ONEBOT
-                ) {
-                    if (parsed.voice && cfg.voiceChancePercent > 0 &&
-                        kotlin.random.Random.nextInt(100) < cfg.voiceChancePercent
-                    ) {
+                val textOk = sendResult == "SKIP:TEXT_EMPTY" ||
+                    (!sendResult.startsWith("错误") && !sendResult.startsWith("⚠️"))
+                // 文本成功（或本次本就无文本）才继续媒体
+                if (textOk && channel.transport == io.prism.qq.channel.QqTransport.ONEBOT) {
+                    if (wantVoice && cfg.voiceChancePercent >= 0) {
                         runCatching {
-                            val synth = qqVoiceSynthesizer.synthesize(parsed.text)
+                            val synth = qqVoiceSynthesizer.synthesize(textToSend.ifBlank { parsed.text })
                             if (synth != null && synth.samples.isNotEmpty()) {
                                 channel.sendVoice(contact, synth.samples, synth.sampleRate)
                             }
@@ -1822,31 +1928,42 @@ class PrismApplication : Application() {
                             )
                         }
                     }
-                    if (parsed.stickerEmotion != null && cfg.stickerChancePercent > 0 &&
-                        kotlin.random.Random.nextInt(100) < cfg.stickerChancePercent
-                    ) {
-                        runCatching {
-                            channel.sendSticker(contact, parsed.stickerEmotion, null)
-                        }.onFailure {
+                    if (stickerEmotion != null) {
+                        val stickerResult = runCatching {
+                            channel.sendSticker(contact, stickerEmotion, null)
+                        }.getOrElse {
                             android.util.Log.w(
                                 "QqProactiveSchedule",
-                                "被动回复附带表情失败（已保留文本）：${it::class.simpleName}"
+                                "被动回复附带表情异常：${it::class.simpleName}"
                             )
+                            "错误：异常"
                         }
+                        android.util.Log.i(
+                            "QqProactiveSchedule",
+                            "表情发送=${if (stickerResult.startsWith("错误")) "fail" else "ok"}" +
+                                (if (stickerResult.startsWith("错误")) "（${stickerResult.take(60)}）" else "")
+                        )
                     }
                 }
-                runCatching {
-                    qqConversationStore.append(
-                        contact,
-                        io.prism.qq.channel.QqMessage(
-                            messageId = null,
-                            incoming = false,
-                            text = parsed.text,
-                            timestampMs = System.currentTimeMillis()
+                android.util.Log.i(
+                    "QqProactiveSchedule",
+                    "被动回复文本=${if (sendResult == "SKIP:TEXT_EMPTY") "仅媒体" else if (textOk) "ok" else "fail"}"
+                )
+                if (textToSend.isNotBlank()) {
+                    runCatching {
+                        qqConversationStore.append(
+                            contact,
+                            io.prism.qq.channel.QqMessage(
+                                messageId = null,
+                                incoming = false,
+                                text = textToSend,
+                                timestampMs = System.currentTimeMillis()
+                            )
                         )
-                    )
+                    }
                 }
-                val result = sendResult
+                // "SKIP:TEXT_EMPTY" = 本次只发媒体（无文本），按成功记账，避免被误判为失败类别
+                val result = if (sendResult == "SKIP:TEXT_EMPTY") "已发送（仅媒体）" else sendResult
                 val sentAt = System.currentTimeMillis()
                 val kind = io.prism.qq.QqFailureClassifier.classify(result)
                 val failed = result.startsWith("错误") || result.startsWith("⚠️")
@@ -1903,6 +2020,39 @@ class PrismApplication : Application() {
                 replyMutex.withLock { autoReplyLocked(override) }
 
             io.prism.qq.QqProactiveGateway.autoReply = { autoReplyOnce() }
+
+            // 2026-10-26（US-3125）：协议端账号在线态周期探测（60s）。
+            // 真机实证：WS 连着但 QQ 已离线时，用户只会觉得"又不回了"，必须显式可见。
+            appScope.launch {
+                while (appScope.isActive) {
+                    try {
+                        val cfg = qqConfigRepository.get()
+                        if (cfg.enabled && cfg.transport == io.prism.qq.channel.QqTransport.ONEBOT) {
+                            val status = qqProtocolHealth.probe()
+                            _qqProtocolStatus.value = status
+                            android.util.Log.i(
+                                "QqProtocolHealth",
+                                "state=${status.state} detail=${status.detail} " +
+                                    "selfId=${status.selfId}"
+                            )
+                            qqRuntimeStateRepository.recordProtocolHealth(
+                                state = status.state.name,
+                                detail = status.detail,
+                                atMs = status.checkedAtMs,
+                                offline = status.state == io.prism.qq.QqProtocolHealth.State.QQ_OFFLINE
+                            )
+                        }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        android.util.Log.w(
+                            "QqProtocolHealth",
+                            "探测异常：${e::class.simpleName}"
+                        )
+                    }
+                    delay(60_000L)
+                }
+            }
 
             // 通道可用性判定（US-3110 AC-6）：协议端离线 + 无障碍不可用 → 调度器跳过且不记失败
             io.prism.qq.QqProactiveGateway.onlineCheck = {
@@ -2126,6 +2276,9 @@ class PrismApplication : Application() {
     companion object {
         /** QQ 回复注入的记忆 section 硬上限（L2+L3 合并；guardrail M-08）。 */
         private const val MAX_MEMORY_SECTION_CHARS = 1200
+
+        /** OCR 结果进入 prompt 的字符上限（防长图整页文字撑爆上下文）。 */
+        private const val MAX_OCR_CHARS = 600
 
         /**
          * 默认切片大小（字符数，ADR-011 5.2）。

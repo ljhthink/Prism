@@ -1,4 +1,4 @@
-﻿package io.prism.debug
+package io.prism.debug
 
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -171,6 +171,28 @@ class QqDebugReceiver : BroadcastReceiver() {
                         } else {
                             "probe len=${snap.length} lines=${snap.count { it == '\n' }} " +
                                 "head=${snap.take(120).replace('\n', '|')}"
+                        }
+                    }
+                    // 2026-10-26（US-3124）：媒体链路真机取证——下载 + OCR。
+                    // 只读、不发送任何消息；用于验证"图片确实能被解析"。
+                    "media" -> runBlocking {
+                        val url = intent.getStringExtra("url").orEmpty()
+                        if (url.isBlank()) {
+                            "media=缺少 url"
+                        } else {
+                            val ref = io.prism.qq.channel.QqMediaRef(
+                                kind = io.prism.qq.channel.QqMediaKind.IMAGE,
+                                url = url,
+                                fileName = intent.getStringExtra("file") ?: "probe.jpg"
+                            )
+                            val dataUrl = app.qqMediaFetcher.dataUrl(ref)
+                            if (dataUrl == null) {
+                                "media=下载失败（白名单/尺寸/MIME/网络） url=${url.take(60)}"
+                            } else {
+                                val ocr = app.qqMlKitOcrTextExtractor.extractText(dataUrl)
+                                "media=ok dataUrl=${dataUrl.length}字符 " +
+                                    "ocr=${ocr?.take(120)?.replace("\n", " ") ?: "<无文字>"}"
+                            }
                         }
                     }
                     ACTION_CONFIG -> runBlocking {

@@ -34,18 +34,59 @@ data class QqChannelStatus(
 )
 
 /**
+ * 一条消息中的**媒体引用**（2026-10-26 新增；PRD US-3124）。
+ *
+ * 真机取证（`get_friend_msg_history`）：NapCat 的图片消息段带 `url`（QQ CDN）、
+ * `file`、`file_size`、`sub_type`（1=表情包，0=普通图片）。原实现只取 `type` 并替换成
+ * `[图片]` 占位符，图片内容从未进入模型 → 用户看到"LLM 看不到图片"。
+ *
+ * 本类型保留这些元数据，由 [io.prism.qq.QqMediaFetcher] 按白名单下载后再决定走视觉还是 OCR。
+ */
+data class QqMediaRef(
+    val kind: QqMediaKind,
+    /** QQ CDN 的 https 下载地址（可能为 null，例如表情 id 类表情）。 */
+    val url: String? = null,
+    /** 协议侧文件名（用于缓存键）。 */
+    val fileName: String? = null,
+    /** 文件大小（字节；未知=0）。 */
+    val fileSize: Long = 0L,
+    /** 协议端给的摘要（如 `[动画表情]`）。 */
+    val summary: String? = null
+)
+
+/** 媒体种类。 */
+enum class QqMediaKind {
+    /** 普通图片。 */
+    IMAGE,
+
+    /** 表情包（NapCat 的 `sub_type=1` 或 `mface`）。 */
+    STICKER,
+
+    /** QQ 内置表情（无图片内容）。 */
+    FACE,
+
+    /** 语音。 */
+    VOICE,
+
+    /** 视频。 */
+    VIDEO
+}
+
+/**
  * 一条 QQ 消息（协议端与无障碍通道的统一视图）。
  *
  * @param messageId 协议端消息 ID（幂等键）；无障碍通道为 null
  * @param incoming true=对方发来，false=自己发出
- * @param text 文本正文（媒体消息为空串）
+ * @param text 文本正文（媒体消息带占位符，如 `[图片]`）
  * @param timestampMs 消息时间（毫秒；未知时为 0）
+ * @param media 该消息携带的媒体引用（2026-10-26 新增；空=纯文本）
  */
 data class QqMessage(
     val messageId: String?,
     val incoming: Boolean,
     val text: String,
-    val timestampMs: Long
+    val timestampMs: Long,
+    val media: List<QqMediaRef> = emptyList()
 )
 
 interface QqChannel {

@@ -154,6 +154,24 @@ class QqRuntimeStateRepository(
         it[RETRY_ANCHOR] = 0L
     }
 
+    /**
+     * 记录一次协议端健康探测（2026-10-26；US-3125）。
+     *
+     * @param state `ONLINE` / `QQ_OFFLINE` / `UNREACHABLE`
+     * @param offline true=本次检测到 QQ 离线（额外记一次离线时刻，供 UI 显示"最近离线"）
+     */
+    suspend fun recordProtocolHealth(
+        state: String,
+        detail: String,
+        atMs: Long,
+        offline: Boolean
+    ) = edit { prefs ->
+        prefs[PROTOCOL_STATE] = state.take(24)
+        prefs[PROTOCOL_DETAIL] = detail.take(120)
+        prefs[PROTOCOL_CHECKED_AT] = atMs
+        if (offline) prefs[PROTOCOL_OFFLINE_AT] = atMs
+    }
+
     /** 记录已回应过的收到消息指纹与时刻（US-3109 双向对话去重 + guardrail M-02 时间窗）。 */
     suspend fun setLastReplied(hash: String, atMs: Long) = edit {
         it[LAST_REPLIED_HASH] = hash
@@ -225,7 +243,11 @@ class QqRuntimeStateRepository(
         retryCount = prefs[RETRY_COUNT] ?: 0,
         passiveReplyTimestamps = prefs[PASSIVE_REPLY_AT].orEmpty()
             .split(',')
-            .mapNotNull { it.trim().toLongOrNull() }
+            .mapNotNull { it.trim().toLongOrNull() },
+        lastProtocolState = prefs[PROTOCOL_STATE] ?: "",
+        lastProtocolDetail = prefs[PROTOCOL_DETAIL] ?: "",
+        lastProtocolCheckedAtMs = prefs[PROTOCOL_CHECKED_AT] ?: 0L,
+        lastProtocolOfflineAtMs = prefs[PROTOCOL_OFFLINE_AT] ?: 0L
     )
 
     companion object {
@@ -248,6 +270,12 @@ class QqRuntimeStateRepository(
 
         /** 被动回复时间戳（逗号分隔 epoch ms；RC-3 滑动窗口）。 */
         private val PASSIVE_REPLY_AT = stringPreferencesKey("qq_passive_reply_at")
+
+        /** 协议端健康（2026-10-26；US-3125）。 */
+        private val PROTOCOL_STATE = stringPreferencesKey("qq_protocol_state")
+        private val PROTOCOL_DETAIL = stringPreferencesKey("qq_protocol_detail")
+        private val PROTOCOL_CHECKED_AT = longPreferencesKey("qq_protocol_checked_at")
+        private val PROTOCOL_OFFLINE_AT = longPreferencesKey("qq_protocol_offline_at")
 
         /** 时间戳保留时长（滑动窗口的 2 倍，超出即淘汰）。 */
         private const val PASSIVE_TIMESTAMP_TTL_MS = 5 * 60_000L

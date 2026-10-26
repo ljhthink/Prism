@@ -9,6 +9,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 import java.time.LocalDateTime
 
 /**
@@ -96,6 +97,20 @@ class QqProactiveComposer(
          * 由 [QqReplyDirective.promptHint] 生成；null/空表示本次不允许媒体。
          */
         mediaHint: String? = null,
+        /**
+         * 图片的 `data:` URL（2026-10-26；US-3124）。
+         *
+         * 非空且模型支持视觉时，user 内容改为多模态数组
+         * `[{type:text},{type:image_url}]`（与 UI 图片消息同构）。
+         */
+        imageDataUrl: String? = null,
+        /**
+         * 媒体文字说明（OCR 结果 / "画面无法识别" / "对方发的是表情包"）。
+         *
+         * 无论是否走视觉都会拼进 user 文本，确保模型知道"这条消息里有什么"，
+         * 并在看不到画面时**不编造**。
+         */
+        mediaNote: String? = null,
         now: LocalDateTime = LocalDateTime.now()
     ): String? {
         if (baseUrl.isBlank() || apiKey.isBlank() || model.isBlank()) return null
@@ -105,13 +120,28 @@ class QqProactiveComposer(
         val memory = memorySection?.trim()?.takeIf { it.isNotEmpty() }
             ?.let { "\n\n【关于用户的相关记忆（供你自然运用，不要直接复述）】\n$it" }
             ?: ""
-        val system = persona + memory +
+        val mediaRule = if (imageDataUrl != null) {
+            "\n\n【注意】对方这条消息包含图片，图片已随消息提供，请依据**你实际看到的画面**回应；" +
+                "看不清就如实说看不清，**严禁编造画面内容**。"
+        } else if (!mediaNote.isNullOrBlank()) {
+            "\n\n【注意】对方这条消息包含图片/表情包，但你**看不到画面**。" +
+                "只能依据下方给出的说明回应；**严禁编造画面内容**。"
+        } else {
+            ""
+        }
+        val system = persona + memory + mediaRule +
             "\n\n对方刚给你发了一条消息，请**像真人那样自然、即时地回一句**。" +
             "要求：口语、简短（不超过 60 字）、承接对方话题，可以有语气词/表情；" +
             "不要引号、不要自称 AI、不要解释你在做什么，只输出回复正文本身。" +
             (mediaHint?.takeIf { it.isNotBlank() } ?: "")
-        val userContext = buildReplyUserContext(history, incoming)
-        val body = buildRequestJson(model, system, userContext, reply = true)
+        val userContext = buildReplyUserContext(history, incoming, mediaNote)
+        val body = buildRequestJson(
+            model = model,
+            system = system,
+            userContext = userContext,
+            reply = true,
+            imageDataUrl = imageDataUrl
+        )
         return postWithRetry(body, baseUrl, apiKey)
     }
 
@@ -171,7 +201,12 @@ class QqProactiveComposer(
      * 截断策略：最多 [MAX_HISTORY_IN_PROMPT] 条、单条 [MAX_CHARS_PER_MESSAGE] 字——
      * 防止长聊天把 prompt 撑爆（上下文窗口与 token 成本双重约束）。
      */
-    internal fun buildReplyUserContext(history: List<QqMessage>, incoming: String): String {
+    internal fun buildReplyUserContext(
+        history: List<QqMessage>,
+        incoming: String,
+        /** 媒体说明（OCR 文字 / 无法识别 / 表情包提示）；空=纯文本消息。 */
+        mediaNote: String? = null
+    ): String {
         val lines = history.takeLast(MAX_HISTORY_IN_PROMPT).map { message ->
             val who = if (message.incoming) "对方" else "我"
             "$who：${message.text.trim().take(MAX_CHARS_PER_MESSAGE)}"
@@ -181,25 +216,34 @@ class QqProactiveComposer(
         } else {
             "最近对话（由旧到新）：\n" + lines.joinToString("\n") + "\n\n"
         }
-        return historyBlock + "对方刚发来：「${incoming.trim().take(MAX_CHARS_PER_MESSAGE)}」"
+        val note = mediaNote?.trim()?.takeIf { it.isNotEmpty() }
+            ?.let { "\n（$it）" }
+            ?: ""
+        return historyBlock + "对方刚发来：「${incoming.trim().take(MAX_CHARS_PER_MESSAGE)}」" + note
     }
 
     /**
      * 构建非流式 chat completions 请求体（internal 纯函数可测）。
      *
      * @param reply true=回复场景（[userContext] 已是完整用户内容）；false=主动消息场景
+     * @param imageDataUrl 非空时 user content 改为多模态数组（2026-10-26；US-3124），
+     *   与 [io.prism.network.OpenAICompatibleProvider] 的图片消息同构：
+     *   `[{"type":"text","text":...},{"type":"image_url","image_url":{"url":...}}]`
      */
     internal fun buildRequestJson(
         model: String,
         system: String,
         userContext: String,
-        reply: Boolean = false
+        reply: Boolean = false,
+        imageDataUrl: String? = null
     ): String =
         buildJsonObject {
             put("model", model)
             put("stream", false)
             put("max_tokens", if (reply) 400 else 120)
             put("temperature", 0.9)
+            val userText = if (reply) userContext else "现在时间：$userContext。请生成这条主动消息。"
+            val image = imageDataUrl?.takeIf { it.isNotBlank() }
             put(
                 "messages",
                 JsonArray(
@@ -210,10 +254,25 @@ class QqProactiveComposer(
                         },
                         buildJsonObject {
                             put("role", "user")
-                            put(
-                                "content",
-                                if (reply) userContext else "现在时间：$userContext。请生成这条主动消息。"
-                            )
+                            if (image == null) {
+                                put("content", userText)
+                            } else {
+                                put(
+                                    "content",
+                                    JsonArray(
+                                        listOf(
+                                            buildJsonObject {
+                                                put("type", "text")
+                                                put("text", userText)
+                                            },
+                                            buildJsonObject {
+                                                put("type", "image_url")
+                                                putJsonObject("image_url") { put("url", image) }
+                                            }
+                                        )
+                                    )
+                                )
+                            }
                         }
                     )
                 )
