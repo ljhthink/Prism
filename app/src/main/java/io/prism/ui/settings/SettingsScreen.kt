@@ -2040,6 +2040,23 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
                     text = "手机操控截图将直接以图片发送给该模型查看（需模型支持图片输入），否则用 OCR 文字+坐标",
                     color = PrismTextFaint, fontSize = 10.sp
                 )
+                // 2026-10-26 真机反馈：用户配置 deepseek-v4-flash（实际支持多模态），
+                // 但开关显示"关"，因为 supportsVision 存的是"用户显式选择"，
+                // 而运行时是 `显式 || 模型名自动判定`。这里把**实际生效**的结论显式写出来，
+                // 否则用户会以为"我明明支持视觉，为什么显示 false"。
+                val autoDetected = remember(models, supportsVisionTouched) {
+                    !supportsVisionTouched &&
+                        models.split(",").any {
+                            io.prism.data.ProviderConfig.detectVisionSupport(it.trim())
+                        }
+                }
+                if (autoDetected && !supportsVision) {
+                    Text(
+                        text = "ℹ 已按模型名自动判定为支持视觉（当前实际生效：开）；" +
+                            "打开此开关可固化为显式设置",
+                        color = PrismIndigo, fontSize = 10.sp
+                    )
+                }
             }
             PrismSwitch(
                 checked = supportsVision,

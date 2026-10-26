@@ -79,11 +79,29 @@ data class ProviderConfig(
          * 按模型名启发式判断是否支持视觉（v1 批次13 B）：保存 Provider 时自动提示
          * [supportsVision]（用户仍可在设置页手动覆盖）。纯启发式，宁缺勿错——
          * 误判为视觉会把截图图片发给纯文本模型（400 走视觉旁路/OCR 兜底，可降级）。
+         *
+         * **2026-10-26 修正（真机反馈）**：用户配置 `deepseek-v4-flash` 实际支持多模态，
+         * 但白名单里没有 deepseek 家族（历史经验：deepseek-chat/reasoner 都是纯文本），
+         * 于是 `vision=false`，QQ 收图只能走 OCR。
+         * 官方文档（Models & Pricing / Vision）明确：
+         * `deepseek-flash`（V4.1-Flash-1017）**支持 Vision**；
+         * 旧名 `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp` 仍被接受且由同一模型服务；
+         * 而 `deepseek-v4-pro` **不支持 Vision**。
+         * 因此这里用**精确模式**（只认 flash 家族），不能写裸 "deepseek"——
+         * 那会把 `deepseek-v4-pro` 误判为支持，反而把图片发给纯文本模型。
          */
         fun detectVisionSupport(modelName: String?): Boolean {
             val m = modelName?.trim()?.lowercase() ?: return false
+            // 先排除明确不支持的型号（避免"包含匹配"把 pro 也算进来）
+            if (NON_VISION_PATTERNS.any { m.contains(it) }) return false
             return VISION_MODEL_PATTERNS.any { m.contains(it) }
         }
+
+        /** 明确**不支持**视觉的型号（优先级高于 [VISION_MODEL_PATTERNS]）。 */
+        private val NON_VISION_PATTERNS = listOf(
+            "deepseek-v4-pro", "deepseek-pro", "deepseek-chat", "deepseek-reasoner",
+            "deepseek-coder", "deepseek-v3", "deepseek-r1"
+        )
 
         /** 常见视觉模型名模式（小写包含匹配）。 */
         private val VISION_MODEL_PATTERNS = listOf(
@@ -91,7 +109,9 @@ data class ProviderConfig(
             "qwen-vl", "qwen2.5-vl", "qwen3-vl", "qwen2-vl",
             "gemini", "gpt-4o", "gpt-5", "claude", // Claude 3+ 全部支持视觉
             "kimi-k2", "kimi-vl", "step-1v", "llava", "minicpm-v",
-            "grok-2v", "grok-4", "o3", "o4", "vision"
+            "grok-2v", "grok-4", "o3", "o4", "vision",
+            // 2026-10-26：DeepSeek Flash 家族支持 Vision（见方法注释的官方依据）
+            "deepseek-flash", "deepseek-v4-flash", "deepseek-v4.1-flash", "deepseek-vl"
         )
     }
 }

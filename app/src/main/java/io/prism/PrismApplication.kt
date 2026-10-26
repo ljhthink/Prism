@@ -1850,17 +1850,8 @@ class PrismApplication : Application() {
                     )
                 }
 
-                val reply = composer.composeReply(
-                    baseUrl = provider.baseUrl,
-                    apiKey = key,
-                    model = provider.models.firstOrNull().orEmpty(),
-                    personaSystemPrompt = persona,
-                    companionAddress = null,
-                    incoming = incoming.text,
-                    history = history,
-                    memorySection = memory,
-                    // 2026-10-26（US-3122）：仅在协议端且用户开启媒体回复时提示指令语法
-                    mediaHint = if (cfg.mediaReplyEnabled &&
+                val reply = run {
+                    val mediaHint = if (cfg.mediaReplyEnabled &&
                         channel.transport == io.prism.qq.channel.QqTransport.ONEBOT
                     ) {
                         io.prism.qq.QqReplyDirective.promptHint(
@@ -1869,10 +1860,53 @@ class PrismApplication : Application() {
                         )
                     } else {
                         null
-                    },
-                    imageDataUrl = imageDataUrl,
-                    mediaNote = mediaNote
-                ) ?: return io.prism.qq.QqReplyOutcome.failed("回复生成失败（端点/模型异常）")
+                    }
+                    val first = composer.composeReply(
+                        baseUrl = provider.baseUrl,
+                        apiKey = key,
+                        model = provider.models.firstOrNull().orEmpty(),
+                        personaSystemPrompt = persona,
+                        companionAddress = null,
+                        incoming = incoming.text,
+                        history = history,
+                        memorySection = memory,
+                        mediaHint = mediaHint,
+                        imageDataUrl = imageDataUrl,
+                        mediaNote = mediaNote
+                    )
+                    if (first != null || imageDataUrl == null) {
+                        first
+                    } else {
+                        // 2026-10-26（真机修正）：启发式判成"支持视觉"但端点实际拒绝图片时，
+                        // 不能把整条回复丢掉。降级为"纯文本 + OCR 文字说明"再试一次，
+                        // 并把这次失败如实记进日志（供判断是误判还是模型真不支持）。
+                        android.util.Log.w(
+                            "QqProactiveSchedule",
+                            "视觉请求失败，降级为 OCR 文字说明重试（model=${provider.models.firstOrNull()}）"
+                        )
+                        val ocr = runCatching {
+                            mlKitOcrTextExtractor.extractText(imageDataUrl!!)
+                        }.getOrNull()
+                        val degradedNote = (mediaNote.orEmpty()) + if (!ocr.isNullOrBlank()) {
+                            "；图片中的文字（OCR，可能有误）：${ocr.take(MAX_OCR_CHARS)}"
+                        } else {
+                            "；当前模型无法识别画面内容"
+                        }
+                        composer.composeReply(
+                            baseUrl = provider.baseUrl,
+                            apiKey = key,
+                            model = provider.models.firstOrNull().orEmpty(),
+                            personaSystemPrompt = persona,
+                            companionAddress = null,
+                            incoming = incoming.text,
+                            history = history,
+                            memorySection = memory,
+                            mediaHint = mediaHint,
+                            imageDataUrl = null,
+                            mediaNote = degradedNote
+                        )
+                    }
+                } ?: return io.prism.qq.QqReplyOutcome.failed("回复生成失败（端点/模型异常）")
                 // 2026-10-26 真机修复：被动回复经工具执行器发送时会命中**主动**节流
                 // （minInterval/dailyCap/maxPerDay）。这些配额语义是"不要主动打扰"，
                 // 不该拦"用户说话→系统回话"。此处置位被动作用域，闸门改走 decidePassive。

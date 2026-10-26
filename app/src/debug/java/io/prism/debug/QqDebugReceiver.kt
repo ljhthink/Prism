@@ -250,6 +250,31 @@ class QqDebugReceiver : BroadcastReceiver() {
                         val result = reply(probe)
                         "simulate_inbound=${result.logLine} media=${media.size}"
                     }
+                    // 2026-10-26（US-3124 排查）：打印当前激活 Provider 的视觉判定依据。
+                    // 真机现象：用户认为模型支持多模态，但媒体日志显示 vision=false——
+                    // 需要区分"模型名启发式没命中"与"用户显式关掉了开关"。
+                    "provider" -> runBlocking {
+                        val p = app.providerConfigRepository.activeProviderFlow.value
+                            ?: return@runBlocking "provider=<无激活 Provider>"
+                        val model = p.models.firstOrNull().orEmpty()
+                        val detected = io.prism.data.ProviderConfig.detectVisionSupport(model)
+                        buildString {
+                            append("provider=")
+                            append(p.name)
+                            append(" model=")
+                            append(model)
+                            append(" supportsVision=")
+                            append(p.supportsVision)
+                            append(" supportsVisionSet=")
+                            append(p.supportsVisionSet)
+                            append(" detect=")
+                            append(detected)
+                            append(" 最终视视觉=")
+                            append(p.supportsVision || detected)
+                            append(" models=")
+                            append(p.models.joinToString(","))
+                        }
+                    }
                     ACTION_CONFIG -> runBlocking {
                         val repo = app.qqConfigRepository
                         intent.getStringExtra(EXTRA_MAX_PER_DAY)?.toIntOrNull()
