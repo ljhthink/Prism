@@ -111,7 +111,20 @@ class QqConnectionDiagnostics(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                val (verdict, detail) = QqDiagnosticsRules.classifyTcpFailure(e, sameSubnet)
+                var (verdict, detail) = QqDiagnosticsRules.classifyTcpFailure(e, sameSubnet)
+                // 2026-10-27（ADR-068）：超时/不可达 + 地址不在当前网络内 → 判为"旧局域网地址"。
+                // 真机实证：离开热点后地址仍是 10.92.122.126，只报"连接超时"会把人引去查防火墙。
+                val timeoutLike = verdict == QqDiagnosticsRules.Verdict.FIREWALL_TIMEOUT ||
+                    verdict == QqDiagnosticsRules.Verdict.UNKNOWN
+                if (timeoutLike && QqDiagnosticsRules.isStaleLanAddress(
+                        sameSubnet = sameSubnet,
+                        cellOnly = QqDiagnosticsRules.isCellOnly(local?.interfaceName),
+                        tcpFailedWithTimeout = true
+                    )
+                ) {
+                    verdict = QqDiagnosticsRules.Verdict.STALE_LAN_ADDRESS
+                    detail = "该地址不在当前网络内（本机无对应网段接口）"
+                }
                 steps += fail(QqDiagnosticsRules.Stage.TCP, detail)
                 return@withContext finish(steps, normalized, verdictOverride = verdict)
             }
@@ -241,7 +254,10 @@ class QqConnectionDiagnostics(
             return QqLocalNetwork(
                 ipv4 = ipv4?.address?.hostAddress,
                 prefixLength = ipv4?.prefixLength,
-                gateway = gateway
+                gateway = gateway,
+                // 2026-10-27：接口名用于识别"只剩蜂窝网"（rmnet*），
+                // 从而把"超时"正确归因为旧局域网地址而非防火墙
+                interfaceName = lp.interfaceName
             )
         }
 

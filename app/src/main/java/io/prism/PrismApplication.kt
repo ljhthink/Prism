@@ -1819,7 +1819,23 @@ class PrismApplication : Application() {
                 }
                 var imageDataUrl: String? = null
                 var mediaNote: String? = null
-                if (mediaRef != null) {
+                // 2026-10-27（US-3126）：通道是否具备媒体能力。降级到无障碍时**根本拿不到图**，
+                // 也就不该去下载/OCR（省流量省电），并要在 prompt 里如实说明。
+                val channelSupportsMedia = channel.supportsMedia
+                if (mediaRef != null && !channelSupportsMedia) {
+                    mediaNote = buildString {
+                        append(if (mediaRef.kind == io.prism.qq.channel.QqMediaKind.STICKER) {
+                            "对方发来一个表情包"
+                        } else {
+                            "对方发来一张图片"
+                        })
+                        append("；当前为无障碍降级通道，**看不到图片内容**")
+                    }
+                    android.util.Log.i(
+                        "QqProactiveSchedule",
+                        "媒体：kind=${mediaRef.kind} 通道=${channel.transport} 无媒体能力 → 不下载"
+                    )
+                } else if (mediaRef != null) {
                     val dataUrl = qqMediaFetcher.dataUrl(mediaRef)
                     val modelName = provider.models.firstOrNull().orEmpty()
                     val vision = provider.supportsVision ||
@@ -1851,8 +1867,12 @@ class PrismApplication : Application() {
                 }
 
                 val reply = run {
+                    // 2026-10-27（US-3126）：媒体提示只在**通道具备媒体能力**时给。
+                    // 无障碍降级时给提示会让模型尝试发表情/语音，然后失败，回复变成"我发不出图"，
+                    // 体验比不提示更差。
                     val mediaHint = if (cfg.mediaReplyEnabled &&
-                        channel.transport == io.prism.qq.channel.QqTransport.ONEBOT
+                        channel.transport == io.prism.qq.channel.QqTransport.ONEBOT &&
+                        channelSupportsMedia
                     ) {
                         io.prism.qq.QqReplyDirective.promptHint(
                             enabledSticker = cfg.stickerChancePercent > 0,
@@ -1969,8 +1989,12 @@ class PrismApplication : Application() {
                 }
                 val textOk = sendResult == "SKIP:TEXT_EMPTY" ||
                     (!sendResult.startsWith("错误") && !sendResult.startsWith("⚠️"))
-                // 文本成功（或本次本就无文本）才继续媒体
-                if (textOk && channel.transport == io.prism.qq.channel.QqTransport.ONEBOT) {
+                // 文本成功（或本次本就无文本）才继续媒体；
+                // 2026-10-27（US-3126）：且**通道必须支持媒体**——无障碍降级时不再尝试，
+                // 省一次必然失败的调用，也避免日志被"不支持"噪音淹没。
+                if (textOk && channel.transport == io.prism.qq.channel.QqTransport.ONEBOT &&
+                    channelSupportsMedia
+                ) {
                     if (wantVoice && cfg.voiceChancePercent >= 0) {
                         runCatching {
                             val synth = qqVoiceSynthesizer.synthesize(textToSend.ifBlank { parsed.text })

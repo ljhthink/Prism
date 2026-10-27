@@ -286,8 +286,18 @@ fun SettingsScreen(
                 val active = app.activeQqChannel()
                 val configured = app.configuredQqChannelStatus()
                 val name = if (active.transport == io.prism.qq.channel.QqTransport.ONEBOT) "协议端" else "无障碍"
-                if (configured.connected) "当前生效：$name"
-                else "当前生效：$name（降级原因：${configured.detail.ifBlank { "未连接" }}）"
+                // 2026-10-27（US-3126）：降级到无障碍时**必须说明能力边界**。
+                // 真机实证：用户以为"表情/看图坏了"，实际是无障碍通道结构上不支持媒体。
+                val degradedCapability = if (active.supportsMedia) {
+                    ""
+                } else {
+                    " · 当前仅文本可用（看不了图、发不了表情/语音）"
+                }
+                if (configured.connected) {
+                    "当前生效：$name$degradedCapability"
+                } else {
+                    "当前生效：$name（降级原因：${configured.detail.ifBlank { "未连接" }}）$degradedCapability"
+                }
             }.getOrDefault("")
             kotlinx.coroutines.delay(QQ_POLL_MS)
         }

@@ -38,9 +38,8 @@ class QqRuntimeStateRepository(
      * @param todayKey 当日日期键（[QqThrottle.todayKey]）
      */
     suspend fun recordFired(nowMs: Long, todayKey: String) = edit { prefs ->
-        val sameDay = prefs[FIRED_DATE] == todayKey
+        val sameDay = advanceDay(prefs, todayKey)
         prefs[LAST_FIRED_AT] = nowMs
-        prefs[FIRED_DATE] = todayKey
         prefs[FIRED_COUNT] = (if (sameDay) prefs[FIRED_COUNT] ?: 0 else 0) + 1
         prefs[SCHEDULED_COUNT] = (if (sameDay) prefs[SCHEDULED_COUNT] ?: 0 else 0) + 1
         prefs[FAILURE_STREAK] = 0
@@ -51,9 +50,8 @@ class QqRuntimeStateRepository(
      * 每日上限仍生效），**不消耗**定时主动消息配额（`maxPerDay`）——两者语义不同，不应混用。
      */
     suspend fun recordReplied(nowMs: Long, todayKey: String) = edit { prefs ->
-        val sameDay = prefs[FIRED_DATE] == todayKey
+        val sameDay = advanceDay(prefs, todayKey)
         prefs[LAST_FIRED_AT] = nowMs
-        prefs[FIRED_DATE] = todayKey
         prefs[FIRED_COUNT] = (if (sameDay) prefs[FIRED_COUNT] ?: 0 else 0) + 1
         prefs[FAILURE_STREAK] = 0
         // 2026-10-26 RC-3 修复：被动回复的滑动窗口记账（与去重集合解耦）
@@ -73,9 +71,8 @@ class QqRuntimeStateRepository(
      * 当日计数不增（可超每日上限），直接违反 PRD US-3108 AC-4「随机化不豁免频控」。
      */
     suspend fun recordUnconfirmedFired(nowMs: Long, todayKey: String) = edit { prefs ->
-        val sameDay = prefs[FIRED_DATE] == todayKey
+        val sameDay = advanceDay(prefs, todayKey)
         prefs[LAST_FIRED_AT] = nowMs
-        prefs[FIRED_DATE] = todayKey
         prefs[FIRED_COUNT] = (if (sameDay) prefs[FIRED_COUNT] ?: 0 else 0) + 1
         prefs[SCHEDULED_COUNT] = (if (sameDay) prefs[SCHEDULED_COUNT] ?: 0 else 0) + 1
         // 刻意不动 FAILURE_STREAK / CIRCUIT_OPEN
@@ -93,9 +90,8 @@ class QqRuntimeStateRepository(
      * 仍然推进 `lastFiredAt` 与当日**总数**（最小间隔 / `dailyCap` 生效），不动 streak。
      */
     suspend fun recordUnconfirmedReplied(nowMs: Long, todayKey: String) = edit { prefs ->
-        val sameDay = prefs[FIRED_DATE] == todayKey
+        val sameDay = advanceDay(prefs, todayKey)
         prefs[LAST_FIRED_AT] = nowMs
-        prefs[FIRED_DATE] = todayKey
         prefs[FIRED_COUNT] = (if (sameDay) prefs[FIRED_COUNT] ?: 0 else 0) + 1
         // 刻意不写 SCHEDULED_COUNT：被动回复不消耗定时主动消息配额
         // 刻意不动 FAILURE_STREAK / CIRCUIT_OPEN：未确认既非成功也非账号失败
@@ -207,6 +203,36 @@ class QqRuntimeStateRepository(
     }
 
     /**
+     * 推进"当日日期键"，并在**跨天时同时重置两个计数**（2026-10-27 RC-4 修复）。
+     *
+     * **原缺陷**：`recordReplied` / `recordUnconfirmedReplied` 只把 `FIRED_DATE` 写成今天，
+     * **没有重置 `SCHEDULED_COUNT`**。于是跨零点后若"先发生被动回复"（用户先说了句话），
+     * 日期变成今天而定时数仍是昨天的值；`QqThrottle.decide` 的判据是
+     * `firedDate == todayKey`（此时成立）→ `scheduledFiredCount >= maxPerDay` →
+     * **当天剩余时间不再发任何定时主动消息**，且文案误导成"已达当日上限"。
+     *
+     * 真机证据：`fired_date=2026-10-27, fired_count=1, scheduled_count=4, max_per_day=3`，
+     * 而 `recordFired` 里两个计数同增 ⇒ `scheduled(4) > fired(1)` 只可能来自昨天。
+     *
+     * 因此**所有**推进日期的写入必须走本函数：跨天一律把两个计数归零，
+     * 调用方只需在 `sameDay` 基础上 +1。
+     *
+     * @return true=同一天（计数应继续累加）；false=已跨天（计数已被清零）
+     */
+    private fun advanceDay(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+        todayKey: String
+    ): Boolean {
+        val sameDay = prefs[FIRED_DATE] == todayKey
+        if (!sameDay) {
+            prefs[FIRED_COUNT] = 0
+            prefs[SCHEDULED_COUNT] = 0
+            prefs[FIRED_DATE] = todayKey
+        }
+        return sameDay
+    }
+
+    /**
      * 追加一条被动回复时间戳并裁剪（RC-3）。
      *
      * 只保留最近 [QqRuntimeState.MAX_PASSIVE_TIMESTAMPS] 条，且淘汰超出滑动窗口 2 倍时长的旧值——
@@ -227,7 +253,13 @@ class QqRuntimeStateRepository(
         lastFiredAt = prefs[LAST_FIRED_AT] ?: 0L,
         firedDate = prefs[FIRED_DATE] ?: "",
         firedCount = prefs[FIRED_COUNT] ?: 0,
-        scheduledFiredCount = prefs[SCHEDULED_COUNT] ?: 0,
+        // 2026-10-27（RC-5）不变量自愈：定时数**不可能大于**当日总数（recordFired 里两者同增）。
+        // 出现 `scheduled > fired` 只可能是旧版本的跨天脏数据（真机实证 4 > 1），
+        // 这里按总数收敛，使升级后**当天**就恢复可用，不必等到次日。
+        scheduledFiredCount = minOf(
+            prefs[SCHEDULED_COUNT] ?: 0,
+            prefs[FIRED_COUNT] ?: 0
+        ),
         failureStreak = prefs[FAILURE_STREAK] ?: 0,
         circuitOpen = prefs[CIRCUIT_OPEN] ?: false,
         lastRepliedMessageHash = prefs[LAST_REPLIED_HASH] ?: "",
