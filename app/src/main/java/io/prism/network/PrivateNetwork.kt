@@ -41,12 +41,6 @@ object PrivateNetwork {
             octets[0] == 127 -> true
             octets[0] == 192 && octets[1] == 168 -> true
             octets[0] == 172 && octets[1] in 16..31 -> true
-            // 2026-10-27（ADR-068）：RFC 6598 共享地址空间 100.64.0.0/10 ——
-            // Tailscale / ZeroTier 等组网工具的默认网段。它**不是公网可路由网段**
-            // （运营商级 NAT 专用），因此不扩大 SSRF 面；但必须整段放行，
-            // 否则用户离开局域网后没有任何合法配置能连上自建协议端
-            // （真机实证：户外只剩蜂窝网，10/8 私网地址全部不可达）。
-            octets[0] == 100 && octets[1] in 64..127 -> true
             else -> false
         }
     }

@@ -87,9 +87,6 @@ class QqDebugReceiver : BroadcastReceiver() {
                             "window=${cfg.windowStartMinute}-${cfg.windowEndMinute} " +
                             "wakeOnScreenOff=${cfg.wakeOnScreenOff} " +
                             "planned=${rt.plannedTriggerAt} circuitOpen=${rt.circuitOpen} " +
-                            // 2026-10-27：把当日计数打进状态，便于验证跨天自愈与配额判定
-                            "firedDate=${rt.firedDate} fired=${rt.firedCount} " +
-                            "scheduled=${rt.scheduledFiredCount}/${cfg.maxPerDay} " +
                             "lastOutcome=${rt.lastOutcome} reason=${rt.lastOutcomeReason}"
                     }
                     ACTION_ONEBOT -> runBlocking {

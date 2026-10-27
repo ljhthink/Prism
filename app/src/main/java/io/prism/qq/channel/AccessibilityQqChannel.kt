@@ -12,10 +12,7 @@ import kotlinx.coroutines.flow.emptyFlow
  * - 历史上下文：只能读到**最后一条**消息气泡（无 message_id），故 [recentMessages] 至多 1 条；
  * - 事件：无法事件驱动（跨用户通知监听不可行，见跟进调研 §1.3），[incoming] 返回空流，
  *   由 Service 侧以「轻量探测 + 命中才建屏」轮询兜底；
- * - 语音：不支持（Android 无系统级虚拟麦克风，无法注入预生成音频）；
- * - **媒体（2026-10-27, US-3126）**：`supportsMedia=false` —— 看不了图/表情包、发不了表情与语音。
- *   上层据此**不尝试**媒体发送，并在 prompt 里如实告知模型"当前看不到图片"，
- *   避免编造画面或反复自述"发不出图"。
+ * - 语音：不支持（Android 无系统级虚拟麦克风，无法注入预生成音频）。
  *
  * 该通道存在的意义是：**协议端未配置/离线时不至于功能全失**。
  */
@@ -28,9 +25,6 @@ class AccessibilityQqChannel(
 ) : QqChannel {
 
     override val transport: QqTransport = QqTransport.ACCESSIBILITY
-
-    /** 无障碍通道无媒体能力（见类注释）。 */
-    override val supportsMedia: Boolean = false
 
     override suspend fun status(): QqChannelStatus {
         val available = runCatching { availability() }.getOrDefault(false)

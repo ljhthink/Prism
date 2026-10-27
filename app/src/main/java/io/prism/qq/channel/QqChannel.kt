@@ -93,18 +93,6 @@ interface QqChannel {
 
     val transport: QqTransport
 
-    /**
-     * 本通道是否支持**媒体**（看图 / 发表情 / 发语音）。2026-10-27（US-3126）。
-     *
-     * **为什么要显式声明**：真机实证——用户离开局域网后协议端不可达，通道自动降级到无障碍，
-     * 而无障碍通道**结构上**读不到图片（只能读最后一条气泡）、也无法注入表情/音频。
-     * 旧实现不声明能力，模型会收到 `[图片]` 占位符后自行发挥（编造画面，或反复说"发不出图"），
-     * 用户也以为是"表情功能坏了"。
-     *
-     * 协议端 = true；无障碍 = false。
-     */
-    val supportsMedia: Boolean get() = transport == QqTransport.ONEBOT
-
     /** 探测当前连接状态（不得抛异常）。 */
     suspend fun status(): QqChannelStatus
 

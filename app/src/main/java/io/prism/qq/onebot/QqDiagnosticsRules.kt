@@ -6,14 +6,11 @@ package io.prism.qq.onebot
  * @param ipv4 当前活动接口的 IPv4（无网络时为 null）
  * @param prefixLength 该接口前缀长度（如 24）
  * @param gateway 默认网关
- * @param interfaceName 接口名（2026-10-27 新增；`rmnet*`=蜂窝、`wlan*`=WiFi、`eth*`=以太网），
- *   用于判断"当前只剩蜂窝网"，从而把"连接超时"正确归因为**旧局域网地址**而不是防火墙
  */
 data class QqLocalNetwork(
     val ipv4: String?,
     val prefixLength: Int?,
-    val gateway: String?,
-    val interfaceName: String? = null
+    val gateway: String?
 )
 
 /**
@@ -60,8 +57,6 @@ object QqDiagnosticsRules {
         FIREWALL_TIMEOUT,
         AUTH_FAILED,
         WS_FAILED,
-        /** 2026-10-27（ADR-068）：配置地址不在当前任何网络内（典型：上次热点的局域网地址）。 */
-        STALE_LAN_ADDRESS,
         UNKNOWN
     }
 
@@ -99,8 +94,6 @@ object QqDiagnosticsRules {
                 Verdict.PORT_CLOSED -> "主机可达但端口未监听：${failed?.detail.orEmpty()}"
                 Verdict.FIREWALL_TIMEOUT ->
                     "连接超时（被防火墙丢弃或目标不在线）：${failed?.detail.orEmpty()}"
-                Verdict.STALE_LAN_ADDRESS ->
-                    "该地址不在当前网络内（疑似上次局域网/热点的地址）：${failed?.detail.orEmpty()}"
                 Verdict.AUTH_FAILED -> "鉴权失败：${failed?.detail.orEmpty()}"
                 Verdict.WS_FAILED -> "HTTP 可用但 WebSocket 握手失败：${failed?.detail.orEmpty()}"
                 Verdict.UNKNOWN -> "未通过：${failed?.detail.orEmpty()}"
@@ -197,43 +190,10 @@ object QqDiagnosticsRules {
         Verdict.LOOPBACK_ENDPOINT -> "协议端在 PC 上：把地址改成 PC 的局域网 IP（设置页会显示实际目标）"
         Verdict.ISOLATED, Verdict.SUBNET_MISMATCH ->
             "换拓扑：①手机开热点、PC 连热点（推荐）②家用路由器同一 LAN ③协议端改跑在手机 Termux"
-        Verdict.STALE_LAN_ADDRESS ->
-            "该地址多半是上次局域网/手机热点的地址，离开后已不可达：" +
-                "①已用 Tailscale/ZeroTier → 改填 PC 的 100.x.y.z 地址；" +
-                "②仍在同一 WiFi → 改填当前局域网 IP；" +
-                "③都没条件 → 户外只能用无障碍文本（看不了图、发不了表情/语音）"
         Verdict.PORT_CLOSED -> "在 PC 上确认 NapCat 已启动、HTTP/WS 端口与填写一致"
         Verdict.FIREWALL_TIMEOUT -> "检查 PC 防火墙是否放行 3000/3001，或换网络拓扑"
         Verdict.AUTH_FAILED -> "核对 access_token（NapCat WebUI → 网络配置）"
         Verdict.WS_FAILED -> "确认 WS 服务已启用（NapCat 需单独开启 WebSocket 服务）"
         else -> null
     }
-
-    /**
-     * 当前是否只有蜂窝网（无局域网接口）。
-     *
-     * Android 侧接口名形如 `rmnet_data0/2`（蜂窝）、`wlan0`（WiFi）、`eth0`（以太网）。
-     * 为 null/未知时返回 false（保守：不据此改判）。
-     */
-    fun isCellOnly(interfaceName: String?): Boolean {
-        val name = interfaceName?.lowercase() ?: return false
-        return name.startsWith("rmnet") || name.startsWith("ccmni") || name.startsWith("pdp")
-    }
-
-    /**
-     * 2026-10-27（ADR-068）：判断"地址不在当前网络内"这一常见失败形态。
-     *
-     * 真机实证：用户离开手机热点后，App 里仍是 `10.92.122.126`（上次热点的 PC 地址），
-     * 手机只剩蜂窝网 `10.244.60.226/30` → 连接超时。若只报"连接超时（防火墙/未启动）"，
-     * 用户会去查防火墙，方向完全错。
-     *
-     * @param sameSubnet 配置地址是否与当前活动接口同网段
-     * @param cellOnly 当前是否只有蜂窝网（无局域网接口）
-     * @param tcpFailedWithTimeout TCP 阶段是否以超时/不可达失败
-     */
-    fun isStaleLanAddress(
-        sameSubnet: Boolean,
-        cellOnly: Boolean,
-        tcpFailedWithTimeout: Boolean
-    ): Boolean = tcpFailedWithTimeout && (!sameSubnet || cellOnly)
 }
