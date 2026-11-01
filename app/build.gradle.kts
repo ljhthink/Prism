@@ -90,6 +90,33 @@ android {
         aidl = true
     }
 
+    // 2026-11-01（US-3128 协议端管家）：把 tools/napcat-on-phone/ 下的**生产脚本**同步进 assets。
+    //
+    // 为什么用生成目录而不是复制一份进 src：脚本的唯一事实来源必须是 tools/（部署手册、
+    // PC 侧 adb push、Prism 内自动部署三者共用同一份）。复制进 src 会立刻产生两个版本，
+    // 而这两个版本一旦漂移，"手机上跑的"和"仓库里的"就不再是同一个东西。
+    val napcatAssetsDir = layout.buildDirectory.dir("generated/napcatAssets")
+    val syncNapcatAssets = tasks.register<Sync>("syncNapcatAssets") {
+        from(rootProject.file("tools/napcat-on-phone")) {
+            include("run2.sh", "run2-inner.sh", "verify.sh")
+            into("napcat")
+        }
+        into(napcatAssetsDir)
+    }
+    sourceSets["main"].assets.srcDir(napcatAssetsDir)
+    tasks.named("preBuild") { dependsOn(syncNapcatAssets) }
+    // 2026-11-01（审查 M5）：只挂 preBuild 不够——单独跑 merge*Assets / 配置缓存命中时
+    // 可能读到缺失或陈旧的生成目录。把生成目录注册为 AGP 的生成源，让 merge 任务自己持有依赖。
+    val napcatAssetsDirProperty: org.gradle.api.file.DirectoryProperty =
+        objects.directoryProperty().apply { set(napcatAssetsDir) }
+    androidComponents {
+        onVariants { variant ->
+            variant.sources.assets?.addGeneratedSourceDirectory(syncNapcatAssets) {
+                napcatAssetsDirProperty
+            }
+        }
+    }
+
     // 批次22（SZ-201，ADR-047）：sherpa-onnx 条件集成——libs 存在 AAR 时才编译 Sherpa 源集
     //（AAR/模型由 docs/runbooks/setup-sherpa-voice.md 的脚本放置；缺失时自动降级 SystemAsrEngine）
     val sherpaAar = file("libs/sherpa-onnx-android.aar")

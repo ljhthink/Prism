@@ -98,8 +98,8 @@ object QqDiagnosticsRules {
                     "连接超时（被防火墙丢弃或目标不在线）：${failed?.detail.orEmpty()}"
                 Verdict.AUTH_FAILED -> "鉴权失败：${failed?.detail.orEmpty()}"
                 Verdict.LOCAL_PROTOCOL_NOT_RUNNING ->
-                    "本机协议端未运行：${failed?.detail.orEmpty()}。请在 ZeroTermux 里执行 " +
-                        "`bash bookworm-arm64.sh` 后 `cd NapCat.linux.arm64 && ./napcat.sh`"
+                    "本机协议端未运行：${failed?.detail.orEmpty()}。请打开 Prism → 设置 → " +
+                        "QQ 小号助手 → 协议端管家，点「一键修复」"
                 Verdict.WS_FAILED -> "HTTP 可用但 WebSocket 握手失败：${failed?.detail.orEmpty()}"
                 Verdict.UNKNOWN -> "未通过：${failed?.detail.orEmpty()}"
             }
@@ -197,9 +197,8 @@ object QqDiagnosticsRules {
             "如果协议端在 PC 上：改填 PC 的局域网 IP；如果已改用本机模式" +
                 "（NapCat 与 Prism 装在同一台手机），127.0.0.1 就是正确配置，无需修改"
         Verdict.LOCAL_PROTOCOL_NOT_RUNNING ->
-            "在手机上启动本机协议端：ZeroTermux → `bash bookworm-arm64.sh` → " +
-                "`cd NapCat.linux.arm64 && ./napcat.sh`；长期在线请开启 termux-wake-lock 并把 " +
-                "ZeroTermux 设为「省电无限制 + 自启动」"
+            "本机协议端未运行。在 Prism 里打开「设置 → QQ 小号助手 → 协议端管家」，" +
+                "点「一键修复」即可自动启动；如果管家提示缺少权限，按提示授权一次后重试"
         Verdict.ISOLATED, Verdict.SUBNET_MISMATCH ->
             "换拓扑：①协议端改跑在手机 Termux（本机模式，推荐）②手机开热点、PC 连热点 ③家用路由器同一 LAN"
         // 本机模式下 TCP 不通已由 LOCAL_PROTOCOL_NOT_RUNNING 接管，这里只覆盖远程拓扑，

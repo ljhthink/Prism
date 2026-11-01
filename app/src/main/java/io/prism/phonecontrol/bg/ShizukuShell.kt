@@ -1,4 +1,4 @@
-﻿package io.prism.phonecontrol.bg
+package io.prism.phonecontrol.bg
 
 import android.content.ComponentName
 import android.content.ServiceConnection
@@ -409,6 +409,309 @@ object ShizukuShell {
      */
     fun amStartForUser(component: String, userId: Int): Boolean =
         exec("am", "start", "--user", userId.toString(), "-n", component)
+
+    // ==================== 电源策略（2026-11-01；US-3128） ====================
+
+    /**
+     * 读 Doze 白名单（`dumpsys deviceidle whitelist`）。
+     *
+     * **为什么需要**：部署手册 §六写着"省电无限制"，但 2026-11-01 真机复核
+     * `dumpsys deviceidle whitelist | grep -ic 'termux|prism'` = **0**——
+     * 设置**根本没生效**却无人知晓。把"是否真的生效"变成可读判据是本方法存在的唯一理由。
+     *
+     * @return 原始输出（每行形如 `system,com.android.shell,2000`）；失败/未就绪返回 null
+     */
+    fun deviceIdleWhitelistDump(): String? =
+        execOutput(DUMPSYS_BIN, "deviceidle", "whitelist")
+
+    /**
+     * 把包加入 Doze 白名单（`dumpsys deviceidle whitelist +<pkg>`）。
+     *
+     * 2026-11-01 真机实测（Redmi M2012K10C / Android 13）：shell uid 2000 执行成功，
+     * 回读由 0 变 2。**注意**：白名单只豁免 Doze/App Standby，**不豁免**
+     * HyperOS 的 `AutoPowerKill` / `SwipeUpClean` / `OneKeyClean`（[详见交接文档]）。
+     * 它是"降低概率"，不是"保证不死"——文案不得夸大。
+     *
+     * @param packageName 目标包名（必须通过 [isPackageNameAllowed]，防命令注入）
+     * @return true=命令退出码 0（**不代表已生效**，调用方必须回读校验）
+     */
+    fun addDeviceIdleWhitelist(packageName: String): Boolean {
+        if (!isPackageNameAllowed(packageName)) {
+            Log.w(TAG, "addDeviceIdleWhitelist 拒绝非法包名")
+            return false
+        }
+        return exec(*buildDeviceIdleWhitelistCommand(packageName, add = true))
+    }
+
+    /** 拼装 `dumpsys deviceidle whitelist ±pkg`（纯函数可测；包名已过白名单）。 */
+    fun buildDeviceIdleWhitelistCommand(packageName: String, add: Boolean): Array<String> =
+        arrayOf(DUMPSYS_BIN, "deviceidle", "whitelist", (if (add) "+" else "-") + packageName)
+
+    /**
+     * 读某包的 App Standby 桶（`am get-standby-bucket <pkg>`）。
+     *
+     * 取值：0=EXEMPTED… 实际 AOSP 常量：10=ACTIVE, 20=WORKING_SET, 30=FREQUENT,
+     * 40=RARE, 45=RESTRICTED, 50=NEVER；**5=EXEMPTED**（被 Doze 白名单强制）。
+     *
+     * @return 桶值；解析失败/未就绪返回 null
+     */
+    fun standbyBucketOf(packageName: String): Int? {
+        if (!isPackageNameAllowed(packageName)) return null
+        return execOutput(*buildGetStandbyBucketCommand(packageName))
+            ?.lineSequence()
+            ?.mapNotNull { it.trim().toIntOrNull() }
+            ?.lastOrNull()
+    }
+
+    /**
+     * 设某包的 App Standby 桶（`am set-standby-bucket <pkg> <bucket>`）。
+     *
+     * **实测补充（2026-11-01）**：包已在 Doze 白名单时，桶恒为 5=EXEMPTED，
+     * 写入 10 会被系统立刻改回 5。因此本方法只在"白名单写入失败/无效"时作为备选手段。
+     *
+     * @param bucket 10=ACTIVE / 20=WORKING_SET / 5=EXEMPTED
+     */
+    fun setStandbyBucket(packageName: String, bucket: Int): Boolean {
+        if (!isPackageNameAllowed(packageName)) return false
+        if (bucket !in ALLOWED_STANDBY_BUCKETS) {
+            Log.w(TAG, "setStandbyBucket 拒绝非白名单桶值")
+            return false
+        }
+        return exec(*buildSetStandbyBucketCommand(packageName, bucket))
+    }
+
+    /** 拼装 `am get-standby-bucket <pkg>`（纯函数可测）。 */
+    fun buildGetStandbyBucketCommand(packageName: String): Array<String> =
+        arrayOf(AM_BIN, "get-standby-bucket", packageName)
+
+    /** 拼装 `am set-standby-bucket <pkg> <bucket>`（纯函数可测）。 */
+    fun buildSetStandbyBucketCommand(packageName: String, bucket: Int): Array<String> =
+        arrayOf(AM_BIN, "set-standby-bucket", packageName, bucket.toString())
+
+    /**
+     * 包名合法性判定（纯函数可测）。
+     *
+     * 只接受 ASCII 字母/数字/下划线/点，长度 ≤ 200——`dumpsys`/`am` 的参数若含空格或
+     * `;` 会被 shell 解释成额外命令（虽然 Shizuku 用户服务用的是 exec 数组不经过 shell，
+     * 但**不依赖底层实现细节**是更稳的边界）。
+     */
+    fun isPackageNameAllowed(packageName: String): Boolean {
+        if (packageName.isEmpty() || packageName.length > 200) return false
+        val asciiOnly = packageName.all { c ->
+            (c in 'a'..'z') || (c in 'A'..'Z') || (c in '0'..'9') || c == '_' || c == '.' || c == ':'
+        }
+        if (!asciiOnly) return false
+        // 必须含至少一个 ASCII 字母（排除 "123"、"." 这类明显非包名的输入）
+        return packageName.any { c -> (c in 'a'..'z') || (c in 'A'..'Z') }
+    }
+
+    private const val DUMPSYS_BIN = "/system/bin/dumpsys"
+    private const val AM_BIN = "/system/bin/am"
+
+    // ==================== Termux RUN_COMMAND 托管（2026-11-01；US-3128） ====================
+
+    /**
+     * 以 shell 身份向 Termux 的 `RunCommandService` 提交一条**后台脚本**。
+     *
+     * **为什么必须由 shell 发起**：Android 8+ 禁止后台应用 `startService`；改用
+     * `startForegroundService` 又要求服务 5s 内 `startForeground`，Termux 的
+     * `RunCommandService` 并不这么做 → 会触发 `ForegroundServiceDidNotStartInTimeException`
+     * **把 Termux 自己搞崩**。shell 身份的 `am startservice` 不受后台启动限制。
+     *
+     * **安全边界**：[scriptPath] 必须命中 [TERMUX_SCRIPT_WHITELIST_PREFIX] 且字符集受限于
+     * `[A-Za-z0-9_./-]`（无空格、无引号、无 shell 元字符），因此**不接受任何用户输入**。
+     * 参数也是常量（`RUN_COMMAND_BACKGROUND=true` + 不切换会话），用户无法借道执行任意命令。
+     *
+     * @param scriptPath 已部署脚本的绝对路径（如 `/data/local/tmp/run2.sh`）
+     * @return true=`am startservice` 退出码为 0（**不代表脚本内部成功**）
+     */
+    fun startTermuxRunCommand(scriptPath: String): Boolean {
+        if (!isTermuxScriptPathAllowed(scriptPath)) {
+            Log.w(TAG, "startTermuxRunCommand 拒绝非白名单脚本路径")
+            return false
+        }
+        return exec(*buildTermuxRunCommand(scriptPath))
+    }
+
+    /**
+     * 拼装 Termux `RUN_COMMAND` 的 `am startservice` 命令数组（纯函数可测）。
+     *
+     * 与 Termux 官方 wiki 的 extras 一致：
+     * `RUN_COMMAND_PATH` / `RUN_COMMAND_ARGUMENTS` / `RUN_COMMAND_WORKDIR` /
+     * `RUN_COMMAND_BACKGROUND` / `RUN_COMMAND_SESSION_ACTION`。
+     */
+    fun buildTermuxRunCommand(scriptPath: String): Array<String> = arrayOf(
+        AM_BIN, "startservice",
+        "-n", "com.termux/com.termux.app.RunCommandService",
+        "-a", "com.termux.RUN_COMMAND",
+        "--es", "com.termux.RUN_COMMAND_PATH", TERMUX_BASH,
+        "--es", "com.termux.RUN_COMMAND_ARGUMENTS", scriptPath,
+        "--es", "com.termux.RUN_COMMAND_WORKDIR", TERMUX_HOME,
+        "--ez", "com.termux.RUN_COMMAND_BACKGROUND", "true",
+        "--es", "com.termux.RUN_COMMAND_SESSION_ACTION", "0",
+        "--es", "com.termux.RUN_COMMAND_COMMAND_LABEL", "Prism"
+    )
+
+    /**
+     * 脚本路径白名单判定（纯函数可测）。
+     *
+     * 只接受 `/data/local/tmp/` 下、字符集 `[A-Za-z0-9_./-]`、无 `..` 的绝对路径。
+     */
+    fun isTermuxScriptPathAllowed(path: String): Boolean {
+        if (!path.startsWith(TERMUX_SCRIPT_WHITELIST_PREFIX)) return false
+        if (path.contains("..")) return false
+        if (path.length > 200) return false
+        return path.all { c ->
+            (c in 'a'..'z') || (c in 'A'..'Z') || (c in '0'..'9') ||
+                c == '_' || c == '.' || c == '/' || c == '-'
+        }
+    }
+
+    /**
+     * 以 shell 身份判断某个文件是否存在（`test -f`）。
+     *
+     * **为什么需要**：`/data/local/tmp` 的权限是 `drwxrwx--x`——普通应用有 `x` 无 `r`，
+     * 因此 `File(...).exists()` 在这里**恒为 false**（2026-11-01 实测），
+     * 只有 shell 身份能判定"脚本到底部署了没有"。
+     *
+     * @param path 绝对路径（受 [isTermuxScriptPathAllowed] 同款字符集约束）
+     */
+    fun fileExists(path: String): Boolean {
+        if (!isSafeAbsolutePath(path)) return false
+        // 必须用绝对路径：用户服务进程的 PATH 不含 /system/bin（2026-10-26 `settings` 已实证）。
+        return exec(TEST_BIN, "-f", path)
+    }
+
+    /** 通用绝对路径安全判定（无 shell 元字符；[fileExists] 用）。 */
+    fun isSafeAbsolutePath(path: String): Boolean {
+        if (!path.startsWith("/")) return false
+        if (path.contains("..")) return false
+        if (path.length > 300) return false
+        return path.all { c ->
+            (c in 'a'..'z') || (c in 'A'..'Z') || (c in '0'..'9') ||
+                c == '_' || c == '.' || c == '/' || c == '-'
+        }
+    }
+
+    private const val TERMUX_SCRIPT_WHITELIST_PREFIX = "/data/local/tmp/"
+    private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
+
+    /**
+     * 以 shell 身份把一段文本写成可执行脚本（**仅限 `/data/local/tmp/`**）。
+     *
+     * **为什么这样写而不是 `cat > file`**：`ShizukuUserService.exec` 是
+     * `Runtime.exec(String[])`（直接 execve，不经过 shell），没有 stdin 可用。
+     * 因此把内容作为**参数**传给 `sh -c 'printf %s "$1" > "$2"'`——
+     * 内容永远不会被 shell 解释（不能借此注入命令），也不需要 AIDL 变更。
+     *
+     * @param path 目标绝对路径（必须 `/data/local/tmp/` 下、字符集受限）
+     * @param content 脚本正文（≤64KB；超出直接拒绝，避免撑爆 Binder 事务）
+     * @return true=写入并 `chmod 755` 成功（调用方仍应 [fileExists] 复核）
+     */
+    fun writeShellFile(path: String, content: String): Boolean {
+        if (!isTermuxScriptPathAllowed(path)) {
+            Log.w(TAG, "writeShellFile 拒绝非 /data/local/tmp 路径")
+            return false
+        }
+        if (content.length > MAX_SCRIPT_CHARS) {
+            Log.w(TAG, "writeShellFile 拒绝超长内容（${content.length} > $MAX_SCRIPT_CHARS）")
+            return false
+        }
+        // NUL / 换行本身不构成注入（内容只作 argv），但 NUL 会被 execve 截断成半截命令参数，
+        // 产生"以为写完了其实只写一半"的静默错误 —— 直接拒绝。
+        if (content.contains('\u0000')) {
+            Log.w(TAG, "writeShellFile 拒绝含 NUL 的内容")
+            return false
+        }
+        return exec(*buildWriteShellFileCommand(path, content))
+    }
+
+    /**
+     * 拼装写文件命令数组（纯函数可测）。
+     *
+     * `sh -c '<固定脚本>' sh <content> <path>`：`$1`=content、`$2`=path，
+     * 二者都只作为 argv 出现，**不参与 shell 解析**。
+     *
+     * **为什么是 755 而不是 700**（2026-11-01 审查 H4 的结论修正）：
+     * 脚本必须由 **Termux（另一个 uid）** 执行，700/shell 会让 Termux 既读不了也执行不了，
+     * **整个功能直接失效**。而 shell 脚本被 `bash <path>` 解释，必须可读，711 也不可行。
+     * 因此安全策略改为：**脚本里不得出现任何密钥**——
+     *   - `verify.sh` 的 OneBot token 已改为必须运行时传参（无默认值）；
+     *   - QQ 号不是密钥（好友可见），且可由 `PRISM_QQ_ID` 覆盖；
+     *   - Prism 侧生成的 `prism-stop.sh` / `prism-probe.sh` / 版本标记都不含凭据。
+     */
+    fun buildWriteShellFileCommand(path: String, content: String): Array<String> = arrayOf(
+        "/system/bin/sh", "-c",
+        "printf '%s' \"\$1\" > \"\$2\" && /system/bin/chmod 755 \"\$2\"",
+        "sh", content, path
+    )
+
+    /**
+     * 以 shell 身份读一个**协议端状态文件**（仅 [READABLE_FILE_WHITELIST] 里的三个固定路径）。
+     *
+     * **为什么需要**：协议端脚本把状态镜像到 `/sdcard/napcat-status.txt` 与
+     * `/sdcard/napcat.log`，而 Prism 在 Android 13 上没有 `MANAGE_EXTERNAL_STORAGE`，
+     * 直接读会 `EACCES`。shell 身份可以读。
+     *
+     * **为什么是固定集合而不是"整个 /sdcard"**：读能力越宽，越容易被将来的调用方
+     * 误用成"任意文件读取"。这里只放协议端自己写的三个文件，多一个都不给。
+     *
+     * @param path 绝对路径（必须精确命中白名单）
+     * @return 文件内容（原样，可能很长；调用方自行截断）；失败返回 null
+     */
+    fun readTextFile(path: String): String? {
+        if (!isReadablePathAllowed(path)) {
+            Log.w(TAG, "readTextFile 拒绝非白名单路径")
+            return null
+        }
+        return execOutput(CAT_BIN, path)
+    }
+
+    /**
+     * 以 shell 身份读文件**尾部 N 行**（`tail -n`）。
+     *
+     * **为什么不能整文件 `cat`**（2026-11-01 安全/可靠性审查 H2）：NapCat 日志会持续增长，
+     * 越过 Binder 事务上限（约 1MB UTF-16）后 `execWithOutput` **恒返回 null**，
+     * 表现为"扫码地址突然解析不到"这种静默失效——同仓 `notificationSnapshot` 已踩过
+     * `dumpsys notification` 660KB 回传 null 的坑。裁剪必须在 **shell 侧**完成。
+     *
+     * @param lines 需要保留的尾部行数（内部夹在 1..2000）
+     * @return 尾部内容；失败/未就绪/路径不允许返回 null
+     */
+    fun readFileTail(path: String, lines: Int): String? {
+        if (!isReadablePathAllowed(path)) {
+            Log.w(TAG, "readFileTail 拒绝非白名单路径")
+            return null
+        }
+        val n = lines.coerceIn(1, 2000)
+        return execOutput(TAIL_BIN, "-n", n.toString(), path)
+    }
+
+    /** 可读路径白名单判定（纯函数可测）：**精确匹配**三个协议端状态文件。 */
+    fun isReadablePathAllowed(path: String): Boolean = path in READABLE_FILE_WHITELIST
+
+    /** 允许 shell 读取的文件（协议端脚本约定的输出位置；不跟随符号链接由 shell 侧决定）。 */
+    private val READABLE_FILE_WHITELIST = setOf(
+        "/sdcard/napcat.log",
+        "/sdcard/napcat-status.txt",
+        "/sdcard/napcat-verify.txt",
+        "/sdcard/napcat-webui.txt",
+        // 部署版本标记（`<脚本名>:<sha256>`），由 QqProtocolSupervisor 写入并回读比对。
+        "/data/local/tmp/prism-scripts.sha"
+    )
+
+    private const val TEST_BIN = "/system/bin/test"
+    private const val CAT_BIN = "/system/bin/cat"
+    private const val TAIL_BIN = "/system/bin/tail"
+
+    /** 脚本正文长度上限（Binder 事务上限约 1MB；留足余量）。 */
+    private const val MAX_SCRIPT_CHARS = 64 * 1024
+
+    /** Termux 的 HOME（`RUN_COMMAND_WORKDIR` 必须是 Termux 可访问目录）。 */
+    private const val TERMUX_HOME = "/data/data/com.termux/files/home"
+
+    /** 允许写入的 App Standby 桶（EXEMPTED/ACTIVE/WORKING_SET；不提供 RESTRICTED 等惩罚性值）。 */
+    private val ALLOWED_STANDBY_BUCKETS = setOf(5, 10, 20)
 
     /**
      * 以 shell 身份在指定**用户**下把目标 App 启动到指定**虚拟屏**（ADR-062 QQ 小号助手：

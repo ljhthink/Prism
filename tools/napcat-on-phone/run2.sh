@@ -2,7 +2,8 @@
 # 快速登录版常驻启动（不扫码）。用法：bash /data/local/tmp/run2.sh ；停止：CTRL+C
 #
 # 与 final.sh 的差别：
-#   1. 用 -q 3904755943 快速登录（凭据已保存，见 2026-10-31 日志）
+#   1. 用 -q <QQ号> 快速登录（凭据已保存，见 2026-10-31 日志；号来自 run2-inner.sh，
+#      可用环境变量 PRISM_QQ_ID 覆盖）
 #   2. 每 5 秒把 NapCat 日志镜像到 /sdcard/napcat.log（PC 侧可直接读，无需用户代跑）
 #   3. 每 10 秒写 /sdcard/napcat-status.txt（含是否被踢、3000 是否监听）
 

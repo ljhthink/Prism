@@ -25,6 +25,35 @@
          「闹钟与提醒」中授权；未授予时运行时检测并降级为仅前台服务心跳调度（PRD US-3108 AC-6）。 -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
+    <!--
+        2026-11-01（US-3128 协议端管家）：调用 ZeroTermux 后台执行脚本所需的权限。
+
+        **必须由用户手动授予**：该权限 `prot=dangerous`，2026-11-01 真机实测
+        `pm grant io.prism com.termux.permission.RUN_COMMAND` 被 shell uid 2000 拒绝
+        （`SecurityException: Neither user 2000 nor current process has
+        GRANT_RUNTIME_PERMISSIONS`），Shizuku 也授不了。设置页会深链到本应用的
+        「附加权限」页并给出探针判据，不做静默失败。
+
+        Termux 侧还需 `allow-external-apps=true`（Termux 私有目录 chmod 700，
+        `run-as` 被拒 → 读不到也写不了，只能用 RUN_COMMAND 探针反推）。
+    -->
+    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+
+    <!--
+        2026-11-01（US-3128）：电池优化白名单申请入口。
+        仅在 Shizuku 不可用（无法代写 doze 白名单）时作为降级路径，
+        经 `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` 弹系统确认框。
+        说明：Google Play 对 REQUEST_IGNORE_BATTERY_OPTIMIZATIONS 有政策限制；
+        本项目为个人自用（ADR-064 补充决策 2 同一前提），不涉及商店分发。
+    -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!--
+        2026-11-01（US-3128）：开机后恢复协议端通道（PRD US-3108 AC-5 只约束**定时任务**
+        不自动恢复；通道恢复是用户显式打开总开关后的预期行为，见方案 §5.1 第 5 条）。
+    -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <application
         android:name=".PrismApplication"
         android:allowBackup="false"
@@ -68,6 +97,20 @@
         <receiver
             android:name=".phonecontrol.PhoneControlAskUserNotifier$ConfirmActionReceiver"
             android:exported="false" />
+
+        <!--
+            2026-11-01（US-3128）：开机后恢复**协议端通道**。
+            只恢复"能收发"的前提，不恢复任何定时计划（PRD US-3108 AC-5 只约束后者）。
+            exported=false：只接系统 BOOT_COMPLETED（系统广播不受 exported 限制影响）。
+        -->
+        <receiver
+            android:name=".qq.QqBootRestartReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
         <!-- v1 批次11（F2）：手机操控保活前台服务（specialUse，防止 MIUI 回收操控进程） -->
         <service
             android:name=".phonecontrol.PhoneControlKeepAliveService"
@@ -151,6 +194,13 @@
         <package android:name="com.tencent.mobileqq" />
         <package android:name="com.sina.weibo" />
         <package android:name="com.baidu.BaiduMap" />
+
+        <!--
+            2026-11-01（US-3128 协议端管家）：Termux / ZeroTermux 包可见性。
+            targetSdk 34（≥30）下不声明则 `getPackageInfo` 查不到、RUN_COMMAND Intent 静默失效
+            （Termux 官方 wiki 明确要求）。ZeroTermux 的 applicationId 同样是 `com.termux`。
+        -->
+        <package android:name="com.termux" />
 
         <!-- 7 个 scheme intent 过滤器（Deep Link 跳转可见性） -->
         <intent>

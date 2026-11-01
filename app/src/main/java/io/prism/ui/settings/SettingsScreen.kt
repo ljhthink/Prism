@@ -942,6 +942,30 @@ fun SettingsScreen(
             // 批次22 修复轮五（2026-09-07）：语音通话热词（同音字偏置，用户词库）
             // ==================== QQ 小号助手（ADR-062/063；US-3101/3105/3108） ====================
             item { SetSection("QQ 小号助手") }
+            // 2026-11-01（US-3128）：协议端管家——把「启动/修复/扫码」变成按钮，并回读校验电源策略。
+            // 放在总开关之前是有意的：用户打开小号助手后第一件事就是让协议端跑起来。
+            item {
+                QqProtocolSupervisorSection(
+                    supervisor = qqApp?.qqProtocolSupervisor,
+                    onOpenTermuxPermission = {
+                        context.startActivity(
+                            io.prism.qq.QqTermuxBridge.appDetailsIntent(context)
+                        )
+                    },
+                    onOpenWebUi = { url ->
+                        // 用系统浏览器打开回环 WebUI：NapCat 的扫码页面是标准网页，
+                        // 自建 WebView 会多引入一层 URL 白名单与 Cookie 生命周期风险。
+                        runCatching {
+                            context.startActivity(
+                                android.content.Intent(
+                                    android.content.Intent.ACTION_VIEW,
+                                    android.net.Uri.parse(url)
+                                ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        }
+                    }
+                )
+            }
             // US-3101 AC-1/AC-2：总开关（默认关）+ 风险告知确认前置
             item {
                 SetRow(

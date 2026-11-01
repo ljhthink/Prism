@@ -86,9 +86,22 @@ data class QqRuntimeState(
     /** 最近一次探测时刻（0=从未）。 */
     val lastProtocolCheckedAtMs: Long = 0L,
     /** 最近一次检测到「QQ 离线」的时刻（0=从未；用于 UI 显示"最近离线"）。 */
-    val lastProtocolOfflineAtMs: Long = 0L
-) {
-    companion object {
+    val lastProtocolOfflineAtMs: Long = 0L,
+    /**
+     * 协议端失联**告警状态**（M2；US-3128；[QqProtocolAlertPolicy]）。
+     *
+     * **必须持久化**：10-31 事故里 Prism 自己也被 `OneKeyClean` 杀掉，
+     * 「曾经稳定在线过」这一事实若只存在内存里，重启后协议端一直不回来就**永远不会告警**——
+     * 恰好是最需要告警的场景。
+     */
+    val protocolAlert: QqProtocolAlertPolicy.State = QqProtocolAlertPolicy.State(),
+    /** 自动重启统计窗口起点（0=无窗口；US-3128；[QqProtocolRestartPolicy]）。 */
+    val protocolRestartWindowStartMs: Long = 0L,
+    /** 窗口内已自动重启次数。 */
+    val protocolRestartAttempts: Int = 0,
+    /** 上次自动重启时刻（0=从未）。 */
+    val protocolLastRestartAtMs: Long = 0L
+) {    companion object {
         /** 幂等集合上限（防无限增长；远大于一次重连可能补投的条数）。 */
         const val MAX_REPLIED_IDS = 20
 

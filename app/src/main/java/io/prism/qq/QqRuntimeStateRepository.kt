@@ -168,8 +168,75 @@ class QqRuntimeStateRepository(
         if (offline) prefs[PROTOCOL_OFFLINE_AT] = atMs
     }
 
-    /** 记录已回应过的收到消息指纹与时刻（US-3109 双向对话去重 + guardrail M-02 时间窗）。 */
-    suspend fun setLastReplied(hash: String, atMs: Long) = edit {
+    /**
+     * 推进一次**协议端失联告警判定**（M2；US-3128）。
+     *
+     * **为什么放在写入路径而不是读取路径**：告警状态是"事实的推进"（连续失败计数、是否已通知、
+     * 节流锚点），必须在显式的此刻写入。`toState()` 保持只读——这条"读不写"原则来自 RC-5 的
+     * `minOf` 收敛设计（B4 陷阱 3），破坏它会让 Compose 每次重组都写盘。
+     *
+     * 原子的「读上一份状态 → 调纯策略 → 写下一份状态」在**同一次 `edit`** 内完成，
+     * 因此并发调用（60s 循环 + 手动刷新）不会出现丢失计数。
+     *
+     * @param probe 本次探测结果（[QqProtocolAlertPolicy.PROBE_ONLINE] 等）
+     * @param nowMs 本次时刻
+     * @param enabled 总开关（false 时策略返回清空且不告警，AC-8）
+     * @param loopback 协议端地址是否回环（AC-6 归因）
+     * @param detail 本次探测可读说明（已脱敏）
+     * @return 策略决策（含要执行的通知动作）
+     */
+    suspend fun advanceProtocolAlert(
+        probe: String,
+        nowMs: Long,
+        enabled: Boolean,
+        loopback: Boolean,
+        detail: String = ""
+    ): QqProtocolAlertPolicy.Decision {
+        var decision = QqProtocolAlertPolicy.Decision(
+            QqProtocolAlertPolicy.State(),
+            QqProtocolAlertPolicy.Action.None
+        )
+        edit { prefs ->
+            val prev = readProtocolAlert(prefs)
+            decision = QqProtocolAlertPolicy.decide(
+                probe = probe,
+                nowMs = nowMs,
+                enabled = enabled,
+                loopback = loopback,
+                prev = prev,
+                detail = detail
+            )
+            // 2026-11-01 验收：**状态未变就不写盘**。60s 一轮的探测里绝大多数时刻状态相同，
+            // 无条件写 8 个 key 等于每分钟一次磁盘 IO（对锁屏续航有可测影响）。
+            if (decision.state != prev) writeProtocolAlert(prefs, decision.state)
+        }
+        return decision
+    }
+
+    /**
+     * 记一次**自动重启**记账（2026-11-01；US-3128；[QqProtocolRestartPolicy]）。
+     *
+     * 必须持久化：Prism 自己也会被 HyperOS 杀掉，内存计数清零后会出现"每次冷启动都重启一次"
+     * 的崩溃循环。
+     */
+    suspend fun recordProtocolRestart(
+        windowStartMs: Long,
+        attempts: Int,
+        lastRestartAtMs: Long
+    ) = edit { prefs ->
+        prefs[RESTART_WINDOW_START] = windowStartMs
+        prefs[RESTART_ATTEMPTS] = attempts
+        prefs[RESTART_LAST_AT] = lastRestartAtMs
+    }
+
+    /** 清空自动重启记账（用户手动启动/一键修复成功后调用）。 */
+    suspend fun clearProtocolRestart() = edit { prefs ->
+        prefs[RESTART_WINDOW_START] = 0L
+        prefs[RESTART_ATTEMPTS] = 0
+        prefs[RESTART_LAST_AT] = 0L
+    }
+
+    /** 记录已回应过的收到消息指纹与时刻（US-3109 双向对话去重 + guardrail M-02 时间窗）。 */    suspend fun setLastReplied(hash: String, atMs: Long) = edit {
         it[LAST_REPLIED_HASH] = hash
         it[LAST_REPLIED_AT] = atMs
     }
@@ -200,6 +267,35 @@ class QqRuntimeStateRepository(
 
     private suspend fun edit(block: (androidx.datastore.preferences.core.MutablePreferences) -> Unit) {
         dataStore.edit(block)
+    }
+
+    /** 读回持久化的告警状态（只读；供 [advanceProtocolAlert] 与 [toState] 共用）。 */
+    private fun readProtocolAlert(
+        prefs: Preferences
+    ): QqProtocolAlertPolicy.State = QqProtocolAlertPolicy.State(
+        armedAtMs = prefs[ALERT_ARMED_AT] ?: 0L,
+        onlineSinceMs = prefs[ALERT_ONLINE_SINCE] ?: 0L,
+        unreachableStreak = prefs[ALERT_UNREACHABLE_STREAK] ?: 0,
+        offlineStreak = prefs[ALERT_OFFLINE_STREAK] ?: 0,
+        downNotified = prefs[ALERT_DOWN_NOTIFIED] ?: false,
+        downKind = prefs[ALERT_DOWN_KIND] ?: "",
+        downSinceMs = prefs[ALERT_DOWN_SINCE] ?: 0L,
+        lastNotifyAtMs = prefs[ALERT_LAST_NOTIFY_AT] ?: 0L
+    )
+
+    /** 写回告警状态（只在显式写入路径调用）。 */
+    private fun writeProtocolAlert(
+        prefs: androidx.datastore.preferences.core.MutablePreferences,
+        state: QqProtocolAlertPolicy.State
+    ) {
+        prefs[ALERT_ARMED_AT] = state.armedAtMs
+        prefs[ALERT_ONLINE_SINCE] = state.onlineSinceMs
+        prefs[ALERT_UNREACHABLE_STREAK] = state.unreachableStreak
+        prefs[ALERT_OFFLINE_STREAK] = state.offlineStreak
+        prefs[ALERT_DOWN_NOTIFIED] = state.downNotified
+        prefs[ALERT_DOWN_KIND] = state.downKind
+        prefs[ALERT_DOWN_SINCE] = state.downSinceMs
+        prefs[ALERT_LAST_NOTIFY_AT] = state.lastNotifyAtMs
     }
 
     /**
@@ -279,7 +375,11 @@ class QqRuntimeStateRepository(
         lastProtocolState = prefs[PROTOCOL_STATE] ?: "",
         lastProtocolDetail = prefs[PROTOCOL_DETAIL] ?: "",
         lastProtocolCheckedAtMs = prefs[PROTOCOL_CHECKED_AT] ?: 0L,
-        lastProtocolOfflineAtMs = prefs[PROTOCOL_OFFLINE_AT] ?: 0L
+        lastProtocolOfflineAtMs = prefs[PROTOCOL_OFFLINE_AT] ?: 0L,
+        protocolAlert = readProtocolAlert(prefs),
+        protocolRestartWindowStartMs = prefs[RESTART_WINDOW_START] ?: 0L,
+        protocolRestartAttempts = prefs[RESTART_ATTEMPTS] ?: 0,
+        protocolLastRestartAtMs = prefs[RESTART_LAST_AT] ?: 0L
     )
 
     companion object {
@@ -308,6 +408,21 @@ class QqRuntimeStateRepository(
         private val PROTOCOL_DETAIL = stringPreferencesKey("qq_protocol_detail")
         private val PROTOCOL_CHECKED_AT = longPreferencesKey("qq_protocol_checked_at")
         private val PROTOCOL_OFFLINE_AT = longPreferencesKey("qq_protocol_offline_at")
+
+        /** 协议端失联告警状态（M2；US-3128；[QqProtocolAlertPolicy]）。 */
+        private val ALERT_ARMED_AT = longPreferencesKey("qq_alert_armed_at")
+        private val ALERT_ONLINE_SINCE = longPreferencesKey("qq_alert_online_since")
+        private val ALERT_UNREACHABLE_STREAK = intPreferencesKey("qq_alert_unreachable_streak")
+        private val ALERT_OFFLINE_STREAK = intPreferencesKey("qq_alert_offline_streak")
+        private val ALERT_DOWN_NOTIFIED = booleanPreferencesKey("qq_alert_down_notified")
+        private val ALERT_DOWN_KIND = stringPreferencesKey("qq_alert_down_kind")
+        private val ALERT_DOWN_SINCE = longPreferencesKey("qq_alert_down_since")
+        private val ALERT_LAST_NOTIFY_AT = longPreferencesKey("qq_alert_last_notify_at")
+
+        /** 协议端自动重启记账（US-3128）。 */
+        private val RESTART_WINDOW_START = longPreferencesKey("qq_restart_window_start")
+        private val RESTART_ATTEMPTS = intPreferencesKey("qq_restart_attempts")
+        private val RESTART_LAST_AT = longPreferencesKey("qq_restart_last_at")
 
         /** 时间戳保留时长（滑动窗口的 2 倍，超出即淘汰）。 */
         private const val PASSIVE_TIMESTAMP_TTL_MS = 5 * 60_000L

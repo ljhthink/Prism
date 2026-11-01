@@ -795,6 +795,15 @@ class PrismApplication : Application() {
     val qqProtocolStatus: kotlinx.coroutines.flow.StateFlow<
         io.prism.qq.QqProtocolHealth.Status?> = _qqProtocolStatus
 
+    /**
+     * 协议端**管家**（2026-11-01；US-3128）：告警 + 自动拉起 + 电源策略核验。
+     *
+     * 消费既有 60s 探测结果，**不新增探测源**（AC-7）。
+     */
+    val qqProtocolSupervisor: io.prism.qq.QqProtocolSupervisor by lazy {
+        io.prism.qq.QqProtocolSupervisor(this, qqRuntimeStateRepository)
+    }
+
     /** 无障碍兜底通道（ADR-062 原主路线；协议端不可用时自动生效）。 */
     val accessibilityQqChannel: io.prism.qq.channel.AccessibilityQqChannel by lazy {
         io.prism.qq.channel.AccessibilityQqChannel(qqLocalToolExecutor)
@@ -2094,7 +2103,8 @@ class PrismApplication : Application() {
                             android.util.Log.i(
                                 "QqProtocolHealth",
                                 "state=${status.state} detail=${status.detail} " +
-                                    "selfId=${status.selfId}"
+                                    // 2026-11-01 验收（安全）：QQ 号属账号标识，日志必须脱敏
+                                    "selfId=${if (status.selfId > 0) "***" else "0"}"
                             )
                             qqRuntimeStateRepository.recordProtocolHealth(
                                 state = status.state.name,
@@ -2102,6 +2112,36 @@ class PrismApplication : Application() {
                                 atMs = status.checkedAtMs,
                                 offline = status.state == io.prism.qq.QqProtocolHealth.State.QQ_OFFLINE
                             )
+                            // 2026-11-01（US-3128）：把同一次探测结果喂给管家——
+                            // 推进告警策略（M2）+ 本机模式下按退避自动拉起。
+                            // **不新增探测源**：这里用的就是上面那次 probe() 的结果。
+                            runCatching {
+                                qqProtocolSupervisor.onProbe(
+                                    state = status.state.name,
+                                    detail = status.detail,
+                                    nowMs = status.checkedAtMs,
+                                    enabled = cfg.enabled,
+                                    loopback = io.prism.qq.onebot.OneBotEndpoint.isLoopback(cfg.oneBotBaseUrl)
+                                )
+                            }.onFailure { e ->
+                                if (e is CancellationException) throw e
+                                android.util.Log.w(
+                                    "QqProtocolSupervisor",
+                                    "管家处理异常：${e::class.simpleName}"
+                                )
+                            }
+                        } else {
+                            // 总开关关闭 / 通道不是协议端：把告警状态清空（AC-8），
+                            // 避免"关掉再打开"时带着旧的 downNotified 直接补发通知。
+                            // 策略在 enabled=false 时**不看 probe**，这里传空串即可。
+                            runCatching {
+                                qqRuntimeStateRepository.advanceProtocolAlert(
+                                    probe = "",
+                                    nowMs = System.currentTimeMillis(),
+                                    enabled = false,
+                                    loopback = true
+                                )
+                            }
                         }
                     } catch (e: CancellationException) {
                         throw e

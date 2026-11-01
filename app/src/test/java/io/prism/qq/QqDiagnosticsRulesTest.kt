@@ -145,8 +145,11 @@ class QqDiagnosticsRulesTest {
         )
         assertNotNull("本机模式必须给出可执行指引", advice)
         val text = advice.orEmpty()
-        assertTrue("指引应给出容器启动命令：$text", text.contains("bookworm-arm64.sh"))
-        assertTrue("指引应给出 napcat 启动命令：$text", text.contains("napcat.sh"))
-        assertTrue("指引应提到保活：$text", text.contains("wake-lock"))
+        // 2026-11-01（US-3128 AC-5）：引导必须指向 Prism 内的管家入口，
+        // **不得**再把用户赶回 ZeroTermux 敲命令（与"不需要打开终端"的承诺冲突）。
+        assertTrue("指引应指向协议端管家：$text", text.contains("协议端管家"))
+        assertTrue("指引应提到一键修复：$text", text.contains("一键修复"))
+        assertFalse("不得再让用户去敲容器启动命令：$text", text.contains("bookworm-arm64.sh"))
+        assertFalse("不得再让用户去敲 napcat 启动命令：$text", text.contains("napcat.sh"))
     }
 }
