@@ -61,6 +61,28 @@ class QqConfigTest {
         assertEquals(QqConfig.MAX_PER_DAY_CEIL, QqConfig(maxPerDay = Int.MAX_VALUE).clamped().maxPerDay)
     }
 
+    /**
+     * 2026-10-31 用户裁定回归：定时上限必须由用户自行决定（0~200，0=不限）。
+     *
+     * 原值域 1~20 会让用户设定的 25/50/100 次被静默压回 20，表现为
+     * 「已达定时主动消息当日上限（20 次）」而用户并未设过 20。
+     * 本测试锁定：上限常量 ≥ 200（不再有 20 这种人为天花板），
+     * 且 0 仍表示不限（与 dailyCap 的 0 语义一致）。
+     */
+    @Test
+    fun `定时上限用户可自由设置到两百且零表示不限`() {
+        assertEquals(200, QqConfig.MAX_PER_DAY_CEIL)
+        assertEquals(0, QqConfig.MIN_PER_DAY)
+        // 0 = 不限（原样保留，不被钳制成 1）
+        assertEquals(0, QqConfig(maxPerDay = 0).clamped().maxPerDay)
+        // 中段值不再被压回 20
+        assertEquals(50, QqConfig(maxPerDay = 50).clamped().maxPerDay)
+        assertEquals(200, QqConfig(maxPerDay = 200).clamped().maxPerDay)
+        // 越界仍防呆
+        assertEquals(200, QqConfig(maxPerDay = 201).clamped().maxPerDay)
+        assertEquals(0, QqConfig(maxPerDay = -1).clamped().maxPerDay)
+    }
+
     @Test
     fun `钳制越界时间窗到当日分钟域`() {
         val c = QqConfig(windowStartMinute = -5, windowEndMinute = 5000).clamped()

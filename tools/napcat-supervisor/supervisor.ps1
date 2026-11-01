@@ -13,6 +13,21 @@ param(
     [switch]$Quiet
 )
 
+# ===== 2026-10-31 起：PC 协议端已停用，改用「手机本机模式」（ADR-069）=====
+# 原因：NapCat 与 Prism 都装在旧手机里，通过 127.0.0.1 通信，不再需要 PC 上的容器。
+# 若本监管继续每 2 分钟拉起容器，会与手机 NapCat **抢同一 QQ 账号**，
+# 表现为反复 `[KickedOffLine] 您的账号已在另一台终端登录`（真机实测两次）。
+# 因此这里直接静默退出：不再启动、不再重连。
+#
+# 恢复 PC 模式：把下面这行改成 $false（并确保手机侧 final.sh 已 CTRL+C 停止）。
+$PcProtocolRetired = $true
+if ($PcProtocolRetired) {
+    if (-not $Quiet) {
+        Write-Output 'NapCat supervisor skipped: PC protocol retired (on-phone mode, ADR-069)'
+    }
+    exit 0
+}
+
 . (Join-Path $PSScriptRoot 'lib.ps1')
 
 $paths = Get-NapCatPaths -Root $Root

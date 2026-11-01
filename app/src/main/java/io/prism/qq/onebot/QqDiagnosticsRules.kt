@@ -57,6 +57,8 @@ object QqDiagnosticsRules {
         FIREWALL_TIMEOUT,
         AUTH_FAILED,
         WS_FAILED,
+        /** 2026-10-31（ADR-069）：本机模式（回环地址）下端口无监听 = 本机协议端没跑。 */
+        LOCAL_PROTOCOL_NOT_RUNNING,
         UNKNOWN
     }
 
@@ -95,6 +97,9 @@ object QqDiagnosticsRules {
                 Verdict.FIREWALL_TIMEOUT ->
                     "连接超时（被防火墙丢弃或目标不在线）：${failed?.detail.orEmpty()}"
                 Verdict.AUTH_FAILED -> "鉴权失败：${failed?.detail.orEmpty()}"
+                Verdict.LOCAL_PROTOCOL_NOT_RUNNING ->
+                    "本机协议端未运行：${failed?.detail.orEmpty()}。请在 ZeroTermux 里执行 " +
+                        "`bash bookworm-arm64.sh` 后 `cd NapCat.linux.arm64 && ./napcat.sh`"
                 Verdict.WS_FAILED -> "HTTP 可用但 WebSocket 握手失败：${failed?.detail.orEmpty()}"
                 Verdict.UNKNOWN -> "未通过：${failed?.detail.orEmpty()}"
             }
@@ -187,11 +192,21 @@ object QqDiagnosticsRules {
      * 拓扑建议（真机实证：同 SSID 同网段仍 ARP 不通时，代码无法解决，必须换拓扑）。
      */
     fun topologyAdvice(verdict: Verdict): String? = when (verdict) {
-        Verdict.LOOPBACK_ENDPOINT -> "协议端在 PC 上：把地址改成 PC 的局域网 IP（设置页会显示实际目标）"
+        // 2026-10-31（ADR-069）：回环不再是错误配置，文案不能再断言"协议端在 PC 上"。
+        Verdict.LOOPBACK_ENDPOINT ->
+            "如果协议端在 PC 上：改填 PC 的局域网 IP；如果已改用本机模式" +
+                "（NapCat 与 Prism 装在同一台手机），127.0.0.1 就是正确配置，无需修改"
+        Verdict.LOCAL_PROTOCOL_NOT_RUNNING ->
+            "在手机上启动本机协议端：ZeroTermux → `bash bookworm-arm64.sh` → " +
+                "`cd NapCat.linux.arm64 && ./napcat.sh`；长期在线请开启 termux-wake-lock 并把 " +
+                "ZeroTermux 设为「省电无限制 + 自启动」"
         Verdict.ISOLATED, Verdict.SUBNET_MISMATCH ->
-            "换拓扑：①手机开热点、PC 连热点（推荐）②家用路由器同一 LAN ③协议端改跑在手机 Termux"
-        Verdict.PORT_CLOSED -> "在 PC 上确认 NapCat 已启动、HTTP/WS 端口与填写一致"
-        Verdict.FIREWALL_TIMEOUT -> "检查 PC 防火墙是否放行 3000/3001，或换网络拓扑"
+            "换拓扑：①协议端改跑在手机 Termux（本机模式，推荐）②手机开热点、PC 连热点 ③家用路由器同一 LAN"
+        // 本机模式下 TCP 不通已由 LOCAL_PROTOCOL_NOT_RUNNING 接管，这里只覆盖远程拓扑，
+        // 文案仍保留"协议端主机"的中性说法，避免把本机模式用户引向"查 PC"。
+        Verdict.PORT_CLOSED -> "确认协议端已启动、HTTP/WS 端口与填写一致（本机模式见「连接诊断」给出的启动命令）"
+        Verdict.FIREWALL_TIMEOUT ->
+            "检查协议端所在主机的防火墙是否放行 3000/3001，或换网络拓扑（本机模式下通常不是网络问题）"
         Verdict.AUTH_FAILED -> "核对 access_token（NapCat WebUI → 网络配置）"
         Verdict.WS_FAILED -> "确认 WS 服务已启用（NapCat 需单独开启 WebSocket 服务）"
         else -> null

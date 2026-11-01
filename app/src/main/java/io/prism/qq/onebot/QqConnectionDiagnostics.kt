@@ -71,37 +71,40 @@ class QqConnectionDiagnostics(
                 QqDiagnosticsRules.Stage.ENDPOINT,
                 "HTTP ${normalized.baseUrl} · WS ${normalized.wsUrl}"
             )
-            // 回环地址：即使可达也只连到手机自己——直接判失败并给指引
-            if (OneBotEndpoint.isLoopback(normalized.baseUrl)) {
-                steps += fail(
-                    QqDiagnosticsRules.Stage.SUBNET,
-                    "回环地址（手机自身），不可能是 PC 上的协议端"
-                )
-                return@withContext finish(steps, normalized)
-            }
+            // 2026-10-31（ADR-069 本机模式）：回环地址不再判失败。
+            // 用户裁定把 NapCat 与 Prism 装在同一台（旧）手机上，此时 127.0.0.1 就是**正确**配置；
+            // 旧实现"回环=不可能是协议端"的假设与此冲突，会把合法配置判死。
+            val loopback = OneBotEndpoint.isLoopback(normalized.baseUrl)
 
             val host = runCatching { java.net.URI(normalized.baseUrl).host }.getOrNull().orEmpty()
             val httpPort = runCatching { java.net.URI(normalized.baseUrl).port }
                 .getOrDefault(OneBotEndpoint.DEFAULT_HTTP_PORT)
 
-            // 2) 网段对照
+            // 2) 网段对照（回环没有网段概念，跳过该阶段）
             val local = runCatching { localNetwork() }.getOrNull()
             val sameSubnet = local?.ipv4 != null && local.prefixLength != null &&
                 QqDiagnosticsRules.sameSubnet(local.ipv4, local.prefixLength, host)
-            val subnetDetail = buildString {
-                append("本机 ")
-                append(local?.ipv4 ?: "未知")
-                if (local?.prefixLength != null) append("/${local.prefixLength}")
-                append(" · 网关 ")
-                append(local?.gateway ?: "未知")
-                append(" · 目标 ")
-                append(host)
-                append(if (sameSubnet) "（同网段）" else "（不同网段）")
-            }
-            steps += if (sameSubnet) {
-                pass(QqDiagnosticsRules.Stage.SUBNET, subnetDetail)
+            if (loopback) {
+                steps += pass(
+                    QqDiagnosticsRules.Stage.SUBNET,
+                    "本机模式（${host}）：协议端与 Prism 在同一台手机上，无需网段/局域网"
+                )
             } else {
-                warn(QqDiagnosticsRules.Stage.SUBNET, subnetDetail + "，跨网段需路由可达")
+                val subnetDetail = buildString {
+                    append("本机 ")
+                    append(local?.ipv4 ?: "未知")
+                    if (local?.prefixLength != null) append("/${local.prefixLength}")
+                    append(" · 网关 ")
+                    append(local?.gateway ?: "未知")
+                    append(" · 目标 ")
+                    append(host)
+                    append(if (sameSubnet) "（同网段）" else "（不同网段）")
+                }
+                steps += if (sameSubnet) {
+                    pass(QqDiagnosticsRules.Stage.SUBNET, subnetDetail)
+                } else {
+                    warn(QqDiagnosticsRules.Stage.SUBNET, subnetDetail + "，跨网段需路由可达")
+                }
             }
 
             // 3) TCP
@@ -112,6 +115,18 @@ class QqConnectionDiagnostics(
                 throw e
             } catch (e: Exception) {
                 val (verdict, detail) = QqDiagnosticsRules.classifyTcpFailure(e, sameSubnet)
+                // 2026-10-31（ADR-069）：本机模式下"连不上回环"只有一个含义——
+                // **本机协议端没跑**，而不是网络/防火墙问题。必须给出可直接执行的指引。
+                if (loopback) {
+                    steps += fail(
+                        QqDiagnosticsRules.Stage.TCP,
+                        "本机协议端未运行（$host:$httpPort 无监听）"
+                    )
+                    return@withContext finish(
+                        steps, normalized,
+                        verdictOverride = QqDiagnosticsRules.Verdict.LOCAL_PROTOCOL_NOT_RUNNING
+                    )
+                }
                 steps += fail(QqDiagnosticsRules.Stage.TCP, detail)
                 return@withContext finish(steps, normalized, verdictOverride = verdict)
             }

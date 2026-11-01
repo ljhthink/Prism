@@ -115,6 +115,82 @@ class QqRuntimeStateRepositoryTest {
         )
     }
 
+    // ==================== 2026-10-31 RC-4：跨天计数自愈 ====================
+
+    /**
+     * RC-4 回归：跨零点后**先发生被动回复**不得污染当日定时配额。
+     *
+     * 原缺陷：`recordReplied` 只把 `FIRED_DATE` 写成今天，未重置 `SCHEDULED_COUNT`，
+     * 于是 `firedDate == todayKey` 成立而 `scheduledFiredCount` 仍是昨天的值，
+     * `QqThrottle.decide` 判 `scheduled >= maxPerDay` → 当天剩余时间一条定时都不发，
+     * 且文案误导为「已达当日上限」。
+     *
+     * 真机证据：`fired_date=2026-10-27, fired_count=1, scheduled_count=4, max_per_day=3`。
+     */
+    @Test
+    fun `跨天后先被动回复不得沿用昨天的定时计数（RC-4）`() = runBlocking {
+        val repo = QqRuntimeStateRepository(FakePreferenceDataStore())
+        val yesterday = "2026-10-27"
+        val today = "2026-10-28"
+        val now = 10_000_000L
+
+        // 昨天用满定时配额（3 次，且总数为 3）
+        repo.recordFired(now - 86_400_000L, yesterday)
+        repo.recordFired(now - 86_000_000L, yesterday)
+        repo.recordFired(now - 85_000_000L, yesterday)
+        assertEquals(3, repo.get().scheduledFiredCount)
+
+        // 跨天后先发生一次**被动**回复
+        repo.recordReplied(now, today)
+
+        val state = repo.get()
+        assertEquals("定时计数必须归零", 0, state.scheduledFiredCount)
+        assertEquals("总计数应只含今天这次被动", 1, state.firedCount)
+
+        // 今天的定时消息必须**允许**（而不是被昨天的 3 次拦掉）
+        val cfg = QqConfig(maxPerDay = 3, minIntervalMs = 60_000L, dailyCap = 100)
+        val decision = QqThrottle.decide(cfg, state, now + 10 * 60_000L)
+        assertTrue(
+            "跨天后应允许定时消息，实际：$decision",
+            decision !is QqThrottle.Decision.Deny ||
+                !(decision as QqThrottle.Decision.Deny).reason.contains("定时主动消息")
+        )
+    }
+
+    /**
+     * RC-5 回归：`scheduledFiredCount > firedCount` 的脏数据必须自愈收敛。
+     *
+     * 真机曾出现 `fired=1, scheduled=4`（`recordFired`/`recordUnconfirmedFired` 里两者同增，
+     * 公开 API 不可能产出该组合），属旧版本跨天残留。
+     *
+     * **构造方式**：不能靠公开 API「累计」——那样 fired 也会同步增长，永远造不出
+     * `scheduled > fired`，断言就成了恒真的假阳性。这里直接按 key 名称预置
+     * DataStore 初始值（Preferences 按名称匹配，与 private key 等价），
+     * 精确复刻真机那份脏数据。
+     */
+    @Test
+    fun `定时计数大于总数时读取侧收敛到总数（RC-5）`() = runBlocking {
+        val dirty = androidx.datastore.preferences.core.preferencesOf(
+            androidx.datastore.preferences.core.stringPreferencesKey("qq_fired_date") to "2026-10-27",
+            androidx.datastore.preferences.core.intPreferencesKey("qq_fired_count") to 1,
+            androidx.datastore.preferences.core.intPreferencesKey("qq_scheduled_count") to 4
+        )
+        val repo = QqRuntimeStateRepository(FakePreferenceDataStore(dirty))
+
+        val state = repo.get()
+        assertEquals("脏 scheduled=4 必须收敛到 fired=1", 1, state.scheduledFiredCount)
+        assertEquals("总数应原样保留", 1, state.firedCount)
+
+        // 若不做收敛，maxPerDay=3 时会被"4 ≥ 3"拦掉；收敛后当天应可继续发
+        val cfg = QqConfig(maxPerDay = 3, minIntervalMs = 60_000L, dailyCap = 100)
+        val decision = QqThrottle.decide(cfg, state, 30_000_000L)
+        assertTrue(
+            "收敛后定时配额应恢复可用，实际：$decision",
+            decision !is QqThrottle.Decision.Deny ||
+                !(decision as QqThrottle.Decision.Deny).reason.contains("定时主动消息")
+        )
+    }
+
     // ==================== 被动路径未确认：不占主动消息配额（guardrail G-r5-01） ====================
 
     @Test

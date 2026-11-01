@@ -495,7 +495,11 @@ class QqLocalToolExecutor(
                     append("定时主动消息状态：总开关=${cfg.enabled}，风险确认=${cfg.riskAccepted}，")
                     append("定时开关=${cfg.scheduleEnabled}，目标联系人=${cfg.targetContact.ifBlank { "未配置" }}，")
                     append("活跃时段=${QqTimeOfDay.describe(cfg.windowStartMinute, cfg.windowEndMinute)}，")
-                    append("每日上限=${cfg.maxPerDay}，策略=${if (cfg.usePoisson) "泊松" else "均匀"}，")
+                    // 2026-10-31：0=不限，状态输出的文案也要如实（模型会照抄这句回给用户）
+                    append(
+                        "每日上限=${if (cfg.maxPerDay <= 0) "不限" else cfg.maxPerDay.toString()}，" +
+                            "策略=${if (cfg.usePoisson) "泊松" else "均匀"}，"
+                    )
                     append("熄屏策略=${if (cfg.wakeOnScreenOff) "点亮屏幕执行" else "跳过并发通知"}")
                     if (rt != null && rt.plannedTriggerAt > 0) {
                         append("；下次计划=${formatEpoch(rt.plannedTriggerAt)}")
@@ -554,8 +558,10 @@ class QqLocalToolExecutor(
                 cfgRepo.setUsePoisson(parseString(arguments, "use_poisson")?.lowercase() == "true")
                 cfgRepo.setScheduleEnabled(true)
                 val cfg = cfgRepo.get()
+                // 2026-10-31：maxPerDay=0 表示不限，文案必须如实（不能出现"每日至多 0 次"）
+                val quota = if (cfg.maxPerDay <= 0) "每日不限次数" else "每日至多 ${cfg.maxPerDay} 次"
                 "已创建定时主动消息：活跃时段 ${QqTimeOfDay.describe(cfg.windowStartMinute, cfg.windowEndMinute)}，" +
-                    "每日至多 ${cfg.maxPerDay} 次，发给「${cfg.targetContact}」。" +
+                    "$quota，发给「${cfg.targetContact}」。" +
                     "Prism 将在该时段内随机时刻主动发消息（受节流与熔断约束）"
             }
             "cancel" -> {
@@ -1035,7 +1041,7 @@ class QqLocalToolExecutor(
                 "管理随机定时主动消息：status 查看状态；create 创建（在时间窗内随机时刻主动发消息）；cancel 取消。" +
                     "**无需提供消息内容**——到点触发时由你（角色）结合人设与当前时段即兴生成一条像真人的消息发出，" +
                     "这不是替用户传话，而是你主动想起对方时的问候/分享。",
-                """{"type":"object","properties":{"action":{"type":"string","enum":["status","create","cancel"]},"window_start":{"type":"string","description":"活跃时段起（HH:mm，如 07:00）"},"window_end":{"type":"string","description":"活跃时段止（HH:mm，如 22:00）；起>止表示跨零点（如 22:00-02:00）"},"window_start_min":{"type":"integer","description":"[兼容旧参数] 时间窗起（当日分钟，如 1200=20:00）；优先使用 window_start"},"window_end_min":{"type":"integer","description":"[兼容旧参数] 时间窗止（当日分钟，如 1380=23:00）；优先使用 window_end"},"max_per_day":{"type":"integer","description":"每日次数上限（1-20）"},"use_poisson":{"type":"string","enum":["true","false"],"description":"true=泊松随机间隔（更突发），false=窗内均匀采样"},"target_contact":{"type":"string","description":"create 时：小号对目标好友的备注名"}},"required":["action"]}"""
+                """{"type":"object","properties":{"action":{"type":"string","enum":["status","create","cancel"]},"window_start":{"type":"string","description":"活跃时段起（HH:mm，如 07:00）"},"window_end":{"type":"string","description":"活跃时段止（HH:mm，如 22:00）；起>止表示跨零点（如 22:00-02:00）"},"window_start_min":{"type":"integer","description":"[兼容旧参数] 时间窗起（当日分钟，如 1200=20:00）；优先使用 window_start"},"window_end_min":{"type":"integer","description":"[兼容旧参数] 时间窗止（当日分钟，如 1380=23:00）；优先使用 window_end"},"max_per_day":{"type":"integer","description":"定时主动消息每日次数上限（0-200；0=不限）"},"use_poisson":{"type":"string","enum":["true","false"],"description":"true=泊松随机间隔（更突发），false=窗内均匀采样"},"target_contact":{"type":"string","description":"create 时：小号对目标好友的备注名"}},"required":["action"]}"""
             )
         )
 

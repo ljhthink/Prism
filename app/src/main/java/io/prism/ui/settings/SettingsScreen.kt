@@ -240,6 +240,8 @@ fun SettingsScreen(
     var qqWindowStartDraft by remember { mutableStateOf("") }
     var qqWindowEndDraft by remember { mutableStateOf("") }
     var qqCapDraft by remember { mutableStateOf("") }
+    // 2026-10-31：每日定时上限（0~200，0=不限）草稿
+    var qqPerDayDraft by remember { mutableStateOf("") }
     var qqIntervalDraft by remember { mutableStateOf("") }
     var qqHistoryDialogVisible by remember { mutableStateOf(false) }
     var qqHistoryDraft by remember { mutableStateOf("") }
@@ -544,6 +546,14 @@ fun SettingsScreen(
                         singleLine = true,
                         label = { Text("每日消息上限（0~200；0=不限）") }
                     )
+                    // 2026-10-31（用户裁定）：定时上限由用户自行决定（0~200，0=不限）。
+                    // 与上面的"每日消息上限"是两个正交约束：本项只约束**定时主动**消息。
+                    androidx.compose.material3.OutlinedTextField(
+                        value = qqPerDayDraft,
+                        onValueChange = { qqPerDayDraft = it },
+                        singleLine = true,
+                        label = { Text("每日定时上限（0~200；0=不限）") }
+                    )
                     androidx.compose.material3.OutlinedTextField(
                         value = qqIntervalDraft,
                         onValueChange = { qqIntervalDraft = it },
@@ -560,6 +570,7 @@ fun SettingsScreen(
                     val start = io.prism.qq.QqTimeOfDay.parse(qqWindowStartDraft)
                     val end = io.prism.qq.QqTimeOfDay.parse(qqWindowEndDraft)
                     val cap = qqCapDraft.trim().toIntOrNull()
+                    val perDay = qqPerDayDraft.trim().toIntOrNull()
                     val intervalMin = qqIntervalDraft.trim().toLongOrNull()
                     if (start == null || end == null ||
                         !io.prism.qq.QqTimeOfDay.isValidWindow(start, end)
@@ -567,10 +578,24 @@ fun SettingsScreen(
                         qqScheduleError = "错误：活跃时段非法。请填写 0:00~24:00 的「时:分」，且起止不能相同"
                         return@TextButton
                     }
+                    // 2026-10-31：定时上限自由填写（0~200，0=不限）；非法值在弹窗内直接报错，
+                    // 不再静默 clamp——静默 clamp 会让用户以为保存成功却仍是旧值。
+                    if (qqPerDayDraft.isNotBlank()) {
+                        if (perDay == null ||
+                            perDay < io.prism.qq.QqConfig.MIN_PER_DAY ||
+                            perDay > io.prism.qq.QqConfig.MAX_PER_DAY_CEIL
+                        ) {
+                            qqScheduleError = "错误：每日定时上限需为 " +
+                                "${io.prism.qq.QqConfig.MIN_PER_DAY}~" +
+                                "${io.prism.qq.QqConfig.MAX_PER_DAY_CEIL} 的整数（0=不限）"
+                            return@TextButton
+                        }
+                    }
                     qqScheduleDialogVisible = false
                     qqScope.launch {
                         qqApp?.qqConfigRepository?.setWindow(start, end)
                         cap?.let { qqApp?.qqConfigRepository?.setDailyCap(it) }
+                        perDay?.let { qqApp?.qqConfigRepository?.setMaxPerDay(it) }
                         intervalMin?.let {
                             qqApp?.qqConfigRepository?.setMinIntervalMs(
                                 (it * 60_000L).coerceAtLeast(io.prism.qq.QqConfig.MIN_INTERVAL_MS_FLOOR)
@@ -1048,10 +1073,13 @@ fun SettingsScreen(
                     iconColor = PrismIndigo,
                     title = "随机定时主动消息",
                     subtitle = if (qqConfig.scheduleEnabled) {
-                        "已开启 · %s 时段内随机联系你（每日至多 ${qqConfig.maxPerDay} 次，${if (qqConfig.usePoisson) "泊松" else "均匀"}随机）".format(
+                        // 2026-10-31：上限由用户自定；0 = 不限，文案要如实说明
+                        val quota = if (qqConfig.maxPerDay <= 0) "不限制" else "至多 ${qqConfig.maxPerDay} 次"
+                        "已开启 · %s 时段内随机联系你（每日%s，${if (qqConfig.usePoisson) "泊松" else "均匀"}随机）".format(
                             io.prism.qq.QqTimeOfDay.describe(
                                 qqConfig.windowStartMinute, qqConfig.windowEndMinute
-                            )
+                            ),
+                            quota
                         )
                     } else {
                         "未开启 · 在设定时段内随机时刻主动发消息（营造真实感）"
@@ -1099,6 +1127,7 @@ fun SettingsScreen(
                         qqWindowStartDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute)
                         qqWindowEndDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
                         qqCapDraft = qqConfig.dailyCap.toString()
+                        qqPerDayDraft = qqConfig.maxPerDay.toString()
                         qqIntervalDraft = (qqConfig.minIntervalMs / 60_000L).toString()
                         qqScheduleError = ""
                         qqScheduleDialogVisible = true
@@ -1115,6 +1144,7 @@ fun SettingsScreen(
                         qqWindowStartDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute)
                         qqWindowEndDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
                         qqCapDraft = qqConfig.dailyCap.toString()
+                        qqPerDayDraft = qqConfig.maxPerDay.toString()
                         qqIntervalDraft = (qqConfig.minIntervalMs / 60_000L).toString()
                         qqScheduleError = ""
                         qqScheduleDialogVisible = true

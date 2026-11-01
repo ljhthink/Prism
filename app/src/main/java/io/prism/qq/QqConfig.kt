@@ -145,8 +145,20 @@ data class QqConfig(
         const val DEFAULT_WINDOW_START_MINUTE: Int = 20 * 60
         const val DEFAULT_WINDOW_END_MINUTE: Int = 23 * 60
 
+        /**
+         * 定时主动消息的每日上限（2026-10-31 用户裁定：**0~200，0=不限**）。
+         *
+         * 原为 1~20，用户反馈「随机定时消息的上限次数应该让用户自行决定」——
+         * 20 这个天花板对"整天高频陪聊"场景不够用，且与 [MAX_DAILY_CAP] 的口径
+         * （总消息上限 0~200）不一致。现统一为 0~200 自由填写：
+         * - `0` = 不限制（与 [dailyCap] 的 0 语义一致）；
+         * - 上限 200 只作为防呆（避免误输入极大值导致 LLM 费用失控）。
+         *
+         * 注意：这与 [dailyCap] 是两个正交约束——[maxPerDay] 只约束**定时主动**消息，
+         * [dailyCap] 约束当日**全部**主动+被动消息。二者同时生效，取更严格者。
+         */
         const val MIN_PER_DAY: Int = 0
-        const val MAX_PER_DAY_CEIL: Int = 20
+        const val MAX_PER_DAY_CEIL: Int = 200
         const val DEFAULT_MAX_PER_DAY: Int = 3
 
         /**
