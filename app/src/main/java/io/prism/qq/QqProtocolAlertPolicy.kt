@@ -35,7 +35,18 @@ object QqProtocolAlertPolicy {
         PROTOCOL_UNREACHABLE,
 
         /** 协议端可达但账号离线：需要重新扫码登录。 */
-        QQ_ACCOUNT_OFFLINE
+        QQ_ACCOUNT_OFFLINE,
+
+        /**
+         * **从未连上过**（2026-11-02 真机实证新增）。
+         *
+         * 原策略要求"先稳定在线 10 分钟才武装"，副作用是：协议端**一次都没启动成功**时
+         * 永不 arm、永不告警——用户只看到"协议端不可达"，却不知道是配置没做完。
+         * 真机实测正处在这个状态（状态文件停在几天前，而一条通知都没有）。
+         *
+         * 用**长时间连续不可达**作为替代判据，单独文案、只发一次。
+         */
+        PROTOCOL_NEVER_STARTED
     }
 
     /** 探测结果字符串（与 [QqProtocolHealth.State.name] 对齐，便于持久化）。 */
@@ -69,6 +80,15 @@ object QqProtocolAlertPolicy {
 
     /** AC-3：同一轮失联最多通知一次，且两次通知之间至少间隔本时长。 */
     const val NOTIFY_THROTTLE_MS = 30 * 60_000L
+
+    /**
+     * 「从未连上过」的判定门槛：连续不可达达到本次数才告警。
+     *
+     * 取 30（≈ 30 分钟 @60s 轮询）：远大于 AC-2 的 3 次，确保"只是启动慢"不会误报；
+     * 又足够短，让用户在一次配置失败后半小时内就能收到明确指引，而不是无限沉默。
+     * 该告警**只发一次**（`downNotified` 一旦置位就不再重复），不会刷屏。
+     */
+    const val NEVER_STARTED_CONFIRM = 30
 
     /**
      * 告警状态（**必须持久化**，否则 Prism 自己被系统杀掉后「曾经在线过」这个事实就丢了，
@@ -232,8 +252,11 @@ object QqProtocolAlertPolicy {
             lastNotifyAtMs = prev.lastNotifyAtMs
         )
 
-        // AC-1：从未稳定在线过 → 不告警（首次部署/刚扫码期间的正常重连不打扰）
-        if (!base.armed) return Decision(base, Action.None)
+        // AC-1：从未稳定在线过 → 不按"掉线"告警（首次部署/刚扫码期间的正常重连不打扰）
+        // 但 2026-11-02：**长期从未连上**是另一回事，见下（否则配置失败会永远沉默）。
+        if (!base.armed) {
+            return neverStarted(nowMs, base, prev, kind, nextUnreachableStreak)
+        }
         // AC-2：失败次数不足 → 继续观察
         if (!streakReached) return Decision(base, Action.None)
 
@@ -276,6 +299,44 @@ object QqProtocolAlertPolicy {
                 lastNotifyAtMs = nowMs
             ),
             Action.NotifyDown(kind = kind, downSinceMs = downSince, detail = detail)
+        )
+    }
+
+    /**
+     * 「从未连上过」分支（2026-11-02）：未武装 + 连续不可达达到
+     * [NEVER_STARTED_CONFIRM] → 发**一条**「协议端从未启动成功」告警。
+     *
+     * 与"掉线"告警的区别：
+     * - 判据不是"曾经在线过"，而是"持续很久都没起来"；
+     * - **只发一次**（`downNotified` 置位后本分支不再触发），不参与 30 分钟节流循环；
+     * - 文案不同：不是"掉了"，而是"从来没起来，检查配置"。
+     *
+     * 账号离线不适用本分支（`get_status` 能通说明协议端起来了，不算"从未连上"）。
+     */
+    private fun neverStarted(
+        nowMs: Long,
+        base: State,
+        prev: State,
+        kind: Kind,
+        unreachableStreak: Int
+    ): Decision {
+        if (kind == Kind.QQ_ACCOUNT_OFFLINE) return Decision(base, Action.None)
+        if (prev.downNotified) return Decision(base, Action.None)
+        if (unreachableStreak < NEVER_STARTED_CONFIRM) return Decision(base, Action.None)
+
+        val since = prev.downSinceMs.takeIf { it > 0L } ?: nowMs
+        return Decision(
+            base.copy(
+                downNotified = true,
+                downKind = Kind.PROTOCOL_NEVER_STARTED.name,
+                downSinceMs = since,
+                lastNotifyAtMs = nowMs
+            ),
+            Action.NotifyDown(
+                kind = Kind.PROTOCOL_NEVER_STARTED,
+                downSinceMs = since,
+                detail = "协议端连续 ${unreachableStreak} 次探测都不可达，且从未成功连上过"
+            )
         )
     }
 }

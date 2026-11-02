@@ -77,7 +77,7 @@ class QqBootRestartReceiver : BroadcastReceiver() {
             Log.i(TAG, "开机恢复放弃：${QqTermuxBridge.describeReadiness(readiness)}")
             return
         }
-        val ok = QqTermuxBridge.start()
+        val ok = QqTermuxBridge.start(app)
         if (ok) {
             app.qqRuntimeStateRepository.clearProtocolRestart()
             Log.i(TAG, "开机已提交协议端拉起")

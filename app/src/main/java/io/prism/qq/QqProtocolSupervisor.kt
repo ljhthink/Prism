@@ -142,7 +142,7 @@ class QqProtocolSupervisor(
                     false
                 } else {
                     // 提交动作本身不是 suspend（只是 startService），可以放在锁内保证互斥
-                    synchronized(launchLock) { QqTermuxBridge.start() }
+                    synchronized(launchLock) { QqTermuxBridge.start(appContext) }
                 }
                 repository.recordProtocolRestart(
                     windowStartMs = decision.state.windowStartMs,
@@ -306,10 +306,14 @@ class QqProtocolSupervisor(
         val power = repairPowerPolicy()
         val deployed = deployScriptsQuietly()
         // 先发探针：验证「Prism 的命令能不能真的交到 Termux」
-        val probed = if (deployed) QqTermuxBridge.probe() else false
+        val probed = if (deployed) QqTermuxBridge.probe(appContext) else false
         // D-1（验收必修）：手动路径同样要判"是否已经在跑"
         val alreadyRunning = isProtocolPortListening()
-        val started = if (deployed && probed && !alreadyRunning) QqTermuxBridge.start() else false
+        val started = if (deployed && probed && !alreadyRunning) {
+            QqTermuxBridge.start(appContext)
+        } else {
+            false
+        }
         if (started) repository.clearProtocolRestart()
         val readiness = QqTermuxBridge.readiness(appContext).let { base ->
             // 探针被拒而其余条件都满足 → 直指 allow-external-apps（AC-1 第二步）

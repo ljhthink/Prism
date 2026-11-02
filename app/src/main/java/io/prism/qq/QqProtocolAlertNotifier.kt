@@ -62,6 +62,7 @@ object QqProtocolAlertNotifier {
             QqProtocolAlertPolicy.Kind.LOCAL_PROTOCOL_NOT_RUNNING -> "QQ 小号协议端未运行"
             QqProtocolAlertPolicy.Kind.PROTOCOL_UNREACHABLE -> "QQ 小号协议端连接不上"
             QqProtocolAlertPolicy.Kind.QQ_ACCOUNT_OFFLINE -> "QQ 小号账号已离线"
+            QqProtocolAlertPolicy.Kind.PROTOCOL_NEVER_STARTED -> "QQ 小号协议端还没启动成功过"
         }
         val advice = adviceFor(kind)
         val body = buildString {
@@ -113,6 +114,12 @@ object QqProtocolAlertNotifier {
         QqProtocolAlertPolicy.Kind.QQ_ACCOUNT_OFFLINE ->
             "QQ 账号登录已失效（常见于被踢或风控），需要在手机上重新扫码：" +
                 "打开 Prism → 设置 → QQ 小号助手 → 协议端管家 → 「扫码登录」。"
+
+        // 2026-11-02：从未连上过的文案必须直接点出"差哪一步"，而不是笼统说"连不上"
+        QqProtocolAlertPolicy.Kind.PROTOCOL_NEVER_STARTED ->
+            "协议端一次都没能启动成功。请在 Prism → 设置 → QQ 小号助手 → 协议端管家 依次检查：" +
+                "① 已允许「在 Termux 环境中运行命令」；② ZeroTermux 的 allow-external-apps 已设为 true；" +
+                "③ 点「一键修复」后看卡片给的最后一步提示。"
     }
 
     private fun post(context: Context, title: String, body: String) {

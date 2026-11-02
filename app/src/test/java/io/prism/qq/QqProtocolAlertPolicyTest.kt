@@ -85,7 +85,7 @@ class QqProtocolAlertPolicyTest {
     }
 
     @Test
-    fun `AC1 未武装前的连续失败不告警`() {
+    fun `AC1 未武装前的短时连续失败不告警`() {
         var s = online(t0, QqProtocolAlertPolicy.State()).state
         var action: QqProtocolAlertPolicy.Action = QqProtocolAlertPolicy.Action.None
         repeat(5) { i ->
@@ -93,7 +93,69 @@ class QqProtocolAlertPolicyTest {
             s = d.state
             action = d.action
         }
-        assertEquals("从未稳定在线过 → 不告警", QqProtocolAlertPolicy.Action.None, action)
+        assertEquals("从未稳定在线过且只失败 5 次 → 不告警", QqProtocolAlertPolicy.Action.None, action)
+    }
+
+    // ==================== 2026-11-02：从未连上过 ====================
+
+    @Test
+    fun `从未连上过 连续 29 次不告警 第 30 次告警`() {
+        var s = QqProtocolAlertPolicy.State()
+        var action: QqProtocolAlertPolicy.Action = QqProtocolAlertPolicy.Action.None
+        repeat(29) { i ->
+            val d = unreachable(t0 + i * minute, s)
+            s = d.state
+            action = d.action
+        }
+        assertEquals("29 次不应告警", QqProtocolAlertPolicy.Action.None, action)
+        val d = unreachable(t0 + 30 * minute, s)
+        assertTrue(
+            "连续 30 次从未连上必须告警（否则配置失败会永远沉默）",
+            d.action is QqProtocolAlertPolicy.Action.NotifyDown
+        )
+        assertEquals(
+            QqProtocolAlertPolicy.Kind.PROTOCOL_NEVER_STARTED,
+            (d.action as QqProtocolAlertPolicy.Action.NotifyDown).kind
+        )
+    }
+
+    @Test
+    fun `从未连上过的告警只发一次`() {
+        var s = QqProtocolAlertPolicy.State()
+        var notifyCount = 0
+        repeat(120) { i ->
+            val d = unreachable(t0 + i * minute, s)
+            s = d.state
+            if (d.action is QqProtocolAlertPolicy.Action.NotifyDown) notifyCount++
+        }
+        assertEquals("长时间不可达也只能通知 1 次，不得刷屏", 1, notifyCount)
+    }
+
+    @Test
+    fun `账号离线不触发从未连上过分支`() {
+        var s = QqProtocolAlertPolicy.State()
+        var notified = false
+        repeat(60) { i ->
+            val d = qqOffline(t0 + i * minute, s)
+            s = d.state
+            if (d.action is QqProtocolAlertPolicy.Action.NotifyDown) notified = true
+        }
+        assertTrue(
+            "get_status 能通说明协议端起来了，不算'从未连上'",
+            !notified
+        )
+    }
+
+    @Test
+    fun `曾经连上过之后长期不可达走掉线分支而不是从未连上`() {
+        var s = armedAt(t0)
+        var kind: QqProtocolAlertPolicy.Kind? = null
+        repeat(3) { i ->
+            val d = unreachable(t0 + 11 * minute + i * minute, s)
+            s = d.state
+            (d.action as? QqProtocolAlertPolicy.Action.NotifyDown)?.let { kind = it.kind }
+        }
+        assertEquals(QqProtocolAlertPolicy.Kind.LOCAL_PROTOCOL_NOT_RUNNING, kind)
     }
 
     @Test

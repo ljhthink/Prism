@@ -186,6 +186,7 @@ fun QqProtocolSupervisorSection(
                         try {
                             val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
                                 QqTermuxBridge.startIfNotRunning(
+                                    context,
                                     supervisor?.isProtocolPortListening() ?: false
                                 )
                             }
@@ -216,7 +217,7 @@ fun QqProtocolSupervisorSection(
                     scope.launch {
                         try {
                             val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                QqTermuxBridge.restart()
+                                QqTermuxBridge.restart(context)
                             }
                             statusText = if (ok) "已提交重启（当前在线会话会被重新登录）" else "重启未成功"
                         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -236,7 +237,7 @@ fun QqProtocolSupervisorSection(
                     scope.launch {
                         try {
                             val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                QqTermuxBridge.stop()
+                                QqTermuxBridge.stop(context)
                             }
                             statusText = if (ok) "已提交停止命令" else "停止未成功"
                         } catch (e: kotlinx.coroutines.CancellationException) {

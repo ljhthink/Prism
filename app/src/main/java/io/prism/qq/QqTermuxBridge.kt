@@ -47,6 +47,25 @@ object QqTermuxBridge {
     /** Termux 侧 `RUN_COMMAND` 权限名（用户手动授予）。 */
     const val RUN_COMMAND_PERMISSION = "com.termux.permission.RUN_COMMAND"
 
+    // ---- RUN_COMMAND 协议常量（Termux 官方 wiki） ----
+    private const val ACTION_RUN_COMMAND = "com.termux.RUN_COMMAND"
+    private const val RUN_COMMAND_SERVICE = "com.termux.app.RunCommandService"
+    private const val EXTRA_PATH = "com.termux.RUN_COMMAND_PATH"
+    private const val EXTRA_ARGUMENTS = "com.termux.RUN_COMMAND_ARGUMENTS"
+    private const val EXTRA_WORKDIR = "com.termux.RUN_COMMAND_WORKDIR"
+    private const val EXTRA_BACKGROUND = "com.termux.RUN_COMMAND_BACKGROUND"
+    private const val EXTRA_SESSION_ACTION = "com.termux.RUN_COMMAND_SESSION_ACTION"
+    private const val EXTRA_COMMAND_LABEL = "com.termux.RUN_COMMAND_COMMAND_LABEL"
+
+    /** Termux 内 bash 的绝对路径（`$PREFIX/bin/bash`）。 */
+    private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
+
+    /** Termux 的 HOME（`RUN_COMMAND_WORKDIR` 必须是 Termux 可访问目录）。 */
+    private const val TERMUX_HOME = "/data/data/com.termux/files/home"
+
+    /** 会话动作：0=不切换（后台跑完即结束）。 */
+    private const val SESSION_ACTION_NONE = "0"
+
     // ==================== 状态探测 ====================
 
     /** Termux 是否已安装（`<queries>` 已声明，否则此处恒为 false）。 */
@@ -101,19 +120,27 @@ object QqTermuxBridge {
     }.getOrDefault(false)
 
     /**
-     * 端到端可用性判定（**不发起任何命令**，但 `SCRIPTS_NOT_DEPLOYED` 那一步会走 Shizuku
-     * `test -f` —— 冷绑定可能阻塞数秒）。
+     * 端到端可用性判定（**不发起任何命令**）。
      *
-     * **调用方必须在后台线程调用**（2026-11-01 审查 H-3）：设置页的
-     * `rememberCoroutineScope` 是 Main，直接调会卡 UI / 触发 ANR。
+     * ## 2026-11-02 修订：Shizuku 不再是核心路径的必需项
+     *
+     * 真机实证推翻了原设计——Termux 的 `RUN_COMMAND` 权限由**调用方 uid**承担，
+     * shell（Shizuku）同样被拒且无法申请该权限。因此命令只能由 Prism 自己发，
+     * Shizuku 只剩两个**可选增强**：
+     * 1. 把脚本部署到 `/data/local/tmp`（无 Shizuku 时脚本必须已由 adb/用户预先放好）；
+     * 2. 读取 `/sdcard` 上的状态/日志文件、写电池白名单。
+     *
+     * **调用方必须在后台线程调用**（H-3：`SCRIPTS_NOT_DEPLOYED` 那步走 Shizuku
+     * `test -f`，冷绑定可能阻塞数秒）。
      *
      * @return 缺什么就返回什么，顺序即用户应先做的一步
      */
     fun readiness(context: Context): Readiness = when {
         !isTermuxInstalled(context) -> Readiness.TERMUX_MISSING
         !hasRunCommandPermission(context) -> Readiness.PERMISSION_MISSING
-        !ShizukuShell.isReady() -> Readiness.SHIZUKU_NOT_READY
-        !QqProtocolScripts.areDeployed() -> Readiness.SCRIPTS_NOT_DEPLOYED
+        // 只有 Shizuku 就绪时才可能"自动部署脚本"；未就绪不代表不可用（脚本可能已预置）
+        ShizukuShell.isReady() && !QqProtocolScripts.areDeployed() ->
+            Readiness.SCRIPTS_NOT_DEPLOYED
         else -> Readiness.READY
     }
 
@@ -122,6 +149,11 @@ object QqTermuxBridge {
         READY,
         TERMUX_MISSING,
         PERMISSION_MISSING,
+
+        /**
+         * Shizuku 未激活。**已不再阻断核心功能**（2026-11-02 修订）：
+         * 仅影响「自动部署脚本 / 读取日志与状态 / 修电池白名单」三项增强。
+         */
         SHIZUKU_NOT_READY,
         SCRIPTS_NOT_DEPLOYED,
 
@@ -144,7 +176,7 @@ object QqTermuxBridge {
         Readiness.PERMISSION_MISSING ->
             "还差一步：在系统的「Prism → 权限 → 附加权限」里允许「在 Termux 环境中运行命令」"
         Readiness.SHIZUKU_NOT_READY ->
-            "Shizuku 未就绪：管家需要它把命令交给 Termux 并修复电池白名单"
+            "Shizuku 未激活（不影响启动协议端，只影响自动部署脚本、读取日志、修电池白名单）"
         Readiness.SCRIPTS_NOT_DEPLOYED ->
             "脚本尚未部署到手机：点「一键修复」会自动部署（需要 Shizuku）"
         Readiness.EXTERNAL_APPS_BLOCKED ->
@@ -161,7 +193,7 @@ object QqTermuxBridge {
      * 脚本自身已内置「单实例 + 快速登录 + 日志镜像到 /sdcard + 不自动重启（防自踢）」，
      * 因此重复调用是**幂等**的（第二个实例检测到既有 NapCat 会自行退出）。
      */
-    fun start(): Boolean = run(QqProtocolScripts.RUN_SCRIPT)
+    fun start(context: Context): Boolean = run(context, QqProtocolScripts.RUN_SCRIPT)
 
     /**
      * 仅当**没有在跑**时才启动（供手动"启动"按钮使用，防自踢）。
@@ -169,7 +201,8 @@ object QqTermuxBridge {
      * @param running 判据由调用方（[QqProtocolSupervisor.isProtocolPortListening]）提供
      * @return true=已提交启动；false=本来就在跑或多条件不满足
      */
-    fun startIfNotRunning(running: Boolean): Boolean = if (running) false else start()
+    fun startIfNotRunning(context: Context, running: Boolean): Boolean =
+        if (running) false else start(context)
 
     /**
      * 强制重启（用户明确要"重启"时用）：先跑停止脚本，再启动。
@@ -181,48 +214,74 @@ object QqTermuxBridge {
      * 原实现 `run(STOP) || run(RUN)` 在「停止成功但启动失败」时返回 true，
      * 会让 UI 显示"已提交重启"而实际协议端已被杀且未拉起——最坏形态（用户以为在线）。
      */
-    fun restart(): Boolean {
-        val stopped = run(QqProtocolScripts.STOP_SCRIPT)
+    fun restart(context: Context): Boolean {
+        val stopped = run(context, QqProtocolScripts.STOP_SCRIPT)
         if (!stopped) Log.w(TAG, "重启前停止脚本未成功，仍尝试启动")
-        return run(QqProtocolScripts.RUN_SCRIPT)
+        return run(context, QqProtocolScripts.RUN_SCRIPT)
     }
 
     /** 跑一次健康检查（`bash verify.sh`；结论落到 `/sdcard`，由管家读取）。 */
-    fun verify(): Boolean = run(QqProtocolScripts.VERIFY_SCRIPT)
+    fun verify(context: Context): Boolean = run(context, QqProtocolScripts.VERIFY_SCRIPT)
 
     /** 停止协议端（杀容器内 qq/napcat/Xvfb，不动 Termux 本身）。 */
-    fun stop(): Boolean = run(QqProtocolScripts.STOP_SCRIPT)
+    fun stop(context: Context): Boolean = run(context, QqProtocolScripts.STOP_SCRIPT)
 
     /** 发一条探针（`echo`），用于反推 Termux 侧 `allow-external-apps` 是否开启。 */
-    fun probe(): Boolean = run(QqProtocolScripts.PROBE_SCRIPT)
+    fun probe(context: Context): Boolean = run(context, QqProtocolScripts.PROBE_SCRIPT)
 
     /**
      * 执行一条**已部署的白名单脚本**。
      *
-     * **必须校验文件真的存在**（2026-11-01 审查 N-2）：`isDeployed` 只是字符串白名单，
-     * 而 `am startservice` 对"不存在的脚本路径"仍可能返回 0，
-     * 于是 stop/probe/restart 会**静默失效却回报成功**。
+     * ## 为什么必须由 Prism 自己发 Intent（2026-11-02 真机实证纠正）
      *
-     * @return true=文件在位且 `am startservice` 退出码 0（**不代表脚本内部成功**）
+     * Termux 的 `RunCommandService` 声明了 `android:permission="com.termux.permission.RUN_COMMAND"`，
+     * 该权限由**调用方 uid**承担。真机实测：
+     * - `adb shell am startservice …`（uid 2000）→ `Error: Requires permission …`；
+     * - `pm grant com.android.shell com.termux.permission.RUN_COMMAND` → `has not requested permission`。
+     *
+     * 即 **Shizuku（shell 身份）根本发不出去这条命令**——我原先"用 Shizuku 代发即可绕过
+     * 后台限制"的设计是错的（ADR-070 已据此修订）。唯一合法调用方是 Prism 自己，
+     * 且必须由用户手动授予该权限。
+     *
+     * ## 后台限制
+     *
+     * Android 8+ 禁止后台应用 `startService`。Prism 在持有前台服务时属
+     * foreground-service 状态，可以正常调用；若无前台服务而被拒
+     * （`IllegalStateException` / `ForegroundServiceStartNotAllowedException`），
+     * 这里会如实记录并返回 false，由上层提示用户"点一下按钮"。
+     *
+     * @return true=Intent 已交给 Termux（**不代表脚本内部成功**）
      */
-    private fun run(scriptPath: String): Boolean {
+    private fun run(context: Context, scriptPath: String): Boolean {
         if (!QqProtocolScripts.isDeployed(scriptPath)) {
             Log.w(TAG, "拒绝执行未部署的脚本：${scriptPath.substringAfterLast('/')}")
             return false
         }
-        if (!ShizukuShell.fileExists(scriptPath)) {
-            Log.w(TAG, "脚本文件不存在：${scriptPath.substringAfterLast('/')}（部署未完成）")
+        val appContext = context.applicationContext
+        if (!isTermuxInstalled(appContext)) {
+            Log.w(TAG, "Termux 未安装，无法提交命令")
             return false
         }
-        val ok = ShizukuShell.startTermuxRunCommand(scriptPath)
-        if (!ok) {
-            Log.w(
-                TAG,
-                "RUN_COMMAND 提交失败（Shizuku=${ShizukuShell.isReady()}，" +
-                    "脚本=${scriptPath.substringAfterLast('/')}）"
-            )
+        if (!hasRunCommandPermission(appContext)) {
+            Log.w(TAG, "缺少 com.termux.permission.RUN_COMMAND 授权（需用户在系统设置里手动授予）")
+            return false
         }
-        return ok
+        val intent = android.content.Intent(ACTION_RUN_COMMAND).apply {
+            component = android.content.ComponentName(TERMUX_PACKAGE, RUN_COMMAND_SERVICE)
+            putExtra(EXTRA_PATH, TERMUX_BASH)
+            putExtra(EXTRA_ARGUMENTS, arrayOf(scriptPath))
+            putExtra(EXTRA_WORKDIR, TERMUX_HOME)
+            putExtra(EXTRA_BACKGROUND, true)
+            putExtra(EXTRA_SESSION_ACTION, SESSION_ACTION_NONE)
+            putExtra(EXTRA_COMMAND_LABEL, "Prism")
+        }
+        return runCatching {
+            appContext.startService(intent)
+            true
+        }.onFailure { e ->
+            // 后台启动限制 / 权限撤销 / Termux 服务未启用，都要留痕，不能静默
+            Log.w(TAG, "提交 RUN_COMMAND 失败：${e::class.simpleName} ${e.message?.take(80)}")
+        }.getOrDefault(false)
     }
 }
 
