@@ -489,6 +489,50 @@ object ShizukuShell {
         arrayOf(AM_BIN, "set-standby-bucket", packageName, bucket.toString())
 
     /**
+     * 读某包的**全部 AppOps**（`cmd appops get <pkg>`）。
+     *
+     * 用于读取 MIUI 自定义 op（如自启动 `MIUIOP(10008)`）——`cmd appops get <pkg> <op>`
+     * 不认识自定义 op，一律返回 `No operations.`（2026-11-02 真机实测），只能全量 dump。
+     */
+    fun appOpsDump(packageName: String): String? {
+        if (!isPackageNameAllowed(packageName)) return null
+        return execOutput(CMD_BIN, "appops", "get", packageName)
+    }
+
+    /**
+     * 设某包的一个 AppOp（`cmd appops set <pkg> <op> <mode>`）。
+     *
+     * **2026-11-02 真机取证**：HyperOS 的 `WakePathChecker` 默认拦截"应用被其它应用唤醒"
+     * （校验的是 **callee**），于是 Prism → Termux 的 `startService` 被框架层**静默丢弃**
+     * ——不抛异常，表现为"提交成功但什么都没发生"。把 Termux 的自启动 op 设为 allow 后拦截消失。
+     *
+     * @param opCode AppOp 编号（本项目只用 [io.prism.qq.QqPowerPolicy.MIUI_AUTO_START_OP]）
+     * @param mode `allow` / `ignore` / `ask` / `deny`
+     * @return true=命令退出码 0（**不代表已生效**，调用方必须 [appOpsDump] 回读校验）
+     */
+    fun setAppOp(packageName: String, opCode: Int, mode: String): Boolean {
+        if (!isPackageNameAllowed(packageName)) return false
+        if (opCode !in ALLOWED_OP_CODES) {
+            Log.w(TAG, "setAppOp 拒绝非白名单 op：$opCode")
+            return false
+        }
+        if (mode !in ALLOWED_OP_MODES) {
+            Log.w(TAG, "setAppOp 拒绝非白名单 mode：$mode")
+            return false
+        }
+        return exec(CMD_BIN, "appops", "set", packageName, opCode.toString(), mode)
+    }
+
+    /** `/system/bin/cmd`（用户服务 PATH 不含 system/bin，必须绝对路径）。 */
+    private const val CMD_BIN = "/system/bin/cmd"
+
+    /** 允许写的 AppOp（当前只有 MIUI 自启动）。 */
+    private val ALLOWED_OP_CODES = setOf(io.prism.qq.QqPowerPolicy.MIUI_AUTO_START_OP)
+
+    /** 允许写的 op 模式。 */
+    private val ALLOWED_OP_MODES = setOf("allow", "ignore", "ask", "deny")
+
+    /**
      * 包名合法性判定（纯函数可测）。
      *
      * 只接受 ASCII 字母/数字/下划线/点，长度 ≤ 200——`dumpsys`/`am` 的参数若含空格或
@@ -696,6 +740,7 @@ object ShizukuShell {
         "/sdcard/napcat-status.txt",
         "/sdcard/napcat-verify.txt",
         "/sdcard/napcat-webui.txt",
+        "/sdcard/napcat-probe.txt",
         // 部署版本标记（`<脚本名>:<sha256>`），由 QqProtocolSupervisor 写入并回读比对。
         "/data/local/tmp/prism-scripts.sha"
     )

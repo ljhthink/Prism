@@ -180,9 +180,8 @@ object QqTermuxBridge {
         Readiness.SCRIPTS_NOT_DEPLOYED ->
             "脚本尚未部署到手机：点「一键修复」会自动部署（需要 Shizuku）"
         Readiness.EXTERNAL_APPS_BLOCKED ->
-            "最后一步：打开 ZeroTermux，进入 ~/.termux/termux.properties，把 " +
-                "allow-external-apps 设为 true（把 true 前面的 # 去掉），保存后重开 Termux 会话，" +
-                "再回来点「一键修复」。这一步无法由 Prism 代做（Termux 私有目录不可读）。"
+            "最后一步：打开 ZeroTermux，粘贴并回车执行这行命令（只需一次）：" +
+                "echo 'allow-external-apps=true' >> ~/.termux/termux.properties"
     }
 
     // ==================== 动作 ====================
@@ -228,6 +227,49 @@ object QqTermuxBridge {
 
     /** 发一条探针（`echo`），用于反推 Termux 侧 `allow-external-apps` 是否开启。 */
     fun probe(context: Context): Boolean = run(context, QqProtocolScripts.PROBE_SCRIPT)
+
+    /**
+     * **真实闭环探针**（2026-11-02，修复"提交成功≠执行成功"的误报）。
+     *
+     * ## 为什么必须做这一步
+     *
+     * 真机实测：`startService` 正常返回（无异常），但 Termux 日志是
+     * ```
+     * E/Termux.RunCommandService: Processing plugin execution error for: Prism
+     * ```
+     * ——`allow-external-apps=false` 时 Termux **接收但拒绝执行**命令，
+     * 而调用方从 API 层面**无法感知**。我先前把"Intent 没抛异常"当作"成功"，
+     * 结果 `probe=true` 而协议端根本没起来（与"adb 能力≠App 能力"是同一类错误）。
+     *
+     * ## 做法
+     *
+     * 探针脚本把当前 epoch 秒写进 `/sdcard/napcat-probe.txt`；提交后由
+     * [ShizukuShell.readTextFile] 回读，**新鲜才算成功**。
+     * 不用 Intent 返回值、不用 Termux 的日志——只看副作用是否真的发生。
+     *
+     * @return true=命令确实被执行（探针文件在 60 秒内被更新）
+     */
+    suspend fun probeVerified(context: Context, nowMs: Long = System.currentTimeMillis()): Boolean {
+        // 先删旧文件，避免把"上次残留"当成这次成功
+        val before = readProbeStamp()
+        if (!probe(context)) return false
+        // 轮询最多 ~6 秒：Termux 唤起 + 脚本执行通常 <2s
+        repeat(6) {
+            kotlinx.coroutines.delay(1_000L)
+            val stamp = readProbeStamp()
+            if (stamp != null && stamp != before && (nowMs / 1000 - stamp) <= 60) return true
+        }
+        Log.w(TAG, "探针文件未更新：Termux 侧可能未开启 allow-external-apps")
+        return false
+    }
+
+    /** 读探针时间戳（epoch 秒）；不可读/不存在返回 null。 */
+    private suspend fun readProbeStamp(): Long? {
+        val text = runCatching {
+            ShizukuShell.readTextFile(QqProtocolScripts.PROBE_STAMP_FILE)
+        }.getOrNull() ?: return null
+        return text.trim().toLongOrNull()
+    }
 
     /**
      * 执行一条**已部署的白名单脚本**。
@@ -323,6 +365,9 @@ object QqProtocolScripts {
     /** `verify.sh` 写的机器可读结论文件（供管家判据闭环，避免只靠人眼）。 */
     const val VERIFY_RESULT_FILE = "/sdcard/napcat-verify.txt"
 
+    /** 探针回执文件（写 epoch 秒；证明「命令真的被执行了」而不只是「Intent 被接收」）。 */
+    const val PROBE_STAMP_FILE = "/sdcard/napcat-probe.txt"
+
     /** 停止脚本内容：杀容器内进程，**不动 Termux 本身**（避免殃及用户其它会话）。 */
     const val STOP_SCRIPT_BODY = """#!/data/data/com.termux/files/usr/bin/bash
 pkill -f 'NapCat' 2>/dev/null
@@ -331,8 +376,15 @@ pkill -f 'Xvfb' 2>/dev/null
 echo stopped
 """
 
-    /** 探针脚本内容（只验证 RUN_COMMAND 通路是否被接受）。 */
+    /**
+     * 探针脚本内容：**写回执文件**，而不是仅 `echo`。
+     *
+     * 2026-11-02 真机：`allow-external-apps=false` 时 Termux 收下命令但拒绝执行，
+     * 调用方 API 层面无异常 → 只看"提交是否成功"会误报。写文件后由 Prism 回读，
+     * 才能证明"命令真的跑起来了"。
+     */
     const val PROBE_SCRIPT_BODY = """#!/data/data/com.termux/files/usr/bin/bash
+date +%s > /sdcard/napcat-probe.txt 2>/dev/null
 echo prism-probe
 """
 

@@ -71,6 +71,58 @@ class QqPowerPolicyTest {
     }
 
     @Test
+    fun `MIUI 自启动模式从真实 dump 解析`() {
+        // `cmd appops get <pkg>` 的真实输出片段（2026-11-02 真机）
+        val dump = """
+            MIUIOP(10004): ignore
+            MIUIOP(10008): allow
+            MIUIOP(10017): ignore
+        """.trimIndent()
+        assertEquals("allow", QqPowerPolicy.parseMiuiAutoStartMode(dump))
+        assertFalse("已允许时不需要修", QqPowerPolicy.needsAutoStartRepair("allow"))
+
+        val blocked = dump.replace("MIUIOP(10008): allow", "MIUIOP(10008): ignore")
+        assertEquals("ignore", QqPowerPolicy.parseMiuiAutoStartMode(blocked))
+        assertTrue("被拦截时必须修", QqPowerPolicy.needsAutoStartRepair("ignore"))
+    }
+
+    @Test
+    fun `MIUI 上 10008 缺省即允许（设为 allow 后会从 dump 消失）`() {
+        // 真机实测：设为 allow 后该 op 不再出现在 dump 里（appops 只列非默认项）
+        val afterAllow = """
+            MIUIOP(10001): ask
+            MIUIOP(10004): ignore
+            MIUIOP(10017): ignore
+        """.trimIndent()
+        assertEquals(
+            "MIUI 存在但 10008 缺省 → 视为允许（否则会误报未生效并反复重设）",
+            "allow",
+            QqPowerPolicy.parseMiuiAutoStartMode(afterAllow)
+        )
+    }
+
+    @Test
+    fun `非 MIUI 机型不适用自启动项`() {
+        // 没有 MIUIOP 行 → null，且不得判为需要修复/显示噪声
+        assertNull(QqPowerPolicy.parseMiuiAutoStartMode("ACCESS_FINE_LOCATION: allow"))
+        assertNull(QqPowerPolicy.parseMiuiAutoStartMode(null))
+        assertNull(QqPowerPolicy.parseMiuiAutoStartMode(""))
+        assertFalse(QqPowerPolicy.needsAutoStartRepair(null))
+        assertNull(QqPowerPolicy.describeAutoStart(null))
+    }
+
+    @Test
+    fun `自启动文案如实区分允许与拦截`() {
+        assertEquals(
+            "自启动（可被唤醒）：已允许",
+            QqPowerPolicy.describeAutoStart("allow")
+        )
+        assertTrue(
+            QqPowerPolicy.describeAutoStart("ignore").orEmpty().contains("被拦截")
+        )
+    }
+
+    @Test
     fun `状态文案如实区分三种情况`() {
         assertEquals(
             "无法确认（Shizuku 未就绪或读取失败）",

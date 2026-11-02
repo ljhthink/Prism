@@ -64,6 +64,66 @@ object QqPowerPolicy {
         if (!whitelisted) return true
         return bucket != null && bucket != BUCKET_EXEMPTED
     }
+
+    // ==================== MIUI/HyperOS 自启动（被唤醒）白名单 ====================
+
+    /**
+     * MIUI 自定义 AppOp 编号：**自启动 / 允许被其它应用唤醒**。
+     *
+     * 2026-11-02 真机实证（这是「协议端起不来」的**真正根因**之一）：
+     * ```
+     * W/WakePathChecker: MIUILOG-AutoStart, Service/Provider/Broadcast Reject
+     *   caller= io.prism callee= com.termux classname=com.termux.app.RunCommandService
+     *   action=com.termux.RUN_COMMAND wakeType=8
+     * ```
+     * MIUI 默认禁止应用被**其它应用**唤醒（注意校验的是 **callee**，即 Termux），
+     * 于是 Prism 发的 `startService` 被系统在框架层直接丢弃——**不抛异常**，
+     * 表现为"Intent 提交成功但什么都没发生"。
+     *
+     * 把该 op 设为 `allow` 后拦截消失（实测）。非 MIUI 机型 dump 里不会有 MIUIOP 行，
+     * 此时本项判定为"不适用"，不得报失败。
+     */
+    const val MIUI_AUTO_START_OP = 10008
+
+    /**
+     * 从 `cmd appops get <pkg>` 的输出里解析 MIUI 自启动 op 的当前模式。
+     *
+     * 为什么不能用 `cmd appops get <pkg> 10008`：该语法不认识 MIUI 自定义 op，
+     * 一律返回 `No operations.`（真机实测）。只能全量 dump 后按行解析。
+     *
+     * **关键语义（2026-11-02 真机实测，极易写错）**：把该 op 设为 `allow` 之后，
+     * 它会**从 dump 里消失**（appops 只列非默认项，而该 op 在 MIUI 上默认即 allow）。
+     * 因此：
+     * - dump 里有 `MIUIOP(` 行但**没有** 10008 → 说明是 MIUI 且当前为**允许**；
+     * - dump 里完全没有 `MIUIOP(` 行 → 非 MIUI，不适用（返回 null）。
+     *
+     * @return `allow` / `ignore` / `ask` / `deny`；非 MIUI 或不适用返回 null
+     */
+    fun parseMiuiAutoStartMode(dump: String?): String? {
+        if (dump.isNullOrBlank()) return null
+        // 非 MIUI：输出里根本没有 MIUIOP 条目
+        if (!dump.contains(MIUI_OP_PREFIX)) return null
+        val regex = Regex("""MIUIOP\($MIUI_AUTO_START_OP\):\s*(\w+)""")
+        return regex.find(dump)?.groupValues?.getOrNull(1)?.lowercase() ?: "allow"
+    }
+
+    private const val MIUI_OP_PREFIX = "MIUIOP("
+
+    /**
+     * 该包是否**还需要修自启动**。
+     *
+     * @param mode [parseMiuiAutoStartMode] 的结果
+     * @return true=明确被拦（非 allow）才修；null（非 MIUI/读不到）视为不适用，返回 false
+     */
+    fun needsAutoStartRepair(mode: String?): Boolean = mode != null && mode != "allow"
+
+    /** 自启动状态的一行文案（不适用时返回 null，避免在非 MIUI 机型上显示噪声）。 */
+    fun describeAutoStart(mode: String?): String? = when (mode) {
+        null -> null
+        "allow" -> "自启动（可被唤醒）：已允许"
+        else -> "自启动（可被唤醒）：被拦截（$mode）——协议端会被系统丢弃启动请求"
+    }
+
     /** 给用户看的一行状态（如实区分「已生效 / 未生效 / 未知」）。 */
     fun describe(whitelisted: Boolean, bucket: Int?, readFailed: Boolean): String = when {
         readFailed -> "无法确认（Shizuku 未就绪或读取失败）"

@@ -142,6 +142,30 @@ class QqDebugReceiver : BroadcastReceiver() {
                             "usable=${app.isAccessibilityService()} " +
                             "last=${io.prism.phonecontrol.health.AccessibilityRestorer.lastResult}"
                     }
+                    // 2026-11-02 排障：协议端管家端到端（US-3128）
+                    // 用法：am broadcast -a io.prism.DEBUG_QQ --es action repair -p io.prism
+                    // 结果：logcat tag=QqDebug，形如 RESULT[repair] deployed=… probe=… started=… running=…
+                    ACTION_REPAIR -> runBlocking {
+                        val supervisor = app.qqProtocolSupervisor
+                        // 修复前的 readiness（对比用）
+                        val before = io.prism.qq.QqTermuxBridge.readiness(app)
+                        val report = runCatching { supervisor.repairAll() }.getOrElse {
+                            return@runBlocking "repair=异常 ${it::class.simpleName}: ${it.message?.take(80)}"
+                        }
+                        // 修复后由 report 给出（含 EXTERNAL_APPS_BLOCKED 判定），不要用修复前的变量
+                        "repair before=$before deployed=${report.scriptsDeployed} " +
+                            "probe=${report.probeAccepted} started=${report.started} " +
+                            "alreadyRunning=${report.alreadyRunning} after=${report.readiness} " +
+                            "power=${report.power.describe()}"
+                    }
+                    // 2026-11-02 排障：只发 RUN_COMMAND（区分"权限/后台限制"与"部署"两类失败）
+                    ACTION_RUN_COMMAND -> {
+                        val ok = io.prism.qq.QqTermuxBridge.start(app)
+                        "runCommand started=$ok " +
+                            "termuxInstalled=${io.prism.qq.QqTermuxBridge.isTermuxInstalled(app)} " +
+                            "hasPermission=${io.prism.qq.QqTermuxBridge.hasRunCommandPermission(app)} " +
+                            "shizuku=${io.prism.phonecontrol.bg.ShizukuShell.isReady()}"
+                    }
                     // 2026-10-26 排障：孤儿用户服务与残留虚拟屏（US-3117）
                     ACTION_INSTANCES -> {
                         val ps = io.prism.phonecontrol.bg.ShizukuShell.execPsForDebug()
@@ -401,6 +425,11 @@ class QqDebugReceiver : BroadcastReceiver() {
         const val EXTRA_LIMIT = "limit"
         const val EXTRA_DISPLAY = "display"
         const val ACTION_CHANNEL = "channel"
+        /** 2026-11-02：协议端管家一键修复端到端探针（US-3128）。 */
+        const val ACTION_REPAIR = "repair"
+
+        /** 2026-11-02：只发 RUN_COMMAND，用于区分"权限/后台限制"与"脚本部署"失败。 */
+        const val ACTION_RUN_COMMAND = "runcommand"
         const val ACTION_DISPLAY = "display"
         const val ACTION_FIRE = "fire"
         const val ACTION_STATUS = "status"

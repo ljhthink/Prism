@@ -305,8 +305,9 @@ class QqProtocolSupervisor(
     suspend fun repairAll(): RepairReport {
         val power = repairPowerPolicy()
         val deployed = deployScriptsQuietly()
-        // 先发探针：验证「Prism 的命令能不能真的交到 Termux」
-        val probed = if (deployed) QqTermuxBridge.probe(appContext) else false
+        // 先用**闭环探针**验证「命令真的被执行」——不是只看 Intent 有没有抛异常。
+        // 真机教训：allow-external-apps=false 时 startService 正常返回、Termux 内部拒绝执行。
+        val probed = if (deployed) QqTermuxBridge.probeVerified(appContext) else false
         // D-1（验收必修）：手动路径同样要判"是否已经在跑"
         val alreadyRunning = isProtocolPortListening()
         val started = if (deployed && probed && !alreadyRunning) {
@@ -356,20 +357,33 @@ class QqProtocolSupervisor(
         /** Prism 自身是否在白名单（不在则告警可能发不出去）。 */
         val prismWhitelisted: Boolean = false,
         /** 协议端（Termux）是否在白名单（不在则会被冻结）。 */
-        val termuxWhitelisted: Boolean = false
+        val termuxWhitelisted: Boolean = false,
+        /**
+         * Termux 的 MIUI **自启动（可被唤醒）** 状态：`allow` / `ignore` / …；null=非 MIUI/不适用。
+         *
+         * 2026-11-02 真机根因：该项被拦时，Prism 发的 `startService` 会被 HyperOS
+         * `WakePathChecker` **静默丢弃**（不抛异常），表现为"一键修复成功但协议端没起来"。
+         */
+        val autoStartMode: String? = null
     ) {
         /** 供 UI 直接显示的一行（**如实区分已生效/未生效/无法确认**）。 */
         fun describe(): String {
             val base = QqPowerPolicy.describe(whitelisted, bucket, readFailed)
-            if (readFailed) return base
-            if (!prismWhitelisted || !termuxWhitelisted) {
-                val who = buildList {
-                    if (!termuxWhitelisted) add("协议端")
-                    if (!prismWhitelisted) add("Prism 自身")
-                }.joinToString("、")
-                return "$base（仍缺：$who）"
+            val autoStart = QqPowerPolicy.describeAutoStart(autoStartMode)
+            val suffix = buildString {
+                if (!readFailed && (!prismWhitelisted || !termuxWhitelisted)) {
+                    val who = buildList {
+                        if (!termuxWhitelisted) add("协议端")
+                        if (!prismWhitelisted) add("Prism 自身")
+                    }.joinToString("、")
+                    append("（仍缺：").append(who).append("）")
+                }
+                if (autoStart != null) {
+                    if (isNotEmpty()) append("；")
+                    append(autoStart)
+                }
             }
-            return base
+            return if (suffix.isEmpty()) base else "$base；$suffix"
         }
     }
 
@@ -417,6 +431,9 @@ class QqProtocolSupervisor(
             "电源策略回读：prism=${if (whitelistedSelf) "在白名单" else "不在"} " +
                 "termux=${if (whitelistedTermux) "在白名单" else "不在"} bucket=$bucket"
         )
+        // 2026-11-02（真机根因）：MIUI/HyperOS 默认拦截「Termux 被其它应用唤醒」，
+        // 于是 Prism 的 startService 被框架层静默丢弃。这里修 + 回读校验。
+        val autoStartMode = repairTermuxAutoStart()
         return PowerRepairResult(
             attempted = true,
             // 2026-11-01 审查 M-3：**必须两项都在白名单**。
@@ -426,8 +443,36 @@ class QqProtocolSupervisor(
             bucket = bucket,
             readFailed = dump == null,
             prismWhitelisted = whitelistedSelf,
-            termuxWhitelisted = whitelistedTermux
+            termuxWhitelisted = whitelistedTermux,
+            autoStartMode = autoStartMode
         )
+    }
+
+    /**
+     * 修复并回读 Termux 的 MIUI **自启动（可被唤醒）** op。
+     *
+     * @return 回读到的模式；非 MIUI 机型/读不到返回 null（不当作失败）
+     */
+    private suspend fun repairTermuxAutoStart(): String? {
+        val before = runCatching {
+            ShizukuShell.appOpsDump(QqPowerPolicy.TERMUX_PACKAGE)
+        }.getOrNull()
+        val modeBefore = QqPowerPolicy.parseMiuiAutoStartMode(before) ?: return null
+        if (!QqPowerPolicy.needsAutoStartRepair(modeBefore)) return modeBefore
+
+        runCatching {
+            ShizukuShell.setAppOp(
+                QqPowerPolicy.TERMUX_PACKAGE,
+                QqPowerPolicy.MIUI_AUTO_START_OP,
+                "allow"
+            )
+        }
+        val after = runCatching {
+            ShizukuShell.appOpsDump(QqPowerPolicy.TERMUX_PACKAGE)
+        }.getOrNull()
+        val modeAfter = QqPowerPolicy.parseMiuiAutoStartMode(after)
+        Log.i(TAG, "Termux 自启动（可被唤醒）：$modeBefore → ${modeAfter ?: "读不到"}")
+        return modeAfter
     }
 
     /** 读取协议端脚本写的状态文件（`/sdcard/napcat-status.txt`）；不可读返回 null。 */
