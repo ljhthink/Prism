@@ -158,6 +158,15 @@ class QqDebugReceiver : BroadcastReceiver() {
                             "alreadyRunning=${report.alreadyRunning} after=${report.readiness} " +
                             "power=${report.power.describe()}"
                     }
+                    // 2026-11-14 验收（ADR-072 F1）：以自定义延时登记存活看门狗，
+                    // 用于确定性验证"进程被杀后闹钟仍能把它拉起来"（不必等 30 分钟）。
+                    // 用法：am broadcast -a io.prism.DEBUG_QQ --es action watchdog --es delay 60 -p io.prism
+                    ACTION_WATCHDOG -> {
+                        val delaySec = intent.getStringExtra(EXTRA_DELAY)?.toLongOrNull() ?: 60L
+                        io.prism.qq.ProactiveScheduleService
+                            .scheduleWatchdogForDebug(app, delaySec * 1000L)
+                        "watchdog=已登记 ${delaySec}s 后触发"
+                    }
                     // 2026-11-02 排障：只发 RUN_COMMAND（区分"权限/后台限制"与"部署"两类失败）
                     ACTION_RUN_COMMAND -> {
                         val ok = io.prism.qq.QqTermuxBridge.start(app)
@@ -407,6 +416,7 @@ class QqDebugReceiver : BroadcastReceiver() {
         const val EXTRA_TARGET_ID = "target_id"
         const val EXTRA_CONTACT = "contact"
         const val EXTRA_TEXT = "text"
+        const val EXTRA_DELAY = "delay"
         const val EXTRA_MAX_PER_DAY = "max_per_day"
         const val EXTRA_DAILY_CAP = "daily_cap"
         const val EXTRA_MIN_INTERVAL_MIN = "min_interval_min"
@@ -427,6 +437,9 @@ class QqDebugReceiver : BroadcastReceiver() {
         const val ACTION_CHANNEL = "channel"
         /** 2026-11-02：协议端管家一键修复端到端探针（US-3128）。 */
         const val ACTION_REPAIR = "repair"
+
+        /** 2026-11-14：debug 验证存活看门狗（--es delay <秒>）。 */
+        const val ACTION_WATCHDOG = "watchdog"
 
         /** 2026-11-02：只发 RUN_COMMAND，用于区分"权限/后台限制"与"脚本部署"失败。 */
         const val ACTION_RUN_COMMAND = "runcommand"

@@ -840,6 +840,26 @@ class ProactiveScheduleService : Service() {
 
     companion object {
         /**
+         * **仅 debug**：以指定延时登记一次存活看门狗（生产仍走 [WATCHDOG_INTERVAL_MS]）。
+         *
+         * 为什么需要：真机验收必须证明"进程被杀后闹钟仍会把它拉起来"，而 30 分钟的
+         * 等待不适合反复验证。该入口只缩短**本次**登记的延时，不改生产常量，
+         * 投递路径仍是同一个 [REQUEST_WATCHDOG] PendingIntent。
+         */
+        fun scheduleWatchdogForDebug(context: android.content.Context, delayMs: Long) {
+            val am = context.getSystemService(AlarmManager::class.java) ?: return
+            val at = System.currentTimeMillis() + delayMs.coerceIn(5_000L, WATCHDOG_INTERVAL_MS)
+            val pi = PendingIntent.getService(
+                context, REQUEST_WATCHDOG,
+                Intent(context, ProactiveScheduleService::class.java).setAction(ACTION_WAKE),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+            )
+            runCatching { am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, pi) }
+                .onFailure { Log.w(TAG, "debug 看门狗登记失败（${it::class.simpleName}）") }
+            Log.i(TAG, "debug：存活看门狗已登记（${delayMs / 1000}s 后）")
+        }
+
+        /**
          * 服务因**配置关闭**主动停止时，必须撤掉看门狗（guardrail A-02）。
          *
          * 不撤的后果：用户关掉 QQ 小号助手 → 服务 stopSelf → 30 分钟看门狗仍会把它叫醒，
