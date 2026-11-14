@@ -32,7 +32,15 @@ import kotlinx.coroutines.launch
 class QqBootRestartReceiver : BroadcastReceiver() {
 
     override fun onReceive(context: Context, intent: Intent?) {
-        if (intent?.action != Intent.ACTION_BOOT_COMPLETED) return
+        // 2026-11-14（ADR-072 F2）：接收三条互相独立的入口广播。
+        // 真机取证：只挂 BOOT_COMPLETED 时，HyperOS 会把它丢弃 → 开机恢复从未执行过。
+        val action = intent?.action
+        if (action != Intent.ACTION_BOOT_COMPLETED &&
+            action != Intent.ACTION_LOCKED_BOOT_COMPLETED &&
+            action != Intent.ACTION_MY_PACKAGE_REPLACED
+        ) {
+            return
+        }
         if (context.applicationContext !is io.prism.PrismApplication) {
             Log.i(TAG, "非本应用上下文，跳过开机恢复")
             return
@@ -46,7 +54,7 @@ class QqBootRestartReceiver : BroadcastReceiver() {
         // 开机恢复本身不需要"广播返回前完成"——交给进程级 scope 异步做即可。
         app.appScope.launch {
             try {
-                restoreProtocol(app)
+                restoreProtocol(app, action)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -55,8 +63,22 @@ class QqBootRestartReceiver : BroadcastReceiver() {
         }
     }
 
-    private suspend fun restoreProtocol(app: io.prism.PrismApplication) {
-        val cfg = app.qqConfigRepository.get()
+    private suspend fun restoreProtocol(app: io.prism.PrismApplication, action: String?) {
+        // ADR-072 F2-3：只有**恢复真正提交成功**才记"链路还活着"。
+        //
+        // guardrail A-03（2026-11-14 验收）：旧实现"收到广播就记账"，于是
+        // 「广播收到但拉起失败」会把停摆补偿的判据刷新成"刚刚还活着"→ 抑制告警，
+        // 恰好把最需要告知用户的场景静默掉。现在改为在 restoreProtocol 成功分支里记账。
+        //
+        // guardrail R-08：`MY_PACKAGE_REPLACED`（升级 App）不等于链路活着，永不记账。
+        val isBootAction = action == Intent.ACTION_BOOT_COMPLETED ||
+            action == Intent.ACTION_LOCKED_BOOT_COMPLETED
+        // LOCKED_BOOT_COMPLETED 时用户数据可能还没解锁，DataStore 读取会失败；
+        // runCatching 兜底并把原因留在日志里（不允许因读配置失败而崩广播）。
+        val cfg = runCatching { app.qqConfigRepository.get() }.getOrNull() ?: run {
+            Log.i(TAG, "配置暂不可读（设备可能仍锁屏），跳过本次恢复")
+            return
+        }
         if (!cfg.enabled) {
             Log.i(TAG, "总开关关闭，不做开机恢复")
             return
@@ -80,9 +102,18 @@ class QqBootRestartReceiver : BroadcastReceiver() {
         val ok = QqTermuxBridge.start(app)
         if (ok) {
             app.qqRuntimeStateRepository.clearProtocolRestart()
-            Log.i(TAG, "开机已提交协议端拉起")
+            // guardrail A-03/R4-04：`start()` 返回 true 只代表 RUN_COMMAND **被提交**，
+            // allow-external-apps=false 时正是"提交成功、执行被拒"。必须用**闭环探针**
+            // 确认命令真的被执行，才允许刷新"链路还活着"的时间戳，否则会误抑制停摆告警。
+            val verified = runCatching { QqTermuxBridge.probeVerified(app) }.getOrDefault(false)
+            if (verified && isBootAction) {
+                app.qqRuntimeStateRepository.recordBootRecovery(action.orEmpty())
+                Log.i(TAG, "开机恢复已验证：协议端命令确实执行（action=$action）")
+            } else if (!verified) {
+                Log.w(TAG, "开机拉起未通过闭环探针验证，不刷新存活记账")
+            }
         } else {
-            Log.w(TAG, "开机拉起失败（RUN_COMMAND 未被接受）")
+            Log.w(TAG, "开机拉起失败（RUN_COMMAND 未被接受），不刷新存活记账")
         }
     }
 

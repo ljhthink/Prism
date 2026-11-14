@@ -1,4 +1,4 @@
-# docs/reports/ —— 运行时报告目录
+﻿# docs/reports/ —— 运行时报告目录
 
 > CLAUDE.md 5.3「动态报告目录化」规定的运行时报告存放目录。
 
@@ -103,3 +103,19 @@
 - [2026-09-24-batch28-realdevice-checklist.md](2026-09-24-batch28-realdevice-checklist.md) —— 真机手动测试清单（主 Agent；A 设置页 UI / B 音色包切换 / C VITS 听感 / D 性能 / E 回归）
 - 19 臂扫参产物（gitignored，`tmp/voice/sweep-20260924/`）：`README.md`（人读）、`sweep-report.json`（全数字）、`determinism-probe.json`、19 个 wav；脚本 `voice-clone-kit/tools/sweep-vits-arms.py`、`probe-vits-determinism.py`
 - 调研与取证（gitignored，`tmp/research-20260924/`）：`R1-voicebox-evaluation.md`、`R2-zipvoice-quality-speed.md`、`R3-vits-quality-diagnosis.md`、`T-tidy-completion.md`、`T-tidy-completion-r2.md`
+
+当前在用批次（2026-11-02，QQ 小号助手回复/连接稳定性整改，ADR-071 / PRD US-3129）
+—— **以下文件仅本地存在，不入远程**（rules/05 §12.6 一次性工件禁令）：
+
+- [2026-11-02-qq-reply-stability-plan.md](2026-11-02-qq-reply-stability-plan.md) —— 整改方案（待用户审核 → 已批准 A+B+C）
+- [2026-11-02-qq-reply-stability-archaeology.md](2026-11-02-qq-reply-stability-archaeology.md) —— 源码考古 / 故障定位（code-archaeologist）
+- [2026-11-02-qq-reply-stability-guardrail.md](2026-11-02-qq-reply-stability-guardrail.md) —— 审查与安全审计（guardrail-enforcer）
+- [2026-11-02-qq-reply-stability-acceptance.md](2026-11-02-qq-reply-stability-acceptance.md) —— 验收测试（ac-verifier）
+
+当前在用批次（2026-11-14，QQ 链路存活整改，ADR-072 / PRD US-3130）
+—— **以下文件仅本地存在，不入远程**（rules/05 §12.6 一次性工件禁令）：
+
+- [2026-11-14-qq-message-drop-bug.md](2026-11-14-qq-message-drop-bug.md) —— 结构化 Bug 报告 + 原始取证（主 Agent）
+- [2026-11-14-qq-liveness-archaeology.md](2026-11-14-qq-liveness-archaeology.md) —— 存活链故障定位（code-archaeologist）
+- [2026-11-14-qq-liveness-guardrail.md](2026-11-14-qq-liveness-guardrail.md) —— 审查与安全审计（guardrail-enforcer）
+- [2026-11-14-qq-liveness-acceptance.md](2026-11-14-qq-liveness-acceptance.md) —— 验收测试（ac-verifier）

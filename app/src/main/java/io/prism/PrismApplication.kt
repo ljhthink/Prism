@@ -777,6 +777,46 @@ class PrismApplication : Application() {
         io.prism.qq.QqConversationStore(filesDir)
     }
 
+    /**
+     * 入站收件箱（2026-11-02；ADR-071 / US-3129）。
+     *
+     * 断连期间的消息由重连补偿写回这里；处理失败按退避重试；进程被杀后待处理项仍在。
+     */
+    val qqInboxStore: io.prism.qq.QqInboxStore by lazy {
+        io.prism.qq.QqInboxStore(filesDir)
+    }
+
+    /**
+     * 本次进程启动时刻（2026-11-14；ADR-072 F2-2）。
+     *
+     * 停摆补偿必须区分"上次会话最后活着"与"本次启动后的探测写入"——
+     * 后者会把历史证据覆盖成"现在"，让停摆判定恒为 HEALTHY（真机实证）。
+     */
+    private val processStartedAtMs: Long = System.currentTimeMillis()
+
+    /**
+     * 实时入站消息原文缓存（2026-11-02）；**仅内存**，用于保住 media。
+     *
+     * 收件箱为了可靠性只持久化文本；而图片/表情消息的价值恰恰在 `media` 里。
+     * 处理时优先取这里（同一进程内的实时事件），取不到才退回文本（补发项本来也没有原文）。
+     * guardrail R3-03：用 **LRU** 而不是拿 `keys.firstOrNull()` 随便删一条——
+     * 后者不是插入序，可能删掉正在处理的那条，导致 media 丢失。
+     */
+    private val liveInboxMessages: MutableMap<String, io.prism.qq.channel.QqMessage> =
+        java.util.Collections.synchronizedMap(
+            object : LinkedHashMap<String, io.prism.qq.channel.QqMessage>(16, 0.75f, true) {
+                override fun removeEldestEntry(
+                    eldest: MutableMap.MutableEntry<String, io.prism.qq.channel.QqMessage>?
+                ): Boolean = size > LIVE_INBOX_CACHE_MAX
+            }
+        )
+
+    /** 记住实时事件原文（有 message_id 才有稳定 key）。 */
+    private fun rememberLiveInboxMessage(message: io.prism.qq.channel.QqMessage) {
+        val id = io.prism.qq.QqInboxStore.idFor(message) ?: return
+        liveInboxMessages[id] = message
+    }
+
     /** QQ 媒体下载器（2026-10-26；US-3124）：白名单 + 尺寸上限 + LRU 缓存。 */
     val qqMediaFetcher: io.prism.qq.QqMediaFetcher by lazy { io.prism.qq.QqMediaFetcher() }
 
@@ -801,7 +841,14 @@ class PrismApplication : Application() {
      * 消费既有 60s 探测结果，**不新增探测源**（AC-7）。
      */
     val qqProtocolSupervisor: io.prism.qq.QqProtocolSupervisor by lazy {
-        io.prism.qq.QqProtocolSupervisor(this, qqRuntimeStateRepository)
+        io.prism.qq.QqProtocolSupervisor(
+            this, qqRuntimeStateRepository,
+            // guardrail R-4：状态文件恒 0（旧脚本）时用 HTTP 复核，避免自踢循环。
+            // 只在"文件说没跑"时调用一次，不是新增周期性探测源。
+            httpProbe = {
+                runCatching { oneBotClient.call("get_status", "{}").ok }.getOrDefault(false)
+            }
+        )
     }
 
     /** 无障碍兜底通道（ADR-062 原主路线；协议端不可用时自动生效）。 */
@@ -2189,23 +2236,247 @@ class PrismApplication : Application() {
             registerQqNetworkCallback()
 
             // US-3111：协议端事件驱动（替代 90s 轮询）。仅在双向对话激活时处理事件。
-            oneBotChannel.incoming().collect { message ->
-                if (!qqConfigRepository.get().autoReplyActive) return@collect
-                try {
-                    val result = autoReplyOnce(message)
-                    // guardrail L-02 + D-01：只记三态与原因类别，不回显联系人/消息正文
+            //
+            // 2026-11-02（ADR-071 / US-3129）：事件不再直接进应答，而是**先落收件箱再处理**——
+            // 失败可退避重试、进程被杀后待处理项不丢；断连期间的消息由 catch-up 补回。
+            //
+            // guardrail R-03：取件必须**原子**（[io.prism.qq.QqInboxStore.claimDue]）——
+            // 事件 collect 与 15s worker 两条协程若各自读快照会拿到同一批消息，
+            // 造成双重 LLM 生成 + 双重记账（replyMutex 只串行化，不防重复取件）。
+            suspend fun processInboxOnce(maxRounds: Int = io.prism.qq.QqInboxStore.MAX_PER_ROUND) {
+                // guardrail R2-02：**逐条领取**（每次只 claim 1 条），领到就串行处理完再领下一条。
+                // 一次领 5 条时，尾部条目会在 120s 租约内过期，被 15s worker 二次领取 →
+                // 双重 LLM 生成 + attempts 多计。逐条领取天然对齐"租约 > 单条处理耗时"。
+                //
+                // guardrail R-1（验收）：补发场景下积压可能 >20 条，而 5 条/轮 × 15s
+                // 满足不了 AC-4 的"恢复后 ≤60s 内回复"。补发入口显式传更大的预算。
+                repeat(maxRounds) {
+                    val due = qqInboxStore.claimDue(System.currentTimeMillis(), limit = 1)
+                    val item = due.firstOrNull() ?: return
+                    // guardrail R2-04：**不要在处理前摘掉**实时原文——HOLD/RETRY 后
+                    // 下一次领取就拿不到 media 了（图片会退化成「[媒体消息]」）。
+                    // 只在条目真正终结（DONE/放弃）时清理。
+                    val live = liveInboxMessages[item.id]
+                    val msg = live ?: io.prism.qq.channel.QqMessage(
+                        messageId = item.id,
+                        incoming = true,
+                        text = item.text,
+                        timestampMs = item.atMs
+                    )
+                    val result = autoReplyOnce(msg)
+                    val now = System.currentTimeMillis()
+                    when (io.prism.qq.QqInboxPolicy.decide(result.kind, result.message)) {
+                        io.prism.qq.QqInboxPolicy.Decision.DONE -> {
+                            qqInboxStore.done(item.id)
+                            liveInboxMessages.remove(item.id)
+                        }
+                        // 通道/环境类跳过：不动预算，等下一轮（否则断线几分钟就烧光重试次数）
+                        io.prism.qq.QqInboxPolicy.Decision.HOLD ->
+                            qqInboxStore.hold(item.id, now + 60_000L)
+                        io.prism.qq.QqInboxPolicy.Decision.RETRY -> {
+                            val dropped = qqInboxStore.retryLater(item.id, result.message, now)
+                            if (dropped) {
+                                liveInboxMessages.remove(item.id)
+                                android.util.Log.i(
+                                    "QqProactiveSchedule",
+                                    "收件箱放弃（重试次数用尽，attempts=${item.attempts + 1}）"
+                                )
+                            }
+                        }
+                    }
+                    // guardrail L-02：只记三态与原因，不回显正文/联系人
+                    android.util.Log.i("QqProactiveSchedule", "（收件箱）" + result.logLine)
+                }
+            }
+
+            /**
+             * 重连补偿（US-3129 AC-4/AC-5）：拉目标联系人最近历史，补回断连期间的入站消息。
+             *
+             * 只补 60 分钟窗口内的；更早的只记诊断（避免"隔夜补刀"）。
+             * **窗口内命中的全部入队**（guardrail R-02：选择阶段截断 + 水位前移会永久丢消息）。
+             */
+            suspend fun catchUpMissed() {
+                val cfg = qqConfigRepository.get()
+                if (!cfg.autoReplyActive) return
+                val contact = cfg.targetContact.trim()
+                if (contact.isEmpty()) return
+                val history = runCatching {
+                    oneBotChannel.recentMessages(contact, io.prism.qq.QqCatchUp.MAX_FETCH)
+                }.getOrDefault(emptyList())
+                if (history.isEmpty()) return
+                val now = System.currentTimeMillis()
+                val watermark = qqInboxStore.lastSeenAtMs()
+                if (watermark <= 0L) {
+                    // 首次运行：不补发历史（否则一开开关就回一堆旧消息），直接对齐水位
+                    qqInboxStore.markSeen(now)
+                    return
+                }
+                val replied = runCatching {
+                    qqRuntimeStateRepository.get().repliedMessageIds.toSet()
+                }.getOrDefault(emptySet())
+                val missed = io.prism.qq.QqCatchUp.selectMissed(history, watermark, now, replied)
+                val expired = io.prism.qq.QqCatchUp.countExpired(history, watermark, now)
+                if (expired > 0) {
                     android.util.Log.i(
                         "QqProactiveSchedule",
-                        "（事件）" + result.logLine
+                        "补发窗口外跳过 $expired 条（超过 ${io.prism.qq.QqCatchUp.DEFAULT_WINDOW_MS / 60_000} 分钟）"
                     )
+                }
+                val enqueued = missed.filter { qqInboxStore.enqueue(it) }
+                    .mapNotNull { it.messageId }.toSet()
+                // guardrail R2-03/R3-01：水位只推进到"已入队或已知已回复"的消息，
+                // 且被"最早未着落点"封顶，不能直接推到历史最新。
+                qqInboxStore.markSeen(
+                    io.prism.qq.QqCatchUp.advanceWatermark(history, watermark, enqueued, replied)
+                )
+                if (missed.isNotEmpty()) {
+                    android.util.Log.i("QqProactiveSchedule", "重连补发 ${missed.size} 条")
+                    // guardrail R-1：补发一次性处理完（上限 CATCHUP_MAX_ROUNDS），
+                    // 保证 AC-4 的"恢复后 ≤60s 内回复"在积压 20+ 条时也成立。
+                    processInboxOnce(CATCHUP_MAX_ROUNDS)
+                }
+            }
+
+            // 重试 worker（US-3129 AC-6）：收件箱里的失败项按退避到期后自动再试。
+            //
+            // guardrail R-01（Blocker）：这些 launch **必须在 collect 之前**启动。
+            // `incoming()` 是 SharedFlow，`collect{}` 永不返回——写在它之后的语句是死代码。
+            appScope.launch {
+                while (appScope.isActive) {
+                    delay(15_000L)
+                    try {
+                        if (qqConfigRepository.get().autoReplyActive) processInboxOnce()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        android.util.Log.w("PrismApplication", "收件箱重试异常：${e::class.simpleName}")
+                    }
+                }
+            }
+
+            // 重连补偿触发点（US-3129 AC-4）：每次 WS 进入 Connected 都补一次。
+            appScope.launch {
+                oneBotClient.state.collect { st ->
+                    if (st !is io.prism.qq.onebot.OneBotClient.State.Connected) return@collect
+                    try {
+                        catchUpMissed()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        android.util.Log.w("PrismApplication", "重连补偿异常：${e::class.simpleName}")
+                    }
+                }
+            }
+
+            /**
+             * **停摆补偿**（2026-11-14 新增；ADR-072 F2-2）。
+             *
+             * 真机 11-03 凌晨消息无人回复，直到 11-14 用户自己发现——期间 App 不在，
+             * 告警发不出去。唯一能触及用户的时刻是**下一次冷启动**：
+             * 若判定"上次活着"距今 > 6 小时，就如实告知"此期间可能没收到的消息不会补"，
+             * 并立刻跑一次重连补偿（把还在 60 分钟窗口内的消息捞回来）。
+             *
+             * 纪律：**不调用 `advanceProtocolAlert`**（那会与 60s 探测循环抢同一份告警状态）。
+             */
+            suspend fun runStartupCompensation() {
+                val cfg = runCatching { qqConfigRepository.get() }.getOrNull() ?: return
+                if (!cfg.enabled || !cfg.riskAccepted) return
+                val rt = runCatching { qqRuntimeStateRepository.get() }.getOrNull() ?: return
+                val now = System.currentTimeMillis()
+                val verdict = io.prism.qq.QqStartupCompensation.evaluate(
+                    nowMs = now,
+                    lastSeenAtMs = qqInboxStore.lastSeenAtMs(),
+                    // 2026-11-14 真机实证：本次启动的 60s 探测会先把该值刷成"现在"，
+                    // 直接用它会让补偿判定恒为 HEALTHY（停摆 11 天也一声不响）。
+                    // 只接受"本次进程启动之前"写入的历史值。
+                    lastProtocolCheckedAtMs = io.prism.qq.QqStartupCompensation.usableCheckedAt(
+                        rt.lastProtocolCheckedAtMs, processStartedAtMs
+                    ),
+                    lastReportAtMs = rt.startupReportAtMs
+                )
+                // 无论是否提醒，都先跑一次补发：停摆期间的消息仍可能在 60 分钟窗口内
+                runCatching { catchUpMissed() }
+                if (verdict != io.prism.qq.QqStartupCompensation.Verdict.STALLED) {
+                    android.util.Log.i(
+                        "QqProactiveSchedule",
+                        "停摆检测=$verdict（阈值 ${io.prism.qq.QqStartupCompensation.STALL_THRESHOLD_MS / 3_600_000}h）" +
+                            " 证据：inbox=${qqInboxStore.lastSeenAtMs()}" +
+                            " probe=${rt.lastProtocolCheckedAtMs}→" +
+                            "${io.prism.qq.QqStartupCompensation.usableCheckedAt(rt.lastProtocolCheckedAtMs, processStartedAtMs)}" +
+                            " report=${rt.startupReportAtMs} start=$processStartedAtMs now=$now"
+                    )
+                    return
+                }
+                // 必须用**与 evaluate 相同的过滤口径**，否则会拿本次启动刚写的探测时刻
+                // 当"最后活着"，算出的停摆时长会变成"0 分钟"。
+                val lastAlive = listOf(
+                    qqInboxStore.lastSeenAtMs(),
+                    io.prism.qq.QqStartupCompensation.usableCheckedAt(
+                        rt.lastProtocolCheckedAtMs, processStartedAtMs
+                    )
+                ).filter { it > 0L && it <= now }.maxOrNull() ?: return
+                val span = io.prism.qq.QqStartupCompensation.describeStall(now, lastAlive)
+                runCatching {
+                    io.prism.qq.QqProtocolAlertNotifier.notifyWatchdog(
+                        this@PrismApplication,
+                        title = "QQ 小号助手曾中断 $span",
+                        body = "Prism 在此期间不在运行，期间的消息已无法补回。" +
+                            "现在已自动重连；若仍无回复，请到 设置 → QQ 小号助手 看协议端状态。"
+                    )
+                }
+                runCatching { qqRuntimeStateRepository.recordStartupReport(now) }
+                android.util.Log.i("QqProactiveSchedule", "停摆补偿：已提醒用户（中断 $span）")
+            }
+
+            // 停摆补偿在冷启动时跑一次（真机教训：这是唯一能触及用户的时刻）
+            appScope.launch {
+                try {
+                    runStartupCompensation()
                 } catch (e: CancellationException) {
-                    // guardrail M-05：取消必须透传，不得当作业务失败
                     throw e
                 } catch (e: Exception) {
                     android.util.Log.w(
-                        "PrismApplication",
-                        "事件应答异常：${e::class.simpleName}"
+                        "PrismApplication", "停摆补偿异常：${e::class.simpleName}"
                     )
+                }
+            }
+
+            appScope.launch {
+                // guardrail R2-01：采集协程必须**整体**兜底并自愈。
+                // 旧实现只 try 了 processInboxOnce，`collect` 本体与上游 `incoming()`
+                // （mapNotNull 里会 `get_friend_list` HTTP）一旦抛异常，该协程永久死亡且无人重启，
+                // 表现就是"事件来了但再也没有回应"——正是本次要修的症状本身。
+                while (appScope.isActive) {
+                    try {
+                        oneBotChannel.incoming().collect { message ->
+                            if (!qqConfigRepository.get().autoReplyActive) return@collect
+                            qqInboxStore.enqueue(message)
+                            rememberLiveInboxMessage(message)
+                            // 实时事件已着落：显式推进水位（不再依赖 enqueue 的副作用）
+                            qqInboxStore.markSeen(message.timestampMs)
+                            try {
+                                processInboxOnce()
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                android.util.Log.w(
+                                    "PrismApplication",
+                                    "事件应答异常：${e::class.simpleName}"
+                                )
+                            }
+                        }
+                        // collect 正常返回（流结束）：退出循环，不再重订阅
+                        return@launch
+                    } catch (e: CancellationException) {
+                        // guardrail M-05：取消必须透传，不得当作业务失败
+                        throw e
+                    } catch (e: Exception) {
+                        android.util.Log.w(
+                            "PrismApplication",
+                            "事件采集中断（5s 后重订阅）：${e::class.simpleName}"
+                        )
+                        delay(5_000L)
+                    }
                 }
             }
         }
@@ -2247,6 +2518,11 @@ class PrismApplication : Application() {
                         io.prism.qq.ProactiveScheduleService.start(this@PrismApplication)
                     } else {
                         io.prism.qq.ProactiveScheduleService.stop(this@PrismApplication)
+                        // guardrail A-02：配置关闭时**必须撤掉存活看门狗**，
+                        // 否则 30 分钟后它会把服务叫醒、闪一次前台通知再退出
+                        // （用户刚关掉功能却被通知打扰，语义上也不对）。
+                        io.prism.qq.ProactiveScheduleService
+                            .cancelAllAlarms(this@PrismApplication)
                     }
                 }
             } catch (e: CancellationException) {
@@ -2377,6 +2653,18 @@ class PrismApplication : Application() {
     companion object {
         /** QQ 回复注入的记忆 section 硬上限（L2+L3 合并；guardrail M-08）。 */
         private const val MAX_MEMORY_SECTION_CHARS = 1200
+
+        /** 实时入站消息原文缓存上限（只在处理前短暂停留，几条足够）。 */
+        private const val LIVE_INBOX_CACHE_MAX = 50
+
+        /**
+         * 重连补发的单轮处理上限（guardrail R-1）。
+         *
+         * 常规路径 5 条/轮 + 15s 间隔；补发是一次性补救，必须在一分钟内清完积压，
+         * 否则 AC-4「恢复后 ≤60s 内回复」在积压 >20 条时不成立。
+         * 上限 20 仍远低于被动节流（60s 窗口 20 条），不会突破风控保护。
+         */
+        private const val CATCHUP_MAX_ROUNDS = 20
 
         /** OCR 结果进入 prompt 的字符上限（防长图整页文字撑爆上下文）。 */
         private const val MAX_OCR_CHARS = 600

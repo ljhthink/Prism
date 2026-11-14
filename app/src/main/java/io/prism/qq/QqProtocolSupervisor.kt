@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import io.prism.phonecontrol.bg.ShizukuShell
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.withLock
 
 /**
  * 协议端**管家**（2026-11-01；US-3128）：把「探测 → 告警 → 自动拉起 → 电源策略核验」串成一条链。
@@ -25,12 +26,31 @@ import kotlinx.coroutines.CancellationException
  */
 class QqProtocolSupervisor(
     context: Context,
-    private val repository: QqRuntimeStateRepository
+    private val repository: QqRuntimeStateRepository,
+    /**
+     * 协议端 HTTP 是否可达（2026-11-02 新增；guardrail R-4）。
+     *
+     * 判「是否在跑」只信状态文件有个致命前提：**设备上必须是新脚本**。
+     * 旧脚本（80 行）探活恒写 `onebot3000=0`，于是 Prism 会一直判"没起来"并反复 `pkill` 重启——
+     * 正是本轮要修的自踢循环。加一个独立的 HTTP 探针作为**兜底证据**：
+     * 只要协议端能回 `get_status`，就说明它在跑，绝不再重启。
+     *
+     * 传 null 表示不具备该能力（JVM 单测/未装配），行为退化为旧口径。
+     */
+    private val httpProbe: (suspend () -> Boolean)? = null
 ) {
     private val appContext = context.applicationContext
 
     /** 同一进程内防止 60s 循环与手动触发并发拉起（拉起本身会争抢 Termux 会话）。 */
     private val launchLock = Any()
+
+    /**
+     * 拉起动作的**协程互斥**（2026-11-14；guardrail R-04）。
+     *
+     * `launchLock` 是 `synchronized`（不可挂起），只能保护"提交"这一步；
+     * 而 `restartAndWait` 需要在 STOP 与 RUN 之间 `delay`，必须用挂起锁。
+     */
+    private val launchMutex = kotlinx.coroutines.sync.Mutex()
 
     /**
      * 处理一次探测结果：推进告警策略、（必要时）通知、并在本机模式不可达时尝试自动拉起。
@@ -61,12 +81,17 @@ class QqProtocolSupervisor(
         // ---- 2. 通知（副作用） ----
         when (val action = decision.action) {
             is QqProtocolAlertPolicy.Action.NotifyDown -> {
-                Log.i(TAG, "协议端失联告警：${action.kind}（since=${action.downSinceMs}）")
+                Log.i(
+                    TAG,
+                    "协议端失联告警：${action.kind}（since=${action.downSinceMs}" +
+                        (if (action.reminder) "，重提醒" else "") + "）"
+                )
                 QqProtocolAlertNotifier.notifyDown(
                     appContext,
                     kind = action.kind,
                     detail = action.detail,
-                    loopback = loopback
+                    loopback = loopback,
+                    reminder = action.reminder
                 )
             }
             is QqProtocolAlertPolicy.Action.NotifyRecovered -> {
@@ -82,6 +107,17 @@ class QqProtocolSupervisor(
 
         // ---- 3. 自动拉起（仅本机模式 + 不可达 + 总开关开） ----
         if (state != QqProtocolAlertPolicy.PROBE_UNREACHABLE || !enabled || !loopback) {
+            // 2026-11-02（F-2 修正；guardrail R-09）：**只有真正在线**才清零重启预算。
+            // 旧版条件写在这里是"非 UNREACHABLE 即清零"，而 QQ_OFFLINE 也是非 UNREACHABLE——
+            // 账号离线时反复清零会让"1 小时最多 3 次"的上限彻底失效，变成无限重启。
+            if (state == QqProtocolAlertPolicy.PROBE_ONLINE) {
+                runCatching {
+                    if (repository.get().protocolRestartAttempts > 0) {
+                        repository.clearProtocolRestart()
+                        Log.i(TAG, "协议端已恢复在线，重启预算清零")
+                    }
+                }
+            }
             return Outcome(decision.action, restart = RestartOutcome.NOT_ATTEMPTED)
         }
         val restart = maybeAutoRestart(nowMs)
@@ -137,12 +173,27 @@ class QqProtocolSupervisor(
                 // （正是 allow-external-apps 未开时的常见状态）会让 attempts 恒为 0 →
                 // 每分钟无限重试、永不给 GiveUp、也永远不告警，还伴生每分钟一次 Shizuku 调用。
                 // 现在：无论提交成功与否，都先落账；用尽 3 次后策略自然转为 GiveUp，交给告警。
-                val deployed = deployScripts()
-                val submitted = if (!deployed) {
+                val deploy = deployScriptsDetailed()
+                val deployed = deploy.ok
+                val submitted: Boolean = if (!deployed) {
                     false
                 } else {
-                    // 提交动作本身不是 suspend（只是 startService），可以放在锁内保证互斥
-                    synchronized(launchLock) { QqTermuxBridge.start(appContext) }
+                    // 2026-11-14（guardrail R-03）：**自动路径同样必须让新脚本生效**。
+                    // 旧实现只 `start()`，而运行中的 bash 不会回读脚本、新实例又被 flock 静默拒绝
+                    // ⇒ 无人值守场景（用户不点「一键修复」）新逻辑永远到不了设备。
+                    //
+                    // guardrail R-04：`restartAndWait` 是 suspend（要等 Termux 侧写停止回执），
+                    // 因此**不能**放在 synchronized 内，用协程 Mutex 串行化。
+                    // 它内部已按 [QqTermuxBridge.StopOutcome] 三态记录日志；这里只关心"是否提交了启动"。
+                    launchMutex.withLock {
+                        if (deploy.changed) {
+                            Log.i(TAG, "脚本内容已变更，重启整条链以让新逻辑生效")
+                            QqTermuxBridge.restartAndWait(appContext)
+                            true
+                        } else {
+                            QqTermuxBridge.start(appContext)
+                        }
+                    }
                 }
                 repository.recordProtocolRestart(
                     windowStartMs = decision.state.windowStartMs,
@@ -185,7 +236,67 @@ class QqProtocolSupervisor(
             Log.i(TAG, "状态文件已陈旧（${ageMs / 1000}s 未更新），判定协议端已停止")
             return false
         }
-        return parseOneBot3000(text) > 0
+        // 2026-11-02（ADR-071）：扫码态/启动中**绝不重启**。
+        // 等待扫码时 3000 本就不监听，旧判据会把它当"没起来"→ pkill QQ → 用户正在扫的二维码作废，
+        // 并且每次重启都要求重新扫码，直接把用户拖进"越修越掉"的循环。
+        // 2026-11-14（guardrail R-05）：状态读取必须走**新鲜度校验**。
+        // 直接用 `parseState(readStatusFile())` 会把 11-03 那种陈旧文件里的
+        // `state=need_qr` 当成当前状态，从而永久拒绝重启/重启判断失真。
+        val state = currentFreshState()
+        val portUp = parseOneBot3000(text) > 0
+        if (state == STATE_NEED_QR) {
+            Log.i(TAG, "协议端状态=need_qr，判定正在等待扫码，不重复拉起")
+            return true
+        }
+        if (state == STATE_STARTING) {
+            // 2026-11-14 真机实证（重要）：`starting` 不能**无限期**当"在跑"。
+            // 旧脚本探活恒 0 时会永远写 `starting`，于是 Prism 判"已在启动"→ 拒绝重启 →
+            // 新脚本永远部署不上（本轮现场就撞到：deploy 成功但 alreadyRunning=true 未重启）。
+            // 现在按 `since=` 判定：启动宽限期内才算"在跑"，超时即视为卡死、允许拉起。
+            val stuckMs = startingStuckMs(text)
+            if (stuckMs in 0..STARTING_GRACE_MS) {
+                Log.i(TAG, "协议端状态=starting 且仅 ${stuckMs / 1000}s，判定仍在启动")
+                return true
+            }
+            Log.i(TAG, "协议端状态=starting 已 ${stuckMs / 1000}s（超 ${STARTING_GRACE_MS / 1000}s），判定卡死")
+        }
+        if (portUp) return true
+        // 状态文件说"没监听"，但可能跑的是恒写 0 的旧脚本 → 用 HTTP 探针复核（guardrail R-4）。
+        // 探针只在"文件说没跑"时执行，不新增周期性网络探测源（AC-8 不变）。
+        val probe = httpProbe ?: return false
+        val reachable = runCatching { probe() }.getOrDefault(false)
+        if (reachable) {
+            Log.i(TAG, "状态文件显示 3000 未监听，但协议端 HTTP 可达（疑似旧脚本探活口径），判为在跑")
+        }
+        return reachable
+    }
+
+    /**
+     * `state=starting` 已持续的毫秒数；解析不到返回 -1（视为未知，调用方按"未超时"保守处理）。
+     *
+     * 状态行形如 `ts=… tick=… qq=3 onebot3000=0 state=starting since=1794661850 …`。
+     * 旧脚本没有 `since=` → 返回 -1，由调用方退化成"不知道多久了"，避免误杀正在启动的链路。
+     */
+    private fun startingStuckMs(statusText: String): Long {
+        val since = Regex("""\bsince=(\d{9,13})""").find(statusText)
+            ?.groupValues?.get(1)?.toLongOrNull() ?: return -1L
+        val sinceMs = if (since > 100_000_000_000L) since else since * 1000L
+        return (System.currentTimeMillis() - sinceMs).coerceAtLeast(0L)
+    }
+
+    /**
+     * 当前状态机取值，**仅在状态文件新鲜时**返回；陈旧/不可读返回空串。
+     *
+     * 2026-11-14（guardrail R-05）：把"新鲜度"与"状态解析"绑成一个入口，
+     * 避免调用方各自 `parseState(readStatusFile())` 绕过 fresh 判定
+     * （真机 11-03 的陈旧文件里还留着 `state=need_qr`，会让自动重启永久让路）。
+     */
+    private suspend fun currentFreshState(): String {
+        val text = readStatusFile() ?: return ""
+        val ts = parseStatusTimestampSec(text)
+        if (ts <= 0L) return ""
+        if (System.currentTimeMillis() - ts * 1000L > STATUS_FRESH_MS) return ""
+        return parseState(text)
     }
 
     /**
@@ -200,14 +311,32 @@ class QqProtocolSupervisor(
      *
      * @return true=三个脚本都已在位
      */
-    suspend fun deployScripts(): Boolean {
-        if (!ShizukuShell.isReady()) return false
+    /**
+     * 脚本部署的**结果**（2026-11-14 新增；ADR-072 F3）。
+     *
+     * 区分"部署成功"与"**内容确实变了**"：前者只说明文件在位，后者才说明
+     * "设备上正在跑的逻辑需要被替换"。真机 11-02/11-03 的两次事故都源于只做了前者——
+     * 新脚本写进了 `/data/local/tmp`，但正在跑的 `run2-inner.sh` 早已把 `while` 循环
+     * 解析进内存，绝不会回读文件，且新实例会被 `flock -n` 静默拒绝（脚本第 36~44 行），
+     * 而 `QqTermuxBridge.start()` 又把"第二实例自行退出"当幂等成功
+     * ⇒ **部署永远不会生效**。
+     */
+    data class DeployResult(val ok: Boolean, val changed: Boolean)
+
+    /**
+     * 把 assets 里的生产脚本部署到 `/data/local/tmp`（幂等，但**会更新内容**）。
+     *
+     * @return 见 [DeployResult]；`changed=true` 时调用方**必须**重启协议端进程
+     */
+    suspend fun deployScriptsDetailed(): DeployResult {
+        if (!ShizukuShell.isReady()) return DeployResult(ok = false, changed = false)
         val marker = readScriptMarker()
         val contents = mutableMapOf<String, String>()
+        var changed = false
         for (name in QqProtocolScripts.ASSET_SCRIPTS) {
             val text = readAsset(name) ?: run {
                 Log.w(TAG, "assets 缺少脚本 $name")
-                return false
+                return DeployResult(ok = false, changed = changed)
             }
             contents[name] = text
             val path = QqProtocolScripts.deployedPath(name)
@@ -216,28 +345,46 @@ class QqProtocolSupervisor(
             if (upToDate) continue
             if (!ShizukuShell.writeShellFile(path, text)) {
                 Log.w(TAG, "部署失败：$name")
-                return false
+                return DeployResult(ok = false, changed = changed)
             }
+            changed = true
             Log.i(TAG, "脚本已部署/更新：$name（sha=${hash.take(8)}）")
         }
         // 两个 Prism 侧生成的脚本：**也走标记比对**（审查 M-5）。
         // 原来"存在即跳过"意味着将来改 STOP_SCRIPT_BODY 永远到不了手机——
         // 与 H3 修的是同一类问题，只是对象不同。
-        deployGenerated(MARKER_KEY_STOP, QqProtocolScripts.STOP_SCRIPT, QqProtocolScripts.STOP_SCRIPT_BODY, marker, contents)
-        deployGenerated(MARKER_KEY_PROBE, QqProtocolScripts.PROBE_SCRIPT, QqProtocolScripts.PROBE_SCRIPT_BODY, marker, contents)
+        if (deployGenerated(
+                MARKER_KEY_STOP, QqProtocolScripts.STOP_SCRIPT,
+                QqProtocolScripts.STOP_SCRIPT_BODY, marker, contents
+            )
+        ) changed = true
+        if (deployGenerated(
+                MARKER_KEY_PROBE, QqProtocolScripts.PROBE_SCRIPT,
+                QqProtocolScripts.PROBE_SCRIPT_BODY, marker, contents
+            )
+        ) changed = true
         val allPresent = QqProtocolScripts.ASSET_SCRIPTS.all {
             ShizukuShell.fileExists(QqProtocolScripts.deployedPath(it))
         }
         if (allPresent) {
             writeScriptMarker(contents.mapValues { (_, v) -> sha256(v) })
         }
-        return allPresent
+        // guardrail A-01（2026-11-14 验收）：**不能**用 `hadMarker` 门控 `changed`。
+        // 标记文件写失败/被清时 changed 会恒为 false ⇒ 脚本部署了却永远不重启 ⇒ 静默不生效，
+        // 与 F3 要修的失败模式一模一样。宁可首次部署多一次"停→起"（此时通常没有在跑的链，
+        // 代价仅为几秒），也不能让"部署不生效"再次成为静默故障。
+        return DeployResult(ok = allPresent, changed = changed)
     }
+
+    /** 兼容旧调用点：只关心"是否都在位"。 */
+    suspend fun deployScripts(): Boolean = deployScriptsDetailed().ok
 
     /**
      * 部署一个 Prism 侧生成的脚本（内容固定但**会随版本变化**）。
      *
      * 与 assets 脚本同一套标记机制：hash 不一致才重写。
+     *
+     * @return true=本次**实际写入**（即内容有变化）
      */
     private fun deployGenerated(
         markerKey: String,
@@ -245,13 +392,15 @@ class QqProtocolSupervisor(
         body: String,
         marker: Map<String, String>,
         contents: MutableMap<String, String>
-    ) {
+    ): Boolean {
         val hash = sha256(body)
         contents[markerKey] = body
-        if (marker[markerKey] == hash && ShizukuShell.fileExists(path)) return
+        if (marker[markerKey] == hash && ShizukuShell.fileExists(path)) return false
         if (!ShizukuShell.writeShellFile(path, body)) {
             Log.w(TAG, "部署生成脚本失败：${path.substringAfterLast('/')}")
+            return false
         }
+        return true
     }
 
     private fun readAsset(name: String): String? = runCatching {
@@ -284,13 +433,13 @@ class QqProtocolSupervisor(
             .joinToString("") { "%02x".format(it) }
 
     /** 部署但**不吞掉取消**（M7：CancellationException 必须继续抛，否则协程取消语义被破坏）。 */
-    private suspend fun deployScriptsQuietly(): Boolean = try {
-        deployScripts()
+    private suspend fun deployScriptsQuietly(): DeployResult = try {
+        deployScriptsDetailed()
     } catch (e: CancellationException) {
         throw e
     } catch (e: Exception) {
         Log.w(TAG, "部署异常：${e::class.simpleName}")
-        false
+        DeployResult(ok = false, changed = false)
     }
 
     /**
@@ -304,16 +453,33 @@ class QqProtocolSupervisor(
      */
     suspend fun repairAll(): RepairReport {
         val power = repairPowerPolicy()
-        val deployed = deployScriptsQuietly()
+        val deploy = deployScriptsQuietly()
+        val deployed = deploy.ok
         // 先用**闭环探针**验证「命令真的被执行」——不是只看 Intent 有没有抛异常。
         // 真机教训：allow-external-apps=false 时 startService 正常返回、Termux 内部拒绝执行。
         val probed = if (deployed) QqTermuxBridge.probeVerified(appContext) else false
         // D-1（验收必修）：手动路径同样要判"是否已经在跑"
         val alreadyRunning = isProtocolPortListening()
-        val started = if (deployed && probed && !alreadyRunning) {
-            QqTermuxBridge.start(appContext)
-        } else {
-            false
+        // 2026-11-14（ADR-072 F3）：**脚本内容变了就必须重启**，否则新逻辑永不生效
+        // （运行中的 bash 已把 while 循环读进内存，新实例又被 flock 静默拒绝）。
+        //
+        // 只拦 `need_qr`（用户可能正在扫二维码）。**不再拦 `starting`**：
+        // 现场实测——旧脚本探活恒 0 会永远写 `starting`，若它也拦重启，
+        // 「部署新脚本」与「让新脚本生效」互为死锁（deployed=true 却不重启）。
+        val state = currentFreshState()
+        val restartForDeploy = deployed && deploy.changed && alreadyRunning &&
+            state != STATE_NEED_QR
+        val started: Boolean = when {
+            !deployed || !probed -> false
+            restartForDeploy -> {
+                Log.i(TAG, "脚本内容已变更，重启协议端以让新逻辑生效（state=$state）")
+                // restartAndWait 返回三态（CONFIRMED/STILL_RUNNING/UNKNOWN），内部已记录日志；
+                // 无论哪一态都已提交启动，故按"已提交"计（真正的在线判定由 60s 探测负责）。
+                QqTermuxBridge.restartAndWait(appContext)
+                true
+            }
+            !alreadyRunning -> QqTermuxBridge.start(appContext)
+            else -> false
         }
         if (started) repository.clearProtocolRestart()
         val readiness = QqTermuxBridge.readiness(appContext).let { base ->
@@ -592,6 +758,17 @@ class QqProtocolSupervisor(
             return match.groupValues[1].toIntOrNull() ?: 0
         }
 
+        /**
+         * 从状态文件解析 `state=...`（纯函数，可单测）。
+         *
+         * 2026-11-02（ADR-071）新增：`run2-inner.sh` 写 `starting|need_qr|online|qq_dead`。
+         * 旧版脚本没有该字段 → 返回空串（调用方按"未知"处理，行为与旧版一致）。
+         */
+        fun parseState(statusText: String): String {
+            val m = Regex("""\bstate=([a-z_]+)""").find(statusText) ?: return ""
+            return m.groupValues[1]
+        }
+
         /** 展示前的脱敏：5 位以上数字（QQ 号/UIN）打码。纯函数，可单测。 */
         fun redactForDisplay(text: String): String =
             Regex("""\d{5,}""").replace(text) { m ->
@@ -605,6 +782,36 @@ class QqProtocolSupervisor(
 
         /** 状态新鲜度上限：脚本每 10 秒刷新一次，留 3 倍余量（审查 C1）。 */
         const val STATUS_FRESH_MS = 30_000L
+
+        /**
+         * `state=starting` 的宽限期（2026-11-14 真机实证）。
+         *
+         * 与脚本内的「启动超时 180s」对齐：超过该时长仍处 `starting` 即视为卡死，
+         * 允许自动拉起/部署重启。否则旧脚本探活恒 0 造成的"永远 starting"
+         * 会锁死整个自愈链（现场实测：脚本部署成功却因 `alreadyRunning=true` 不重启）。
+         */
+        const val STARTING_GRACE_MS = 180_000L
+
+        /** 状态机取值（与 `run2-inner.sh` 约定一致；ADR-071）。 */
+        const val STATE_STARTING = "starting"
+        const val STATE_NEED_QR = "need_qr"
+        const val STATE_ONLINE = "online"
+        const val STATE_QQ_DEAD = "qq_dead"
+
+        /**
+         * 「协议端是否在跑」的**判据顺序**（纯函数，可单测；guardrail R-4）。
+         *
+         * 顺序即语义，不可调换：
+         * 1. `starting` / `need_qr` → 在跑（扫码期 3000 本就不监听，重启会毁掉扫码窗口）；
+         * 2. `onebot3000 > 0` → 在跑；
+         * 3. HTTP 可达 → 在跑（兜底旧脚本恒写 0 的情况）；
+         * 4. 其余 → 停止。
+         */
+        fun isRunningDecision(onebot3000: Int, state: String, httpReachable: Boolean): Boolean {
+            if (state == STATE_STARTING || state == STATE_NEED_QR) return true
+            if (onebot3000 > 0) return true
+            return httpReachable
+        }
 
         /**
          * 解析状态行里的 `ts=<epoch 秒>`（纯函数，可单测）。

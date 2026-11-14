@@ -219,6 +219,99 @@ object QqTermuxBridge {
         return run(context, QqProtocolScripts.RUN_SCRIPT)
     }
 
+    /**
+     * 重启前的等待确认**结果**（2026-11-14；guardrail R4-01/R4-02）。
+     *
+     * 为什么需要三态：`am startservice` 只代表命令**被提交**，不代表执行结果。
+     * 旧实现用"状态文件 ts 变陈旧（>30s）"当判据，而它比等待上限（12s）还长，
+     * 正常情况**永远不会**判定为陈旧 → 退化为固定睡眠；反过来文件缺失/无 `ts=`
+     * 又立刻返回 true → 旧链未退就 RUN，撞 `flock` 静默 `exit 0` 而回报"成功"。
+     *
+     * 现在改为**由 Termux 侧自己判定并写回执**（`STOP_SCRIPT_BODY` 内轮询
+     * `pgrep -f run2-inner` 归零），Prism 只回读回执——证据链放在真正能观测进程的一侧。
+     */
+    enum class StopOutcome {
+        /** 回执确认整条 run2 链已退出。 */
+        CONFIRMED,
+
+        /** 回执确认链**仍在**（超时未退出）。 */
+        STILL_RUNNING,
+
+        /** 拿不到回执（脚本被拒/超时/Shizuku 不可读）——按不确定处理。 */
+        UNKNOWN
+    }
+
+    /**
+     * **串行化**的重启（2026-11-14；guardrail R-04 / R4-01 / R4-02）。
+     *
+     * 为什么不能只用 [restart]：`run()` 只是把命令**提交**给 Termux，STOP 与 RUN 会在
+     * Termux 侧并发执行。实测后果两种：
+     * ① STOP 的 `pkill` 把刚起来的 run2 链一起杀掉 → 整链不在，但本方法返回"已提交"；
+     * ② 新 run2-inner 抢在旧实例退出前启动，撞上 `flock -n` 静默 `exit 0` → 什么都没起。
+     *
+     * @param maxWaitMs 等待回执的最长时间（STOP 脚本自身最多轮询 20s）
+     * @return 见 [StopOutcome]；`CONFIRMED` 才继续 RUN，其它两态仍尽力启动并记录告警
+     */
+    suspend fun restartAndWait(
+        context: Context,
+        maxWaitMs: Long = 30_000L
+    ): StopOutcome {
+        // guardrail R5-02：回执必须能区分"本次写的"与"上次重启留下的"。
+        // STOP 脚本本身用 `>` 覆盖写回执，因此旧内容会被替换；但仍用
+        // **"写入时刻 ≥ 本次提交时刻"** 做时间下界，防止"脚本被拒、回执未更新"时
+        // 误读上一次的 `stopped=1`（那会导致旧链未退就 RUN → 撞 flock 静默失败）。
+        val attemptFloorMs = System.currentTimeMillis() - 1_000L
+        val stopSubmitted = run(context, QqProtocolScripts.STOP_SCRIPT)
+        if (!stopSubmitted) {
+            Log.w(TAG, "停止脚本未被接受，仍尝试启动")
+            run(context, QqProtocolScripts.RUN_SCRIPT)
+            return StopOutcome.UNKNOWN
+        }
+        val outcome = awaitStopAck(maxWaitMs, attemptFloorMs)
+        when (outcome) {
+            StopOutcome.CONFIRMED ->
+                Log.i(TAG, "回执确认整条 run2 链已退出，开始重新拉起")
+            StopOutcome.STILL_RUNNING ->
+                Log.w(TAG, "回执显示 run2 链仍在运行，仍尝试启动（新实例可能被 flock 拒绝）")
+            StopOutcome.UNKNOWN ->
+                Log.w(TAG, "未拿到停止回执（脚本被拒或超时），按不确定处理并尝试启动")
+        }
+        run(context, QqProtocolScripts.RUN_SCRIPT)
+        return outcome
+    }
+
+    /**
+     * 回读停止回执（`/sdcard/napcat-stop.txt`，由 STOP 脚本写 `stopped=1|0 ts=…`）。
+     *
+     * 只接受**本次提交之后写完**且仍新鲜的回执（guardrail R5-02）：
+     * 旧实现只看"90s 内"，而重启间隔可能短于 90s，回执写失败时会误读上一次的 `stopped=1`。
+     */
+    private suspend fun awaitStopAck(maxWaitMs: Long, attemptFloorMs: Long): StopOutcome {
+        val deadline = System.currentTimeMillis() + maxWaitMs
+        while (System.currentTimeMillis() < deadline) {
+            kotlinx.coroutines.delay(1_000L)
+            val text = runCatching {
+                ShizukuShell.readTextFile(QqProtocolScripts.STOP_ACK_FILE)
+            }.getOrNull() ?: continue
+            val ts = Regex("""\bts=(\d{9,13})""").find(text)?.groupValues?.get(1)?.toLongOrNull()
+                ?: continue
+            val sec = if (ts > 100_000_000_000L) ts / 1000L else ts
+            val writtenAtMs = sec * 1000L
+            if (writtenAtMs < attemptFloorMs) continue
+            if (System.currentTimeMillis() - writtenAtMs >
+                QqProtocolScripts.STOP_ACK_FRESH_MS
+            ) {
+                continue
+            }
+            return when {
+                text.contains("stopped=1") -> StopOutcome.CONFIRMED
+                text.contains("stopped=0") -> StopOutcome.STILL_RUNNING
+                else -> StopOutcome.UNKNOWN
+            }
+        }
+        return StopOutcome.UNKNOWN
+    }
+
     /** 跑一次健康检查（`bash verify.sh`；结论落到 `/sdcard`，由管家读取）。 */
     fun verify(context: Context): Boolean = run(context, QqProtocolScripts.VERIFY_SCRIPT)
 
@@ -368,11 +461,48 @@ object QqProtocolScripts {
     /** 探针回执文件（写 epoch 秒；证明「命令真的被执行了」而不只是「Intent 被接收」）。 */
     const val PROBE_STAMP_FILE = "/sdcard/napcat-probe.txt"
 
+    /**
+     * 停止回执文件（2026-11-14；guardrail R4-01/R4-02）。
+     *
+     * 内容 `stopped=1|0 ts=<epoch 秒>`：由 [STOP_SCRIPT_BODY] 在**确认 run2 链是否真的退出**后写入。
+     */
+    const val STOP_ACK_FILE = "/sdcard/napcat-stop.txt"
+
+    /** 停止回执的新鲜度上限（超过即视为上次重启的旧结论）。 */
+    const val STOP_ACK_FRESH_MS = 90_000L
+
     /** 停止脚本内容：杀容器内进程，**不动 Termux 本身**（避免殃及用户其它会话）。 */
     const val STOP_SCRIPT_BODY = """#!/data/data/com.termux/files/usr/bin/bash
+# 2026-11-14（ADR-072 F3）：必须把**整条 run2 链**一起停掉。
+#
+# 旧版本只 pkill NapCat/qq/Xvfb——容器内的 run2-inner.sh 循环仍在跑，
+# 于是"部署新脚本 → 重启"只重启了 QQ 本体：旧循环继续按老逻辑写状态文件，
+# 新 run2-inner 实例又被 flock 静默 exit 0（脚本第 36~44 行）
+# ⇒ 表现为"脚本改了却永远不生效"（真机 11-02/11-03 两次事故的共同结构）。
+#
+# guardrail R-12/R-13：不 pkill -f 'proot'（会误杀用户其它 proot 会话），
+# 只按 run2 脚本名与 QQ/NapCat/Xvfb 特征终止。
+#
+# guardrail R4-01/R4-02：**由本脚本自己确认链已退出并写回执**。
+# Prism 侧只能"提交命令"，看不到 Termux 内进程；用状态文件 ts 陈旧当判据
+# 既比等待上限还长（永不触发），文件缺失时又立刻放行（旧链未退就 RUN → 撞 flock）。
+pkill -f 'run2-inner\.sh' 2>/dev/null
+pkill -f 'run2\.sh' 2>/dev/null
 pkill -f 'NapCat' 2>/dev/null
 pkill -f 'qq --no-sandbox' 2>/dev/null
-pkill -f 'Xvfb' 2>/dev/null
+pkill -f 'Xvfb :99' 2>/dev/null
+n=0
+while [ ${'$'}n -lt 20 ]; do
+  pgrep -f 'run2-inner\.sh' >/dev/null 2>&1 || break
+  sleep 1
+  n=${'$'}((n+1))
+done
+TS=${'$'}(date +%s)
+if pgrep -f 'run2-inner\.sh' >/dev/null 2>&1; then
+  echo "stopped=0 ts=${'$'}TS" > /sdcard/napcat-stop.txt 2>/dev/null
+else
+  echo "stopped=1 ts=${'$'}TS" > /sdcard/napcat-stop.txt 2>/dev/null
+fi
 echo stopped
 """
 

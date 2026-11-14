@@ -100,10 +100,32 @@ data class QqRuntimeState(
     /** 窗口内已自动重启次数。 */
     val protocolRestartAttempts: Int = 0,
     /** 上次自动重启时刻（0=从未）。 */
-    val protocolLastRestartAtMs: Long = 0L
-) {    companion object {
-        /** 幂等集合上限（防无限增长；远大于一次重连可能补投的条数）。 */
-        const val MAX_REPLIED_IDS = 20
+    val protocolLastRestartAtMs: Long = 0L,
+
+    /**
+     * 最近一次收到"开机/升级恢复"广播的时刻（2026-11-14；ADR-072 F2）。
+     *
+     * 用途：下次冷启动时区分"这段时间根本没收到广播"与"收到了但恢复失败"。
+     */
+    val bootRecoveryAtMs: Long = 0L,
+
+    /**
+     * 最近一次**停摆补偿**已提醒用户的时刻（2026-11-14；ADR-072 F2-2）。
+     *
+     * 24 小时节流，避免用户每次打开 App 都被同一条"曾中断"提醒打扰。
+     */
+    val startupReportAtMs: Long = 0L
+) {
+
+    companion object {
+        /**
+         * 幂等集合上限（防无限增长）。
+         *
+         * 2026-11-02（ADR-071 / F-5）：由 20 提高到 **200**。20 条时集合会很快滚出旧 id，
+         * 一旦断连补发重新拉到同一条消息（历史接口返回最近 30 条），就会**重复回复**。
+         * 200 覆盖"一次补发 + 一段正常对话"，与 [QqInboxStore.MAX_ITEMS] 同量级。
+         */
+        const val MAX_REPLIED_IDS = 200
 
         /**
          * 被动回复时间戳保留条数。

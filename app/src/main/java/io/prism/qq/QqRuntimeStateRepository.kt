@@ -236,6 +236,30 @@ class QqRuntimeStateRepository(
         prefs[RESTART_LAST_AT] = 0L
     }
 
+    /**
+     * 记一次"收到开机/升级恢复广播"（2026-11-14；ADR-072 F2）。
+     *
+     * 纯记账：下次冷启动据此判断"系统到底有没有把广播送到"。
+     * 不抛异常（广播接收器里调用，失败不能影响恢复流程）。
+     */
+    suspend fun recordBootRecovery(action: String = "", nowMs: Long = System.currentTimeMillis()) {
+        runCatching {
+            edit { prefs ->
+                prefs[BOOT_RECOVERY_AT] = nowMs
+            }
+            android.util.Log.i("QqRuntimeStateRepository", "已记录开机恢复广播（$action）")
+        }.onFailure {
+            android.util.Log.w(
+                "QqRuntimeStateRepository", "开机恢复记账失败（${it::class.simpleName}）"
+            )
+        }
+    }
+
+    /** 记一次"停摆补偿已提醒"（ADR-072 F2-2）。 */
+    suspend fun recordStartupReport(nowMs: Long = System.currentTimeMillis()) = edit { prefs ->
+        prefs[STARTUP_REPORT_AT] = nowMs
+    }
+
     /** 记录已回应过的收到消息指纹与时刻（US-3109 双向对话去重 + guardrail M-02 时间窗）。 */    suspend fun setLastReplied(hash: String, atMs: Long) = edit {
         it[LAST_REPLIED_HASH] = hash
         it[LAST_REPLIED_AT] = atMs
@@ -379,7 +403,9 @@ class QqRuntimeStateRepository(
         protocolAlert = readProtocolAlert(prefs),
         protocolRestartWindowStartMs = prefs[RESTART_WINDOW_START] ?: 0L,
         protocolRestartAttempts = prefs[RESTART_ATTEMPTS] ?: 0,
-        protocolLastRestartAtMs = prefs[RESTART_LAST_AT] ?: 0L
+        protocolLastRestartAtMs = prefs[RESTART_LAST_AT] ?: 0L,
+        bootRecoveryAtMs = prefs[BOOT_RECOVERY_AT] ?: 0L,
+        startupReportAtMs = prefs[STARTUP_REPORT_AT] ?: 0L
     )
 
     companion object {
@@ -426,5 +452,11 @@ class QqRuntimeStateRepository(
 
         /** 时间戳保留时长（滑动窗口的 2 倍，超出即淘汰）。 */
         private const val PASSIVE_TIMESTAMP_TTL_MS = 5 * 60_000L
+
+        /** 开机/升级恢复广播记账（ADR-072 F2）。 */
+        private val BOOT_RECOVERY_AT = longPreferencesKey("qq_boot_recovery_at")
+
+        /** 停摆补偿提醒节流锚点（ADR-072 F2-2）。 */
+        private val STARTUP_REPORT_AT = longPreferencesKey("qq_startup_report_at")
     }
 }

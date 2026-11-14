@@ -150,11 +150,29 @@ class QqConversationStore(
         true
     }.getOrDefault(false)
 
-    private fun q(value: String): String = "\"" + value
-        .replace("\\", "\\\\")
-        .replace("\"", "\\\"")
-        .replace("\n", "\\n")
-        .replace("\r", "") + "\""
+    /**
+     * JSON 字符串转义。
+     *
+     * 2026-11-02（guardrail R-07 同类）：补齐控制字符转义——原实现把 `\t` 之类的控制符原样写入，
+     * 会让整个文件变成非法 JSON，下次启动解析失败 → 会话历史静默清空。
+     */
+    private fun q(value: String): String {
+        val sb = StringBuilder(value.length + 2)
+        sb.append('"')
+        for (ch in value) {
+            when {
+                ch == '\\' -> sb.append("\\\\")
+                ch == '"' -> sb.append("\\\"")
+                ch == '\n' -> sb.append("\\n")
+                ch == '\r' -> sb.append("\\r")
+                ch == '\t' -> sb.append("\\t")
+                ch < ' ' -> sb.append(String.format("\\u%04x", ch.code))
+                else -> sb.append(ch)
+            }
+        }
+        sb.append('"')
+        return sb.toString()
+    }
 
     companion object {
         /** 单联系人保留条数（约等于数十轮对话）。 */

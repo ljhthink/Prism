@@ -36,6 +36,9 @@ object QqProtocolAlertNotifier {
     /** 协议端告警通知固定 id（新告警覆盖旧告警——只关心最新状态）。 */
     const val NOTIFICATION_ID = 8110
 
+    /** 重提醒通知 id（ADR-072 F4）：独立于首条，避免互相覆盖。 */
+    const val REMINDER_NOTIFICATION_ID = 8111
+
     /** 与 `PhoneControlCompletionNotifier` 共用的渠道 id（**不要改**，改了等于新建渠道）。 */
     private const val CHANNEL_ID = "prism_phone_status"
 
@@ -55,15 +58,18 @@ object QqProtocolAlertNotifier {
         context: Context,
         kind: QqProtocolAlertPolicy.Kind,
         detail: String = "",
-        loopback: Boolean = true
+        loopback: Boolean = true,
+        reminder: Boolean = false
     ) {
         ensureChannel(context)
-        val title = when (kind) {
+        val baseTitle = when (kind) {
             QqProtocolAlertPolicy.Kind.LOCAL_PROTOCOL_NOT_RUNNING -> "QQ 小号协议端未运行"
             QqProtocolAlertPolicy.Kind.PROTOCOL_UNREACHABLE -> "QQ 小号协议端连接不上"
             QqProtocolAlertPolicy.Kind.QQ_ACCOUNT_OFFLINE -> "QQ 小号账号已离线"
             QqProtocolAlertPolicy.Kind.PROTOCOL_NEVER_STARTED -> "QQ 小号协议端还没启动成功过"
         }
+        // 2026-11-14（ADR-072 F4）：重提醒必须在标题上可见差异——否则用户会当成旧通知划走。
+        val title = if (reminder) "【仍未恢复】$baseTitle" else baseTitle
         val advice = adviceFor(kind)
         val body = buildString {
             append(advice)
@@ -75,7 +81,9 @@ object QqProtocolAlertNotifier {
             }
             append("\n打开 Prism → 设置 → QQ 小号助手，可一键启动/修复或重新扫码。")
         }
-        post(context, title, body)
+        // 2026-11-14：重提醒走独立通知 id，避免与首条互相覆盖；
+        // reminder 用 CATEGORY_REMINDER 让系统在勿扰/锁屏上更显著。
+        post(context, title, body, reminder = reminder)
     }
 
     /**
@@ -100,6 +108,17 @@ object QqProtocolAlertNotifier {
         )
     }
 
+    /**
+     * 发一条**存活看门狗 / 停摆补偿**通知（2026-11-14；ADR-072 F1/F2）。
+     *
+     * 与 [notifyDown] 分开的原因：这两类通知的性质是"我们曾经不在，现在回来了"，
+     * 与"协议端掉线"是不同的语义；混用会让用户分不清是该去扫码还是该重新打开 App。
+     */
+    fun notifyWatchdog(context: Context, title: String, body: String) {
+        ensureChannel(context)
+        post(context, title, body, reminder = true)
+    }
+
     /** AC-5：可执行建议（**三条全部**指向 Prism 内的入口，不再把用户引回终端）。 */
     private fun adviceFor(kind: QqProtocolAlertPolicy.Kind): String = when (kind) {
         // 2026-11-01 验收 AC-5：三条文案统一指向管家（与设置页诊断同源：诊断文案也已改为指向管家）
@@ -122,7 +141,7 @@ object QqProtocolAlertNotifier {
                 "③ 点「一键修复」后看卡片给的最后一步提示。"
     }
 
-    private fun post(context: Context, title: String, body: String) {
+    private fun post(context: Context, title: String, body: String, reminder: Boolean = false) {
         val appContext = context.applicationContext
         val nm = appContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         // 2026-11-01 审查 M1/M-4：不仅要看 POST_NOTIFICATIONS，还要看**渠道是否被用户关闭**
@@ -153,12 +172,19 @@ object QqProtocolAlertNotifier {
             .setContentTitle(title)
             .setContentText(body.lineSequence().firstOrNull().orEmpty().take(120))
             .setStyle(NotificationCompat.BigTextStyle().bigText(body.take(500)))
-            .setCategory(NotificationCompat.CATEGORY_STATUS)
-            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setCategory(
+                if (reminder) NotificationCompat.CATEGORY_REMINDER
+                else NotificationCompat.CATEGORY_STATUS
+            )
+            .setPriority(
+                if (reminder) NotificationCompat.PRIORITY_HIGH
+                else NotificationCompat.PRIORITY_DEFAULT
+            )
+            .setOnlyAlertOnce(!reminder)
             .setAutoCancel(true)
             .setContentIntent(contentIntent)
             .build()
-        runCatching { nm.notify(NOTIFICATION_ID, notification) }
+        runCatching { nm.notify(if (reminder) REMINDER_NOTIFICATION_ID else NOTIFICATION_ID, notification) }
     }
 
     /**

@@ -82,6 +82,17 @@ object QqProtocolAlertPolicy {
     const val NOTIFY_THROTTLE_MS = 30 * 60_000L
 
     /**
+     * 同一轮故障持续未恢复时的**重提醒周期**（2026-11-14 新增；ADR-072 F4）。
+     *
+     * 4 小时：足够长到不打扰（一天最多 6 次），又足够短到"早上起来能看到"。
+     * 真机教训：账号 11-03 03:11 离线只通知了一次，用户 11 天都没发现。
+     *
+     * 与 AC-3「同一轮最多通知一次」的关系：AC-3 的语义修订为
+     * **「同一轮内每个重提醒周期最多一次」**（见 ADR-072 与 PRD US-3128 AC-4 修订）。
+     */
+    const val RE_ALERT_INTERVAL_MS = 4 * 60 * 60_000L
+
+    /**
      * 「从未连上过」的判定门槛：连续不可达达到本次数才告警。
      *
      * 取 30（≈ 30 分钟 @60s 轮询）：远大于 AC-2 的 3 次，确保"只是启动慢"不会误报；
@@ -123,7 +134,19 @@ object QqProtocolAlertPolicy {
         data object None : Action
 
         /** AC-5：通知内容必须可执行，[kind] 决定文案与入口。 */
-        data class NotifyDown(val kind: Kind, val downSinceMs: Long, val detail: String) : Action
+        data class NotifyDown(
+            val kind: Kind,
+            val downSinceMs: Long,
+            val detail: String,
+            /**
+             * 2026-11-14（ADR-072 F4）：是否为**重提醒**。
+             *
+             * 同一轮故障持续期间，每隔 [RE_ALERT_INTERVAL_MS] 再提醒一次。
+             * 真机 11-03~11-14 的形态是"账号离线 → 通知一次 → 用户没看到 → 静默 11 天"，
+             * 单次通知等于没通知。
+             */
+            val reminder: Boolean = false
+        ) : Action
 
         /** AC-4：恢复通知（仅在本轮确实通知过"掉线"之后才发）。 */
         data class NotifyRecovered(val downKind: String, val downDurationMs: Long) : Action
@@ -261,8 +284,27 @@ object QqProtocolAlertPolicy {
         if (!streakReached) return Decision(base, Action.None)
 
         val sameKindRound = prev.downNotified && prev.downKind == kind.name
-        // AC-3：同一轮已通知过同一种故障 → 静默
-        if (sameKindRound) return Decision(base, Action.None)
+        // AC-3：同一轮已通知过同一种故障 → 默认静默；
+        // 2026-11-14（ADR-072 F4）：但**持续未恢复**时必须周期性重提醒。
+        // 真机形态：账号 11-03 03:11 离线 → 通知一次 → 用户没看到 → 静默 11 天。
+        // 只发一次等于没发，因此同一轮内按 [RE_ALERT_INTERVAL_MS] 再提醒。
+        if (sameKindRound) {
+            val elapsed = nowMs - prev.lastNotifyAtMs
+            // 时钟回拨（elapsed<0）按"已到重提醒时刻"处理，与既有节流防御一致
+            val due = prev.lastNotifyAtMs <= 0L || elapsed !in 0 until RE_ALERT_INTERVAL_MS
+            if (!due) return Decision(base, Action.None)
+            return Decision(
+                base.copy(
+                    downNotified = true,
+                    downKind = kind.name,
+                    downSinceMs = downSince,
+                    lastNotifyAtMs = nowMs
+                ),
+                Action.NotifyDown(
+                    kind = kind, downSinceMs = downSince, detail = detail, reminder = true
+                )
+            )
+        }
 
         /**
          * 2026-11-01 审查 M3：**升级型故障允许突破节流**。
@@ -321,10 +363,27 @@ object QqProtocolAlertPolicy {
         unreachableStreak: Int
     ): Decision {
         if (kind == Kind.QQ_ACCOUNT_OFFLINE) return Decision(base, Action.None)
-        if (prev.downNotified) return Decision(base, Action.None)
         if (unreachableStreak < NEVER_STARTED_CONFIRM) return Decision(base, Action.None)
 
         val since = prev.downSinceMs.takeIf { it > 0L } ?: nowMs
+        // guardrail R-09（2026-11-14）：**"从未连上过"同样要重提醒**。
+        // 旧实现 `if (prev.downNotified) return None` → 首次部署失败只响一次，
+        // 用户第二天才想起配置时已经没有任何提示（真机同型：账号离线只响一次）。
+        if (prev.downNotified) {
+            val elapsed = nowMs - prev.lastNotifyAtMs
+            val due = prev.lastNotifyAtMs <= 0L || elapsed !in 0 until RE_ALERT_INTERVAL_MS
+            if (!due) return Decision(base, Action.None)
+            return Decision(
+                base.copy(downNotified = true, downSinceMs = since, lastNotifyAtMs = nowMs),
+                Action.NotifyDown(
+                    kind = Kind.PROTOCOL_NEVER_STARTED,
+                    downSinceMs = since,
+                    detail = "协议端连续 ${unreachableStreak} 次探测都不可达，且从未成功连上过",
+                    reminder = true
+                )
+            )
+        }
+
         return Decision(
             base.copy(
                 downNotified = true,

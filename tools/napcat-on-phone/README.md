@@ -1,4 +1,4 @@
-# 手机本机模式：NapCat 装在手机上（免 Google 账号、免电脑、免组网）
+﻿# 手机本机模式：NapCat 装在手机上（免 Google 账号、免电脑、免组网）
 
 > 适用：Prism 与 NapCat 跑在**同一台 Android 手机**上，Prism 连 `127.0.0.1:3000`。
 > 推荐把两者都装在**一台闲置旧手机**上（插电常驻、与主号设备隔离）。
@@ -197,3 +197,29 @@ ps -A | grep -E 'Xvfb|^qq$' | head -3
 - NapCat/Termux 侧：ZeroTermux 里删除容器（或在系统里卸载 ZeroTermux），Linux QQ 数据随之清除；
 - Prism 侧：把协议端地址改回 PC 的 IP（或关闭 QQ 小号助手）即回到旧形态；
 - 不影响主号 QQ 与 Prism 其它功能。
+
+## 十、环境差异与自愈脚本（2026-11-02，ADR-071）
+
+**PRoot 镜像里没有 `ss`，也没有 `netstat`** —— 旧版 `run2-inner.sh` 用
+`(ss -tln || netstat -tln) | grep -c ':3000'` 探活，计数**恒为 0**，于是 Prism 侧
+「已在运行就不重启」的防自踢守卫永不生效。现在改为读内核表（并校验连接状态列）：
+
+```bash
+grep -E ':0BB8[[:space:]]+[0-9A-Fa-f:]+[[:space:]]+(0A|01)[[:space:]]' /proc/net/tcp
+```
+
+状态文件格式升级为：
+
+```text
+ts=1793626043 tick=724 qq=5 onebot3000=1 state=online restarts=0
+```
+
+`state` 取值 `starting | need_qr | online | qq_dead`；**`starting` / `need_qr` 期间 Prism 不会自动重启**
+（等待扫码时 3000 本来就不监听，重启会把正在扫的二维码作废并导致登录态再次失效）。
+
+脚本已加**单实例锁**（`flock /tmp/qq-run2.lock`，无 flock 时退化为 pid 文件）：重复执行
+`RUN_COMMAND` 不会再拉起第二条 QQ 链互踢账号。`run2.sh` 入口会先执行 `termux-wake-lock`。
+另外加了**启动超时**：`starting` 持续 180 秒不前进即杀掉重来（防"进程活着但卡死"两边都不救）。
+
+> 核对是否真的生效（P0 教训：修好的脚本可能没进 APK）：
+> `adb shell wc -l /data/local/tmp/run2-inner.sh` 应为 **199 行**左右，或看状态文件里是否有 `state=` 字段。

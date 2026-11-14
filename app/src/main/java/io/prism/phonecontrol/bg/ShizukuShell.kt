@@ -741,6 +741,8 @@ object ShizukuShell {
         "/sdcard/napcat-verify.txt",
         "/sdcard/napcat-webui.txt",
         "/sdcard/napcat-probe.txt",
+        // 停止回执（`stopped=1|0 ts=…`），由停止脚本写、Prism 回读确认旧链已退出（R4-01）。
+        "/sdcard/napcat-stop.txt",
         // 部署版本标记（`<脚本名>:<sha256>`），由 QqProtocolSupervisor 写入并回读比对。
         "/data/local/tmp/prism-scripts.sha"
     )

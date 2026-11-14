@@ -10,6 +10,11 @@
 ROOTFS="$HOME/bookworm-arm64"
 [ -d "$ROOTFS/root" ] || { echo "!! 容器不存在：$ROOTFS"; exit 1; }
 
+# 2026-11-02（ADR-071）：先拿唤醒锁。Termux 不持锁时 Doze 会挂起整条链，
+# 掉线后表现为「进程还在但几十秒不响应」。拿不到锁不阻断启动，只告警。
+command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock 2>/dev/null \
+  || echo "!! termux-wake-lock 不可用（链仍可起，但后台会被 Doze 挂起）"
+
 unset LD_PRELOAD
 proot \
   --bind=/vendor --bind=/system \

@@ -102,13 +102,21 @@
             2026-11-01（US-3128）：开机后恢复**协议端通道**。
             只恢复"能收发"的前提，不恢复任何定时计划（PRD US-3108 AC-5 只约束后者）。
             exported=false：只接系统 BOOT_COMPLETED（系统广播不受 exported 限制影响）。
+
+            2026-11-14（ADR-072 F2）：真机 11-13 12:47 取证 `am_broadcast_discard_app`
+            —— BOOT_COMPLETED 被 HyperOS 丢弃，只挂一条等于没有开机恢复。
+            补 LOCKED_BOOT_COMPLETED（解锁前投递，需 directBootAware）与
+            MY_PACKAGE_REPLACED（升级后首启），三者互相独立。
         -->
         <receiver
             android:name=".qq.QqBootRestartReceiver"
             android:enabled="true"
-            android:exported="false">
+            android:exported="false"
+            android:directBootAware="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
         <!-- v1 批次11（F2）：手机操控保活前台服务（specialUse，防止 MIUI 回收操控进程） -->

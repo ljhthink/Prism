@@ -50,6 +50,15 @@ class ProactiveScheduleService : Service() {
     private var replyJob: Job? = null
 
     /**
+     * 用户是否**显式**停止了本服务（通知栏「停止」）。
+     *
+     * 2026-11-14（ADR-072 F1）：新增该标志是为了区分"用户不要了"与"系统把我杀了"——
+     * 前者必须撤销所有唤醒源（否则会被反复叫醒，等于停止失效），后者必须**保留**唤醒源
+     * （否则死了就再也不会回来）。
+     */
+    private var stopRequested = false
+
+    /**
      * 精确闹钟的**唤醒信号**（ADR-063 修订 2026-10-25）。
      *
      * 原实现里 `ACTION_WAKE` 只是再 `startForeground` 一次：`loopJob` 非空时不会打断正在
@@ -108,26 +117,37 @@ class ProactiveScheduleService : Service() {
         if (intent?.action == ACTION_STOP) {
             Log.i(TAG, "用户请求停止定时主动消息（通知栏动作）")
             // CR-9：必须落盘——否则配置流的 collect 会立即把服务重新拉起（"停止"失效）
+            stopRequested = true
             scope.launch {
                 runCatching { QqConfigRepositoryHolder.get()?.setScheduleEnabled(false) }
                 stopSelf()
             }
             return START_NOT_STICKY
         }
+        // 2026-11-14（ADR-072 F1）：**任何**进入服务的路径都要重挂存活看门狗。
+        // 这是"进程被杀后还能自己回来"的唯一不依赖定时计划的入口——
+        // 旧实现只在有定时计划时才登记闹钟，于是"只开自动回复"的用户死了就再也起不来。
+        scheduleLivenessWatchdog()
         if (!startInForeground()) {
-            // CR-10：前台服务启动失败（系统限制）→ 立即停止，避免"无通知仍在跑"
+            // CR-10：前台服务启动失败（系统限制）→ 不能直接认输。
+            // 旧实现 stopSelf + NOT_STICKY = 叫醒一次、失败、再无唤醒源（自毁闭环）。
+            // 现在登记一次 5 分钟后的非精确重试，让"系统一时不允许前台服务"能自行恢复。
+            Log.w(TAG, "前台化失败，登记 5 分钟重试闹钟后再停止")
+            scheduleRetryAfterForegroundFailure()
             stopSelf()
             return START_NOT_STICKY
         }
         // 闹钟唤醒：必须优先于"循环已存在就不动"的分支——否则兜底形同虚设
         if (intent?.action == ACTION_WAKE) {
-            Log.i(TAG, "精确闹钟唤醒：立即复评到期计划")
+            Log.i(TAG, "闹钟唤醒：立即复评到期计划")
             wakeSignal.trySend(Unit)
         }
         if (loopJob == null) loopJob = scope.launch { heartbeatLoop() }
         if (replyJob == null) replyJob = scope.launch { replyLoop() }
         registerScreenReceiver()
-        return START_NOT_STICKY
+        // 2026-11-14：START_STICKY 让系统在内存压力回收后**重建**本服务（intent 为 null，
+        // 上面的 `intent?.action` 分支已能容忍）。用户显式停止仍返回 NOT_STICKY。
+        return START_STICKY
     }
 
     /**
@@ -163,9 +183,29 @@ class ProactiveScheduleService : Service() {
         screenReceiver?.let { runCatching { unregisterReceiver(it) } }
         screenReceiver = null
         scope.cancel()
-        cancelExactAlarm()
-        Log.i(TAG, "定时主动消息调度服务已停止")
+        // 2026-11-14（ADR-072 F1）：**只有用户显式停止才撤闹钟**。
+        // 旧实现在任何退出路径（含前台化失败、系统回收）都 cancelExactAlarm()，
+        // 于是"闹钟叫醒 → 服务退出 → 自己把下次唤醒源撤掉"，形成自毁闭环，
+        // 进程死后永久失去自愈能力（真机 11-03~11-14 静默 11 天即此形态）。
+        //
+        // guardrail R-01：用户显式停止时必须把**看门狗 PendingIntent 一并撤掉**。
+        // 只撤 `REQUEST_WAKE` 的话，30 分钟后的看门狗仍会把服务复活并重新 startForeground，
+        // 而 `stopRequested` 只是实例字段（新实例为 false）→ 用户"停止"形同虚设。
+        if (stopRequested) {
+            cancelAllAlarms()
+        } else {
+            scheduleLivenessWatchdog()
+        }
+        Log.i(TAG, "定时主动消息调度服务已停止（stopRequested=$stopRequested）")
         super.onDestroy()
+    }
+
+    /** 撤掉**全部**唤醒源（定时精确闹钟 + 存活看门狗 + 前台化重试）。 */
+    private fun cancelAllAlarms() {
+        val am = getSystemService(AlarmManager::class.java) ?: return
+        runCatching { am.cancel(firePendingIntent()) }
+        runCatching { am.cancel(watchdogPendingIntent()) }
+        runCatching { am.cancel(foregroundRetryPendingIntent()) }
     }
 
     // ==================== 心跳循环（唯一发送路径） ====================
@@ -198,6 +238,22 @@ class ProactiveScheduleService : Service() {
 
                 // 到期判定（含进程重启后的补发；plannedTriggerAt 持久化 → 恰好一次）
                 if (rt.plannedTriggerAt in 1..now) {
+                    // 2026-11-14（ADR-072 E 节 / PRD US-3108 AC-5 边界）：
+                    // **过期计划一律丢弃，不补发**。
+                    //
+                    // 为什么必须在这里拦：`plannedTriggerAt` 是持久化的，而本服务现在有了
+                    // 存活看门狗（被系统杀掉后会自己回来）。若不加这条，进程停摆几小时后被唤醒，
+                    // 心跳会立刻发现"计划时刻早过了"→ 当场补发一条主动消息 ——
+                    // 这正是 AC-5 要防的"重启后莫名收到消息"，而且会让自愈机制变成骚扰源。
+                    //
+                    // 阈值 10 分钟：正常运行（含 15 分钟分块睡眠）的到点抖动远小于它，
+                    // 只有"真的停摆过"才会超过。
+                    val staleMs = now - rt.plannedTriggerAt
+                    if (staleMs > STALE_PLAN_MS) {
+                        Log.i(TAG, "计划已过期 ${staleMs / 60_000} 分钟，丢弃并重排（AC-5）")
+                        QqRuntimeStateRepositoryHolder.get()?.clearPlan()
+                        continue
+                    }
                     handleDue(cfg, rt, now)
                     continue
                 }
@@ -683,13 +739,72 @@ class ProactiveScheduleService : Service() {
     private fun scheduleExactAlarm(triggerAtMs: Long) {
         val am = getSystemService(AlarmManager::class.java) ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !am.canScheduleExactAlarms()) {
-            Log.w(TAG, "未授予精确闹钟权限（Android 12+「闹钟与提醒」），兜底降级为仅心跳调度")
+            // 2026-11-14（ADR-072 F1-3）：权限缺失**降级**而不是静默放弃。
+            // 旧实现只打一行日志就 return，于是"没授精确闹钟权限"= 没有任何闹钟兜底，
+            // 进程一死就再也叫不醒。setAndAllowWhileIdle 在 Doze 下仍会唤醒（只是不精确），
+            // 对"随机主动消息"语义完全够用。
+            runCatching {
+                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMs, firePendingIntent())
+                Log.i(TAG, "未授予精确闹钟权限，已降级为非精确闹钟（时刻可能延后数分钟）")
+            }.onFailure { Log.w(TAG, "降级闹钟登记失败（${it::class.simpleName}）") }
             return
         }
         runCatching {
             am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMs, firePendingIntent())
             Log.i(TAG, "已登记精确闹钟兜底 @ $triggerAtMs")
         }.onFailure { Log.w(TAG, "精确闹钟登记失败（${it::class.simpleName}）") }
+    }
+
+    /**
+     * **存活看门狗**（2026-11-14 新增；ADR-072 F1）。
+     *
+     * 与"定时主动消息"完全解耦：只要有 QQ 小号助手开着，就每 [WATCHDOG_INTERVAL_MS]
+     * 唤醒一次本服务。它是"进程被系统回收后能自己回来"的唯一不依赖定时计划的入口。
+     *
+     * - 用 `setAndAllowWhileIdle`（非精确）：Doze 下仍会唤醒，且**不需要**「闹钟与提醒」权限；
+     * - 每次进入服务都重挂（幂等，`FLAG_UPDATE_CURRENT` 只保留一条）。
+     */
+    private fun scheduleLivenessWatchdog() {
+        // guardrail R4-03：`stopRequested` 与本函数之间没有 happens-before——
+        // 本函数在 appScope 里异步读配置，而 `ACTION_STOP` 的落盘同样异步。
+        // 没有这行守卫时，用户点「停止」后一个迟到的协程仍会补挂一条 30 分钟闹钟，
+        // 表现为"已停止却仍闪一次前台通知"。首行早退是最小且确定的修法。
+        if (stopRequested) return
+        val holder = QqConfigRepositoryHolder.get() ?: return
+        // onStartCommand 是同步的，读配置需要协程；用 scope 异步登记，失败只记日志。
+        val appScope = (application as? io.prism.PrismApplication)?.appScope
+        if (appScope == null) {
+            // guardrail R4-08/R-14：静默失败会让"看门狗从未挂上"无从排查
+            Log.w(TAG, "无法获取 appScope，存活看门狗未登记")
+            return
+        }
+        appScope.launch {
+            val cfg = runCatching { holder.get() }.getOrNull() ?: return@launch
+            // guardrail R5-01：入口守卫不够——协程 `holder.get()` 挂起期间用户可能已点停止，
+            // 恢复后仍会补挂一条 30 分钟闹钟。**读配置之后必须再复检一次**。
+            if (stopRequested) return@launch
+            // 2026-11-14：只在"确实有链路要服务"时挂看门狗。
+            // 用 schedulingActive || autoReplyActive（与配置流启停服务的判据一致），
+            // 而不是只看 enabled——否则"开了总开关但没配好目标联系人"的用户
+            // 会被每 30 分钟唤醒一次却什么都不做，纯耗电。
+            if (!cfg.autoReplyActive && !cfg.schedulingActive) return@launch
+            val am = getSystemService(AlarmManager::class.java) ?: return@launch
+            val at = System.currentTimeMillis() + WATCHDOG_INTERVAL_MS
+            runCatching {
+                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, watchdogPendingIntent())
+            }.onFailure { Log.w(TAG, "存活看门狗登记失败（${it::class.simpleName}）") }
+        }
+    }
+
+    /** 前台化失败后的 5 分钟重试（不精确，够用；避免"叫醒一次失败就再无唤醒源"）。 */
+    private fun scheduleRetryAfterForegroundFailure() {
+        val am = getSystemService(AlarmManager::class.java) ?: return
+        val at = System.currentTimeMillis() + FOREGROUND_RETRY_MS
+        runCatching {
+            // guardrail R-02：**必须用独立的 PendingIntent**。复用看门狗那个会被
+            // 30 分钟后的看门狗覆盖（等于 5 分钟重试从未生效），反之亦然。
+            am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, foregroundRetryPendingIntent())
+        }.onFailure { Log.w(TAG, "前台化重试闹钟登记失败（${it::class.simpleName}）") }
     }
 
     private fun cancelExactAlarm() {
@@ -705,7 +820,46 @@ class ProactiveScheduleService : Service() {
         )
     }
 
+    /** 存活看门狗（ACTION_WAKE）。 */
+    private fun watchdogPendingIntent(): PendingIntent {
+        val intent = Intent(this, ProactiveScheduleService::class.java).setAction(ACTION_WAKE)
+        return PendingIntent.getService(
+            this, REQUEST_WATCHDOG, intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+    }
+
+    /** 前台化失败后的 5 分钟重试（guardrail R-02：独立 requestCode，不被看门狗覆盖）。 */
+    private fun foregroundRetryPendingIntent(): PendingIntent {
+        val intent = Intent(this, ProactiveScheduleService::class.java).setAction(ACTION_WAKE)
+        return PendingIntent.getService(
+            this, REQUEST_FG_RETRY, intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+    }
+
     companion object {
+        /**
+         * 服务因**配置关闭**主动停止时，必须撤掉看门狗（guardrail A-02）。
+         *
+         * 不撤的后果：用户关掉 QQ 小号助手 → 服务 stopSelf → 30 分钟看门狗仍会把它叫醒，
+         * 于是刚关掉又闪一次前台服务通知（随后因配置未激活再退出）。
+         * 语义上"用户关闭"与"用户点停止"等价，都应撤销全部唤醒源。
+         */
+        fun cancelAllAlarms(context: android.content.Context) {
+            val am = context.getSystemService(AlarmManager::class.java) ?: return
+            val cls = ProactiveScheduleService::class.java
+            listOf(REQUEST_WAKE, REQUEST_WATCHDOG, REQUEST_FG_RETRY).forEach { code ->
+                val pi = PendingIntent.getService(
+                    context, code,
+                    Intent(context, cls).setAction(ACTION_WAKE),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+                runCatching { am.cancel(pi) }
+            }
+            Log.i(TAG, "已撤销全部协议端唤醒源（配置关闭）")
+        }
+
         private const val TAG = "QqProactiveSchedule"
 
         private const val CHANNEL_ID = "prism_proactive_message"
@@ -727,6 +881,36 @@ class ProactiveScheduleService : Service() {
 
         private const val REQUEST_WAKE = 3002
         private const val REQUEST_STOP = 3003
+
+        /** 存活看门狗 / 前台化重试（ADR-072 F1）。 */
+        private const val REQUEST_WATCHDOG = 3004
+
+        /** 前台化失败后的 5 分钟重试（guardrail R-02：独立于看门狗）。 */
+        private const val REQUEST_FG_RETRY = 3005
+
+        /**
+         * 存活看门狗间隔。
+         *
+         * 30 分钟：`setAndAllowWhileIdle` 在 Doze 下每天只有少量唤醒配额，
+         * 30 分钟足够把"被系统回收"控制在可接受范围内，又不会明显耗电。
+         */
+        private const val WATCHDOG_INTERVAL_MS = 30 * 60 * 1000L
+
+        /** 前台服务启动失败后的重试间隔（不精确）。 */
+        private const val FOREGROUND_RETRY_MS = 5 * 60 * 1000L
+
+        /**
+         * 过期计划的容忍上限（ADR-072：自愈不得补发过期主动消息）。
+         *
+         * 超过即 `clearPlan()` 重排，而不是当场发送——这是 PRD US-3108 AC-5
+         * 「重启后不恢复定时任务」在"自愈能让进程回来"之后必须显式守住的那条线。
+         *
+         * guardrail A-04（2026-11-14 验收）：取 **30 分钟**而不是 10 分钟。
+         * 因为"未授予精确闹钟权限"时会降级为 `setAndAllowWhileIdle`，Doze 下延迟
+         * 十几分钟是常态；10 分钟阈值会把**正常到点**误判成"过期"，反而漏发。
+         * 30 分钟仍远小于"停摆数小时/数天"，AC-5 的意图不受影响。
+         */
+        private const val STALE_PLAN_MS = 30 * 60 * 1000L
 
         /** N-2：单次睡眠分块上限——每 ≤15 分钟重读配置，运行期改动及时生效。 */
         private const val MAX_SLEEP_CHUNK_MS = 15 * 60 * 1000L
