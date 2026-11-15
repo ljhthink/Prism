@@ -60,7 +60,15 @@ case "$NAME" in
   # 前导 `-` 会被 find/cp 当成选项（单测 `-rf.jpg` 抓到过这个洞）
   -*) fail "illegal_leading_dash" ;;
 esac
-printf '%s' "$NAME" | grep -qE '^[A-Za-z0-9_-]{1,80}\.(jpg|jpeg|png|gif|webp|bmp)$' \
+# 2026-11-15（guardrail R-04）：扩展名必须**大小写不敏感**。
+# 旧写死小写 → `ABC.JPG` 被 Kotlin 侧放行（它已 lowercase 比较）却被这里拒绝，
+# 本地回退 100% 失败。两端必须一致：都以 lower(ext) 判定。
+EXT=$(printf '%s' "$NAME" | sed 's/.*\.//' | tr 'A-Z' 'a-z')
+case "$EXT" in
+  jpg|jpeg|png|gif|webp|bmp) : ;;
+  *) fail "illegal_name" ;;
+esac
+printf '%s' "$NAME" | grep -qE '^[A-Za-z0-9_-]{1,74}\.[A-Za-z0-9]{2,5}$' \
   || fail "illegal_name"
 
 ROOTFS="$HOME/bookworm-arm64"

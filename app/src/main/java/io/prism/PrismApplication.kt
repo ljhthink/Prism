@@ -2248,7 +2248,6 @@ class PrismApplication : Application() {
                 override: io.prism.qq.channel.QqMessage? = null
             ): io.prism.qq.QqReplyOutcome.ReplyResult =
                 replyMutex.withLock { autoReplyLocked(override) }
-
             io.prism.qq.QqProactiveGateway.autoReply = { autoReplyOnce() }
 
             // 2026-10-26（US-3124 验收）：debug 探针的端到端入口——用**合成入站消息**

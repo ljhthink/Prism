@@ -208,6 +208,38 @@ class QqMediaFetcherFallbackTest {
     }
 
     @Test
+    fun `BAD_CONTENT 不触发本地回退（guardrail R-03）`() = runBlocking {
+        var fallbackCalls = 0
+        // 拿到字节但 magic 不是图片 → BAD_CONTENT，回退无意义（30s proot 纯浪费）
+        val fetcher = QqMediaFetcher(
+            download = { _, _, _ -> byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12) },
+            localFallback = { fallbackCalls++; jpeg },
+            clock = { 1000L }
+        )
+        val r = fetcher.fetch(ref(url = "https://multimedia.nt.qq.com.cn/x.jpg"))
+        assertTrue(r is QqMediaResult.Failure)
+        assertEquals(QqMediaResult.Kind.BAD_CONTENT, (r as QqMediaResult.Failure).kind)
+        assertEquals("BAD_CONTENT 不得触发本地回退", 0, fallbackCalls)
+    }
+
+    @Test
+    fun `回退也失败时文案同时说明两条路（guardrail R-01）`() = runBlocking {
+        val fetcher = QqMediaFetcher(
+            download = { _, _, _ -> null },
+            localFallback = { null },
+            clock = { 1000L }
+        )
+        val r = fetcher.fetch(ref())
+        assertTrue(r is QqMediaResult.Failure)
+        val f = r as QqMediaResult.Failure
+        assertEquals(QqMediaResult.Kind.RKEY_EXPIRED, f.kind)
+        assertTrue(
+            "必须说清本地回退也没成，否则误导排障方向：${f.detail}",
+            f.detail.contains("本地文件回退")
+        )
+    }
+
+    @Test
     fun `dataUrl 兼容入口仍工作`() = runBlocking {
         val fetcher = QqMediaFetcher(
             download = { _, _, _ -> jpeg },

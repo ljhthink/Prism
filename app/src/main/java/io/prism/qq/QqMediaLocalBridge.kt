@@ -132,9 +132,22 @@ class QqMediaLocalBridge(
         return parseReceipt(readText(QqProtocolScripts.MEDIA_RELAY_RESULT_FILE))
     }
 
-    /** 读产物：同上，必要时经 Shizuku 中转。 */
+    /**
+     * 读产物：先直读；读不到再经 Shizuku 中转一次（guardrail R-06）。
+     *
+     * 注意：**只在回执 ok=1 之后**才会走到这里（调用点在 while 内 ok 分支之后），
+     * 因此不会"每 500ms 发起一次无效 exec"。
+     */
     private fun readBytesRelayed(): ByteArray? {
-        readBytes(QqProtocolScripts.MEDIA_OUT_FILE)?.takeIf { it.isNotEmpty() }?.let { return it }
+        readBytes(QqProtocolScripts.MEDIA_OUT_FILE)
+            ?.takeIf { it.isNotEmpty() && it.size <= MAX_MEDIA_BYTES }
+            ?.let { return it }
+        // guardrail R-05：中转前先看文件大小，避免把一个超大文件整份读进堆
+        // （superceded 之后 fetch() 的 maxBytes 校验已经来不及）。
+        if (!fileIsWithinLimit(QqProtocolScripts.MEDIA_OUT_FILE)) {
+            android.util.Log.w(TAG, "产物超过字节上限，跳过中转读取")
+            return null
+        }
         val relayed = runCatching {
             relayToReadablePath(
                 QqProtocolScripts.MEDIA_OUT_FILE,
@@ -142,8 +155,15 @@ class QqMediaLocalBridge(
             )
         }.getOrDefault(false)
         if (!relayed) return null
+        if (!fileIsWithinLimit(QqProtocolScripts.MEDIA_RELAY_FILE)) return null
         return readBytes(QqProtocolScripts.MEDIA_RELAY_FILE)?.takeIf { it.isNotEmpty() }
     }
+
+    /** 文件是否在可接受大小内（不存在/不可测视为 false，交给上层如实降级）。 */
+    private fun fileIsWithinLimit(path: String): Boolean = runCatching {
+        val f = java.io.File(path)
+        f.isFile && f.length() in 1..MAX_MEDIA_BYTES
+    }.getOrDefault(false)
 
     companion object {
         private const val TAG = "QqMediaLocalBridge"
@@ -151,15 +171,25 @@ class QqMediaLocalBridge(
         /**
          * 单次导出上限（2026-11-15 真机实测校准）。
          *
-         * 真机：`ok=1 size=1836981` 成功，但**8s 不够**——proot 启动（起完整
-         * Debian rootfs 环境 + ptrace）在本机约 10s，随后才是毫秒级 cp。
-         * 原值 8s 会让每一次都"超时"，看起来像功能没生效。
-         * 30s 覆盖冷启动；图片消息不频繁，这个等待可接受（且不阻塞回复主链）。
+         * 真机：`ok=1 size=1836981` 成功，但**8s 不够**。成功那次耗时 **2452ms**，
+         * 首次（冷启 proot）会更久。15s 覆盖冷启动且不至于把回复拖太久；
+         * 超时即如实降级（不编造画面）。
+         *
+         * guardrail R-07：本调用在 `autoReplyLocked` 内（持有 replyMutex），
+         * 因此上限不能设太大——宁可"这次看不到图"，也不要堵住后续所有回复。
          */
-        const val TIMEOUT_MS: Long = 30_000L
+        const val TIMEOUT_MS: Long = 15_000L
 
         /** 回执轮询间隔（proot 启动是秒级，500ms 足够且不空转）。 */
         const val POLL_INTERVAL_MS: Long = 500L
+
+        /**
+         * 单次可接受的媒体字节上限（guardrail R-05）。
+         *
+         * 与 [QqMediaFetcher.MAX_BYTES] 一致（8MB）。读文件前先比对大小，
+         * 避免"先把 100MB 读进堆再被上层拒掉"。
+         */
+        const val MAX_MEDIA_BYTES: Long = 8L * 1024 * 1024
 
         /** 允许的图片扩展名。 */
         private val ALLOWED_EXT = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp")

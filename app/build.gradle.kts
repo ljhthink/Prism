@@ -105,8 +105,6 @@ android {
         }
         into(napcatAssetsDir)
     }
-    sourceSets["main"].assets.srcDir(napcatAssetsDir)
-    tasks.named("preBuild") { dependsOn(syncNapcatAssets) }
     /**
      * 2026-11-15（真机排障抓到的**真构建缺陷**）：`mergeDebugAssets` 会读到**陈旧**脚本。
      *
@@ -115,14 +113,21 @@ android {
      * 仍是 3519B，APK 里也是 3519B —— 改了协议端脚本却**永远打不进包**，
      * 手机 `/data/local/tmp` 上一直是旧版（表现为"脚本改了却不生效"）。
      *
-     * 只靠 `addGeneratedSourceDirectory` 不足以防住这条：它登记了源目录，但
-     * `merge*Assets` 在增量/配置缓存场景下仍可能判定 UP-TO-DATE。
-     * 这里显式让所有 merge*Assets 依赖 sync 任务，保证"源变则必重同步"。
+     * ## 真正的原因（guardrail R-08 指出）
+     *
+     * 同一个目录被**登记了两次**：既作 `sourceSets.assets.srcDir(...)`（静态源），
+     * 又作 `addGeneratedSourceDirectory(...)`（生成源）。AGP 对"生成源"会做任务依赖推导，
+     * 对"静态 srcDir"只做输入快照 —— 两者叠加时，静态源那条路径的快照可能先于
+     * `syncNapcatAssets` 落盘，于是 merge 认为"输入没变"（UP-TO-DATE），
+     * 保留了上一次的旧产物。`dependsOn` 只能保证**顺序**，不能强制 merge 重新快照。
+     *
+     * ## 修法
+     *
+     * 移除静态 `srcDir`，**只保留生成源**这一条登记路径，让 AGP 唯一地由
+     * `syncNapcatAssets` 供给该目录。这消除了双重登记带来的陈旧风险。
      */
-    tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
-        .configureEach { dependsOn(syncNapcatAssets) }
-    // 2026-11-01（审查 M5）：只挂 preBuild 不够——单独跑 merge*Assets / 配置缓存命中时
-    // 可能读到缺失或陈旧的生成目录。把生成目录注册为 AGP 的生成源，让 merge 任务自己持有依赖。
+    tasks.named("preBuild") { dependsOn(syncNapcatAssets) }
+    // 2026-11-01（审查 M5）：把生成目录注册为 AGP 的生成源，让 merge 任务自己持有依赖。
     val napcatAssetsDirProperty: org.gradle.api.file.DirectoryProperty =
         objects.directoryProperty().apply { set(napcatAssetsDir) }
     androidComponents {

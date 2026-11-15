@@ -109,12 +109,19 @@ class QqMediaFetcher(
         // rkey 观测：占位 rkey 会被大量不同图片复用 → 提前判定，省掉一次必然失败的 10s 超时
         val rkey = QqMediaFailure.rkeyOf(url)
         val rkeyCount = if (rkey == null) 0 else synchronized(rkeyTracker) {
+            // 2026-11-15（guardrail 预判）：rkey 是长串，若无上限会随进程运行无限增长。
+            // 超过上限就整体清空——判定只需"近期是否被复用"，历史计数无价值。
+            if (rkeyTracker.size >= MAX_RKEY_TRACKED) rkeyTracker.clear()
             val n = (rkeyTracker[rkey] ?: 0) + 1
             rkeyTracker[rkey] = n
             n
         }
         val preExpired = QqMediaFailure.isRkeyExpired(url, rkeyCount)
 
+        // guardrail R-03（2026-11-15）：**记录 CDN 阶段的真实失败类别**，不要最后才猜。
+        // 旧版把所有"没拿到"都归成 RKEY_EXPIRED/NETWORK，于是"字节拿到了但 magic 不合格"
+        // （BAD_CONTENT）被误标成网络问题，还会白白触发一次 30s 的 proot 回退。
+        var cdnFailure: QqMediaResult.Kind? = null
         if (!preExpired) {
             val bytes = try {
                 download(url, timeoutMs, maxBytes)
@@ -136,10 +143,18 @@ class QqMediaFetcher(
                     put(key, Entry(success.dataUrl, clock(), success.bytes))
                     return success
                 }
+                // 拿到字节但不合格（空/超限/magic 非图片）→ BAD_CONTENT，**不值得回退**
+                cdnFailure = QqMediaResult.Kind.BAD_CONTENT
+            } else {
+                cdnFailure = if (QqMediaFailure.looksLikeFallbackUrl(url)) {
+                    QqMediaResult.Kind.RKEY_EXPIRED
+                } else {
+                    QqMediaResult.Kind.NETWORK
+                }
             }
             android.util.Log.w(
                 TAG,
-                "媒体获取失败 host=${QqMediaFailure.hostOf(url)} " +
+                "媒体获取失败 host=${QqMediaFailure.hostOf(url)} 类别=$cdnFailure " +
                     "有字节=${bytes != null} 预判rkey失效=$preExpired"
             )
         } else {
@@ -150,8 +165,14 @@ class QqMediaFetcher(
         }
 
         // ---- 层 B：本地文件回退（图片字节通常已在协议端容器内）----
+        //
+        // guardrail R-03：**必须**查 shouldTryLocalFallback —— 旧版把该函数写成了死代码，
+        // 导致 BAD_CONTENT（字节不合格）也去起一次 proot（30s），纯浪费。
         val fallback = localFallback
-        if (fallback != null) {
+        val worthFallback = QqMediaFailure.shouldTryLocalFallback(
+            cdnFailure ?: QqMediaResult.Kind.RKEY_EXPIRED
+        )
+        if (fallback != null && worthFallback) {
             val local = try {
                 fallback(ref)
             } catch (e: CancellationException) {
@@ -175,18 +196,23 @@ class QqMediaFetcher(
             }
         }
 
-        val kind = if (preExpired || QqMediaFailure.looksLikeFallbackUrl(url)) {
-            // 2026-11-15（单测抓到的真 bug）：即使只出现 1 次，只要 URL **本身就是
-            // 降级形状**（gchat.qpic.cn + rkey + spec=0），也应判 rkey 失效——
-            // 真机 4 张图片 rkey 完全相同，但首张就必然失败，不该被归类成"网络问题"。
-            QqMediaResult.Kind.RKEY_EXPIRED
-        } else if (fallback == null) {
-            QqMediaResult.Kind.NETWORK
-        } else {
-            // 有回退能力但也没拿到 → 最可能是 rkey 失效 + 本地文件缺失
-            QqMediaResult.Kind.RKEY_EXPIRED
+        // guardrail R-01（2026-11-15）：**如实归类**，不要把"回退也没拿到"一律说成 rkey 失效
+        // ——那会把"脚本未部署 / proot 挂了 / 容器内确实没这个文件"误导成"协议端签名坏了"，
+        // 让用户按错误方向排障。
+        val kind = when {
+            cdnFailure == QqMediaResult.Kind.BAD_CONTENT -> QqMediaResult.Kind.BAD_CONTENT
+            preExpired || QqMediaFailure.looksLikeFallbackUrl(url) ->
+                QqMediaResult.Kind.RKEY_EXPIRED
+            cdnFailure != null -> cdnFailure
+            else -> QqMediaResult.Kind.NETWORK
         }
-        return QqMediaResult.Failure(kind, QqMediaFailure.diagnosticFor(kind))
+        val detail = if (kind == QqMediaResult.Kind.RKEY_EXPIRED && fallback != null) {
+            // 两条路都没成：既说了签名问题，也说清"本地回退同样失败"
+            QqMediaFailure.diagnosticFor(kind) + "；本地文件回退亦未取到（脚本未部署或容器内无此文件）"
+        } else {
+            QqMediaFailure.diagnosticFor(kind)
+        }
+        return QqMediaResult.Failure(kind, detail)
     }
 
     /** 字节 → 成功结果（含尺寸/magic 校验）；不合格返回 null。 */
@@ -232,6 +258,9 @@ class QqMediaFetcher(
 
         /** 单张图片上限（8MB；QQ 常见 100KB~2MB）。 */
         const val MAX_BYTES: Int = 8 * 1024 * 1024
+
+        /** rkey 观测表上限（超过整体清空；只用于"近期复用"判定）。 */
+        private const val MAX_RKEY_TRACKED = 64
 
         /** 缓存条数。 */
         const val MAX_ENTRIES: Int = 8
