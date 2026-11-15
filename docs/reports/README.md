@@ -132,3 +132,9 @@
 
 - [2026-11-15-prism-memory-footprint-archaeology.md](2026-11-15-prism-memory-footprint-archaeology.md) —— 内存占用考古（code-archaeologist）
 - [2026-11-15-qq-media-and-memory-guardrail.md](2026-11-15-qq-media-and-memory-guardrail.md) —— 审查与安全审计（guardrail-enforcer）
+
+当前在用批次（2026-11-15 夜，图片 rkey 失效与本地回退，ADR-075 / PRD US-3134）
+—— **以下文件仅本地存在，不入远程**（rules/05 §12.6 一次性工件禁令）：
+
+- [2026-11-15-qq-image-rkey-and-local-fallback-plan.md](2026-11-15-qq-image-rkey-and-local-fallback-plan.md) —— 取证与方案（待审稿，已获准执行 A+B+C3）
+- [2026-11-15-qq-media-local-fallback-guardrail.md](2026-11-15-qq-media-local-fallback-guardrail.md) —— 审查与安全审计（guardrail-enforcer，有条件通过 → 4M 已修）
