@@ -3,6 +3,9 @@ package io.prism.qq
 import io.prism.qq.channel.QqMediaKind
 import io.prism.qq.channel.QqMediaRef
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Base64
@@ -63,6 +66,23 @@ class QqMediaFetcher(
     private val cachedBytes = AtomicLong(0)
 
     /**
+     * **单飞**（guardrail R-03/R-05；2026-11-15）。
+     *
+     * 预取（消息到达时）与回复链可能同时请求同一 ref；桥接层虽有互斥锁，
+     * 但排队会白等一个 15s 预算。这里按 key 去重：同一张图并发只真正取一次，
+     * 其余协程共享同一个 `Deferred`。
+     */
+    private val inFlight = ConcurrentHashMap<String, kotlinx.coroutines.Deferred<QqMediaResult>>()
+
+    /**
+     * 全局限流（guardrail R-05）：同一时刻最多 [MAX_CONCURRENT_FETCH] 个真实取图。
+     *
+     * 用户连发多图时会触发多个预取，每个都要起一次 proot（1~3s、吃 CPU）。
+     * 不限流会瞬间拉起 N 个 proot 把手机拖慢。
+     */
+    private val fetchSemaphore = Semaphore(MAX_CONCURRENT_FETCH)
+
+    /**
      * 下载并转成 `data:` URL（**向后兼容入口**；失败返回 null）。
      *
      * 新代码请用 [fetch] 拿到带原因的 [QqMediaResult]。
@@ -93,7 +113,47 @@ class QqMediaFetcher(
                 QqMediaResult.Kind.POLICY_REJECTED, "来源不在允许范围"
             )
         }
+        return fetchDeduplicated(ref, url)
+    }
+
+    /**
+     * 单飞去重 + 并发限流后的真实取图（guardrail R-03/R-05；2026-11-15）。
+     *
+     * - 同一 ref 并发（预取 + 回复链）只真正取一次，避免白等一个 15s 预算；
+     * - 全局最多 [MAX_CONCURRENT_FETCH] 个真实取图（每个会起一次 proot）。
+     */
+    private suspend fun fetchDeduplicated(ref: QqMediaRef, url: String): QqMediaResult {
         val key = ref.fileName?.takeIf { it.isNotBlank() } ?: ("u:" + url.hashCode())
+        // 快路径：命中缓存直接返回（预取成功时回复链走这里）
+        cache[key]?.let { hit ->
+            if (clock() - hit.at < CACHE_TTL_MS) {
+                return QqMediaResult.Success(
+                    dataUrl = hit.dataUrl,
+                    mime = hit.dataUrl.substringAfter("data:").substringBefore(";base64,"),
+                    bytes = hit.bytes,
+                    source = QqMediaResult.Source.CDN
+                )
+            }
+            evict(key)
+        }
+        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO)
+        val deferred = inFlight.computeIfAbsent(key) {
+            scope.async {
+                try {
+                    fetchSemaphore.withPermit { fetchUncached(ref, url, key) }
+                } finally {
+                    inFlight.remove(key)
+                }
+            }
+        }
+        return deferred.await()
+    }
+
+    private suspend fun fetchUncached(
+        ref: QqMediaRef,
+        url: String,
+        key: String
+    ): QqMediaResult {
         cache[key]?.let { hit ->
             if (clock() - hit.at < CACHE_TTL_MS) {
                 return QqMediaResult.Success(
@@ -106,7 +166,7 @@ class QqMediaFetcher(
             evict(key)
         }
 
-        // rkey 观测：占位 rkey 会被大量不同图片复用 → 提前判定，省掉一次必然失败的 10s 超时
+        // rkey 观测：占位 rkey 会被大量不同图片复用 → 提前判定，省掉一次必然失败的 10s 超时（旧注释）
         val rkey = QqMediaFailure.rkeyOf(url)
         val rkeyCount = if (rkey == null) 0 else synchronized(rkeyTracker) {
             // 2026-11-15（guardrail 预判）：rkey 是长串，若无上限会随进程运行无限增长。
@@ -261,6 +321,14 @@ class QqMediaFetcher(
 
         /** rkey 观测表上限（超过整体清空；只用于"近期复用"判定）。 */
         private const val MAX_RKEY_TRACKED = 64
+
+        /**
+         * 同时进行的真实取图上限（guardrail R-05）。
+         *
+         * 每次真实取图会起一次 proot（1~3s，吃 CPU/内存）。2 个并发足以覆盖
+         * "预取 + 回复链"的常见重叠，又不会因为连发多图而拉起一堆 proot。
+         */
+        private const val MAX_CONCURRENT_FETCH = 2
 
         /** 缓存条数。 */
         const val MAX_ENTRIES: Int = 8

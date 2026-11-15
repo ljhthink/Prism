@@ -344,6 +344,11 @@ class QqDebugReceiver : BroadcastReceiver() {
                             timestampMs = System.currentTimeMillis(),
                             media = media
                         )
+                        // 2026-11-15（ADR-075）：先走**与真实事件相同**的路径——
+                        // 记住实时原文（内含媒体预取），再走回复链。
+                        // 否则探针测不到"预取是否生效"，会误判为功能正常。
+                        app.debugRememberLiveInbound(probe)
+                        kotlinx.coroutines.delay(1_500L)
                         val reply = app.qqAutoReplyForDebug
                             ?: return@runBlocking "simulate_inbound=debug 入口未装配"
                         val result = reply(probe)

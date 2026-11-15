@@ -877,6 +877,61 @@ class PrismApplication : Application() {
     private fun rememberLiveInboxMessage(message: io.prism.qq.channel.QqMessage) {
         val id = io.prism.qq.QqInboxStore.idFor(message) ?: return
         liveInboxMessages[id] = message
+        // 2026-11-15（guardrail R-02 必修）：**这里必须真的调用预取**。
+        // 上一版定义了 prefetchMediaInBackground 却没有任何调用点（死代码），
+        // 于是"消息一到就取图"根本没发生，回复链路仍要现等落盘。
+        prefetchMediaInBackground(message)
+    }
+
+    /**
+     * **后台预取媒体**（2026-11-15 新增；ADR-075 / PRD US-3134）。
+     *
+     * ## 为什么必须有
+     *
+     * 真机实测：NapCat 给出 `file` 名**不代表字节已落盘**——QQ 还在后台下载，
+     * 实测 26KB 的表情在 prime 后 6 秒仍 `not_found`，数十秒后才出现。
+     * 若等到回复链路才去取，用户就要干等（且这段时间持有 `replyMutex`）。
+     *
+     * 因此**消息一到达**就在后台把图取进缓存：等回复真正需要时通常已命中，
+     * 把"最长 30s 的等待"挪到"用户还在看消息"的空档里。
+     * 失败也无所谓（回复时会重试一次，行为不变）。
+     */
+    private fun prefetchMediaInBackground(message: io.prism.qq.channel.QqMessage) {
+        val ref = message.media.firstOrNull {
+            it.kind == io.prism.qq.channel.QqMediaKind.IMAGE ||
+                it.kind == io.prism.qq.channel.QqMediaKind.STICKER
+        } ?: return
+        // 可观测性：没有这条日志就无法判断"预取到底跑没跑"（上一轮就是死代码却全绿）。
+        android.util.Log.i(
+            "QqProactiveSchedule",
+            "媒体预取启动：kind=${ref.kind} file=${ref.fileName?.take(40) ?: "-"}"
+        )
+        appScope.launch {
+            val r = runCatching { qqMediaFetcher.fetch(ref) }
+            r.onSuccess { res ->
+                android.util.Log.i(
+                    "QqProactiveSchedule",
+                    "媒体预取结果：${res::class.simpleName}" +
+                        " source=${(res as? io.prism.qq.QqMediaResult.Success)?.source}"
+                )
+            }.onFailure { e ->
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                android.util.Log.w(
+                    "QqProactiveSchedule",
+                    "媒体预取失败（回复时会重试）：${e::class.simpleName}"
+                )
+            }
+        }
+    }
+
+    /**
+     * debug 专用：把合成消息送进**真实事件路径**（记住原文 + 媒体预取）。
+     *
+     * 2026-11-15：之前的探针直接调 autoReply，绕过了 `rememberLiveInboxMessage`，
+     * 于是"预取是否生效"根本无法被验证——我因此误判过一次。
+     */
+    fun debugRememberLiveInbound(message: io.prism.qq.channel.QqMessage) {
+        rememberLiveInboxMessage(message)
     }
 
     /** QQ 媒体下载器（2026-10-26；US-3124）：白名单 + 尺寸上限 + LRU 缓存。 */
@@ -893,9 +948,32 @@ class PrismApplication : Application() {
         )
     }
 
-    /** 协议端本地文件桥（rkey 失效时从容器内取图）。 */
+    /**
+     * 协议端本地文件桥（rkey 失效时从容器内取图）。
+     *
+     * 2026-11-15（guardrail R-01 必修）：**必须注入 `primeDownload`**。
+     * 上一版这里只写了 `QqMediaLocalBridge(this)`，prime 恒为 null →
+     * 生产上从未调用过 `get_image` → 图片永远等不到落盘（"一片空白"的真因之一）。
+     */
     val mediaLocalBridge: io.prism.qq.QqMediaLocalBridge by lazy {
-        io.prism.qq.QqMediaLocalBridge(this)
+        io.prism.qq.QqMediaLocalBridge(
+            context = this,
+            primeDownload = { name ->
+                // `name` 已过 sanitizeName（仅 [A-Za-z0-9_-] + 图片扩展名），无注入面；
+                // 但用结构化 JSON（buildJsonObject）而非字符串拼接，避免将来放宽字符集时埋雷。
+                val payload = kotlinx.serialization.json.buildJsonObject {
+                    put("file", kotlinx.serialization.json.JsonPrimitive(name))
+                }.toString()
+                runCatching {
+                    oneBotClient.call("get_image", payload)
+                }.onFailure {
+                    android.util.Log.w(
+                        "PrismApplication", "get_image prime 失败：${it::class.simpleName}"
+                    )
+                }
+                Unit
+            }
+        )
     }
 
     /**
@@ -2177,7 +2255,12 @@ class PrismApplication : Application() {
                 }
                 android.util.Log.i(
                     "QqProactiveSchedule",
-                    "被动回复文本=${if (sendResult == "SKIP:TEXT_EMPTY") "仅媒体" else if (textOk) "ok" else "fail"}"
+                    // guardrail R-10：失败时带上**脱敏后的原因**（此前只打印 fail，排障无从下手）。
+                    // sendResult 是通道返回的短状态串（不含正文）；仍限长 80 防意外膨胀。
+                    "被动回复文本=${if (sendResult == "SKIP:TEXT_EMPTY") "仅媒体" else if (textOk) "ok" else "fail"}" +
+                        (if (!textOk && sendResult != "SKIP:TEXT_EMPTY") {
+                            "（${sendResult.take(80)}）"
+                        } else "")
                 )
                 if (textToSend.isNotBlank()) {
                     runCatching {

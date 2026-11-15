@@ -2,6 +2,8 @@ package io.prism.qq
 
 import android.content.Context
 import io.prism.qq.channel.QqMediaRef
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * **本地文件回退**：当 QQ CDN 取不到图时，从协议端容器里把图片字节"捞"出来
@@ -33,6 +35,18 @@ import io.prism.qq.channel.QqMediaRef
  */
 class QqMediaLocalBridge(
     private val context: Context,
+    /**
+     * **触发协议端落盘**（2026-11-15 真机排障的关键发现）。
+     *
+     * 真机实测：NapCat 给出 `file` 名**不代表字节已落盘**。
+     * 同一条消息：事件后 3 秒 find → `not_found`（整个容器只有 1 个 jpg）；
+     * 手动调过一次 OneBot `get_image` 之后 → 立刻命中。
+     * 说明 **`get_image` 的副作用会促使 QQ 下载/解密并写入 `nt_data/Pic/...`**。
+     *
+     * 这就是"手工测能过、真实消息收不到"的根因：手工测用的是早已落盘的老图。
+     * 因此回退时序必须是：先 prime（触发落盘）→ 再 find（脚本内还会等 8s）。
+     */
+    private val primeDownload: (suspend (String) -> Unit)? = null,
     /** 提交脚本执行（默认走 Termux RUN_COMMAND；可注入以便单测）。 */
     private val launch: (arguments: Array<String>) -> Boolean = { args ->
         QqTermuxBridge.runMediaFetch(context.applicationContext, args)
@@ -69,9 +83,27 @@ class QqMediaLocalBridge(
     /**
      * 尝试从协议端容器导出该媒体的原始字节。
      *
+     * ## guardrail R-03（2026-11-15 必修）：必须**串行化**
+     *
+     * 脚本的产物/回执是**全局固定路径**（`/sdcard/prism-media.{bin,txt}`），
+     * 因为 Termux 的 `RUN_COMMAND` 无法按调用方区分输出。若两条 fetch 并发
+     * （预取 + 回复链，或用户连发多图），会出现：
+     * ```
+     * A 提交 → B 提交 → B 的脚本写产物 → A 读到 B 的字节
+     * → A 的回复带上了 B 的图（串包），并写进 10 分钟缓存
+     * ```
+     * 这是**内容错配**，比"取不到"严重得多（模型会对着别人的图说话）。
+     *
+     * 因此用一把进程内互斥锁保证同一时刻只有一个导出在跑；
+     * 后来者排队（单次上限见 [TIMEOUT_MS]），拿到的一定是自己那次的产物。
+     *
      * @return 原始字节；不可用/失败返回 null（调用方退化为诚实降级）
      */
-    suspend fun fetchBytes(ref: QqMediaRef): ByteArray? {
+    suspend fun fetchBytes(ref: QqMediaRef): ByteArray? = fetchLock.withLock {
+        fetchBytesLocked(ref)
+    }
+
+    private suspend fun fetchBytesLocked(ref: QqMediaRef): ByteArray? {
         val name = sanitizeName(ref.fileName)
         if (name == null) {
             android.util.Log.w(TAG, "本地回退跳过：文件名不安全或缺失")
@@ -82,14 +114,30 @@ class QqMediaLocalBridge(
         runCatching { java.io.File(QqProtocolScripts.MEDIA_OUT_FILE).delete() }
         runCatching { cleanupReadablePath(QqProtocolScripts.MEDIA_RELAY_FILE) }
         runCatching { cleanupReadablePath(QqProtocolScripts.MEDIA_RELAY_RESULT_FILE) }
+        // 2026-11-15：**先触发协议端落盘**，再交给脚本 find。
+        // 顺序错了就会稳定 not_found（真实消息刚到达时字节还没写下来）。
+        primeDownload?.let { prime ->
+            runCatching { prime(name) }.onFailure {
+                android.util.Log.w(TAG, "触发落盘失败（继续尝试直取）：${it::class.simpleName}")
+            }
+        }
         val submitted = runCatching { launch(arrayOf(name)) }.getOrDefault(false)
         if (!submitted) {
             android.util.Log.w(TAG, "本地回退提交失败（Termux 未装/未授权 RUN_COMMAND？）")
             return null
         }
         val deadline = clock() + TIMEOUT_MS
+        var nextPrimeAt = clock() + REPRIME_INTERVAL_MS
         while (clock() < deadline) {
             sleep(POLL_INTERVAL_MS)
+            // 2026-11-15：等待期间**反复 prime**。真机实测单次 get_image 触发的下载
+            // 可能较慢或被丢弃，重发一次能显著提高命中率（代价只是一次本地 HTTP 调用）。
+            if (clock() >= nextPrimeAt) {
+                nextPrimeAt = clock() + REPRIME_INTERVAL_MS
+                primeDownload?.let { prime ->
+                    runCatching { prime(name) }
+                }
+            }
             val receipt = readReceiptRelayed() ?: continue
             if (!receipt.ok) {
                 android.util.Log.w(
@@ -165,6 +213,9 @@ class QqMediaLocalBridge(
         f.isFile && f.length() in 1..MAX_MEDIA_BYTES
     }.getOrDefault(false)
 
+    /** 串行化导出（见 [fetchBytes] 的 R-03 说明）。 */
+    private val fetchLock = Mutex()
+
     companion object {
         private const val TAG = "QqMediaLocalBridge"
 
@@ -178,7 +229,17 @@ class QqMediaLocalBridge(
          * guardrail R-07：本调用在 `autoReplyLocked` 内（持有 replyMutex），
          * 因此上限不能设太大——宁可"这次看不到图"，也不要堵住后续所有回复。
          */
+        /**
+         * 总预算（2026-11-15 真机校准）。
+         *
+         * 实测：prime 后落盘 **>6s**（26KB 表情等 6s 仍 not_found，3 分钟后已存在）。
+         * guardrail R-04：本调用发生在 `autoReplyLocked` 内（持 replyMutex），所以预算必须小。\n         * 真正的长时间等待交给**预取**（消息到达时就在后台跑）；回复链通常是缓存命中。\n         * 桥接层在等待期间每 [REPRIME_INTERVAL_MS] 再 prime 一次，
+         * 因为单次 `get_image` 触发的下载可能被丢弃/较慢。
+         */
         const val TIMEOUT_MS: Long = 15_000L
+
+        /** 等待期间重新触发落盘的间隔。 */
+        const val REPRIME_INTERVAL_MS: Long = 5_000L
 
         /** 回执轮询间隔（proot 启动是秒级，500ms 足够且不空转）。 */
         const val POLL_INTERVAL_MS: Long = 500L
