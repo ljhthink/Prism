@@ -847,6 +847,15 @@ class PrismApplication : Application() {
             // 只在"文件说没跑"时调用一次，不是新增周期性探测源。
             httpProbe = {
                 runCatching { oneBotClient.call("get_status", "{}").ok }.getOrDefault(false)
+            },
+            // 2026-11-15（ADR-073）：一键修复必须能看到**账号态**，
+            // 否则"进程在跑但账号离线（需扫码）"会被报成"本来就在运行"。
+            healthProbe = {
+                runCatching { qqProtocolHealth.probe() }.getOrNull()
+                    ?: io.prism.qq.QqProtocolHealth.Status(
+                        state = io.prism.qq.QqProtocolHealth.State.UNREACHABLE,
+                        detail = "账号态探测失败"
+                    )
             }
         )
     }
@@ -1869,40 +1878,48 @@ class PrismApplication : Application() {
                 // 2026-10-26（US-3124）：图片/表情包要真的"给模型看"。
                 // 真机取证：NapCat 事件带 https CDN 地址，但原实现只留 `[图片]` 占位符。
                 // 策略：下载 → 支持视觉就传图；否则 OCR 提字；都不行则诚实说明（禁止编造）。
+                //
+                // 2026-11-15 真机反馈「LLM 看不到用户发的表情」：原实现只挑 IMAGE/STICKER，
+                // **`face`（QQ 内置表情，如 14=开心）被整条丢弃** → 模型只看到 `[表情]` 占位符，
+                // 既不知道是哪个表情也不知道情绪。现在改为：对所有媒体都生成可读说明，
+                // 图片再叠加视觉/OCR 增强。
                 val mediaRef = incoming.media.firstOrNull {
                     it.kind == io.prism.qq.channel.QqMediaKind.IMAGE ||
                         it.kind == io.prism.qq.channel.QqMediaKind.STICKER
                 }
                 var imageDataUrl: String? = null
                 var mediaNote: String? = null
+                if (incoming.media.isNotEmpty()) {
+                    // 先为**全部**媒体生成说明（face/语音/视频都算），保证模型一定"看得到"
+                    mediaNote = io.prism.qq.QqMediaDescriber.describe(incoming.media)
+                    android.util.Log.i(
+                        "QqProactiveSchedule",
+                        "媒体说明：${incoming.media.size} 项 → ${mediaNote?.take(120).orEmpty()}"
+                    )
+                }
                 if (mediaRef != null) {
                     val dataUrl = qqMediaFetcher.dataUrl(mediaRef)
                     val modelName = provider.models.firstOrNull().orEmpty()
                     val vision = provider.supportsVision ||
                         io.prism.data.ProviderConfig.detectVisionSupport(modelName)
-                    val isSticker = mediaRef.kind == io.prism.qq.channel.QqMediaKind.STICKER
-                    mediaNote = buildString {
-                        append(if (isSticker) "对方发来一个表情包" else "对方发来一张图片")
-                        mediaRef.summary?.takeIf { it.isNotBlank() }?.let { append("，摘要：$it") }
-                        if (mediaRef.fileSize > 0) append("，约 ${mediaRef.fileSize / 1024}KB")
-                    }
                     if (dataUrl != null && vision) {
                         imageDataUrl = dataUrl
                     } else if (dataUrl != null) {
                         // 无视觉能力 → 本地 OCR 兜底（中文 ML Kit，离线）
                         val ocr = runCatching { mlKitOcrTextExtractor.extractText(dataUrl) }.getOrNull()
-                        mediaNote += if (!ocr.isNullOrBlank()) {
-                            "；图片中的文字（OCR，可能有误）：${ocr.take(MAX_OCR_CHARS)}"
+                        mediaNote = (mediaNote ?: "") + if (!ocr.isNullOrBlank()) {
+                            "\n图片中的文字（OCR，可能有误）：${ocr.take(MAX_OCR_CHARS)}"
                         } else {
-                            "；当前模型无法识别画面内容"
+                            "\n当前模型无法识别图片画面内容"
                         }
                     } else {
-                        mediaNote += "；图片内容未能获取"
+                        // 下载失败（CDN 过期/无权限）时**不要把已识别出的表情/摘要丢掉**
+                        mediaNote = (mediaNote ?: "") + "\n图片本体未能获取（下载失败或已过期）"
                     }
                     android.util.Log.i(
                         "QqProactiveSchedule",
                         "媒体：kind=${mediaRef.kind} vision=$vision 有图=${dataUrl != null} " +
-                            "OCR=${if (mediaNote.contains("OCR")) "yes" else "no"}"
+                            "OCR=${if (mediaNote?.contains("OCR") == true) "yes" else "no"}"
                     )
                 }
 

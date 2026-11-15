@@ -119,6 +119,55 @@ object QqProtocolAlertNotifier {
         post(context, title, body, reminder = true)
     }
 
+    /**
+     * 「后台被系统限制，自动回复已暂停」通知（2026-11-15；ADR-073）。
+     *
+     * 这是**受限态下唯一一定能送达**的通道：发通知不需要前台服务、不需要进程常驻。
+     * 真机 177 次 `startForeground() not allowed due to bg restriction` 期间，
+     * 用户完全不知道功能已停摆——本方法就是补这个洞。
+     *
+     * @param attempt 连续被拒次数（用于文案与诊断）
+     * @param hasExactAlarm 是否持有「闹钟与提醒」权限（决定给出的修复建议）
+     */
+    fun notifyBackgroundRestricted(context: Context, attempt: Int, hasExactAlarm: Boolean) {
+        ensureChannel(context)
+        val advice = if (!hasExactAlarm) {
+            "请到 设置 → 应用 → Prism → 授予「闹钟与提醒」权限，" +
+                "否则系统会阻止后台唤醒，自动回复随时会停。"
+        } else {
+            "请在系统设置里把 Prism 的省电策略改为「无限制」，并允许后台弹出界面。"
+        }
+        post(
+            context,
+            "QQ 小号助手：后台被系统限制",
+            "系统拒绝了后台运行许可（连续第 $attempt 次），自动回复与定时消息暂时无法工作。" +
+                "打开 Prism 一次即可恢复。\n$advice",
+            reminder = attempt == 1
+        )
+    }
+
+    /**
+     * 「自动拉起失败」通知（2026-11-15；ADR-073）。
+     *
+     * 真机实证：Shizuku 未就绪时自动拉起连命令都发不出去，用户只看到"又断了"
+     * 却不知道要做什么。这里给出**一步**可执行动作（而不是罗列所有可能原因）。
+     */
+    fun notifyRestartFailed(context: Context, reason: String, shizukuReady: Boolean) {
+        ensureChannel(context)
+        val advice = if (!shizukuReady) {
+            "Shizuku 未在运行——自动拉起需要它。请打开 Shizuku 应用并启动服务" +
+                "（手机重启后必须重做一次），然后回到 Prism 点「一键修复」。"
+        } else {
+            "请打开 Prism → 设置 → QQ 小号助手 → 协议端管家，点「一键修复」查看具体原因。"
+        }
+        post(
+            context,
+            "QQ 小号助手：自动拉起失败",
+            "协议端掉了但未能自动恢复。\n原因：$reason\n$advice",
+            reminder = true
+        )
+    }
+
     /** AC-5：可执行建议（**三条全部**指向 Prism 内的入口，不再把用户引回终端）。 */
     private fun adviceFor(kind: QqProtocolAlertPolicy.Kind): String = when (kind) {
         // 2026-11-01 验收 AC-5：三条文案统一指向管家（与设置页诊断同源：诊断文案也已改为指向管家）

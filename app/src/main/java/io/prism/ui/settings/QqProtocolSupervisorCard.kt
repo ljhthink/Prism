@@ -51,6 +51,9 @@ fun QqProtocolSupervisorSection(
     var statusText by remember { mutableStateOf("点「刷新」查看协议端状态") }
     var powerText by remember { mutableStateOf("尚未核验") }
     var readiness by remember { mutableStateOf<QqTermuxBridge.Readiness?>(null) }
+
+    /** 账号在线态文案（2026-11-15；ADR-073）：与"协议端是否在跑"分开显示，避免混为一谈。 */
+    var accountText by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
 
     fun refresh() {
@@ -107,6 +110,17 @@ fun QqProtocolSupervisorSection(
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         Text("状态：$statusText", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 6.dp))
+        // guardrail R-03：账号态必须真的渲染出来（否则"展示账号态"是死状态）。
+        // 与"协议端是否在跑"分开显示：进程在跑 ≠ 账号能收发，混为一谈正是本次 bug 的来源。
+        if (accountText.isNotBlank()) {
+            val warn = accountText.contains("离线") || accountText.contains("不可达")
+            Text(
+                "账号：$accountText",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (warn) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         Text("省电策略：$powerText", style = MaterialTheme.typography.bodySmall)
         if (!notificationsEnabled) {
             Text(
@@ -157,7 +171,13 @@ fun QqProtocolSupervisorSection(
                             powerText = result?.power?.describe() ?: "无法核验"
                             statusText = when {
                                 result == null -> "无法执行"
-                                // N-3：本来就在跑时**不要**报"启动未成功"，那会误导用户
+                                // 2026-11-15（ADR-073）：**账号离线优先于一切**。
+                                // 真机反馈"一键修复好像有问题"：3000 在监听但账号已离线时，
+                                // 旧文案固定报"本来就在运行"，把"必须扫码"这个唯一有效动作
+                                // 完全掩盖了——用户点多少次都不会好。
+                                result.needsQrLogin ->
+                                    "协议端在运行，但**账号已离线**：请点下方「扫码登录」重新扫码" +
+                                        "（这就是「有时回有时不回」的原因）"
                                 result.alreadyRunning -> "协议端本来就在运行（未重启，避免账号被踢）"
                                 result.started -> "已提交启动命令"
                                 // 验收 AC-1：探针被拒时明确指向 Termux 的 allow-external-apps
@@ -166,6 +186,14 @@ fun QqProtocolSupervisorSection(
                                 else -> "启动未成功：" + QqTermuxBridge.describeReadiness(
                                     result.readiness
                                 )
+                            }
+                            // 账号态如实展示（不再只在日志里）
+                            if (result != null && result.accountState.isNotBlank()) {
+                                accountText = when (result.accountState) {
+                                    "ONLINE" -> "账号在线"
+                                    "QQ_OFFLINE" -> "账号离线（需扫码）"
+                                    else -> "协议端不可达"
+                                }
                             }
                             readiness = result?.readiness
                         } catch (e: kotlinx.coroutines.CancellationException) {

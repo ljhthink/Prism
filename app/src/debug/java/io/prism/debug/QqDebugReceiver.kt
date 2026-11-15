@@ -249,10 +249,18 @@ class QqDebugReceiver : BroadcastReceiver() {
                         val summary = intent.getStringExtra("summary") ?: ""
                         val isSticker = intent.getStringExtra("sub_type") == "1"
                         val textExtra = intent.getStringExtra("text")
-                        val media = if (url.isBlank()) {
-                            emptyList()
-                        } else {
-                            listOf(
+                        val faceId = intent.getStringExtra("face")
+                        val media = when {
+                            // 2026-11-15：`--es face <id>` 用于真机验证
+                            // 「LLM 能看到 QQ 内置表情」（用户反馈的第二项问题）。
+                            !faceId.isNullOrBlank() -> listOf(
+                                io.prism.qq.channel.QqMediaRef(
+                                    kind = io.prism.qq.channel.QqMediaKind.FACE,
+                                    summary = faceId
+                                )
+                            )
+                            url.isBlank() -> emptyList()
+                            else -> listOf(
                                 io.prism.qq.channel.QqMediaRef(
                                     kind = if (isSticker) {
                                         io.prism.qq.channel.QqMediaKind.STICKER
@@ -267,6 +275,7 @@ class QqDebugReceiver : BroadcastReceiver() {
                             )
                         }
                         val text = textExtra ?: when {
+                            !faceId.isNullOrBlank() -> "[表情]"
                             isSticker -> "[表情包]"
                             media.isNotEmpty() -> "[图片]"
                             else -> "在吗"

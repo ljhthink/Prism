@@ -59,6 +59,17 @@ class ProactiveScheduleService : Service() {
     private var stopRequested = false
 
     /**
+     * 连续"前台化被系统拒绝"次数（2026-11-15；ADR-073 / guardrail R-01）。
+     *
+     * **真值落盘**在 `QqRuntimeStateRepository`；这里只是本次实例的缓存。
+     * 为什么不能只用实例字段：失败路径每次 `stopSelf()`，下次被闹钟唤起是**新实例**，
+     * 实例字段归零 → `attempt` 恒 1、退避与 30 分钟通知节流全部失效
+     * （真机 177 次拒绝 ≈ 每 6 分钟一条高优提醒，正是该缺陷的形态）。
+     */
+    @Volatile
+    private var foregroundBlockCountCache = 0
+
+    /**
      * 精确闹钟的**唤醒信号**（ADR-063 修订 2026-10-25）。
      *
      * 原实现里 `ACTION_WAKE` 只是再 `startForeground` 一次：`loopJob` 非空时不会打断正在
@@ -130,13 +141,66 @@ class ProactiveScheduleService : Service() {
         scheduleLivenessWatchdog()
         if (!startInForeground()) {
             // CR-10：前台服务启动失败（系统限制）→ 不能直接认输。
-            // 旧实现 stopSelf + NOT_STICKY = 叫醒一次、失败、再无唤醒源（自毁闭环）。
-            // 现在登记一次 5 分钟后的非精确重试，让"系统一时不允许前台服务"能自行恢复。
-            Log.w(TAG, "前台化失败，登记 5 分钟重试闹钟后再停止")
-            scheduleRetryAfterForegroundFailure()
-            stopSelf()
+            //
+            // 2026-11-15（真机决定性取证；ADR-073）：dumpsys 里 177 条
+            // `Service.startForeground() not allowed due to bg restriction` 说明
+            // **系统在后台拒绝启动 FGS**，而我们这里"只登记 5 分钟重试 + stopSelf"，
+            // 于是每 5 分钟失败一次、直到用户手动打开——用户看到的就是"隔了几小时才恢复"。
+            //
+            // 现在的处置（三层，缺一不可）：
+            //  ① **如实告知用户**：发一条通知"后台被系统限制、自动回复已暂停，请打开 App"。
+            //     通知不需要 FGS，任何进程内代码都能发——这是唯一在受限态下一定能送达的通道；
+            //  ② 退避重试：5 分钟 → 10 分钟 → 20 分钟（封顶），避免每 5 分钟刷一次失败；
+            //  ③ 把状态落盘，供下次冷启动诊断（`qq_fgs_blocked_at`）。
+            Log.w(TAG, "前台化被系统拒绝（bg restriction），转为通知用户 + 退避重试")
+            // guardrail R-01 / R2-01：计数与通知锚点都必须**落盘**（失败路径每次 stopSelf，
+            // 新实例字段归零）；且「读-判断-写」必须**合成一次 DataStore 事务**，
+            // 否则两次几乎同时的失败会读到同一 prevCount → attempt 同档、同刻发两条通知。
+            val ctx = applicationContext
+            val sid = startId
+            scope.launch {
+                var attempt = foregroundBlockCountCache + 1
+                // guardrail R3-01：仓库未装配/异常时**不得**退化成"每次都通知"
+                // （否则又会回到 177 条轰炸）。默认不通知，只在确实拿到记账结果时按它决定。
+                var notify = false
+                var decided = false
+                runCatching {
+                    val repo = QqRuntimeStateRepositoryHolder.get()
+                    if (repo != null) {
+                        val r = repo.recordForegroundBlock(
+                            nowMs = System.currentTimeMillis(),
+                            throttleMs = FG_BLOCK_NOTIFY_THROTTLE_MS
+                        )
+                        attempt = r.first
+                        notify = r.second
+                        decided = true
+                    }
+                }.onFailure { Log.w(TAG, "前台化被拒记账失败（${it::class.simpleName}）") }
+                if (!decided) {
+                    // 记账不可用时保守处理：只在**首次**（缓存为 0）提醒一次，
+                    // 后续失败只记日志，避免退化回刷屏。
+                    notify = foregroundBlockCountCache == 0
+                }
+                foregroundBlockCountCache = attempt
+                scheduleForegroundRetryWithBackoff(attempt)
+                if (notify) {
+                    runCatching {
+                        io.prism.qq.QqProtocolAlertNotifier.notifyBackgroundRestricted(
+                            ctx, attempt = attempt, hasExactAlarm = canScheduleExactAlarms()
+                        )
+                    }.onFailure { Log.w(TAG, "受限通知发送失败（${it::class.simpleName}）") }
+                }
+                Log.i(
+                    TAG,
+                    "前台化被拒第 $attempt 次（已落盘；通知=${if (notify) "已发" else "节流跳过"}）"
+                )
+                // guardrail R2-01：带 startId 停止，避免把随后**成功前台化**的新实例一起停掉。
+                stopSelf(sid)
+            }
             return START_NOT_STICKY
         }
+        // 前台化成功即清零"被拒"计数（连续失败才需要退避）
+        resetForegroundBlockCount()
         // 闹钟唤醒：必须优先于"循环已存在就不动"的分支——否则兜底形同虚设
         if (intent?.action == ACTION_WAKE) {
             Log.i(TAG, "闹钟唤醒：立即复评到期计划")
@@ -791,20 +855,76 @@ class ProactiveScheduleService : Service() {
             val am = getSystemService(AlarmManager::class.java) ?: return@launch
             val at = System.currentTimeMillis() + WATCHDOG_INTERVAL_MS
             runCatching {
-                am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, watchdogPendingIntent())
+                // 2026-11-15（真机决定性取证；ADR-073）：**必须优先用精确闹钟**。
+                //
+                // 177 次实证：`Service.startForeground() not allowed due to bg restriction`。
+                // 原因是 Android 12+ 的后台 FGS 限制——**只有 `setExactAndAllowWhileIdle`
+                // 会给应用一段临时白名单（允许启动 FGS）**；`setAndAllowWhileIdle`（不精确）
+                // **不给**。上一轮为了"免去闹钟权限"改用不精确闹钟，等于亲手把 FGS 豁免弄丢了：
+                // 闹钟能把进程叫醒，但服务一前台化就被拒 → 我们 `stopSelf()` → 自愈彻底失效。
+                //
+                // 因此：有精确闹钟权限 → 用精确（拿豁免）；没有 → 退化为不精确，
+                // 但**同时**把"无法前台化"如实告知用户（见 startInForeground 失败分支）。
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || am.canScheduleExactAlarms()) {
+                    am.setExactAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP, at, watchdogPendingIntent()
+                    )
+                    Log.i(TAG, "存活看门狗已按**精确**闹钟登记（保留 FGS 启动豁免）")
+                } else {
+                    am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, watchdogPendingIntent())
+                    Log.w(
+                        TAG,
+                        "存活看门狗降级为不精确闹钟（无「闹钟与提醒」权限）：" +
+                            "系统可能拒绝后台启动前台服务，自愈能力受限"
+                    )
+                }
             }.onFailure { Log.w(TAG, "存活看门狗登记失败（${it::class.simpleName}）") }
         }
     }
 
-    /** 前台化失败后的 5 分钟重试（不精确，够用；避免"叫醒一次失败就再无唤醒源"）。 */
-    private fun scheduleRetryAfterForegroundFailure() {
+    /**
+     * 前台化被系统拒绝后的**退避重试**（2026-11-15；ADR-073）。
+     *
+     * 旧实现固定 5 分钟，而 Android 12+ 的后台 FGS 限制**不会**在 5 分钟后自动解除
+     * （它取决于应用是否回到前台/是否进入豁免态），于是 5 分钟一次、失败 177 次，
+     * 既耗电又没有任何成功概率。改为指数退避，避免无效轰炸。
+     */
+    private fun scheduleForegroundRetryWithBackoff(attempt: Int) {
         val am = getSystemService(AlarmManager::class.java) ?: return
-        val at = System.currentTimeMillis() + FOREGROUND_RETRY_MS
+        val delayMs = foregroundRetryDelayMs(attempt)
+        val at = System.currentTimeMillis() + delayMs
         runCatching {
             // guardrail R-02：**必须用独立的 PendingIntent**。复用看门狗那个会被
-            // 30 分钟后的看门狗覆盖（等于 5 分钟重试从未生效），反之亦然。
+            // 30 分钟后的看门狗覆盖（等于重试从未生效），反之亦然。
             am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, foregroundRetryPendingIntent())
+            Log.i(TAG, "已登记前台化重试（第 $attempt 次，${delayMs / 60_000} 分钟后）")
         }.onFailure { Log.w(TAG, "前台化重试闹钟登记失败（${it::class.simpleName}）") }
+    }
+
+    /** 前台化重试的退避间隔（5 → 10 → 20 → 30 分钟封顶）。 */
+    private fun foregroundRetryDelayMs(attempt: Int): Long = when {
+        attempt <= 1 -> 5 * 60_000L
+        attempt == 2 -> 10 * 60_000L
+        attempt == 3 -> 20 * 60_000L
+        else -> 30 * 60_000L
+    }
+    /** 是否持有「闹钟与提醒」权限（Android 12+）。 */
+    private fun canScheduleExactAlarms(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+        val am = getSystemService(AlarmManager::class.java) ?: return false
+        return runCatching { am.canScheduleExactAlarms() }.getOrDefault(false)
+    }
+
+    /** 前台化成功 → 清零"被拒"计数（落盘 + 内存缓存）。 */
+    private fun resetForegroundBlockCount() {
+        foregroundBlockCountCache = 0
+        Thread {
+            runCatching {
+                kotlinx.coroutines.runBlocking {
+                    QqRuntimeStateRepositoryHolder.get()?.resetForegroundBlock()
+                }
+            }
+        }.start()
     }
 
     private fun cancelExactAlarm() {
@@ -916,8 +1036,11 @@ class ProactiveScheduleService : Service() {
          */
         private const val WATCHDOG_INTERVAL_MS = 30 * 60 * 1000L
 
-        /** 前台服务启动失败后的重试间隔（不精确）。 */
+        /** 前台服务启动失败后的重试间隔（不精确；实际用 [foregroundRetryDelayMs] 退避）。 */
         private const val FOREGROUND_RETRY_MS = 5 * 60 * 1000L
+
+        /** 「后台受限」通知的节流间隔（ADR-073）：避免 177 条轰炸，但保证用户能看到。 */
+        private const val FG_BLOCK_NOTIFY_THROTTLE_MS = 30 * 60 * 1000L
 
         /**
          * 过期计划的容忍上限（ADR-072：自愈不得补发过期主动消息）。

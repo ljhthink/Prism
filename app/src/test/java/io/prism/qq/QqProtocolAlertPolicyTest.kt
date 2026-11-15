@@ -119,6 +119,22 @@ class QqProtocolAlertPolicyTest {
         )
     }
 
+    /**
+     * 2026-11-15（ADR-073）：兜底判据**只在抖动时**启用；稳态持续不可达仍走原 30 次阈值。
+     * 这条锁死"不得因为加了兜底而把'等半小时'的语义改成'等 15 分钟'"。
+     */
+    @Test
+    fun `稳态不可达仍按 30 次阈值而不是兜底阈值`() {
+        var s = QqProtocolAlertPolicy.State()
+        var notifiedAt = -1
+        repeat(30) { i ->
+            val d = unreachable(t0 + i * minute, s)
+            s = d.state
+            if (d.action is QqProtocolAlertPolicy.Action.NotifyDown && notifiedAt < 0) notifiedAt = i
+        }
+        assertEquals("稳态不可达必须等到第 30 次（t0+29min）", 29, notifiedAt)
+    }
+
     @Test
     fun `从未连上过的告警只发一次`() {
         var s = QqProtocolAlertPolicy.State()
@@ -131,18 +147,27 @@ class QqProtocolAlertPolicyTest {
         assertEquals("长时间不可达也只能通知 1 次，不得刷屏", 1, notifyCount)
     }
 
+    /**
+     * 2026-11-15（ADR-073）**语义修订**：原用例断言"未武装时账号离线永 NOT 告警"，
+     * 真机证明这条会变成沉默盲区——快速登录"成功"后 12 秒即离线、反复 3 次，
+     * 用户只看到"有时回有时不回"却收不到任何提示。现在改为：
+     * 未到兜底阈值（15 分钟）不打扰，超过即告警（且按 4h 节流只响一次）。
+     */
     @Test
-    fun `账号离线不触发从未连上过分支`() {
+    fun `账号离线在未武装时超过兜底阈值才告警`() {
         var s = QqProtocolAlertPolicy.State()
-        var notified = false
+        var notifiedAtMinute = -1
         repeat(60) { i ->
             val d = qqOffline(t0 + i * minute, s)
             s = d.state
-            if (d.action is QqProtocolAlertPolicy.Action.NotifyDown) notified = true
+            if (d.action is QqProtocolAlertPolicy.Action.NotifyDown && notifiedAtMinute < 0) {
+                notifiedAtMinute = i
+            }
         }
+        assertTrue("未武装 + 账号长期离线必须告警（否则用户永远不知道要扫码）", notifiedAtMinute >= 0)
         assertTrue(
-            "get_status 能通说明协议端起来了，不算'从未连上'",
-            !notified
+            "必须等够兜底阈值（15 分钟）再报，逐条抖动不得打扰。实际第 $notifiedAtMinute 分钟",
+            notifiedAtMinute >= (QqProtocolAlertPolicy.DOWN_SINCE_FALLBACK_MS / minute).toInt()
         )
     }
 

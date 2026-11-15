@@ -260,6 +260,49 @@ class QqRuntimeStateRepository(
         prefs[STARTUP_REPORT_AT] = nowMs
     }
 
+    /** 读「前台化被拒」记账（次数 + 上次通知时刻）。 */
+    /**
+     * **原子**记一次「前台化被拒」（2026-11-15；ADR-073 / guardrail R2-01）。
+     *
+     * 为什么必须合成一次 `edit`：上一版是「read → 判断 → bump」三步，
+     * 两次几乎同时的失败会读到同一个 prevCount → `attempt` 同档、**同刻发两条通知**。
+     * DataStore 的 `edit` 在同一事务里串行，天然消除该竞态。
+     *
+     * @return (累加后的次数, 本次是否应发通知)；通知锚点只在应发时由本方法一并写回
+     */
+    suspend fun recordForegroundBlock(
+        nowMs: Long,
+        throttleMs: Long
+    ): Pair<Int, Boolean> {
+        var attempt = 1
+        var shouldNotify = true
+        edit { prefs ->
+            attempt = (prefs[FGS_BLOCK_COUNT] ?: 0) + 1
+            prefs[FGS_BLOCK_COUNT] = attempt
+            val lastNotifyAt = prefs[FGS_BLOCK_NOTIFY_AT] ?: 0L
+            val elapsed = nowMs - lastNotifyAt
+            // guardrail R3-02：时钟回拨（elapsed<0）按"已过节流"处理，与告警策略的既有防御一致；
+            // 否则改过系统时间后会被长期静默。
+            shouldNotify = lastNotifyAt <= 0L || elapsed !in 0 until throttleMs
+            if (shouldNotify) prefs[FGS_BLOCK_NOTIFY_AT] = nowMs
+        }
+        return attempt to shouldNotify
+    }
+
+    /** 读「前台化被拒」记账（诊断/UI 用；**不要**用它在写路径上做判断，见 [recordForegroundBlock]）。 */
+    suspend fun readForegroundBlock(): Pair<Int, Long> {
+        var result = 0 to 0L
+        edit { prefs ->
+            result = (prefs[FGS_BLOCK_COUNT] ?: 0) to (prefs[FGS_BLOCK_NOTIFY_AT] ?: 0L)
+        }
+        return result
+    }
+
+    /** 前台化成功 → 清零记账（连续失败才需要退避）。 */
+    suspend fun resetForegroundBlock() = edit { prefs ->
+        prefs[FGS_BLOCK_COUNT] = 0
+    }
+
     /** 记录已回应过的收到消息指纹与时刻（US-3109 双向对话去重 + guardrail M-02 时间窗）。 */    suspend fun setLastReplied(hash: String, atMs: Long) = edit {
         it[LAST_REPLIED_HASH] = hash
         it[LAST_REPLIED_AT] = atMs
@@ -304,7 +347,10 @@ class QqRuntimeStateRepository(
         downNotified = prefs[ALERT_DOWN_NOTIFIED] ?: false,
         downKind = prefs[ALERT_DOWN_KIND] ?: "",
         downSinceMs = prefs[ALERT_DOWN_SINCE] ?: 0L,
-        lastNotifyAtMs = prefs[ALERT_LAST_NOTIFY_AT] ?: 0L
+        lastNotifyAtMs = prefs[ALERT_LAST_NOTIFY_AT] ?: 0L,
+        flapCount = prefs[ALERT_FLAP_COUNT] ?: 0,
+        lastKind = prefs[ALERT_LAST_KIND] ?: "",
+        kindChangedAtMs = prefs[ALERT_KIND_CHANGED_AT] ?: 0L
     )
 
     /** 写回告警状态（只在显式写入路径调用）。 */
@@ -320,6 +366,9 @@ class QqRuntimeStateRepository(
         prefs[ALERT_DOWN_KIND] = state.downKind
         prefs[ALERT_DOWN_SINCE] = state.downSinceMs
         prefs[ALERT_LAST_NOTIFY_AT] = state.lastNotifyAtMs
+        prefs[ALERT_FLAP_COUNT] = state.flapCount
+        prefs[ALERT_LAST_KIND] = state.lastKind
+        prefs[ALERT_KIND_CHANGED_AT] = state.kindChangedAtMs
     }
 
     /**
@@ -445,6 +494,15 @@ class QqRuntimeStateRepository(
         private val ALERT_DOWN_SINCE = longPreferencesKey("qq_alert_down_since")
         private val ALERT_LAST_NOTIFY_AT = longPreferencesKey("qq_alert_last_notify_at")
 
+        /** 本轮失联期间故障类型切换次数（ADR-073 抖动判据）。 */
+        private val ALERT_FLAP_COUNT = intPreferencesKey("qq_alert_flap_count")
+
+        /** 最近观测到的故障类型（ADR-073；未通知也记录，用于抖动判据）。 */
+        private val ALERT_LAST_KIND = stringPreferencesKey("qq_alert_last_kind")
+
+        /** 最近一次故障类型**切换**的时刻（ADR-073；用于判"kind 已稳定多久"）。 */
+        private val ALERT_KIND_CHANGED_AT = longPreferencesKey("qq_alert_kind_changed_at")
+
         /** 协议端自动重启记账（US-3128）。 */
         private val RESTART_WINDOW_START = longPreferencesKey("qq_restart_window_start")
         private val RESTART_ATTEMPTS = intPreferencesKey("qq_restart_attempts")
@@ -458,5 +516,15 @@ class QqRuntimeStateRepository(
 
         /** 停摆补偿提醒节流锚点（ADR-072 F2-2）。 */
         private val STARTUP_REPORT_AT = longPreferencesKey("qq_startup_report_at")
+
+    /**
+     * 「前台服务被系统拒绝」的连续次数与上次通知时刻（2026-11-15；ADR-073 / guardrail R-01）。
+     *
+     * **为什么必须落盘**：失败路径每次 `stopSelf()`，下次被闹钟唤起是**新的 Service 实例**，
+     * 实例字段一律归零 → `attempt` 恒为 1，5/10/20/30 分钟退避与 30 分钟通知节流**全部失效**，
+     * 真机表现为"每 5 分钟一条高优提醒"（正是 177 次拒绝的形态）。
+     */
+    private val FGS_BLOCK_COUNT = intPreferencesKey("qq_fgs_block_count")
+    private val FGS_BLOCK_NOTIFY_AT = longPreferencesKey("qq_fgs_block_notify_at")
     }
 }

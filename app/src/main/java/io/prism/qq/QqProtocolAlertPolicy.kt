@@ -93,6 +93,18 @@ object QqProtocolAlertPolicy {
     const val RE_ALERT_INTERVAL_MS = 4 * 60 * 60_000L
 
     /**
+     * 「异常已持续这么久」的兜底告警阈值（2026-11-15 新增；ADR-073）。
+     *
+     * 真机实证：`QQ_OFFLINE` 与 `UNREACHABLE` 每 30~60 秒交替出现，两类 streak
+     * **互斥清零**（在线→unreachable 清 offline，反之亦然），于是永远攒不满 2/3 次，
+     * 即使已武装也**永不告警**。叠加"在线满 10 分钟才武装"，抖动期是双重沉默。
+     *
+     * 15 分钟：短于"用户睡一觉就错过一整晚"，长于正常的重连抖动（退避上限 30s + 重登）。
+     * 该判据**不看 kind、不看 streak**，只看"首次发现异常到现在多久"。
+     */
+    const val DOWN_SINCE_FALLBACK_MS = 15 * 60_000L
+
+    /**
      * 「从未连上过」的判定门槛：连续不可达达到本次数才告警。
      *
      * 取 30（≈ 30 分钟 @60s 轮询）：远大于 AC-2 的 3 次，确保"只是启动慢"不会误报；
@@ -123,7 +135,31 @@ object QqProtocolAlertPolicy {
         val downNotified: Boolean = false,
         val downKind: String = "",
         val downSinceMs: Long = 0L,
-        val lastNotifyAtMs: Long = 0L
+        val lastNotifyAtMs: Long = 0L,
+        /**
+         * 本轮失联期间**故障类型切换次数**（2026-11-15 新增；ADR-073）。
+         *
+         * 用途：区分"稳态持续不可达"与"抖动"。前者按原阈值（30 次）等够时间再报，
+         * 后者（kind 反复切换导致 streak 互斥清零）必须走 `DOWN_SINCE_FALLBACK_MS` 兜底，
+         * 否则永远攒不满、永远不告警（真机实证：`QQ_OFFLINE` ↔ `UNREACHABLE` 每 30~60s 交替）。
+         */
+        val flapCount: Int = 0,
+        /**
+         * 最近**观测到**的故障类型（[Kind.name]，未通知也记录；2026-11-15）。
+         *
+         * 不能复用 `downKind`：那个只在**发出通知**时才写，而未到阈值前的抖动
+         * 根本不会通知 → `flapCount` 永远不增长（这正是本类首个实现的缺陷，
+         * 被 `QqForegroundBlockBackoffTest` 的"历史抖动"用例抓到）。
+         */
+        val lastKind: String = "",
+        /**
+         * 最近一次故障类型**切换**的时刻（2026-11-15；guardrail R2-01）。
+         *
+         * 为什么需要它：判"是否仍在抖动"的正确依据是**kind 已稳定多久**，
+         * 而不是"本轮已持续多久"。首个实现用 `downSinceMs` 判稳定 → 抖动超过 30 分钟
+         * 仍在交替时会被误判成"稳定" → 兜底判据永久失效（真机 177 次的形态正好命中）。
+         */
+        val kindChangedAtMs: Long = 0L
     ) {
         /** AC-1：是否已进入"可告警"状态。 */
         val armed: Boolean get() = armedAtMs > 0L
@@ -238,7 +274,11 @@ object QqProtocolAlertPolicy {
             // 原实现把 lastNotifyAtMs 置为 now，于是"恢复后 30 分钟内又掉线"会被静默——
             // 而那恰恰是最需要告警的抖动场景。恢复通知本身是"好消息"，
             // 不值得占用掉线告警的节流额度。
-            lastNotifyAtMs = prev.lastNotifyAtMs
+            lastNotifyAtMs = prev.lastNotifyAtMs,
+            // 恢复在线即结束本轮抖动统计
+            flapCount = 0,
+            lastKind = "",
+            kindChangedAtMs = 0L
         )
         return Decision(next, recovered)
     }
@@ -272,16 +312,61 @@ object QqProtocolAlertPolicy {
             downNotified = prev.downNotified,
             downKind = prev.downKind,
             downSinceMs = downSince,
-            lastNotifyAtMs = prev.lastNotifyAtMs
+            lastNotifyAtMs = prev.lastNotifyAtMs,
+            // 2026-11-15（ADR-073）：本轮已见过另一种故障类型 → 记为一次抖动。
+            // 注意只看 `downKind`（上次**已通知**的 kind），而不是刚清零的 streak：
+            // 稳态持续不可达时 downKind 不变，flapCount 恒 0，仍走原 30 次阈值。
+            //
+            // guardrail R-06：进入新的一轮（`downSinceMs` 刚起算，即上一轮已恢复）时**重置**，
+            // 避免历史残留让稳态也走兜底判据。
+            flapCount = when {
+                prev.downSinceMs <= 0L -> 0
+                prev.lastKind.isNotEmpty() && prev.lastKind != kind.name -> prev.flapCount + 1
+                else -> prev.flapCount
+            },
+            lastKind = kind.name,
+            // guardrail R2-01：记录"kind 最后一次切换"的时刻，供 stableLongEnough 判定。
+            kindChangedAtMs = if (prev.lastKind.isNotEmpty() && prev.lastKind != kind.name) {
+                nowMs
+            } else if (prev.kindChangedAtMs > 0L) {
+                prev.kindChangedAtMs
+            } else {
+                nowMs
+            }
         )
 
         // AC-1：从未稳定在线过 → 不按"掉线"告警（首次部署/刚扫码期间的正常重连不打扰）
         // 但 2026-11-02：**长期从未连上**是另一回事，见下（否则配置失败会永远沉默）。
-        if (!base.armed) {
-            return neverStarted(nowMs, base, prev, kind, nextUnreachableStreak)
+        //
+        // 2026-11-15（ADR-073）：**抖动豁免**。真机实测 1 分钟内 `QQ_OFFLINE` 与
+        // `UNREACHABLE` 交替出现，两类 streak 互斥清零 → 永远攒不到阈值（2/3），
+        // 即使 armed 也永不告警；叠加"在线满 10 分钟才武装"后，抖动期是**双重沉默**。
+        // 修法：以 `downSinceMs`（首次发现异常即记录、跨 kind 保留）为兜底判据——
+        // 异常持续超过 [DOWN_SINCE_FALLBACK_MS] 就告警，不管 streak 是否攒满。
+        val downingSince = base.downSinceMs
+        // 只在**抖动**（kind 切换过）或**账号离线**（streak 阈值仅 2 次、极易被清零）时启用；
+        // 稳态持续不可达仍走原 30 次阈值，避免"等了半小时就报"的语义被改掉。
+        //
+        // guardrail R2-01（第二轮复审）：**判"kind 已稳定多久"，不是"本轮持续多久"**。
+        // 首个实现用 `downSinceMs` 判稳定 → 抖动超过 30 分钟仍在交替时被误判成"稳定"
+        // → 兜底判据永久失效（真机 177 次/18h 的形态正好命中该漏洞）。
+        // 现在用 `kindChangedAtMs`（kind 最后一次切换的时刻）：只要还在切，就一直是抖动。
+        val kindStableMs = if (base.kindChangedAtMs > 0L && base.kindChangedAtMs <= nowMs) {
+            nowMs - base.kindChangedAtMs
+        } else {
+            // 时钟回拨/未记录：保守按"仍在抖动"处理（宁可多报，不可静默）
+            0L
         }
-        // AC-2：失败次数不足 → 继续观察
-        if (!streakReached) return Decision(base, Action.None)
+        val kindStableLongEnough = kindStableMs >= DOWN_SINCE_FALLBACK_MS * 2
+        val isFlapping = base.flapCount > 0 && !kindStableLongEnough
+        val flappingTooLong = downingSince > 0L &&
+            nowMs - downingSince >= DOWN_SINCE_FALLBACK_MS &&
+            (isFlapping || kind == Kind.QQ_ACCOUNT_OFFLINE)
+        if (!base.armed) {
+            return neverStarted(nowMs, base, prev, kind, nextUnreachableStreak, flappingTooLong)
+        }
+        // AC-2：失败次数不足 → 继续观察（但抖动过久例外）
+        if (!streakReached && !flappingTooLong) return Decision(base, Action.None)
 
         val sameKindRound = prev.downNotified && prev.downKind == kind.name
         // AC-3：同一轮已通知过同一种故障 → 默认静默；
@@ -298,7 +383,8 @@ object QqProtocolAlertPolicy {
                     downNotified = true,
                     downKind = kind.name,
                     downSinceMs = downSince,
-                    lastNotifyAtMs = nowMs
+                    lastNotifyAtMs = nowMs,
+                    lastKind = kind.name
                 ),
                 Action.NotifyDown(
                     kind = kind, downSinceMs = downSince, detail = detail, reminder = true
@@ -321,7 +407,12 @@ object QqProtocolAlertPolicy {
             kind == Kind.QQ_ACCOUNT_OFFLINE &&
                 prev.downNotified &&
                 prev.downKind != Kind.QQ_ACCOUNT_OFFLINE.name &&
-                base.armed
+                base.armed &&
+                // 2026-11-15（ADR-073）：**抖动兜底不得借升级例外突破节流**。
+                // 抖动场景下 kind 本来就在来回切，若每次都判"升级"就会绕过 30 分钟节流，
+                // 退化成刷屏（既有用例 `AC3 29 分钟内换故障类型也不重复通知` 正是这条）。
+                // 稳态下一次性的"进程死 → 账号离线"升级不受影响（此时 flapCount==0）。
+                !flappingTooLong
 
         // AC-3：节流窗口内不重复（升级型故障例外，见上）
         // 2026-11-01 验收：**时钟回拨防御**——`nowMs - lastNotifyAtMs` 为负说明系统时间被调回，
@@ -360,10 +451,49 @@ object QqProtocolAlertPolicy {
         base: State,
         prev: State,
         kind: Kind,
-        unreachableStreak: Int
+        unreachableStreak: Int,
+        flappingTooLong: Boolean = false
     ): Decision {
-        if (kind == Kind.QQ_ACCOUNT_OFFLINE) return Decision(base, Action.None)
-        if (unreachableStreak < NEVER_STARTED_CONFIRM) return Decision(base, Action.None)
+        // 2026-11-15（ADR-073）：账号离线在"未武装"时也不能一律沉默。
+        // 真机：快速登录"成功"后 12 秒即离线、反复 3 次，如果永远不告警，
+        // 用户只看到"有时回有时不回"。抖动/持续过久即按账号离线告警。
+        if (kind == Kind.QQ_ACCOUNT_OFFLINE) {
+            if (!flappingTooLong) return Decision(base, Action.None)
+            val since = prev.downSinceMs.takeIf { it > 0L } ?: nowMs
+            val sameRound = prev.downNotified && prev.downKind == Kind.QQ_ACCOUNT_OFFLINE.name
+            if (sameRound) {
+                val elapsed = nowMs - prev.lastNotifyAtMs
+                val due = prev.lastNotifyAtMs <= 0L || elapsed !in 0 until RE_ALERT_INTERVAL_MS
+                if (!due) return Decision(base, Action.None)
+                return Decision(
+                    base.copy(
+                        downNotified = true, downSinceMs = since, lastNotifyAtMs = nowMs
+                    ),
+                    Action.NotifyDown(
+                        kind = Kind.QQ_ACCOUNT_OFFLINE,
+                        downSinceMs = since,
+                        detail = "账号反复离线已超过 ${DOWN_SINCE_FALLBACK_MS / 60_000} 分钟，需重新扫码登录",
+                        reminder = true
+                    )
+                )
+            }
+            return Decision(
+                base.copy(
+                    downNotified = true,
+                    downKind = Kind.QQ_ACCOUNT_OFFLINE.name,
+                    downSinceMs = since,
+                    lastNotifyAtMs = nowMs
+                ),
+                Action.NotifyDown(
+                    kind = Kind.QQ_ACCOUNT_OFFLINE,
+                    downSinceMs = since,
+                    detail = "账号反复离线（可能已被踢或触发风控），需重新扫码登录"
+                )
+            )
+        }
+        if (unreachableStreak < NEVER_STARTED_CONFIRM && !flappingTooLong) {
+            return Decision(base, Action.None)
+        }
 
         val since = prev.downSinceMs.takeIf { it > 0L } ?: nowMs
         // guardrail R-09（2026-11-14）：**"从未连上过"同样要重提醒**。

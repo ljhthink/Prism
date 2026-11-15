@@ -37,7 +37,14 @@ class QqProtocolSupervisor(
      *
      * 传 null 表示不具备该能力（JVM 单测/未装配），行为退化为旧口径。
      */
-    private val httpProbe: (suspend () -> Boolean)? = null
+    private val httpProbe: (suspend () -> Boolean)? = null,
+    /**
+     * 账号在线态探测（2026-11-15 新增；ADR-073）。
+     *
+     * 一键修复必须能区分「进程没跑」与「进程在跑但账号离线（需扫码）」——
+     * 后者点多少次修复都不会好，只能扫码。旧报告把两者混成"本来就在运行"。
+     */
+    private val healthProbe: (suspend () -> QqProtocolHealth.Status)? = null
 ) {
     private val appContext = context.applicationContext
 
@@ -210,6 +217,21 @@ class QqProtocolSupervisor(
                         "RUN_COMMAND 提交失败（检查 RUN_COMMAND 授权与 allow-external-apps）"
                     }
                     Log.w(TAG, "拉起失败（已计入重试预算）：$why")
+                    // 2026-11-15（guardrail R-04）：**只在最后一次尝试失败时才高优提醒**。
+                    // 旧写 `attempts >= 1` 恒真（Allow 分支返回的已是自增后的值）→ 每次 Allow
+                    // 失败都发一条 reminder 高优通知，而真正需要打扰的 GiveUp 分支反而完全静默。
+                    // 现在：前 N-1 次用普通通知（不打扰），最后一次用重提醒。
+                    if (decision.state.attempts >= QqProtocolRestartPolicy.MAX_ATTEMPTS) {
+                        runCatching {
+                            QqProtocolAlertNotifier.notifyRestartFailed(
+                                appContext,
+                                reason = why,
+                                shizukuReady = ShizukuShell.isReady()
+                            )
+                        }.onFailure {
+                            Log.w(TAG, "拉起失败通知发送失败（${it::class.simpleName}）")
+                        }
+                    }
                     RestartOutcome.Failed(why)
                 }
             }
@@ -492,13 +514,22 @@ class QqProtocolSupervisor(
                 base
             }
         }
+        // 2026-11-15（ADR-073）：**必须把账号在线态一起报出来**。
+        // "协议端进程在跑" ≠ "账号能收发"：3000 在监听但账号已离线（需扫码）时，
+        // 旧报告让 UI 显示"本来就在运行"，用户点了修复却什么都没发生。
+        val health = runCatching { healthProbe?.invoke() }.getOrNull()
+        val accountState = health?.state?.name.orEmpty()
+        val needsQr = health?.state == QqProtocolHealth.State.QQ_OFFLINE ||
+            currentFreshState() == STATE_NEED_QR
         return RepairReport(
             power = power,
             scriptsDeployed = deployed,
             probeAccepted = probed,
             started = started,
             alreadyRunning = alreadyRunning,
-            readiness = readiness
+            readiness = readiness,
+            accountState = accountState,
+            needsQrLogin = needsQr
         )
     }
 
@@ -511,7 +542,18 @@ class QqProtocolSupervisor(
         val started: Boolean,
         /** 修复时协议端本来就在跑（此时**不重启**，避免自踢）。 */
         val alreadyRunning: Boolean = false,
-        val readiness: QqTermuxBridge.Readiness
+        val readiness: QqTermuxBridge.Readiness,
+        /**
+         * 修复后的**账号在线态**（2026-11-15 新增；ADR-073）。
+         *
+         * 真机反馈「一键修复好像有问题」的根因：旧报告只有 `alreadyRunning`，
+         * 而"协议端进程在跑"与"账号能收发"是两件事。3000 在监听但账号已离线
+         * （需扫码）时，UI 固定显示"协议端本来就在运行（未重启，避免账号被踢）"，
+         * 把真正要做的动作（扫码）完全掩盖了。现在把账号态一起返回并驱动文案。
+         */
+        val accountState: String = "",
+        /** 需要用户**扫码**（账号离线/登录态失效）。 */
+        val needsQrLogin: Boolean = false
     )
 
     /** 电源策略修复结果。 */
