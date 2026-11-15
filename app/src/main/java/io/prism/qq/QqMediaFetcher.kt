@@ -83,6 +83,16 @@ class QqMediaFetcher(
     private val fetchSemaphore = Semaphore(MAX_CONCURRENT_FETCH)
 
     /**
+     * fetcher 级协程作用域（guardrail 第二轮 P1）。
+     *
+     * 不用 `CoroutineScope(Dispatchers.IO)` 每次新建：那样 caller 被取消后
+     * 子协程仍活着（孤儿），可能继续起 proot 并写全局共享路径。
+     */
+    private val fetchScope = kotlinx.coroutines.CoroutineScope(
+        kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO
+    )
+
+    /**
      * 下载并转成 `data:` URL（**向后兼容入口**；失败返回 null）。
      *
      * 新代码请用 [fetch] 拿到带原因的 [QqMediaResult]。
@@ -136,17 +146,26 @@ class QqMediaFetcher(
             }
             evict(key)
         }
-        val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO)
+        // 2026-11-15（guardrail 第二轮 P1 修复）：**不能用 finally 里的 `inFlight.remove(key)`**。
+        //
+        // 竞态：若 `async` 在 `computeIfAbsent` 把 Deferred 放进 map **之前**就完成
+        // （缓存命中、rkey 预判等微秒级早退路径），`remove(key)` 先执行、之后 map 里
+        // 才被插入这个**已完成**的 Deferred → 该 key 永久返回同一个旧结果，
+        // 直到进程重启（症状与本次要修的问题同形：一直说取不到）。
+        //
+        // 正确做法：**await 之后**用 `remove(key, deferred)`（两参数，仅当仍是自己才删），
+        // 且用 fetcher 级 scope（不再每次 new，避免 caller 取消产生孤儿协程）。
         val deferred = inFlight.computeIfAbsent(key) {
-            scope.async {
-                try {
-                    fetchSemaphore.withPermit { fetchUncached(ref, url, key) }
-                } finally {
-                    inFlight.remove(key)
-                }
+            fetchScope.async {
+                fetchSemaphore.withPermit { fetchUncached(ref, url, key) }
             }
         }
-        return deferred.await()
+        return try {
+            deferred.await()
+        } finally {
+            // 仅在"仍是自己"时移除；注意此时 Deferred 必然已在 map 中（await 已返回）。
+            inFlight.remove(key, deferred)
+        }
     }
 
     private suspend fun fetchUncached(

@@ -523,6 +523,14 @@ object QqProtocolScripts {
     /** 中转后的**回执**路径（回执也在 /sdcard，Prism 同样读不到）。 */
     const val MEDIA_RELAY_RESULT_FILE = "/data/local/tmp/prism-media.txt"
 
+    /**
+     * 失败诊断文件（脚本在 NOT_FOUND 时写，含 QQ 目录名/账号哈希）。
+     *
+     * guardrail 第二轮 P2：桥接侧此前**从不删除**它，会长期残留在共享存储。
+     * 现在每次取图开始与成功结束都显式清理。
+     */
+    const val MEDIA_DEBUG_FILE = "/sdcard/prism-media-debug.txt"
+
     /** 停止脚本（Prism 生成，不来自 assets）。 */
     const val STOP_SCRIPT = "$DEPLOY_DIR/prism-stop.sh"
 

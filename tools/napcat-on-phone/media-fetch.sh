@@ -17,7 +17,7 @@
 # 2. **`env -i` 会清空环境**：proot 内拿不到外层 `$APPDIR`（曾导致写到 `/`）。
 #    因此路径一律用**位置参数**传入。
 # 3. **NapCat 给出 file 名 ≠ 字节已落盘**：刚收到消息时 `find` 会 not_found，
-#    QQ 还在后台下载。必须**逐秒重试**（见 WAIT_LOOPS）。
+#    QQ 还在后台下载。必须**重试等待**（见 WAIT_SECONDS）。
 # 4. 扩展名大小写：事件里是大写 md5，落盘常为小写，必须 `-iname`。
 #
 # ## 契约
@@ -34,9 +34,13 @@ RESULT=$APPDIR/prism-media.txt
 OUT=$APPDIR/prism-media.bin
 DEBUG=$APPDIR/prism-media-debug.txt
 
-# 等落盘的最大秒数。必须**短于**桥接层 TIMEOUT_MS，否则桥接放弃后本脚本仍在跑，
-# 变成孤儿 proot 并继续写全局共享路径（可能污染下一次取图）。
-WAIT_LOOPS=10
+# 等落盘的**绝对截止秒数**（不是轮数）。
+#
+# guardrail 第二轮 P1：上一版用"轮数"，而每轮含 2 次 `find -maxdepth 10` + sleep 1，
+# 实测单轮 1.4~4s → 10 轮最长可达 40s，**超过桥接层 15s** 预算。
+# 于是桥接放弃后本脚本仍在跑，变成孤儿 proot 并继续写全局共享路径（串图低频复发）。
+# 现在改为绝对截止：无论 find 多慢，总时长封顶在此值，且明显小于桥接预算。
+WAIT_SECONDS=8
 
 fail() {
   TS=$(date +%s)
@@ -85,7 +89,8 @@ proot \
     SRC=""
     i=0
     LIMIT="$3"
-    while [ "$i" -lt "$LIMIT" ]; do
+    END=$(( $(date +%s) + LIMIT ))
+    while [ "$(date +%s)" -lt "$END" ]; do
       SRC=$(find /root/.config/QQ -maxdepth 10 -type f \
               \( -name "$NAME" -o -iname "$NAME" \) 2>/dev/null | head -1)
       if [ -z "$SRC" ]; then
@@ -96,7 +101,7 @@ proot \
       i=$((i + 1))
       sleep 1
     done
-    echo "WAITED=${i}s"
+    echo "WAITED=${i}次 剩余=$((END - $(date +%s)))s"
     if [ -z "$SRC" ]; then
       echo "NOT_FOUND name=$NAME"
       echo "--- nt_data ---"
@@ -113,7 +118,7 @@ proot \
     mkdir -p "$APPDIR" 2>/dev/null
     cp "$SRC" "$APPDIR/prism-media.bin" 2>&1 || exit 3
     echo "COPIED"
-  ' prism "$NAME" "$APPDIR" "$WAIT_LOOPS" 2>&1
+  ' prism "$NAME" "$APPDIR" "$WAIT_SECONDS" 2>&1
 )
 RC=$?
 

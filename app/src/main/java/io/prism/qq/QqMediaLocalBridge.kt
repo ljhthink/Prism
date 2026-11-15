@@ -110,8 +110,10 @@ class QqMediaLocalBridge(
             return null
         }
         // 清掉旧回执与旧产物（含上次的中转残留），避免把上一次的 ok=1 当成这次的结论
+        // 每轮开始先清上一轮的产物/回执/诊断，避免把旧结论当成这次的
         runCatching { java.io.File(QqProtocolScripts.MEDIA_RESULT_FILE).delete() }
         runCatching { java.io.File(QqProtocolScripts.MEDIA_OUT_FILE).delete() }
+        runCatching { java.io.File(QqProtocolScripts.MEDIA_DEBUG_FILE).delete() }
         runCatching { cleanupReadablePath(QqProtocolScripts.MEDIA_RELAY_FILE) }
         runCatching { cleanupReadablePath(QqProtocolScripts.MEDIA_RELAY_RESULT_FILE) }
         // 2026-11-15：**先触发协议端落盘**，再交给脚本 find。
@@ -151,10 +153,12 @@ class QqMediaLocalBridge(
                 android.util.Log.w(TAG, "本地回退回执 ok=1 但产物为空（或中转失败）")
                 return null
             }
-            // 用完即删：/sdcard 是 world-readable，/data/local/tmp 也不留残图
+            // 用完即删：/sdcard 是 world-readable，/data/local/tmp 也不留残图。
+            // guardrail P2：诊断文件同样清掉（含账号哈希，不该长期残留）。
             runCatching {
                 java.io.File(QqProtocolScripts.MEDIA_OUT_FILE).delete()
                 java.io.File(QqProtocolScripts.MEDIA_RESULT_FILE).delete()
+                java.io.File(QqProtocolScripts.MEDIA_DEBUG_FILE).delete()
             }
             runCatching { cleanupReadablePath(QqProtocolScripts.MEDIA_RELAY_FILE) }
             runCatching { cleanupReadablePath(QqProtocolScripts.MEDIA_RELAY_RESULT_FILE) }
