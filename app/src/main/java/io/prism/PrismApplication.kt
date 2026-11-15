@@ -301,15 +301,60 @@ class PrismApplication : Application() {
             // 批次22 crash-fix（TKN-B22-CRASH-001 方案C）：改用 **Safe** 工厂——native 库
             // 故障（缺符号/类毒化）降级 NullEmbedder，绝不向主线程调用方抛 Error
             //（2026-09-06 真机 FATAL 循环崩溃的防御层，见 docs/reports/2026-09-06-crash-ort-conflict-rca-and-fix.md）。
-            assets.open(EmbedderFactory.DEFAULT_MODEL_PATH).use { modelInput ->
+            //
+            // 2026-11-15（内存优化；ADR-074 / PRD US-3133）：改为**按文件路径**加载。
+            // 旧实现 `assets.open(...).readBytes()` 把 113MB 模型读成 byte[] **永久常驻**，
+            // 且 `checkAndUnload` 只关 session、byte[] 永不释放（真机 Dalvik Alloc 162MB
+            // 中约 110MB 即此）。现在先把模型复制到 filesDir（仅首次，约 113MB 磁盘），
+            // 再由 ORT 按路径 mmap —— 内存不计入 Java Heap。
+            val modelFile = ensureEmbedderModelOnDisk()
+            if (modelFile == null) {
+                NullEmbedder()
+            } else {
                 assets.open(EmbedderFactory.DEFAULT_TOKENIZER_PATH).use { tokenizerInput ->
-                    EmbedderFactory.createMultilingualSafe(modelInput, tokenizerInput)
+                    EmbedderFactory.createMultilingualFromFile(modelFile, tokenizerInput)
                 }
             }
         } else {
             NullEmbedder()
         }
     }
+
+    /**
+     * 确保 ONNX 模型已落到 `filesDir`（仅首次复制），返回文件；失败返回 null。
+     *
+     * **为什么复制而不是直接读 asset**：APK 内的 asset 是压缩存放的，ORT 无法 mmap，
+     * 只能 `readBytes()` 全量进堆。复制到 `filesDir` 后 ORT 可按路径 mmap，
+     * 这是把 113MB 从 Java Heap 移出去的唯一低风险做法（2026-11-15；ADR-074）。
+     *
+     * 幂等：文件存在且大小一致即复用；大小不一致（升级换模型）则重写。
+     */
+    private fun ensureEmbedderModelOnDisk(): java.io.File? = runCatching {
+        val dir = java.io.File(filesDir, "models")
+        if (!dir.exists() && !dir.mkdirs()) return@runCatching null
+        val target = java.io.File(dir, "embedder.onnx")
+        val expected = runCatching {
+            assets.openFd(EmbedderFactory.DEFAULT_MODEL_PATH).use { it.length }
+        }.getOrNull()
+        if (target.isFile && (expected == null || target.length() == expected)) {
+            return@runCatching target
+        }
+        // 复制到临时文件再 rename（原子；避免半截文件被 ORT 读到）
+        val tmp = java.io.File(dir, "embedder.onnx.tmp")
+        assets.open(EmbedderFactory.DEFAULT_MODEL_PATH).use { input ->
+            java.io.FileOutputStream(tmp).use { out -> input.copyTo(out) }
+        }
+        if (target.exists()) target.delete()
+        if (!tmp.renameTo(target)) {
+            tmp.delete()
+            return@runCatching null
+        }
+        android.util.Log.i(
+            "PrismApplication",
+            "嵌入模型已落地：${target.length() / 1024 / 1024}MB（按路径 mmap，不占 Java Heap）"
+        )
+        target
+    }.getOrNull()
 
     /**
      * 摄入管线（US-016，ADR-009）—— 串联 解析→切片→嵌入→写入 全链路。
@@ -658,6 +703,16 @@ class PrismApplication : Application() {
      */
     @Volatile
     private var qqWakeOnScreenOffCache: Boolean = true
+
+    /**
+     * QQ 功能是否启用（协议端通道）的进程内缓存（2026-11-15；ADR-074）。
+     *
+     * 用途：让 60s 健康探测循环在**总开关关闭**时降频到 10 分钟。
+     * 旧实现无论开关如何都每 60s 读 DataStore + 触发一次 HTTP 探测，
+     * 后台常驻会持续唤醒进程。
+     */
+    @Volatile
+    private var qqFeatureEnabledCache: Boolean = false
 
     /**
      * QQ 小号助手本地工具执行器（ADR-062 路线 R1；`qq__send_message` / `qq__set_signature` /
@@ -1651,11 +1706,15 @@ class PrismApplication : Application() {
         // （主线程）首次触发会同步阻塞导致首开聊天页卡顿/ANR。此处用 appScope(IO) 预预热，
         // 将加载移出主线程。by lazy 默认 SYNCHRONIZED 线程安全：IO 预热失败不缓存，后续
         // 访问（含主线程）会重试，优雅降级。
-        appScope.launch {
-            runCatching { embedder }.onFailure { e ->
-                android.util.Log.e("PrismApplication", "embedder 预热失败（后续按需重试）", e)
-            }
-        }
+        //
+        // 2026-11-15（内存优化；ADR-074 / PRD US-3133）：**改为按需加载，不再无条件预热**。
+        // 真机 dumpsys meminfo：Dalvik Heap Alloc 162MB，其中 ~150MB 来自这里——
+        // 模型 113MB 被整读成 byte[] 常驻 + tokenizer 30~45MB 的 HashMap。
+        // 而后台常驻的 QQ 助手根本不用 RAG：用户只是想让小号回消息，却付出 150MB。
+        // 现在：只有真正首次使用检索时才加载（仍走 IO 线程，首用有一次性延迟，
+        // 但设置页/知识库入口可显式预热）。这是"后台常驻内存"最有效的一刀。
+        // 需要预热的场景由调用方显式触发（见 SettingsScreen 知识库区块）。
+        // 
         // 批次24（BUG-20260913-001 附带修复 / PRD US-2413 AC-3）：桌宠开关是持久化的，
         // 但服务不会自己回来。这里在进程启动时触达 petManager（by lazy），
         // 由其 init 按持久化状态恢复悬浮窗——否则"杀进程后再打开 App"会呈现
@@ -2161,6 +2220,9 @@ class PrismApplication : Application() {
                 while (appScope.isActive) {
                     try {
                         val cfg = qqConfigRepository.get()
+                        // 2026-11-15（ADR-074）：缓存开关态供本轮 delay 选择频率
+                        qqFeatureEnabledCache = cfg.enabled &&
+                            cfg.transport == io.prism.qq.channel.QqTransport.ONEBOT
                         if (cfg.enabled && cfg.transport == io.prism.qq.channel.QqTransport.ONEBOT) {
                             val status = qqProtocolHealth.probe()
                             _qqProtocolStatus.value = status
@@ -2215,7 +2277,10 @@ class PrismApplication : Application() {
                             "探测异常：${e::class.simpleName}"
                         )
                     }
-                    delay(60_000L)
+                    // 2026-11-15（内存/耗电优化；ADR-074）：**总开关关闭时降频**。
+                    // 旧实现无论开关如何都每 60s 读一次 DataStore 并触发一次探测，
+                    // 后台常驻时会持续唤醒进程，也让 WAL/缓存常驻。关闭态改为 10 分钟一次。
+                    delay(if (qqFeatureEnabledCache) 60_000L else 600_000L)
                 }
             }
 
@@ -2260,7 +2325,12 @@ class PrismApplication : Application() {
             // guardrail R-03：取件必须**原子**（[io.prism.qq.QqInboxStore.claimDue]）——
             // 事件 collect 与 15s worker 两条协程若各自读快照会拿到同一批消息，
             // 造成双重 LLM 生成 + 双重记账（replyMutex 只串行化，不防重复取件）。
-            suspend fun processInboxOnce(maxRounds: Int = io.prism.qq.QqInboxStore.MAX_PER_ROUND) {
+            suspend fun processInboxOnce(
+                maxRounds: Int = io.prism.qq.QqInboxStore.MAX_PER_ROUND
+            ): Int {
+                // 2026-11-15（ADR-074）：返回**实际处理条数**，供重试 worker 判断是否需要退避
+                // （收件箱为空时不应保持 15s 高频轮询）。
+                var handled = 0
                 // guardrail R2-02：**逐条领取**（每次只 claim 1 条），领到就串行处理完再领下一条。
                 // 一次领 5 条时，尾部条目会在 120s 租约内过期，被 15s worker 二次领取 →
                 // 双重 LLM 生成 + attempts 多计。逐条领取天然对齐"租约 > 单条处理耗时"。
@@ -2269,16 +2339,30 @@ class PrismApplication : Application() {
                 // 满足不了 AC-4 的"恢复后 ≤60s 内回复"。补发入口显式传更大的预算。
                 repeat(maxRounds) {
                     val due = qqInboxStore.claimDue(System.currentTimeMillis(), limit = 1)
-                    val item = due.firstOrNull() ?: return
+                    val item = due.firstOrNull() ?: return handled
                     // guardrail R2-04：**不要在处理前摘掉**实时原文——HOLD/RETRY 后
                     // 下一次领取就拿不到 media 了（图片会退化成「[媒体消息]」）。
                     // 只在条目真正终结（DONE/放弃）时清理。
                     val live = liveInboxMessages[item.id]
+                    // 2026-11-15（US-3132 修复「非内置表情包看不见」）：
+                    // 缓存未命中时必须**从落盘快照重建 media**，否则图片/表情包会退化成
+                    // 纯文本（mediaRef=null → 视觉与 OCR 全失效，只剩一句文字说明）。
                     val msg = live ?: io.prism.qq.channel.QqMessage(
                         messageId = item.id,
                         incoming = true,
                         text = item.text,
-                        timestampMs = item.atMs
+                        timestampMs = item.atMs,
+                        media = item.media.map {
+                            io.prism.qq.channel.QqMediaRef(
+                                kind = runCatching {
+                                    io.prism.qq.channel.QqMediaKind.valueOf(it.kind)
+                                }.getOrDefault(io.prism.qq.channel.QqMediaKind.IMAGE),
+                                url = it.url?.takeIf { u -> u.isNotBlank() },
+                                fileName = it.fileName?.takeIf { f -> f.isNotBlank() },
+                                fileSize = it.fileSize,
+                                summary = it.summary?.takeIf { s -> s.isNotBlank() }
+                            )
+                        }
                     )
                     val result = autoReplyOnce(msg)
                     val now = System.currentTimeMillis()
@@ -2303,7 +2387,9 @@ class PrismApplication : Application() {
                     }
                     // guardrail L-02：只记三态与原因，不回显正文/联系人
                     android.util.Log.i("QqProactiveSchedule", "（收件箱）" + result.logLine)
+                    handled += 1
                 }
+                return handled
             }
 
             /**
@@ -2360,14 +2446,24 @@ class PrismApplication : Application() {
             // `incoming()` 是 SharedFlow，`collect{}` 永不返回——写在它之后的语句是死代码。
             appScope.launch {
                 while (appScope.isActive) {
-                    delay(15_000L)
+                    // 2026-11-15（内存/耗电优化；ADR-074）：**先看开关再决定频率**。
+                    // 旧实现每 15s 无条件读一次 DataStore（即使功能关闭、收件箱为空），
+                    // 后台常驻时等于每分钟 4 次无意义 IO + 进程唤醒。
+                    // 关闭态降到 5 分钟；开启但收件箱为空时也降频（有事件会立刻唤醒处理）。
+                    val active = runCatching { qqConfigRepository.get().autoReplyActive }
+                        .getOrDefault(false)
+                    delay(if (active) 15_000L else 300_000L)
+                    if (!active) continue
+                    var processed = 0
                     try {
-                        if (qqConfigRepository.get().autoReplyActive) processInboxOnce()
+                        processed = processInboxOnce()
                     } catch (e: CancellationException) {
                         throw e
                     } catch (e: Exception) {
                         android.util.Log.w("PrismApplication", "收件箱重试异常：${e::class.simpleName}")
                     }
+                    // 没有待处理项时本轮无实际工作，退避到 5 分钟（有事件会即时触发）
+                    if (processed == 0) delay(285_000L)
                 }
             }
 
@@ -2602,6 +2698,16 @@ class PrismApplication : Application() {
                 }.onFailure { e ->
                     android.util.Log.w("PrismApplication", "checkAndUnload failed: ${e::class.simpleName}")
                 }
+                // 2026-11-15（内存优化；ADR-074）：同一循环顺带回收 OCR 的 native 资源。
+                // ML Kit 的 recognizer 持 10~25MB 且不会自己释放；后台常驻时闲置就该还回去。
+                // 不新增调度器（复用既有节律），失败只记日志。
+                runCatching { qqMlKitOcrTextExtractor.releaseIfIdle() }
+                    .onFailure { e ->
+                        android.util.Log.w(
+                            "PrismApplication",
+                            "OCR 闲置释放失败: ${e::class.simpleName}"
+                        )
+                    }
             }
         }
     }

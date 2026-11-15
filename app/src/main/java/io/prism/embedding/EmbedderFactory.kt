@@ -54,6 +54,37 @@ object EmbedderFactory {
     }
 
     /**
+     * 从**文件路径**加载多语言模型（2026-11-15 内存优化；ADR-074 / PRD US-3133）。
+     *
+     * 与 [createMultilingual] 的唯一区别：**不再把 113MB 模型读成 byte[]**。
+     * ONNX Runtime 直接从路径 mmap，模型内存不计入 Java Heap
+     * （真机实测该项占 Dalvik Alloc 约 110MB）。
+     *
+     * @param modelFile 已落到 `filesDir` 的 ONNX 模型文件
+     * @param tokenizerJsonInput tokenizer.json 输入流（约 9MB）
+     */
+    fun createMultilingualFromFile(
+        modelFile: java.io.File,
+        tokenizerJsonInput: InputStream,
+        clock: OnnxEmbedder.Clock = OnnxEmbedder.Clock { System.currentTimeMillis() }
+    ): Embedder = runCatching {
+        val tokenizer = tokenizerJsonInput.use { UnigramTokenizer(it) }
+        OnnxEmbedder(
+            modelBytes = ByteArray(0),
+            tokenizer = tokenizer,
+            clock = clock,
+            modelPath = modelFile.absolutePath
+        )
+    }.getOrElse { e ->
+        android.util.Log.e(
+            "EmbedderFactory",
+            "embedder 创建失败（文件路径模式），RAG 降级为 NullEmbedder",
+            e
+        )
+        NullEmbedder()
+    }
+
+    /**
      * 从输入流加载多语言模型与 Unigram tokenizer，构造 [OnnxEmbedder]（UXR9 US-901）。
      *
      * 两个流会在方法内关闭。

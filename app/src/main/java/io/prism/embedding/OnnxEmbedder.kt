@@ -50,7 +50,17 @@ class OnnxEmbedder(
     tokenizer: TokenEncoder,
     private val clock: Clock = Clock { System.currentTimeMillis() },
     private val maxSeqLen: Int = 512,
-    private val embeddingDim: Int = 384
+    private val embeddingDim: Int = 384,
+    /**
+     * 模型的**文件路径**（2026-11-15 内存优化；ADR-074 / PRD US-3133）。
+     *
+     * 提供时优先按路径建 session，**不再持有 [modelBytes]**：
+     * ONNX Runtime 会自行 mmap，113MB 不再计入 Java Heap。
+     * 真机实测 Dalvik Alloc 162MB 中有 ~110MB 就是这个 byte[]。
+     *
+     * null 时退回 [modelBytes]（JVM 单测注入 bytes 的路径不受影响）。
+     */
+    private val modelPath: String? = null
 ) : Embedder {
 
     /**
@@ -185,11 +195,18 @@ class OnnxEmbedder(
             options.setInterOpNumThreads(1)
             options.setIntraOpNumThreads(1)
             val s = try {
-                env.createSession(modelBytes, options)
+                // 2026-11-15（ADR-074）：优先按**文件路径**建 session——ORT 自行 mmap，
+                // 不再把 113MB 模型计入 Java Heap。无路径时退回内存字节（单测路径）。
+                if (modelPath != null) {
+                    env.createSession(modelPath, options)
+                } else {
+                    env.createSession(modelBytes, options)
+                }
             } catch (e: Exception) {
                 throw EmbeddingException(
                     EmbeddingException.Stage.MODEL_LOAD,
-                    "模型加载失败 (${modelBytes.size} bytes)",
+                    "模型加载失败 (" + (modelPath?.let { "path=$it" }
+                        ?: "${modelBytes.size} bytes") + ")",
                     e
                 )
             }

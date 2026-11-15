@@ -161,6 +161,27 @@ class QqDebugReceiver : BroadcastReceiver() {
                     // 2026-11-14 验收（ADR-072 F1）：以自定义延时登记存活看门狗，
                     // 用于确定性验证"进程被杀后闹钟仍能把它拉起来"（不必等 30 分钟）。
                     // 用法：am broadcast -a io.prism.DEBUG_QQ --es action watchdog --es delay 60 -p io.prism
+                    // 2026-11-15（ADR-074 验收）：验证 embedder 的**按文件路径加载**可用。
+                    // 这是内存优化的关键改动（不再把 113MB 读进 Java Heap），
+                    // 若 path 模式不可用，RAG 会永久降级为 NullEmbedder——必须真机确认。
+                    // 用法：am broadcast -a io.prism.DEBUG_QQ --es action embed -p io.prism
+                    ACTION_EMBED_UNLOAD -> runBlocking {
+                        val e = app.embedder
+                        val before = (e as? io.prism.embedding.OnnxEmbedder)?.isLoaded()
+                        // 强制按 0 闲置阈值卸载（等价于闲置超时后的行为）
+                        val released = (e as? io.prism.embedding.OnnxEmbedder)
+                            ?.checkAndUnload(0L) ?: false
+                        "embedUnload before=$before released=$released " +
+                            "after=${(e as? io.prism.embedding.OnnxEmbedder)?.isLoaded()}"
+                    }
+                    ACTION_EMBED -> runBlocking {
+                        val t0 = System.currentTimeMillis()
+                        val e = app.embedder
+                        val loaded = (e as? io.prism.embedding.OnnxEmbedder)?.isLoaded()
+                        val vec = runCatching { e.embed("测试文本") }.getOrNull()
+                        "embed kind=${e::class.simpleName} loaded=$loaded " +
+                            "dim=${vec?.size ?: -1} 耗时=${System.currentTimeMillis() - t0}ms"
+                    }
                     ACTION_WATCHDOG -> {
                         val delaySec = intent.getStringExtra(EXTRA_DELAY)?.toLongOrNull() ?: 60L
                         io.prism.qq.ProactiveScheduleService
@@ -449,6 +470,12 @@ class QqDebugReceiver : BroadcastReceiver() {
 
         /** 2026-11-14：debug 验证存活看门狗（--es delay <秒>）。 */
         const val ACTION_WATCHDOG = "watchdog"
+
+        /** 2026-11-15：验证 embedder 按文件路径加载（ADR-074 验收）。 */
+        const val ACTION_EMBED = "embed"
+
+        /** 2026-11-15：强制卸载 embedder session（验证 native 内存可回收）。 */
+        const val ACTION_EMBED_UNLOAD = "embedunload"
 
         /** 2026-11-02：只发 RUN_COMMAND，用于区分"权限/后台限制"与"脚本部署"失败。 */
         const val ACTION_RUN_COMMAND = "runcommand"

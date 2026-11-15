@@ -39,7 +39,27 @@ class QqInboxStore(
         val atMs: Long,
         val attempts: Int = 0,
         val nextAttemptAtMs: Long = 0L,
-        val lastError: String = ""
+        val lastError: String = "",
+        /**
+         * 入站媒体快照（2026-11-15 新增；PRD US-3132）。
+         *
+         * **为什么必须有**：真机反馈「非内置表情包看不见了」。根因是收件箱只持久化
+         * `text`，重建 `QqMessage` 时 `media` 为空 → 回复链路拿不到图片 URL →
+         * 视觉/OCR 整条失效（只能给出"对方发来了表情包"的文字说明）。
+         *
+         * 存的字段刻意最小化：`kind/url/fileName/fileSize/summary`。
+         * URL 的 rkey 有时效，重启后可能下载失败，但 `summary` 仍可用于说明。
+         */
+        val media: List<MediaSnapshot> = emptyList()
+    )
+
+    /** 媒体快照（可序列化，见 [Item.media]）。 */
+    data class MediaSnapshot(
+        val kind: String,
+        val url: String? = null,
+        val fileName: String? = null,
+        val fileSize: Long = 0L,
+        val summary: String? = null
     )
 
     private val file = File(rootDir, FILE_NAME)
@@ -93,7 +113,10 @@ class QqInboxStore(
                 id = id,
                 // 无正文（纯媒体）时给占位符，保证重放时仍能触发一次应答
                 text = message.text.take(MAX_TEXT_CHARS).ifBlank { "[媒体消息]" },
-                atMs = if (message.timestampMs > 0) message.timestampMs else clock()
+                atMs = if (message.timestampMs > 0) message.timestampMs else clock(),
+                // 2026-11-15（US-3132）：**必须持久化 media**，否则重建消息时
+                // 图片/表情包会被退化成纯文本（真机「非内置表情包看不见」的根因）。
+                media = message.media.map { it.toSnapshot() }
             )
             // 注意：这里**不再**顺带推进 `lastSeenAtMs`（guardrail R2-03/R3-01）。
             // 水位只能由 `markSeen` / `advanceWatermark` 显式推进，否则 catch-up 里
@@ -203,6 +226,12 @@ class QqInboxStore(
 
     private fun idOf(message: QqMessage): String? = idFor(message)
 
+    /** `QqMediaRef` → 可持久化快照（2026-11-15；US-3132）。 */
+    private fun io.prism.qq.channel.QqMediaRef.toSnapshot(): MediaSnapshot = MediaSnapshot(
+        kind = kind.name, url = url, fileName = fileName,
+        fileSize = fileSize, summary = summary
+    )
+
     private fun load() {
         runCatching {
             if (!file.isFile) return@runCatching
@@ -219,7 +248,19 @@ class QqInboxStore(
                     atMs = obj["a"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L,
                     attempts = obj["n"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: 0,
                     nextAttemptAtMs = obj["x"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L,
-                    lastError = obj["e"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                    lastError = obj["e"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+                    // 2026-11-15（US-3132）：旧数据无 `m` 字段 → 空列表（向后兼容）
+                    media = (obj["m"] as? kotlinx.serialization.json.JsonArray)?.mapNotNull { m ->
+                        val mo = m as? JsonObject ?: return@mapNotNull null
+                        val kind = mo["k"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                        MediaSnapshot(
+                            kind = kind,
+                            url = mo["u"]?.jsonPrimitive?.contentOrNull,
+                            fileName = mo["f"]?.jsonPrimitive?.contentOrNull,
+                            fileSize = mo["s"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L,
+                            summary = mo["y"]?.jsonPrimitive?.contentOrNull
+                        )
+                    }.orEmpty()
                 )
             }
         }
@@ -231,7 +272,13 @@ class QqInboxStore(
             append(
                 items.values.joinToString(",") { item ->
                     "{\"i\":${q(item.id)},\"t\":${q(item.text)},\"a\":${item.atMs}," +
-                        "\"n\":${item.attempts},\"x\":${item.nextAttemptAtMs},\"e\":${q(item.lastError)}}"
+                        "\"n\":${item.attempts},\"x\":${item.nextAttemptAtMs}," +
+                        "\"e\":${q(item.lastError)},\"m\":[" +
+                        item.media.joinToString(",") { m ->
+                            "{\"k\":${q(m.kind)},\"u\":${q(m.url.orEmpty())}," +
+                                "\"f\":${q(m.fileName.orEmpty())},\"s\":${m.fileSize}," +
+                                "\"y\":${q(m.summary.orEmpty())}}"
+                        } + "]}"
                 }
             )
             append("]}")

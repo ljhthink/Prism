@@ -117,7 +117,55 @@ class MlKitOcrTextExtractor(
     private val context: Context
 ) : OcrTextExtractor {
 
-    private val recognizer = TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+    /**
+     * ML Kit 识别器（2026-11-15 内存优化；ADR-074）：**可释放、可重建**。
+     *
+     * 旧实现是 `val recognizer = getClient(...)` 常驻：ML Kit 的 recognizer 持有
+     * native 资源（10~25MB）且不会自动回收，而后台常驻的 QQ 助手可能只用过一次。
+     * 现在改为 `var`：闲置超 [IDLE_RELEASE_MS] 由 [releaseIfIdle] `close()`，
+     * 下次使用时由 [recognizer] 懒重建。
+     */
+    @Volatile
+    private var recognizerRef: com.google.mlkit.vision.text.TextRecognizer? = null
+
+    private val recognizer: com.google.mlkit.vision.text.TextRecognizer
+        get() = recognizerRef ?: synchronized(this) {
+            recognizerRef ?: TextRecognition.getClient(
+                ChineseTextRecognizerOptions.Builder().build()
+            ).also { recognizerRef = it; closed = false }
+        }
+
+    /** 最近一次使用时刻（闲置释放判据）。 */
+    @Volatile
+    private var lastUsedAtMs: Long = System.currentTimeMillis()
+
+    /** 是否已被释放（诊断用；下次访问 [recognizer] 会重置为 false）。 */
+    @Volatile
+    private var closed: Boolean = false
+
+    /**
+     * 闲置释放 native 资源（由调用方定时触发）。
+     *
+     * @return true=本次真的释放了（下次使用会自动重建）
+     */
+    fun releaseIfIdle(idleMs: Long = IDLE_RELEASE_MS): Boolean {
+        if (closed) return false
+        if (System.currentTimeMillis() - lastUsedAtMs < idleMs) return false
+        val r = synchronized(this) {
+            val cur = recognizerRef ?: return false
+            recognizerRef = null
+            closed = true
+            cur
+        }
+        runCatching { r.close() }
+            .onFailure { Log.w(TAG, "OCR recognizer 释放失败（${it::class.simpleName}）") }
+        Log.i(TAG, "OCR recognizer 已闲置释放（native 内存回收）")
+        return true
+    }
+
+    /** 是否仍持有 native recognizer（诊断用）。 */
+    fun isLoaded(): Boolean = !closed
+
 
     /** 图标区域检测器（v1 批次11 F，D12）。 */
     private val iconDetector = IconRegionDetector()
@@ -265,6 +313,13 @@ class MlKitOcrTextExtractor(
 
     companion object {
         private const val TAG = "MlKitOcr"
+
+        /**
+         * OCR recognizer 的闲置释放阈值（2026-11-15；ADR-074）。
+         *
+         * 10 分钟：足够覆盖"同一轮对话连续识别几张图"；后台闲置后回收 10~25MB native 内存。
+         */
+        internal const val IDLE_RELEASE_MS = 10 * 60 * 1000L
 
         /** 图标候选占位文本（纯文本模型据此识别"这是非文字可点击区域"）。 */
         internal const val ICON_PLACEHOLDER_TEXT = "图标"

@@ -23,7 +23,8 @@ import java.util.concurrent.atomic.AtomicLong
  * - 只接受图片 magic（JPEG/PNG/GIF/WEBP），其它一律当作失败。
  *
  * **缓存**：按 `file`（或 url 哈希）做 LRU，避免同一条消息在"事件 + 历史"两条路径重复下载。
- * 内存上限由 [maxEntries] 控制（按条数近似，单条已限 8MB）。
+ * 内存上限**双重**约束：[maxEntries] 条数 + [cacheBytesLimit] 字节（2026-11-15 内存优化新增；
+ * 此前只按条数，而单条最大 8MB 且存 base64 String，最坏可达数百 MB）。
  *
  * 失败一律返回 null（调用方退化为"看不到内容"的诚实描述，不阻断回复）。
  */
@@ -31,6 +32,8 @@ class QqMediaFetcher(
     private val timeoutMs: Int = 10_000,
     private val maxBytes: Int = MAX_BYTES,
     private val maxEntries: Int = MAX_ENTRIES,
+    /** 缓存**原始字节**上限（不含 base64 膨胀；默认 12MB）。0=不限制（仅测试用）。 */
+    private val cacheBytesLimit: Long = MAX_CACHE_BYTES,
     /** 下载函数（可注入以便 JVM 单测；生产用 [HttpURLConnection]）。 */
     private val download: suspend (String, Int, Int) -> ByteArray? = { url, timeout, limit ->
         httpGet(url, timeout, limit)
@@ -83,7 +86,15 @@ class QqMediaFetcher(
     private fun put(key: String, entry: Entry) {
         cache.put(key, entry)?.let { cachedBytes.addAndGet(-it.bytes.toLong()) }
         cachedBytes.addAndGet(entry.bytes.toLong())
-        while (cache.size > maxEntries) {
+        // 2026-11-15（内存优化；US-3132）：**按字节淘汰**，不能只看条数。
+        //
+        // 旧实现只 `while (cache.size > maxEntries)`，而 `cachedBytes` 只统计不参与淘汰：
+        // 30 条 × 单图 8MB，且存的是 base64 String（UTF-16 双倍）→ 最坏可达数百 MB。
+        // 真机 PSS 里 Java Heap 230MB 有一部分就是它。现在同时受条数与字节双重约束，
+        // 且用 LRU（按 at 最旧）逐条淘汰直到两个上限都满足。
+        while (cache.size > maxEntries ||
+            (cacheBytesLimit > 0 && cachedBytes.get() > cacheBytesLimit)
+        ) {
             val oldest = cache.entries.minByOrNull { it.value.at }?.key ?: break
             evict(oldest)
         }
@@ -98,7 +109,16 @@ class QqMediaFetcher(
         const val MAX_BYTES: Int = 8 * 1024 * 1024
 
         /** 缓存条数。 */
-        const val MAX_ENTRIES: Int = 30
+        const val MAX_ENTRIES: Int = 8
+
+        /**
+         * 缓存原始字节上限（2026-11-15 内存优化）。
+         *
+         * 12MB：约等于 6 张 2MB 图片，足够覆盖"同一条消息被事件+历史各读一次"的场景；
+         * 而 base64 后实际 String 约占 2~3 倍（String 是 UTF-16），即 ~25-35MB 上界。
+         * 旧实现只有 30 条上限 → 最坏 30×8MB×~2.7 ≈ 650MB 的隐患。
+         */
+        const val MAX_CACHE_BYTES: Long = 12L * 1024 * 1024
 
         /** 缓存有效期（10 分钟；QQ CDN 的 rkey 有时效，过期即重下）。 */
         const val CACHE_TTL_MS: Long = 10 * 60 * 1000L
