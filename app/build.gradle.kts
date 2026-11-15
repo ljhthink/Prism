@@ -98,13 +98,29 @@ android {
     val napcatAssetsDir = layout.buildDirectory.dir("generated/napcatAssets")
     val syncNapcatAssets = tasks.register<Sync>("syncNapcatAssets") {
         from(rootProject.file("tools/napcat-on-phone")) {
-            include("run2.sh", "run2-inner.sh", "verify.sh")
+            // 2026-11-15（ADR-075 / US-3134）：新增 media-fetch.sh —— 图片本地文件回退。
+            // rkey 失效时 CDN 必然 400，但图片字节已在协议端容器内，由该脚本捞到 /sdcard。
+            include("run2.sh", "run2-inner.sh", "verify.sh", "media-fetch.sh")
             into("napcat")
         }
         into(napcatAssetsDir)
     }
     sourceSets["main"].assets.srcDir(napcatAssetsDir)
     tasks.named("preBuild") { dependsOn(syncNapcatAssets) }
+    /**
+     * 2026-11-15（真机排障抓到的**真构建缺陷**）：`mergeDebugAssets` 会读到**陈旧**脚本。
+     *
+     * 现象：`app/build/generated/napcatAssets/napcat/media-fetch.sh` 已是 4555B，
+     * 但 `app/build/intermediates/assets/debug/mergeDebugAssets/napcat/media-fetch.sh`
+     * 仍是 3519B，APK 里也是 3519B —— 改了协议端脚本却**永远打不进包**，
+     * 手机 `/data/local/tmp` 上一直是旧版（表现为"脚本改了却不生效"）。
+     *
+     * 只靠 `addGeneratedSourceDirectory` 不足以防住这条：它登记了源目录，但
+     * `merge*Assets` 在增量/配置缓存场景下仍可能判定 UP-TO-DATE。
+     * 这里显式让所有 merge*Assets 依赖 sync 任务，保证"源变则必重同步"。
+     */
+    tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }
+        .configureEach { dependsOn(syncNapcatAssets) }
     // 2026-11-01（审查 M5）：只挂 preBuild 不够——单独跑 merge*Assets / 配置缓存命中时
     // 可能读到缺失或陈旧的生成目录。把生成目录注册为 AGP 的生成源，让 merge 任务自己持有依赖。
     val napcatAssetsDirProperty: org.gradle.api.file.DirectoryProperty =

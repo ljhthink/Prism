@@ -165,6 +165,40 @@ class QqDebugReceiver : BroadcastReceiver() {
                     // 这是内存优化的关键改动（不再把 113MB 读进 Java Heap），
                     // 若 path 模式不可用，RAG 会永久降级为 NullEmbedder——必须真机确认。
                     // 用法：am broadcast -a io.prism.DEBUG_QQ --es action embed -p io.prism
+                    ACTION_SHIZUKU_READ -> runBlocking {
+                        // 2026-11-15：确认 Shizuku(shell) 能否读 /sdcard 上的脚本产物
+                        val exists = io.prism.phonecontrol.bg.ShizukuShell.fileExists(
+                            "/sdcard/prism-media.txt"
+                        )
+                        val copied = io.prism.phonecontrol.bg.ShizukuShell
+                            .copySharedMediaToTmp(
+                                "/sdcard/prism-media.txt",
+                                "/data/local/tmp/prism-media.txt"
+                            )
+                        val readable = io.prism.phonecontrol.bg.ShizukuShell.fileExists(
+                            "/data/local/tmp/prism-media.txt"
+                        )
+                        "shizukuRead exists=$exists copied=$copied nowInTmp=$readable"
+                    }
+                    ACTION_MEDIA_DIAG -> runBlocking {
+                        // 2026-11-15 排障：区分"文件不存在"与"没权限读"
+                        val f = java.io.File(io.prism.qq.QqProtocolScripts.MEDIA_RESULT_FILE)
+                        val g = java.io.File(io.prism.qq.QqProtocolScripts.MEDIA_OUT_FILE)
+                        val list = java.io.File("/sdcard").list()?.take(5)?.joinToString(",")
+                        "diag exists=${f.exists()} canRead=${f.canRead()} len=${f.length()} " +
+                            "binLen=${g.length()} sdcardList=${list ?: "null"}"
+                    }
+                    ACTION_MEDIA -> runBlocking {
+                        val name = intent.getStringExtra("name").orEmpty()
+                        val t0 = System.currentTimeMillis()
+                        val bytes = app.mediaLocalBridge.fetchBytes(
+                            io.prism.qq.channel.QqMediaRef(
+                                io.prism.qq.channel.QqMediaKind.STICKER, fileName = name
+                            )
+                        )
+                        "media name=$name bytes=${bytes?.size ?: -1} " +
+                            "耗时=${System.currentTimeMillis() - t0}ms"
+                    }
                     ACTION_EMBED_UNLOAD -> runBlocking {
                         // 2026-11-15：embedder 现在是 LazyLoadedEmbedder 包装器，
                         // 卸载必须走包装器（它会转发给内层 delegate），
@@ -475,6 +509,15 @@ class QqDebugReceiver : BroadcastReceiver() {
 
         /** 2026-11-15：验证 embedder 按文件路径加载（ADR-074 验收）。 */
         const val ACTION_EMBED = "embed"
+
+        /** 2026-11-15（ADR-075 验收）：直接从协议端容器取图，验证本地回退链路。 */
+        const val ACTION_MEDIA = "media"
+
+        /** 2026-11-15 排障：探测 /sdcard 可读性。 */
+        const val ACTION_MEDIA_DIAG = "mediadiag"
+
+        /** 2026-11-15：确认 Shizuku 能否读 /sdcard。 */
+        const val ACTION_SHIZUKU_READ = "shizukuread"
 
         /** 2026-11-15：强制卸载 embedder session（验证 native 内存可回收）。 */
         const val ACTION_EMBED_UNLOAD = "embedunload"

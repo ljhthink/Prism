@@ -38,8 +38,23 @@ class QqMediaFetcher(
     private val download: suspend (String, Int, Int) -> ByteArray? = { url, timeout, limit ->
         httpGet(url, timeout, limit)
     },
+    /**
+     * **本地文件回退**（2026-11-15 新增；ADR-075 / PRD US-3134）。
+     *
+     * 真机取证：NapCat 的 rkey 三通道全挂 → 图片 URL 是硬编码占位符 → CDN 必然 400；
+     * 但 **图片字节其实已经存在协议端容器里**（`get_image` 返回 `file` 本地路径）。
+     * 本回调负责"经 Termux 把容器内文件取出来"，返回原始字节；失败返回 null。
+     *
+     * null = 不具备该能力（JVM 单测/未装配），行为与旧版一致。
+     */
+    private val localFallback: (suspend (QqMediaRef) -> ByteArray?)? = null,
     /** 时钟（缓存淘汰用）。 */
-    private val clock: () -> Long = { System.currentTimeMillis() }
+    private val clock: () -> Long = { System.currentTimeMillis() },
+    /**
+     * rkey 观测器（2026-11-15）：记录"同一 rkey 被多少张不同图片复用"，
+     * 用于**离线**判定 rkey 失效（占位符必然大量重复）。可注入以便单测。
+     */
+    private val rkeyTracker: MutableMap<String, Int> = ConcurrentHashMap()
 ) {
 
     private data class Entry(val dataUrl: String, val at: Long, val bytes: Int)
@@ -48,33 +63,140 @@ class QqMediaFetcher(
     private val cachedBytes = AtomicLong(0)
 
     /**
-     * 下载并转成 `data:` URL（可直接作为 `image_url` 内容给视觉模型，也可给 OCR 用）。
+     * 下载并转成 `data:` URL（**向后兼容入口**；失败返回 null）。
      *
-     * @return `data:image/jpeg;base64,...`；不可用/被拒/失败返回 null
+     * 新代码请用 [fetch] 拿到带原因的 [QqMediaResult]。
      */
-    suspend fun dataUrl(ref: QqMediaRef): String? {
+    suspend fun dataUrl(ref: QqMediaRef): String? =
+        (fetch(ref) as? QqMediaResult.Success)?.dataUrl
+
+    /**
+     * **带结构化结果的获取**（2026-11-15；ADR-075）。
+     *
+     * 顺序：缓存 → CDN 直连 → （失败且值得）本地文件回退 → 结构化失败。
+     *
+     * 与旧实现的差别：**不再静默吞错**。失败时返回 [QqMediaResult.Failure]，
+     * 上层据此把"为什么看不到图"如实写进给模型的说明（旧版只会得到一个 null，
+     * 模型于是把 `约 1793KB` 当成画面内容 —— 真机「看到个头--1793kb」即此）。
+     */
+    suspend fun fetch(ref: QqMediaRef): QqMediaResult {
         // 只有图片/表情包有画面；语音/视频/内置表情不处理
-        if (ref.kind != QqMediaKind.IMAGE && ref.kind != QqMediaKind.STICKER) return null
+        if (!QqMediaFailure.hasVisual(ref)) {
+            return QqMediaResult.Failure(
+                QqMediaResult.Kind.NO_VISUAL, "该类型无画面（${ref.kind}）"
+            )
+        }
         val url = ref.url?.trim().orEmpty()
-        if (!isAllowedUrl(url)) return null
+        if (!isAllowedUrl(url)) {
+            // 安全边界：非白名单/非 https **不回退**（避免把 App 变成任意文件读取器）
+            return QqMediaResult.Failure(
+                QqMediaResult.Kind.POLICY_REJECTED, "来源不在允许范围"
+            )
+        }
         val key = ref.fileName?.takeIf { it.isNotBlank() } ?: ("u:" + url.hashCode())
         cache[key]?.let { hit ->
-            if (clock() - hit.at < CACHE_TTL_MS) return hit.dataUrl
+            if (clock() - hit.at < CACHE_TTL_MS) {
+                return QqMediaResult.Success(
+                    dataUrl = hit.dataUrl,
+                    mime = hit.dataUrl.substringAfter("data:").substringBefore(";base64,"),
+                    bytes = hit.bytes,
+                    source = QqMediaResult.Source.CDN
+                )
+            }
             evict(key)
         }
-        val bytes = try {
-            download(url, timeoutMs, maxBytes)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            null
-        } ?: return null
+
+        // rkey 观测：占位 rkey 会被大量不同图片复用 → 提前判定，省掉一次必然失败的 10s 超时
+        val rkey = QqMediaFailure.rkeyOf(url)
+        val rkeyCount = if (rkey == null) 0 else synchronized(rkeyTracker) {
+            val n = (rkeyTracker[rkey] ?: 0) + 1
+            rkeyTracker[rkey] = n
+            n
+        }
+        val preExpired = QqMediaFailure.isRkeyExpired(url, rkeyCount)
+
+        if (!preExpired) {
+            val bytes = try {
+                download(url, timeoutMs, maxBytes)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 2026-11-15（ADR-075）：**不再静默**——旧版这里只有 `catch { null }`，
+                // 是本次"为什么看不到图"排障困难的直接原因。
+                android.util.Log.w(
+                    TAG,
+                    "媒体下载异常 host=${QqMediaFailure.hostOf(url)} " +
+                        "err=${e::class.simpleName}"
+                )
+                null
+            }
+            if (bytes != null) {
+                val success = toSuccess(bytes, QqMediaResult.Source.CDN)
+                if (success != null) {
+                    put(key, Entry(success.dataUrl, clock(), success.bytes))
+                    return success
+                }
+            }
+            android.util.Log.w(
+                TAG,
+                "媒体获取失败 host=${QqMediaFailure.hostOf(url)} " +
+                    "有字节=${bytes != null} 预判rkey失效=$preExpired"
+            )
+        } else {
+            android.util.Log.w(
+                TAG,
+                "媒体跳过 CDN：rkey 已被 $rkeyCount 张图片复用（协议端降级占位符），改走本地回退"
+            )
+        }
+
+        // ---- 层 B：本地文件回退（图片字节通常已在协议端容器内）----
+        val fallback = localFallback
+        if (fallback != null) {
+            val local = try {
+                fallback(ref)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "本地回退异常：${e::class.simpleName}")
+                null
+            }
+            if (local != null) {
+                val success = toSuccess(local, QqMediaResult.Source.LOCAL_FILE)
+                if (success != null) {
+                    android.util.Log.i(
+                        TAG,
+                        "媒体已通过本地文件回退获取（${success.bytes / 1024}KB）"
+                    )
+                    put(key, Entry(success.dataUrl, clock(), success.bytes))
+                    return success
+                }
+            } else {
+                android.util.Log.w(TAG, "本地回退未拿到字节（协议端容器内无此文件？）")
+            }
+        }
+
+        val kind = if (preExpired || QqMediaFailure.looksLikeFallbackUrl(url)) {
+            // 2026-11-15（单测抓到的真 bug）：即使只出现 1 次，只要 URL **本身就是
+            // 降级形状**（gchat.qpic.cn + rkey + spec=0），也应判 rkey 失效——
+            // 真机 4 张图片 rkey 完全相同，但首张就必然失败，不该被归类成"网络问题"。
+            QqMediaResult.Kind.RKEY_EXPIRED
+        } else if (fallback == null) {
+            QqMediaResult.Kind.NETWORK
+        } else {
+            // 有回退能力但也没拿到 → 最可能是 rkey 失效 + 本地文件缺失
+            QqMediaResult.Kind.RKEY_EXPIRED
+        }
+        return QqMediaResult.Failure(kind, QqMediaFailure.diagnosticFor(kind))
+    }
+
+    /** 字节 → 成功结果（含尺寸/magic 校验）；不合格返回 null。 */
+    private fun toSuccess(bytes: ByteArray, source: QqMediaResult.Source): QqMediaResult.Success? {
         if (bytes.isEmpty() || bytes.size > maxBytes) return null
         val mime = detectMime(bytes) ?: return null
-        val dataUrl = "data:$mime;base64," +
-            Base64.getEncoder().encodeToString(bytes)
-        put(key, Entry(dataUrl, clock(), bytes.size))
-        return dataUrl
+        val dataUrl = "data:$mime;base64," + Base64.getEncoder().encodeToString(bytes)
+        return QqMediaResult.Success(
+            dataUrl = dataUrl, mime = mime, bytes = bytes.size, source = source
+        )
     }
 
     /** 当前缓存条数（诊断/测试用）。 */
@@ -105,6 +227,9 @@ class QqMediaFetcher(
     }
 
     companion object {
+        /** 日志 TAG（2026-11-15：ADR-075 起失败必须落日志）。 */
+        private const val TAG = "QqMediaFetcher"
+
         /** 单张图片上限（8MB；QQ 常见 100KB~2MB）。 */
         const val MAX_BYTES: Int = 8 * 1024 * 1024
 

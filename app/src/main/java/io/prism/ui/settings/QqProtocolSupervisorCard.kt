@@ -122,6 +122,25 @@ fun QqProtocolSupervisorSection(
             )
         }
         Text("省电策略：$powerText", style = MaterialTheme.typography.bodySmall)
+        // 2026-11-15（ADR-075 / US-3134）：图片获取诊断。
+        // 真机事故：NapCat 的 rkey 三通道全挂 → 图片 URL 是占位 rkey → CDN 必然 400，
+        // 而旧实现在任何地方都看不到"图取不到"，用户只能看到 LLM 胡说"看到个头--1793kb"。
+        // 这里把最近一次媒体失败原因显式展示出来，不再只藏在 logcat。
+        val mediaFailure = (context.applicationContext as? io.prism.PrismApplication)
+            ?.lastMediaFailureKind
+        if (mediaFailure != null) {
+            val severe = mediaFailure == io.prism.qq.QqMediaResult.Kind.RKEY_EXPIRED ||
+                mediaFailure == io.prism.qq.QqMediaResult.Kind.NETWORK
+            Text(
+                io.prism.qq.QqMediaFailure.diagnosticFor(mediaFailure) +
+                    if (mediaFailure == io.prism.qq.QqMediaResult.Kind.RKEY_EXPIRED) {
+                        "（已尝试从协议端本地文件回退；仍失败请点「一键修复」重装脚本）"
+                    } else "",
+                style = MaterialTheme.typography.bodySmall,
+                color = if (severe) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         if (!notificationsEnabled) {
             Text(
                 "⚠ 未授予通知权限：协议端掉线时无法通知你。请到系统设置允许 Prism 发送通知。",

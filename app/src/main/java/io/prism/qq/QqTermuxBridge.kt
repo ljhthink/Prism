@@ -322,6 +322,51 @@ object QqTermuxBridge {
     fun probe(context: Context): Boolean = run(context, QqProtocolScripts.PROBE_SCRIPT)
 
     /**
+     * 带参数执行 `media-fetch.sh`（2026-11-15；ADR-075 / US-3134）。
+     *
+     * 与 [run] 的差别只有两点：目标是 [QqProtocolScripts.MEDIA_SCRIPT]，且**透传参数**。
+     * 参数已由 [QqMediaLocalBridge.sanitizeName] 白名单校验；脚本侧还会再校验一次
+     * （双端一致，任一端被改坏另一端仍拦得住）。
+     */
+    fun runMediaFetch(context: Context, arguments: Array<String>): Boolean =
+        runWithArgs(context, QqProtocolScripts.MEDIA_SCRIPT, arguments)
+
+    private fun runWithArgs(
+        context: Context,
+        scriptPath: String,
+        arguments: Array<String>
+    ): Boolean {
+        if (!QqProtocolScripts.isDeployed(scriptPath)) {
+            Log.w(TAG, "拒绝执行未部署的脚本：${scriptPath.substringAfterLast('/')}")
+            return false
+        }
+        val appContext = context.applicationContext
+        if (!isTermuxInstalled(appContext)) {
+            Log.w(TAG, "Termux 未安装，无法提交命令")
+            return false
+        }
+        if (!hasRunCommandPermission(appContext)) {
+            Log.w(TAG, "缺少 com.termux.permission.RUN_COMMAND 授权")
+            return false
+        }
+        val intent = android.content.Intent(ACTION_RUN_COMMAND).apply {
+            component = android.content.ComponentName(TERMUX_PACKAGE, RUN_COMMAND_SERVICE)
+            putExtra(EXTRA_PATH, TERMUX_BASH)
+            putExtra(EXTRA_ARGUMENTS, arrayOf(scriptPath) + arguments)
+            putExtra(EXTRA_WORKDIR, TERMUX_HOME)
+            putExtra(EXTRA_BACKGROUND, true)
+            putExtra(EXTRA_SESSION_ACTION, SESSION_ACTION_NONE)
+            putExtra(EXTRA_COMMAND_LABEL, "Prism")
+        }
+        return runCatching {
+            appContext.startService(intent)
+            true
+        }.onFailure { e ->
+            Log.w(TAG, "提交 RUN_COMMAND 失败：${e::class.simpleName} ${e.message?.take(80)}")
+        }.getOrDefault(false)
+    }
+
+    /**
      * **真实闭环探针**（2026-11-02，修复"提交成功≠执行成功"的误报）。
      *
      * ## 为什么必须做这一步
@@ -435,11 +480,48 @@ object QqProtocolScripts {
     /** 部署目录（shell 可写、Termux 可读）。 */
     const val DEPLOY_DIR = "/data/local/tmp"
 
-    /** 从 assets 同步的三个脚本（顺序即部署顺序；`run2-inner.sh` 由 `run2.sh` 调用）。 */
-    val ASSET_SCRIPTS = listOf("run2.sh", "run2-inner.sh", "verify.sh")
+    /**
+     * 从 assets 同步的脚本（顺序即部署顺序；`run2-inner.sh` 由 `run2.sh` 调用）。
+     *
+     * 2026-11-15（ADR-075 / US-3134）新增 `media-fetch.sh`：图片本地文件回退
+     * （协议端 rkey 失效时 CDN 必然 400，但图片字节已在容器内）。
+     */
+    val ASSET_SCRIPTS = listOf("run2.sh", "run2-inner.sh", "verify.sh", "media-fetch.sh")
 
     const val RUN_SCRIPT = "$DEPLOY_DIR/run2.sh"
     const val VERIFY_SCRIPT = "$DEPLOY_DIR/verify.sh"
+
+    /** 图片本地导出脚本（2026-11-15；ADR-075）。入参=图片文件名；产物=[MEDIA_OUT_FILE]。 */
+    const val MEDIA_SCRIPT = "$DEPLOY_DIR/media-fetch.sh"
+
+    /** 本地导出脚本的产物（Prism 可直接读 /sdcard，无需 root）。 */
+    /**
+     * 本地导出脚本的产物（2026-11-15 真机取证后定案）。
+     *
+     * **必须放在 Prism 自己的 app-specific 外部目录**：脚本以 Termux 身份运行
+     * （持有 MANAGE_EXTERNAL_STORAGE），可以写进来；而该目录属主是 Prism，
+     * **Prism 读它不需要任何权限**。
+     *
+     * 为什么不用 app-specific 目录：真机实测 Termux **写不进去**
+     * （`DENIED /sdcard/Android/data/io.prism/files`，Android 11+ 跨应用限制）。
+     * Termux 唯一可写的是 `/sdcard` 根；Prism 读不了它，故经 Shizuku 转一次。
+     */
+    const val MEDIA_OUT_FILE = "/sdcard/prism-media.bin"
+
+    /** 本地导出脚本的回执（`ok=1|0 ts=… size=… reason=…`）。 */
+    const val MEDIA_RESULT_FILE = "/sdcard/prism-media.txt"
+
+    /**
+     * 中转后的产物路径（2026-11-15；ADR-075 真机取证后新增）。
+     *
+     * 为什么需要中转：脚本产物在 `/sdcard`（`root:everybody 660`），而 **Prism 没有存储权限**
+     * （真机实测 `exists=true canRead=false`）。shell 能读 `/sdcard`、Prism 能读
+     * `/data/local/tmp`（两者均已实测），故由 Shizuku 做一次 `cp` 中转。
+     */
+    const val MEDIA_RELAY_FILE = "/data/local/tmp/prism-media.bin"
+
+    /** 中转后的**回执**路径（回执也在 /sdcard，Prism 同样读不到）。 */
+    const val MEDIA_RELAY_RESULT_FILE = "/data/local/tmp/prism-media.txt"
 
     /** 停止脚本（Prism 生成，不来自 assets）。 */
     const val STOP_SCRIPT = "$DEPLOY_DIR/prism-stop.sh"

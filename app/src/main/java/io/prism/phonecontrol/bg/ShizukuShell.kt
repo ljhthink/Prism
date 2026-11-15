@@ -626,6 +626,56 @@ object ShizukuShell {
         return exec(TEST_BIN, "-f", path)
     }
 
+    /**
+     * 以 shell 身份把共享存储里的文件复制到 `/data/local/tmp`（2026-11-15；ADR-075）。
+     *
+     * ## 为什么需要这一步
+     *
+     * 真机实测：协议端脚本能把图片写到 `/sdcard/prism-media.bin`（`ok=1 size=1836981`），
+     * 但 **Prism 自己读不了**——文件是 `root:everybody 660`，而 Prism 没有
+     * `MANAGE_EXTERNAL_STORAGE`/`READ_EXTERNAL_STORAGE`（实测 `exists=true canRead=false`）。
+     *
+     * 而 **shell 身份能读** `/sdcard`，且 **Prism 能读** `/data/local/tmp`
+     * （两者均已实测）。于是用 shell 做一次中转：
+     *
+     * ```
+     * /sdcard/prism-media.bin  --(shell cp)-->  /data/local/tmp/prism-media.bin  --(Prism 直接读)
+     * ```
+     *
+     * 安全边界：源只允许 `/sdcard/prism-media.bin`，目标只允许 `/data/local/tmp/` 前缀，
+     * 且两者都过 [isSafeAbsolutePath]（无 `..`、无 shell 元字符），命令以 argv 传入不拼串。
+     */
+    fun copySharedMediaToTmp(source: String, target: String): Boolean {
+        if (!isSafeAbsolutePath(source) || !isSafeAbsolutePath(target)) return false
+        if (source !in ALLOWED_MEDIA_SOURCES) return false
+        if (!target.startsWith(TERMUX_SCRIPT_WHITELIST_PREFIX)) return false
+        // 2026-11-15（真机取证）：**不能用 `cp`**。
+        // 实测 `cp /sdcard/x /data/local/tmp/x` 稳定 `exit=1`（SELinux 对 cp 创建文件的
+        // 类型转换有限制），而既有的 writeShellFile 走 `sh -c 'printf > file'` 却能正常
+        // 写 /data/local/tmp。故改走 `sh` 的重定向：
+        //   sh -c 'cat "$1" > "$2"' sh <src> <dst>
+        // 只用位置参数（不拼字符串），路径已过白名单 + 字符集校验，无注入面。
+        return exec(*buildCopyShellFileCommand(source, target))
+    }
+
+    /**
+     * 拼装"以 shell 身份复制文件"的命令数组（纯函数，可单测）。
+     *
+     * 用 `cat` + 重定向而不是 `cp`（原因见 [copySharedMediaToTmp]）。
+     */
+    fun buildCopyShellFileCommand(source: String, target: String): Array<String> = arrayOf(
+        "/system/bin/sh", "-c",
+        "cat \"\$1\" > \"\$2\" && /system/bin/chmod 644 \"\$2\"",
+        "sh", source, target
+    )
+
+    /** 删除 `/data/local/tmp` 下的媒体中转文件（用完即清，避免残留）。 */
+    fun removeMediaTmpFile(path: String): Boolean {
+        if (!isSafeAbsolutePath(path)) return false
+        if (!path.startsWith(TERMUX_SCRIPT_WHITELIST_PREFIX)) return false
+        return exec(RM_BIN, "-f", path)
+    }
+
     /** 通用绝对路径安全判定（无 shell 元字符；[fileExists] 用）。 */
     fun isSafeAbsolutePath(path: String): Boolean {
         if (!path.startsWith("/")) return false
@@ -750,6 +800,23 @@ object ShizukuShell {
     private const val TEST_BIN = "/system/bin/test"
     private const val CAT_BIN = "/system/bin/cat"
     private const val TAIL_BIN = "/system/bin/tail"
+
+    /** `cp` 绝对路径（用户服务进程的 PATH 不含 /system/bin）。 */
+    private const val CP_BIN = "/system/bin/cp"
+
+    /** `rm` 绝对路径。 */
+    private const val RM_BIN = "/system/bin/rm"
+
+    /**
+     * 允许中转的共享存储源文件（**精确白名单**，不放目录）。
+     *
+     * 只有协议端脚本产出的媒体中转文件，避免这条能力被用来读任意共享存储内容。
+     */
+    private val ALLOWED_MEDIA_SOURCES = setOf(
+        "/sdcard/prism-media.bin",
+        // 回执同样在 /sdcard，Prism 也读不到 —— 必须一起中转
+        "/sdcard/prism-media.txt"
+    )
 
     /** 脚本正文长度上限（Binder 事务上限约 1MB；留足余量）。 */
     private const val MAX_SCRIPT_CHARS = 64 * 1024

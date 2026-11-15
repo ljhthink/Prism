@@ -880,7 +880,31 @@ class PrismApplication : Application() {
     }
 
     /** QQ 媒体下载器（2026-10-26；US-3124）：白名单 + 尺寸上限 + LRU 缓存。 */
-    val qqMediaFetcher: io.prism.qq.QqMediaFetcher by lazy { io.prism.qq.QqMediaFetcher() }
+    /**
+     * 媒体获取器（2026-11-15 增强；ADR-075 / US-3134）。
+     *
+     * 注入了**本地文件回退**：真机取证 NapCat 的 rkey 三通道全挂
+     * （`[Rkey] 所有服务均已禁用, 图片使用FallBack机制`）→ 图片 URL 是占位 rkey
+     * → CDN 必然 400；但图片字节已在协议端容器内，由 `media-fetch.sh` 捞到 /sdcard。
+     */
+    val qqMediaFetcher: io.prism.qq.QqMediaFetcher by lazy {
+        io.prism.qq.QqMediaFetcher(
+            localFallback = { ref -> mediaLocalBridge.fetchBytes(ref) }
+        )
+    }
+
+    /** 协议端本地文件桥（rkey 失效时从容器内取图）。 */
+    val mediaLocalBridge: io.prism.qq.QqMediaLocalBridge by lazy {
+        io.prism.qq.QqMediaLocalBridge(this)
+    }
+
+    /**
+     * 最近一次媒体获取失败的原因（诊断用；设置页可读）。
+     *
+     * 2026-11-15 新增：让"为什么看不到图"在 UI 上可见，而不是只藏在 logcat 里。
+     */
+    @Volatile
+    var lastMediaFailureKind: io.prism.qq.QqMediaResult.Kind? = null
 
     /**
      * 协议端账号在线态探测（2026-10-26；US-3125）。
@@ -1964,7 +1988,12 @@ class PrismApplication : Application() {
                     )
                 }
                 if (mediaRef != null) {
-                    val dataUrl = qqMediaFetcher.dataUrl(mediaRef)
+                    // 2026-11-15（ADR-075 / US-3134）：改用 fetch() 拿**结构化结果**。
+                    // 旧版用的是 dataUrl()（失败只有 null），于是上层只能写一句笼统的
+                    // "未能获取"，模型于是把 `约 1793KB` 当成画面内容
+                    // —— 真机「看到个头--1793kb」正是这么来的。
+                    val result = qqMediaFetcher.fetch(mediaRef)
+                    val dataUrl = (result as? io.prism.qq.QqMediaResult.Success)?.dataUrl
                     val modelName = provider.models.firstOrNull().orEmpty()
                     val vision = provider.supportsVision ||
                         io.prism.data.ProviderConfig.detectVisionSupport(modelName)
@@ -1979,8 +2008,14 @@ class PrismApplication : Application() {
                             "\n当前模型无法识别图片画面内容"
                         }
                     } else {
-                        // 下载失败（CDN 过期/无权限）时**不要把已识别出的表情/摘要丢掉**
-                        mediaNote = (mediaNote ?: "") + "\n图片本体未能获取（下载失败或已过期）"
+                        // 失败时**如实解释原因**，并明确"你看不到画面"——
+                        // 避免模型对着一张不存在的图编造，或把文件大小当成内容。
+                        val kind = (result as? io.prism.qq.QqMediaResult.Failure)?.kind
+                            ?: io.prism.qq.QqMediaResult.Kind.NETWORK
+                        mediaNote = (mediaNote ?: "") + "\n" +
+                            io.prism.qq.QqMediaFailure.noteFor(kind)
+                        // 失败类别也记为最近一次诊断结论，供设置页展示
+                        lastMediaFailureKind = kind
                     }
                     android.util.Log.i(
                         "QqProactiveSchedule",
