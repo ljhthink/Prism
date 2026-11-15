@@ -20,6 +20,7 @@ import io.prism.document.Chunker
 import io.prism.document.DocumentParserRegistry
 import io.prism.embedding.Embedder
 import io.prism.embedding.EmbedderFactory
+import io.prism.embedding.LazyLoadedEmbedder
 import io.prism.embedding.NullEmbedder
 import io.prism.embedding.OnnxEmbedder
 import io.prism.fs.FilesystemMcpServer
@@ -294,30 +295,32 @@ class PrismApplication : Application() {
      * 由 [startEmbedderUnloadScheduler] 在 [appScope] 中定时调用 [OnnxEmbedder.checkAndUnload]。
      */
     val embedder: Embedder by lazy {
-        if (tierManager.currentTier.isEmbedderEnabled) {
-            // UXR9 US-901：多语言嵌入模型（paraphrase-multilingual-MiniLM-L12-v2 qint8，
-            // ~113MB）+ Unigram tokenizer（tokenizer.json ~9MB）。英文 MiniLM 对中文语义
-            // 区分度差（无关中文片段余弦 0.4~0.7），多语言模型是中文 RAG 治本方案。
-            // 批次22 crash-fix（TKN-B22-CRASH-001 方案C）：改用 **Safe** 工厂——native 库
-            // 故障（缺符号/类毒化）降级 NullEmbedder，绝不向主线程调用方抛 Error
-            //（2026-09-06 真机 FATAL 循环崩溃的防御层，见 docs/reports/2026-09-06-crash-ort-conflict-rca-and-fix.md）。
-            //
-            // 2026-11-15（内存优化；ADR-074 / PRD US-3133）：改为**按文件路径**加载。
-            // 旧实现 `assets.open(...).readBytes()` 把 113MB 模型读成 byte[] **永久常驻**，
-            // 且 `checkAndUnload` 只关 session、byte[] 永不释放（真机 Dalvik Alloc 162MB
-            // 中约 110MB 即此）。现在先把模型复制到 filesDir（仅首次，约 113MB 磁盘），
-            // 再由 ORT 按路径 mmap —— 内存不计入 Java Heap。
-            val modelFile = ensureEmbedderModelOnDisk()
-            if (modelFile == null) {
-                NullEmbedder()
-            } else {
-                assets.open(EmbedderFactory.DEFAULT_TOKENIZER_PATH).use { tokenizerInput ->
-                    EmbedderFactory.createMultilingualFromFile(modelFile, tokenizerInput)
+        // 2026-11-15（内存优化；ADR-074 / guardrail R-01）：
+        // **lazy 本身必须零 IO**。它唯一的生产调用点是 ConversationViewModel.Factory
+        // 的 initializer（主线程）；若在这里做 113MB 解压写盘 + tokenizer 解析，
+        // 首次开聊天页必然 ANR（这正是第一版"取消预热"引入的问题）。
+        // 因此改为返回一个**延迟加载包装器**：真正加载发生在首次 embed()（IO 线程）。
+        LazyLoadedEmbedder(
+            factory = {
+                if (!tierManager.currentTier.isEmbedderEnabled) {
+                    null
+                } else {
+                    // UXR9 US-901：多语言嵌入模型（~113MB）+ Unigram tokenizer（~9MB）。
+                    // 批次22 crash-fix（TKN-B22-CRASH-001 方案C）：Safe 工厂——native 库
+                    // 故障（缺符号/类毒化）降级 NullEmbedder，绝不向调用方抛 Error
+                    //（2026-09-06 真机 FATAL 循环崩溃的防御层）。
+                    val modelFile = ensureEmbedderModelOnDisk()
+                    if (modelFile == null) {
+                        NullEmbedder()
+                    } else {
+                        assets.open(EmbedderFactory.DEFAULT_TOKENIZER_PATH).use { tokenizerInput ->
+                            EmbedderFactory.createMultilingualFromFile(modelFile, tokenizerInput)
+                        }
+                    }
                 }
-            }
-        } else {
-            NullEmbedder()
-        }
+            },
+            label = "多语言嵌入模型"
+        )
     }
 
     /**
@@ -2462,8 +2465,11 @@ class PrismApplication : Application() {
                     } catch (e: Exception) {
                         android.util.Log.w("PrismApplication", "收件箱重试异常：${e::class.simpleName}")
                     }
-                    // 没有待处理项时本轮无实际工作，退避到 5 分钟（有事件会即时触发）
-                    if (processed == 0) delay(285_000L)
+                    // guardrail R-05（2026-11-15）：**不能**用 5 分钟退避抹平策略层的重试节奏。
+                    // `QqInboxPolicy` 的 FAILED 退避是 30s → 2min → 10min，HOLD 是 60s；
+                    // 若这里追加 285s，等于把 30s/60s 的重试全部拉长到 ≥5 分钟（US-3129 AC-6 失效）。
+                    // 空转时只做 45s 的温和降频，仍覆盖 30s/60s 两档（事件到达会即时触发处理）。
+                    if (processed == 0) delay(45_000L)
                 }
             }
 

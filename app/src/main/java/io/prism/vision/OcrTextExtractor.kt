@@ -128,6 +128,15 @@ class MlKitOcrTextExtractor(
     @Volatile
     private var recognizerRef: com.google.mlkit.vision.text.TextRecognizer? = null
 
+    /**
+     * **使用中**计数（guardrail R-02）：>0 时禁止 [releaseIfIdle] 关闭 recognizer。
+     *
+     * 为什么必须有：`extractText` 取出 recognizer 引用后到 `process()` 完成之间，
+     * 若调度器恰好判定"闲置"并 `close()`，in-flight 的识别会被打断 →
+     * 异常被吞成 null → 上游落"无法识别图片画面内容"（症状与"看不到表情"同形）。
+     */
+    private val inFlight = java.util.concurrent.atomic.AtomicInteger(0)
+
     private val recognizer: com.google.mlkit.vision.text.TextRecognizer
         get() = recognizerRef ?: synchronized(this) {
             recognizerRef ?: TextRecognition.getClient(
@@ -135,7 +144,7 @@ class MlKitOcrTextExtractor(
             ).also { recognizerRef = it; closed = false }
         }
 
-    /** 最近一次使用时刻（闲置释放判据）。 */
+    /** 最近一次使用时刻（闲置释放判据；**必须在每次实际识别时刷新**，R-02）。 */
     @Volatile
     private var lastUsedAtMs: Long = System.currentTimeMillis()
 
@@ -146,11 +155,14 @@ class MlKitOcrTextExtractor(
     /**
      * 闲置释放 native 资源（由调用方定时触发）。
      *
+     * guardrail R-02：有 in-flight 识别时**拒绝释放**（宁可多占一会儿，不可打断识别）。
+     *
      * @return true=本次真的释放了（下次使用会自动重建）
      */
     fun releaseIfIdle(idleMs: Long = IDLE_RELEASE_MS): Boolean {
         if (closed) return false
         if (System.currentTimeMillis() - lastUsedAtMs < idleMs) return false
+        if (inFlight.get() > 0) return false
         val r = synchronized(this) {
             val cur = recognizerRef ?: return false
             recognizerRef = null
@@ -172,6 +184,9 @@ class MlKitOcrTextExtractor(
 
     override suspend fun extractText(imageDataUrl: String): String? = withContext(Dispatchers.IO) {
         val bitmap = decodeImageDataUrl(imageDataUrl) ?: return@withContext null
+        // guardrail R-02：进入识别前刷新使用时刻并占位 in-flight，避免被调度器误判闲置而 close。
+        lastUsedAtMs = System.currentTimeMillis()
+        inFlight.incrementAndGet()
         try {
             val result = Tasks.await(recognizer.process(InputImage.fromBitmap(bitmap, 0)))
             val text = result.text.trim()
@@ -181,6 +196,9 @@ class MlKitOcrTextExtractor(
         } catch (e: Exception) {
             Log.w(TAG, "extractText: OCR 失败（${e::class.simpleName}）")
             null
+        } finally {
+            lastUsedAtMs = System.currentTimeMillis()
+            inFlight.decrementAndGet()
         }
     }
 
@@ -229,6 +247,10 @@ class MlKitOcrTextExtractor(
         } catch (e: Exception) {
             Log.w(TAG, "extractElements: OCR 失败（${e::class.simpleName}）")
             emptyList()
+        } finally {
+            // guardrail R-02：必须释放 in-flight 占位，否则 recognizer 永不回收。
+            lastUsedAtMs = System.currentTimeMillis()
+            inFlight.decrementAndGet()
         }
     }
 

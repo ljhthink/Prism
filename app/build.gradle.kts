@@ -143,6 +143,18 @@ android {
         }
     }
 
+    /**
+     * 2026-11-15（内存优化；ADR-074 / guardrail R-04）：**`onnx` 不压缩**。
+     *
+     * 原因：`ensureEmbedderModelOnDisk()` 用 `assets.openFd()` 读期望长度做"是否已落地"的校验，
+     * 而压缩存放的 asset 会让 `openFd()` 抛异常 → 期望长度恒为 null → 校验永不生效，
+     * 换模型时会静默沿用旧文件（而 tokenizer 已换 → 向量空间不一致）。
+     * 不压缩后 ORT 也更容易直接 mmap，且 `openFd` 可正常工作。
+     */
+    androidResources {
+        noCompress += "onnx"
+    }
+
     // 临时配置：禁用 lint 崩溃检测器（已知工具链问题，保留以维持 Typecheck）。
     // 背景：Kotlin 2.3.21 产 metadata v2.3.0，lint 内置 kotlinx-metadata-jvm 无法读取更高版本 metadata，
     // 导致多个 UAST 检测器解析含协程/StateFlow 的源码时抛 throwIfNotCompatible 崩溃（非业务代码缺陷）。

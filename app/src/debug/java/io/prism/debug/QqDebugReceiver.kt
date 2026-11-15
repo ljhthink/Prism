@@ -166,18 +166,20 @@ class QqDebugReceiver : BroadcastReceiver() {
                     // 若 path 模式不可用，RAG 会永久降级为 NullEmbedder——必须真机确认。
                     // 用法：am broadcast -a io.prism.DEBUG_QQ --es action embed -p io.prism
                     ACTION_EMBED_UNLOAD -> runBlocking {
+                        // 2026-11-15：embedder 现在是 LazyLoadedEmbedder 包装器，
+                        // 卸载必须走包装器（它会转发给内层 delegate），
+                        // 否则 `as? OnnxEmbedder` 恒为 null（真机实测 released=false 即此）。
                         val e = app.embedder
-                        val before = (e as? io.prism.embedding.OnnxEmbedder)?.isLoaded()
-                        // 强制按 0 闲置阈值卸载（等价于闲置超时后的行为）
-                        val released = (e as? io.prism.embedding.OnnxEmbedder)
-                            ?.checkAndUnload(0L) ?: false
-                        "embedUnload before=$before released=$released " +
-                            "after=${(e as? io.prism.embedding.OnnxEmbedder)?.isLoaded()}"
+                        val before = e.isLoaded()
+                        val released = e.checkAndUnload(0L)
+                        val after = e.isLoaded()
+                        "embedUnload kind=${e::class.simpleName} " +
+                            "before=$before released=$released after=$after"
                     }
                     ACTION_EMBED -> runBlocking {
                         val t0 = System.currentTimeMillis()
                         val e = app.embedder
-                        val loaded = (e as? io.prism.embedding.OnnxEmbedder)?.isLoaded()
+                        val loaded = e.isLoaded()
                         val vec = runCatching { e.embed("测试文本") }.getOrNull()
                         "embed kind=${e::class.simpleName} loaded=$loaded " +
                             "dim=${vec?.size ?: -1} 耗时=${System.currentTimeMillis() - t0}ms"

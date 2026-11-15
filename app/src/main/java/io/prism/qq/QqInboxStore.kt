@@ -25,7 +25,9 @@ import java.io.File
  * - 仅应用私有目录；原子写（临时文件 + rename）；
  * - 条数上限 [MAX_ITEMS]，超出淘汰最旧；
  * - 写失败不抛异常（收件箱是可靠性增强，不能阻断在线回复）；
- * - **不持久化媒体**：重启后补处理时只剩文本占位符（媒体 URL 有时效，重存无意义）。
+ * - **持久化媒体元数据**（2026-11-15 修订；ADR-074）：`kind/url/fileName/fileSize/summary`
+ *   随条目落盘，重建 `QqMessage` 时恢复——否则视觉/OCR 会整条失效（真机「非内置表情包看不见」）。
+ *   只存**元数据不存图片字节**：URL 的 rkey 有时效，重放失败时 `summary` 仍可如实说明。
  */
 class QqInboxStore(
     private val rootDir: File,
