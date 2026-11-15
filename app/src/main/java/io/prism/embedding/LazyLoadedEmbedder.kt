@@ -60,6 +60,17 @@ class LazyLoadedEmbedder(
         delegate?.let { return it }
         if (disabled) return null
         if (nextRetryAtMs > 0L && clock() < nextRetryAtMs) return null
+        // guardrail R3-01：`embed()` 不是 suspend 接口，无法从类型上强制"必须在 IO 线程"。
+        // 首次加载含 113MB 模型落盘 + tokenizer 解析（秒级），一旦被主线程调用即 ANR。
+        // 这里只在**检测到主线程**时记一条显著错误（不抛异常、不改变行为），
+        // 让误用能在 logcat 里立刻被发现；release 同样保留（零额外成本，仅一次线程判定）。
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            android.util.Log.e(
+                "LazyLoadedEmbedder",
+                "**主线程触发 $label 首次加载**（会阻塞秒级）：请改到 Dispatchers.IO 调用",
+                IllegalStateException("embedder loaded on main thread")
+            )
+        }
         return synchronized(loadLock) {
             delegate?.let { return it }
             if (disabled) return null
