@@ -237,7 +237,10 @@ class QqMediaLocalBridge(
          * 总预算（2026-11-15 真机校准）。
          *
          * 实测：prime 后落盘 **>6s**（26KB 表情等 6s 仍 not_found，3 分钟后已存在）。
-         * guardrail R-04：本调用发生在 `autoReplyLocked` 内（持 replyMutex），所以预算必须小。\n         * 真正的长时间等待交给**预取**（消息到达时就在后台跑）；回复链通常是缓存命中。\n         * 桥接层在等待期间每 [REPRIME_INTERVAL_MS] 再 prime 一次，
+         *
+         * guardrail R-04：本调用发生在 `autoReplyLocked` 内（持 replyMutex），所以预算必须小。
+         * 真正的长时间等待交给**预取**（消息到达时就在后台跑）；回复链通常是缓存命中。
+         * 桥接层在等待期间每 [REPRIME_INTERVAL_MS] 再 prime 一次，
          * 因为单次 `get_image` 触发的下载可能被丢弃/较慢。
          */
         const val TIMEOUT_MS: Long = 15_000L

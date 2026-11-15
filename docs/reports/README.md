@@ -138,3 +138,8 @@
 
 - [2026-11-15-qq-image-rkey-and-local-fallback-plan.md](2026-11-15-qq-image-rkey-and-local-fallback-plan.md) —— 取证与方案（待审稿，已获准执行 A+B+C3）
 - [2026-11-15-qq-media-local-fallback-guardrail.md](2026-11-15-qq-media-local-fallback-guardrail.md) —— 审查与安全审计（guardrail-enforcer，有条件通过 → 4M 已修）
+
+当前在用批次（2026-11-15 收尾，QQ 小号助手图片/表情多模态交接）
+—— **以下文件仅本地存在，不入远程**（rules/05 §12.6 一次性工件禁令）：
+
+- [2026-11-15-qq-media-multimodal-handover.md](2026-11-15-qq-media-multimodal-handover.md) —— **交接文档**（四轮根因汇总 / 关键实现位置 / 真机四道权限墙 / 调试命令 / 三条教训 / 待办移交）
