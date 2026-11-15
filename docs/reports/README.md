@@ -119,3 +119,10 @@
 - [2026-11-14-qq-liveness-archaeology.md](2026-11-14-qq-liveness-archaeology.md) —— 存活链故障定位（code-archaeologist）
 - [2026-11-14-qq-liveness-guardrail.md](2026-11-14-qq-liveness-guardrail.md) —— 审查与安全审计（guardrail-enforcer）
 - [2026-11-14-qq-liveness-acceptance.md](2026-11-14-qq-liveness-acceptance.md) —— 验收测试（ac-verifier）
+
+当前在用批次（2026-11-15，QQ 后台受限自愈 + 抖动告警 + 表情可见，ADR-073 / PRD US-3131）
+—— **以下文件仅本地存在，不入远程**（rules/05 §12.6 一次性工件禁令）：
+
+- [2026-11-15-qq-fgs-denial-and-flapping-archaeology.md](2026-11-15-qq-fgs-denial-and-flapping-archaeology.md) —— 存活链故障定位（code-archaeologist）
+- [2026-11-15-qq-fgs-guardrail.md](2026-11-15-qq-fgs-guardrail.md) —— 审查与安全审计（guardrail-enforcer，三轮：有条件通过 → 有条件通过 → 通过）
+- [2026-11-15-qq-fgs-acceptance.md](2026-11-15-qq-fgs-acceptance.md) —— 验收测试（ac-verifier）
