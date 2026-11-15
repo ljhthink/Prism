@@ -162,8 +162,10 @@ class MlKitOcrTextExtractor(
     fun releaseIfIdle(idleMs: Long = IDLE_RELEASE_MS): Boolean {
         if (closed) return false
         if (System.currentTimeMillis() - lastUsedAtMs < idleMs) return false
-        if (inFlight.get() > 0) return false
         val r = synchronized(this) {
+            // guardrail R2-04：inFlight 检查必须**在锁内**——锁外检查与锁内取走引用之间
+            // 仍可能被新的 extractText 进入，从而 close 掉正在使用的 recognizer。
+            if (inFlight.get() > 0) return false
             val cur = recognizerRef ?: return false
             recognizerRef = null
             closed = true
@@ -227,6 +229,12 @@ class MlKitOcrTextExtractor(
         screenHeight: Int
     ): List<OcrElement> = withContext(Dispatchers.IO) {
         val bitmap = decodeImageDataUrl(imageDataUrl) ?: return@withContext emptyList()
+        // guardrail R2-03（H，第二轮复审）：**入口也必须刷新时刻并占位 inFlight**。
+        // 上一版只在 finally 里单边 `decrementAndGet()` —— 入口没 increment 会让计数变负，
+        // 使 `releaseIfIdle` 的 `inFlight > 0` 判据永久失效（这正是手机控制 OCR 的主路径，
+        // 等于 R-02 根本没修好）。
+        lastUsedAtMs = System.currentTimeMillis()
+        inFlight.incrementAndGet()
         try {
             val result = Tasks.await(recognizer.process(InputImage.fromBitmap(bitmap, 0)))
             // A：计算降采样空间 → 屏幕空间的缩放因子（bitmap 为降采样后尺寸）

@@ -303,19 +303,23 @@ class PrismApplication : Application() {
         LazyLoadedEmbedder(
             factory = {
                 if (!tierManager.currentTier.isEmbedderEnabled) {
+                    // 返回 null = **档位不启用**（终态，包装器不再重试）
                     null
                 } else {
                     // UXR9 US-901：多语言嵌入模型（~113MB）+ Unigram tokenizer（~9MB）。
-                    // 批次22 crash-fix（TKN-B22-CRASH-001 方案C）：Safe 工厂——native 库
-                    // 故障（缺符号/类毒化）降级 NullEmbedder，绝不向调用方抛 Error
-                    //（2026-09-06 真机 FATAL 循环崩溃的防御层）。
+                    //
+                    // guardrail R2-02：这里**不能**把失败吞成 NullEmbedder 当"成功"返回——
+                    // 包装器会把它当已加载永久缓存，等于"不缓存失败"变成 paper fix。
+                    // 现在：模型落地失败 → **抛异常**（包装器按指数退避重试）；
+                    // 仅"native 库不可用"这类确定性问题才由 EmbedderFactory 的 Safe 工厂
+                    // 降级为 NullEmbedder（它自己保证不抛 Error）。
                     val modelFile = ensureEmbedderModelOnDisk()
-                    if (modelFile == null) {
-                        NullEmbedder()
-                    } else {
-                        assets.open(EmbedderFactory.DEFAULT_TOKENIZER_PATH).use { tokenizerInput ->
-                            EmbedderFactory.createMultilingualFromFile(modelFile, tokenizerInput)
-                        }
+                        ?: throw io.prism.embedding.EmbeddingException(
+                            io.prism.embedding.EmbeddingException.Stage.MODEL_LOAD,
+                            "嵌入模型落地失败（assets 或 filesDir 不可用）"
+                        )
+                    assets.open(EmbedderFactory.DEFAULT_TOKENIZER_PATH).use { tokenizerInput ->
+                        EmbedderFactory.createMultilingualFromFile(modelFile, tokenizerInput)
                     }
                 }
             },
@@ -2700,7 +2704,11 @@ class PrismApplication : Application() {
             while (isActive) {
                 delay(intervalMs)
                 runCatching {
-                    (embedder as? OnnxEmbedder)?.checkAndUnload(idleThresholdMs)
+                    // 2026-11-15（guardrail R2-01）：**必须走 Embedder 接口**。
+                    // 旧写 `as? OnnxEmbedder` 在包装器（LazyLoadedEmbedder）上线后恒为 null
+                    // → 生产路径的闲置卸载**永不触发**，113MB 模型句柄常驻（真机探针能卸、
+                    // 生产不走，纯属假象）。
+                    embedder.checkAndUnload(idleThresholdMs)
                 }.onFailure { e ->
                     android.util.Log.w("PrismApplication", "checkAndUnload failed: ${e::class.simpleName}")
                 }
