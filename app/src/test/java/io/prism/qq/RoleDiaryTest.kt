@@ -207,4 +207,75 @@ class RoleDiaryTest {
         assertTrue("schema 必须声明 required text", def.function.parameters.toString().contains("required"))
         assertTrue("触发判据必须可读", DiaryLocalToolExecutor.TRIGGER_HINT.contains("日记"))
     }
+
+    // ==================== 日记保底沉淀（2026-11-17；ADR-077 未决问题 2 落地） ====================
+
+    @Test
+    fun `保底闸门 - 情绪化长消息值得考虑`() {
+        assertTrue(
+            QqDiaryFallback.shouldConsider(
+                incoming = "今天其实挺难过的，忙了一整天还是被否了",
+                reply = "唔……那先别急着分析什么，人家陪你把这件事放一放。",
+                todayCount = 0
+            )
+        )
+    }
+
+    @Test
+    fun `保底闸门 - 纯媒体与过短消息跳过`() {
+        // 纯表情：不该为「对方发了个表情」写日记
+        assertTrue(
+            !QqDiaryFallback.shouldConsider("[表情]", "这个表情是舒服到不想说话啦？", 0)
+        )
+        assertTrue(!QqDiaryFallback.shouldConsider("[图片]", "拍得真好看呀♪", 0))
+        // 过短
+        assertTrue(!QqDiaryFallback.shouldConsider("嗯", "嗯。", 0))
+        // 空
+        assertTrue(!QqDiaryFallback.shouldConsider("", "在呀", 0))
+    }
+
+    @Test
+    fun `保底闸门 - 每日额度用尽即跳过（不再调 LLM）`() {
+        assertTrue(
+            !QqDiaryFallback.shouldConsider(
+                incoming = "今天其实挺难过的，忙了一整天还是被否了",
+                reply = "唔……那先别急着分析什么，人家陪你把这件事放一放。",
+                todayCount = RoleDiaryStore.MAX_PER_DAY
+            )
+        )
+    }
+
+    @Test
+    fun `保底闸门 - 占位符识别`() {
+        assertTrue(QqDiaryFallback.isPlaceholderOnly("[表情]"))
+        assertTrue(QqDiaryFallback.isPlaceholderOnly("[表情包] [图片]"))
+        assertTrue(QqDiaryFallback.isPlaceholderOnly("……[表情]！"))
+        assertTrue(!QqDiaryFallback.isPlaceholderOnly("[表情]你猜～"))
+        assertTrue(!QqDiaryFallback.isPlaceholderOnly("难过"))
+    }
+
+    @Test
+    fun `NONE 识别覆盖常见变体（模型会带引号与句号）`() {
+        listOf("NONE", "none", " NONE ", "\"NONE\"", "NONE。", "无", "不写", "")
+            .forEach { assertTrue("应判为不写：[$it]", QqDiaryFallback.isNoneResult(it)) }
+        listOf("今天他说会一直在，我把这句收好了。", "有点软", "NONE 但其实是有的")
+            .forEach {
+                // 「NONE 但其实是有的」这种前缀 NONE 会被判为不写（保守：宁可漏记，不写错）
+                if (!it.startsWith("NONE")) assertTrue("应判为要写：[$it]", !QqDiaryFallback.isNoneResult(it))
+            }
+    }
+
+    @Test
+    fun `保底 prompt 必须含二选一与反编造约束`() {
+        val p = QqDiaryFallback.buildPrompt(
+            personaSystemPrompt = "你是昔涟",
+            incoming = "今天被否了",
+            reply = "先歇一会儿"
+        )
+        assertTrue("必须带人设", p.contains("你是昔涟"))
+        assertTrue("必须带本轮入站", p.contains("今天被否了"))
+        assertTrue("必须带本轮回复", p.contains("先歇一会儿"))
+        assertTrue("必须给出 NONE 出口", p.contains("NONE"))
+        assertTrue("必须禁止旁白", p.contains("不要旁白"))
+    }
 }

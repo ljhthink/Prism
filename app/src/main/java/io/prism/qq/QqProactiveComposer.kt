@@ -199,6 +199,39 @@ class QqProactiveComposer(
         return null
     }
 
+    /**
+     * **日记保底沉淀**用的单次补全（2026-11-17；ADR-077 未决问题 2 落地）。
+     *
+     * 真机 E2E 实测：即使 `diary__write` 已在 20 个下发工具里，模型面对
+     * "今天被否了，有点难过" 仍然只安慰、不写日记（连测 3 轮零写入）。
+     * 故在**回复已发出之后**补一次独立判定——`SillyTavern-Plugin-HCDiary` 同款做法。
+     *
+     * @return 一句日记正文；null=不写（模型输出 NONE / 调用失败 / 无 key）
+     */
+    suspend fun composeDiaryNote(
+        baseUrl: String,
+        apiKey: String,
+        model: String,
+        personaSystemPrompt: String?,
+        incoming: String,
+        reply: String
+    ): String? {
+        if (baseUrl.isBlank() || apiKey.isBlank() || model.isBlank()) return null
+        val userContext = QqDiaryFallback.buildPrompt(personaSystemPrompt, incoming, reply)
+        val body = buildRequestJson(
+            model = model,
+            system = "你正在写只有自己能看的日记。严格按格式输出：一句日记正文，或 NONE。",
+            userContext = userContext,
+            reply = true
+        )
+        val raw = postWithRetry(body, baseUrl, apiKey) ?: return null
+        if (QqDiaryFallback.isNoneResult(raw)) return null
+        return raw.trim()
+            .trim('"', '\'', '。', ' ')
+            .take(QqDiaryFallback.MAX_DIARY_CHARS)
+            .takeIf { it.isNotEmpty() }
+    }
+
     companion object {
         /**
          * 生成消息长度上限（防跑飞）。
@@ -219,7 +252,7 @@ class QqProactiveComposer(
         /** 单条历史消息进入 prompt 的字符上限（防单条长文撑爆上下文）。 */
         const val MAX_CHARS_PER_MESSAGE = 120
 
-        /**
+    /**
      * 构建最近对话 + 当前消息的 user 内容（internal 纯函数可测；US-3112 AC-1）。
      *
      * 截断策略：最多 [MAX_HISTORY_IN_PROMPT] 条、单条 [MAX_CHARS_PER_MESSAGE] 字——

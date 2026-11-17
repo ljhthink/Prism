@@ -2026,6 +2026,14 @@ class PrismApplication : Application() {
                     personaSystemPrompt = persona,
                     diaryEnabled = cfg.diaryEnabled
                 )
+                // 2026-11-17（真机 E2E 取证）：**必须记下实际下发了哪些工具**。
+                // 没有这条日志时，"日记从没被写过"无法区分三种成因：
+                // ①工具没下发（装配缺陷，与 B-01 同族）②下发了但模型没选 ③写了但落盘失败。
+                android.util.Log.i(
+                    "QqProactiveSchedule",
+                    "工具回路下发=${tools.size} 个：" +
+                        io.prism.qq.QqReplyToolPolicy.namesOf(tools).joinToString(",")
+                )
                 val messages = io.prism.qq.QqReplyToolLoop.buildMessages(userContent)
                 val startedAt = System.currentTimeMillis()
                 val toolNames = mutableListOf<String>()
@@ -2790,6 +2798,68 @@ class PrismApplication : Application() {
                                 mediaNote = "发了一个「$label」的表情"
                             )
                         )
+                    }
+                }
+                // 2026-11-17（ADR-077 未决问题 2 落地）：**日记保底沉淀**。
+                //
+                // 真机 E2E 实测：`diary__write` 已下发（20 个工具里含它），但模型面对
+                // "今天被否了，有点难过" 仍然只安慰、不写日记（连测 3 轮零写入）。
+                // 主通道不可靠 → 在**回复已发出后**补一次独立判定（HCDiary 同款做法）。
+                //
+                // 三条不变量：
+                // 1. **不阻塞**：fire-and-forget 到 appScope；失败只打日志，绝不影响回复；
+                // 2. **不重复**：本轮模型已自己写过日记就跳过（该轮写没写由 store 条数变化判断）；
+                // 3. **省调用**：先过 [QqDiaryFallback.shouldConsider] 纯函数闸门，
+                //    纯表情/过短/额度满的轮次直接不调 LLM。
+                if (cfg.diaryEnabled && textOk && sentBubbles.isNotEmpty()) {
+                    val repliedText = sentBubbles.joinToString("\n")
+                    val roleIdForDiary = rolePack?.id
+                    if (roleIdForDiary != null) {
+                        val todayBefore = runCatching {
+                            roleDiaryStore.countToday(roleIdForDiary, System.currentTimeMillis())
+                        }.getOrDefault(io.prism.qq.RoleDiaryStore.MAX_PER_DAY)
+                        if (io.prism.qq.QqDiaryFallback.shouldConsider(
+                                incoming = replyTarget.text,
+                                reply = repliedText,
+                                todayCount = todayBefore
+                            )
+                        ) {
+                            appScope.launch {
+                                runCatching {
+                                    val note = qqProactiveComposer.composeDiaryNote(
+                                        baseUrl = provider.baseUrl,
+                                        apiKey = key,
+                                        model = provider.models.firstOrNull().orEmpty(),
+                                        personaSystemPrompt = persona,
+                                        incoming = replyTarget.text,
+                                        reply = repliedText
+                                    )
+                                    // 二次确认额度：后台调用期间可能已被主通道写满
+                                    val now = System.currentTimeMillis()
+                                    if (note != null &&
+                                        roleDiaryStore.countToday(roleIdForDiary, now) <
+                                        io.prism.qq.RoleDiaryStore.MAX_PER_DAY
+                                    ) {
+                                        val ok = roleDiaryStore.append(roleIdForDiary, note, "沉淀", now)
+                                        android.util.Log.i(
+                                            "QqProactiveSchedule",
+                                            "日记保底沉淀=${if (ok) "已写入" else "写入失败"}（len=${note.length}，" +
+                                                "今日第 ${roleDiaryStore.countToday(roleIdForDiary, now)} 条）"
+                                        )
+                                    } else {
+                                        android.util.Log.i(
+                                            "QqProactiveSchedule",
+                                            "日记保底沉淀=本轮无值得记的内容（模型判定 NONE）"
+                                        )
+                                    }
+                                }.onFailure {
+                                    android.util.Log.w(
+                                        "QqProactiveSchedule",
+                                        "日记保底沉淀异常（不影响回复）：${it::class.simpleName}"
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
                 // "SKIP:TEXT_EMPTY" = 本次只发媒体（无文本），按成功记账，避免被误判为失败类别

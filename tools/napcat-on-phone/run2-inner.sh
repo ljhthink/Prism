@@ -109,9 +109,19 @@ start_qq() {
   Xvfb :99 -screen 0 720x1280x24 -nolisten tcp > /tmp/xvfb2.log 2>&1 &
   sleep 4
   cd /opt/QQ || return 1
+  # 2026-11-17（真机取证）：**必须加 `--no-zygote`**。
+  # 现象：需要扫码（登录态失效）时 QQ 渲染二维码窗口，约 60s 后崩溃：
+  #   `Failed to send GetTerminationStatus message to zygote`
+  #   → `GPU process launch failed: error_code=1002` ×3
+  #   → `FATAL: GPU process isn't usable. Goodbye.`
+  # proot 下 zygote fork 不可用（容器内没有真正的 Android zygote），GPU 进程是由 zygote
+  # 分支拉起的，所以 zygote 一坏 GPU 就连带失败。`--no-zygote` 让它单进程内建 GPU 路径，
+  # 与已知可用的 `boot-inner.sh` 保持一致（那版一直带这个参数）。
+  # 另一个效果：扫码窗口能活下来 → 二维码可以持续刷新，而不是"打印后 60s 就崩"。
   env DISPLAY=:99 HOME=/root XDG_RUNTIME_DIR=/tmp/xdg \
       ./qq --no-sandbox --disable-gpu --disable-dev-shm-usage \
-           --disable-software-rasterizer --ozone-platform=x11 \
+           --disable-software-rasterizer --ozone-platform=x11 --no-zygote \
+           --disable-gpu-compositing --disable-gpu-sandbox \
            -q "$QQ" > "$LOG" 2>&1 &
   sleep 2
 }
