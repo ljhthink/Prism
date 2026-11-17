@@ -97,8 +97,28 @@ qr_pending() {
   esac
 }
 
+# 2026-11-17（真机 E2E 取证）：**匹配模式必须是真实 argv**。
+#
+# 原实现用 `pgrep -f 'opt/QQ/qq'`，但 QQ 是以 `cd /opt/QQ && ./qq ...` 启动的，
+# 其 cmdline 是 `./qq --no-sandbox ...`（**不含** `opt/QQ/` 前缀）→ 永不匹配。
+# 后果：状态文件恒为 `qq=0 state=qq_dead`，看门狗据此反复"重拉"健康进程 →
+# 这就是之前"在线却在抖/被自己踢掉"的真因（实测：OneBot get_login_info 返回
+# Cyrene 在线，而状态文件同一时刻写着 qq_dead）。
+#
+# 现改为匹配启动参数里必有的 `--no-sandbox`（与 qq 二进制名组合），
+# 对 `./qq` 与 `/opt/QQ/qq` 两种启动方式都成立。
 qq_alive() {
-  pgrep -f 'opt/QQ/qq' >/dev/null 2>&1
+  pgrep -f 'qq .*--no-sandbox' >/dev/null 2>&1 \
+    || pgrep -f 'opt/QQ/qq' >/dev/null 2>&1 \
+    || pgrep -x qq >/dev/null 2>&1
+}
+
+# 统计在跑的 QQ 进程数（同一模式，供状态文件)
+qq_count() {
+  local n
+  n=$(pgrep -fc 'qq .*--no-sandbox' 2>/dev/null || echo 0)
+  [ "$n" -gt 0 ] 2>/dev/null || n=$(pgrep -fc 'opt/QQ/qq' 2>/dev/null || echo 0)
+  echo "$n"
 }
 
 start_qq() {
@@ -132,7 +152,7 @@ pkill -9 -f 'opt/QQ/qq' 2>/dev/null
 pkill -9 -f 'Xvfb :99' 2>/dev/null
 sleep 3
 rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null
-echo "残留 qq=$(pgrep -fc 'opt/QQ/qq' 2>/dev/null || echo 0)"
+echo "残留 qq=$(qq_count)"
 
 echo "== 2) 启动（Xvfb + 快速登录） =="
 start_qq
@@ -145,7 +165,7 @@ while true; do
   cp "$LOG" /sdcard/napcat.log 2>/dev/null
 
   # ---- 3) 状态机 ----
-  QN=$(pgrep -fc 'opt/QQ/qq' 2>/dev/null || echo 0)
+  QN=$(qq_count)
   P3000=0
   port3000_listening && P3000=1
   prev_state="$state"
