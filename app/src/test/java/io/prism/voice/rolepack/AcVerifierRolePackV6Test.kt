@@ -171,13 +171,31 @@ class AcVerifierRolePackV6Test {
      * （`tool_usage.md` 全文移植 + 手写 Prism 工具清单 + 工程记账语言），soul 层角色内容未减、
      * 另新增示例对话层与执行态表达层（见 ADR-052 D1/D2/D3）。
      * `worldbook` 三层逐字节透传，故条目数/字数/恒定数与 v6 完全一致（本用例即其回归护栏）。
+     *
+     * **2026-11-15（ADR-076 / guardrail 复审）**：断言由"精确 7.0.0 / 10548 字"改为
+     * "v7 系列 / ≥10500 字"。理由：该资产是**用户私有、持续迭代**的角色卡（v7.1 由
+     * `docs/design` 下的本地生成器产出，不入库），精确字数断言会把一个**跟踪中的测试文件**
+     * 绑死在私有资产的每次文案增删上。
+     *
+     * **已知残余缺口（如实登记，不夸大）**：下限只能拦住"整章被删"，拦不住"删 10%"；
+     * 精确体量本应由生成器 fail-fast 承担，但该生成器在 gitignore 内、**不在 CI**，
+     * 且本类所有真实资产用例都是 `realAsset() ?: return`（**无资产时静默通过**）——
+     * 因此该补偿控制**无法从仓库验证**。下限取 10500（≈ v7 的 99.5%）以尽量收紧。
      */
     @Test
     fun `AC4-真实资产 - 规模与恒定条目数核验（40 条 20750 字 3 恒定）`() {
-        val f = realAsset() ?: return
+        val f = realAsset()
+        if (f == null) {
+            // guardrail 复审：跳过必须**可见**（原实现 `?: return` 让"没有护栏"看起来像"通过"）
+            println("[AC-VERIFIER][SKIP] 未找到 cyrene.rolepack（用户私有资产）——本用例的资产护栏未执行")
+            return
+        }
         val pack = RolePackParser.parse(f.readText())
         assertEquals("资产 schema 应为 v1", RolePack.SCHEMA_V1, pack.schema)
-        assertEquals("资产版本应为 v7.0.0（ADR-052 角色卡重构）", "7.0.0", pack.version)
+        assertTrue(
+            "资产应为 v7 系列（当前 ${pack.version}）",
+            pack.version.startsWith("7.")
+        )
 
         val total = pack.worldbook.sumOf { it.content.length }
         val constants = pack.worldbook.count { it.constant }
@@ -188,7 +206,10 @@ class AcVerifierRolePackV6Test {
         assertEquals("worldbook 条目数应为 40", 40, pack.worldbook.size)
         assertEquals("worldbook 总字数应为 20,750", 20750, total)
         assertEquals("恒定条目应为 3 条", 3, constants)
-        assertEquals("文本人格应为 10,548 字", 10548, pack.persona.systemPrompt.length)
+        assertTrue(
+            "文本人格体量不得低于 v7 下限（整章/大段误删的回归判据），实际 ${pack.persona.systemPrompt.length} 字",
+            pack.persona.systemPrompt.length >= 10_500
+        )
         assertEquals("通话段应为 919 字", 919, pack.persona.callSystemPrompt.length)
     }
 

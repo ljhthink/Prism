@@ -80,4 +80,21 @@ class QqContextBuilderTest {
         assertTrue(text.contains("对方：你好"))
         assertTrue(text.contains("我：在呢"))
     }
+
+    @Test
+    fun `render 优先使用媒体说明而不是占位符（ADR-076）`() {
+        val text = QqContextBuilder.render(
+            listOf(
+                io.prism.qq.channel.QqMessage(
+                    messageId = null,
+                    incoming = true,
+                    text = "[表情包]",
+                    timestampMs = 1L,
+                    mediaNote = "对方发来一个抱抱的表情包"
+                )
+            )
+        )
+        assertTrue(text.contains("对方发来一个抱抱的表情包"))
+        assertTrue("说明存在时不再输出裸占位符", !text.contains("[表情包]"))
+    }
 }

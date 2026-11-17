@@ -202,6 +202,32 @@ fun SettingsScreen(
         ?: kotlinx.coroutines.flow.flowOf(io.prism.qq.QqConfig.DEFAULT))
         .collectAsState(initial = io.prism.qq.QqConfig.DEFAULT)
     val qqScope = rememberCoroutineScope()
+    // 2026-11-16（ADR-077）：QQ 自定义表情库
+    // 2026-11-16（guardrail R2-M-03 / R2-L-16 修复）：
+    //   ① 所有写盘（importImage / removeUserSticker / setDescription）都**必须**在 IO 线程，
+    //      原实现在 onClick 里直调 store（主线程写 2MB 图片 + 整份 JSON 重写）→ jank/StrictMode；
+    //   ② 改用 `viewModel.importQqSticker(...)` 等 VM 方法（本就有大小校验 + IO + 可读错误），
+    //      不再在 UI 里重复实现一遍——上一批 guardrail 指出过"断言测的是没人用的死路径"。
+    val qqStickerMessageSink = remember { mutableStateOf<String?>(null) }
+    val qqStickerState = remember { mutableStateOf(qqApp?.qqStickerStore?.userStickers() ?: emptyList()) }
+    var qqStickerEmotionDraft by remember { mutableStateOf("") }
+    var qqStickerDescDraft by remember { mutableStateOf("") }
+    // guardrail R2-M-02：描述必须能作用于**任意一张**（原实现只能改最后一张 →
+    // 先批量导入 5 张、再补描述时前 4 张永久不可见）。
+    var qqStickerSelectedId by remember { mutableStateOf<String?>(null) }
+    val qqStickerPicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri: android.net.Uri? ->
+        if (uri != null && qqApp != null) {
+            viewModel.importQqSticker(uri, qqStickerEmotionDraft)
+            // VM 在协程内完成写盘；这里在下一帧刷新一次快照（store 内部有内存缓存，读零 IO）
+            qqScope.launch {
+                kotlinx.coroutines.delay(400)
+                qqStickerState.value = qqApp.qqStickerStore.userStickers()
+                qqStickerMessageSink.value = viewModel.qqStickerMessage.value
+            }
+        }
+    }
     var qqRiskDialogVisible by remember { mutableStateOf(false) }
     var qqContactDialogVisible by remember { mutableStateOf(false) }
     var qqContactDraft by remember { mutableStateOf("") }
@@ -1239,6 +1265,192 @@ fun SettingsScreen(
                         )
                     }
                 )
+            }
+            // ==================== 2026-11-16（ADR-077）：拟人节奏 ====================
+            item {
+                SetRow(
+                    icon = "🐢",
+                    iconColor = PrismIndigo,
+                    title = "拟人节奏（思考 + 打字延迟）",
+                    subtitle = if (qqConfig.pacingEnabled) {
+                        "已开启 · ${"%.1f".format(qqConfig.typingCharsPerSecond)} 字/秒 + 思考时间，" +
+                            "约 ${qqConfig.minReplyDelayMs / 1000}~${qqConfig.maxReplyDelayMs / 1000} 秒（深夜更慢）"
+                    } else {
+                        "已关闭 · 生成完立即发出（会显得「秒回」）"
+                    },
+                    trailing = {
+                        PrismSwitch(
+                            checked = qqConfig.pacingEnabled,
+                            onCheckedChange = { on ->
+                                qqScope.launch { qqApp?.qqConfigRepository?.setPacingEnabled(on) }
+                            }
+                        )
+                    }
+                )
+            }
+            // ==================== 2026-11-16（ADR-077）：能力接入 + 日记 ====================
+            item {
+                SetRow(
+                    icon = "🧰",
+                    iconColor = PrismIndigo,
+                    title = "聊天里可以调用 Prism 能力",
+                    subtitle = if (qqConfig.replyToolsEnabled) {
+                        "已开启 · 联网/热榜/资料库/待办/文档/写日记（上限 ${qqConfig.replyToolBudgetMs / 1000}s）"
+                    } else {
+                        "已关闭 · 只根据上下文回答，不查资料、不写日记"
+                    },
+                    trailing = {
+                        PrismSwitch(
+                            checked = qqConfig.replyToolsEnabled,
+                            onCheckedChange = { on ->
+                                qqScope.launch { qqApp?.qqConfigRepository?.setReplyToolsEnabled(on) }
+                            }
+                        )
+                    }
+                )
+            }
+            item {
+                SetRow(
+                    icon = "📱",
+                    iconColor = PrismIndigo,
+                    title = "允许她在聊天里操作手机",
+                    subtitle = if (qqConfig.replyPhoneControlEnabled) {
+                        "已开启 · 后台建副屏执行（较高风险，可能抢占前台）"
+                    } else {
+                        "已关闭 · 不建副屏、不抢前台（推荐）"
+                    },
+                    trailing = {
+                        PrismSwitch(
+                            checked = qqConfig.replyPhoneControlEnabled,
+                            onCheckedChange = { on ->
+                                qqScope.launch { qqApp?.qqConfigRepository?.setReplyPhoneControlEnabled(on) }
+                            }
+                        )
+                    }
+                )
+            }
+            item {
+                SetRow(
+                    icon = "📔",
+                    iconColor = PrismIndigo,
+                    title = "允许她写日记",
+                    subtitle = if (qqConfig.diaryEnabled) {
+                        "已开启 · 本地保存，每天最多 ${io.prism.qq.RoleDiaryStore.MAX_PER_DAY} 条"
+                    } else {
+                        "已关闭 · 不写入任何日记"
+                    },
+                    trailing = {
+                        PrismSwitch(
+                            checked = qqConfig.diaryEnabled,
+                            onCheckedChange = { on ->
+                                qqScope.launch { qqApp?.qqConfigRepository?.setDiaryEnabled(on) }
+                            }
+                        )
+                    }
+                )
+            }
+            // ==================== 2026-11-16（ADR-077）：自定义表情库 ====================
+            item {
+                SetRow(
+                    icon = "🎭",
+                    iconColor = PrismIndigo,
+                    title = "我的表情库（${qqStickerState.value.size} 张）",
+                    subtitle = if (qqStickerState.value.isEmpty()) {
+                        "还没有导入表情。导入后，她自己会按语境挑一张发，不再只用 QQ 内置表情"
+                    } else {
+                        qqStickerMessageSink.value
+                            ?: "她会按描述挑最贴的那张；描述越具体越准"
+                    },
+                    trailing = {
+                        Text(
+                            text = "导入",
+                            color = PrismIndigo,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.clickable {
+                                qqStickerPicker.launch(arrayOf("image/*"))
+                            }
+                        )
+                    }
+                )
+            }
+            if (qqStickerState.value.isNotEmpty()) {
+                item {
+                    PrismGlassCard {
+                        Column(Modifier.padding(16.dp)) {
+                            qqStickerState.value.forEach { sticker ->
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    // guardrail R2-M-02：点整行即选中该张，下方输入框的"保存"作用于它
+                                    modifier = Modifier.clickable {
+                                        qqStickerSelectedId = sticker.id
+                                        qqStickerDescDraft = sticker.description
+                                    }
+                                ) {
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            (if (qqStickerSelectedId == sticker.id) "▶ " else "") +
+                                                sticker.description.ifBlank {
+                                                    sticker.emotion.ifBlank { "（还没有描述）" }
+                                                },
+                                            color = if (qqStickerSelectedId == sticker.id) PrismIndigo else PrismText,
+                                            fontSize = 13.sp
+                                        )
+                                        Text(
+                                            sticker.emotion.ifBlank { "无情绪标签" } + " · " + sticker.id,
+                                            color = PrismTextFaint,
+                                            fontSize = 11.sp
+                                        )
+                                    }
+                                    Text(
+                                        text = "删",
+                                        color = PrismTextDim,
+                                        fontSize = 13.sp,
+                                        modifier = Modifier.clickable {
+                                            // guardrail R2-M-03/L-16：走 VM（IO 线程 + 可读错误），不在主线程写盘
+                                            viewModel.deleteQqSticker(sticker.id)
+                                            qqScope.launch {
+                                                kotlinx.coroutines.delay(300)
+                                                qqStickerState.value =
+                                                    qqApp?.qqStickerStore?.userStickers() ?: emptyList()
+                                                qqStickerMessageSink.value = viewModel.qqStickerMessage.value
+                                            }
+                                        }
+                                    )
+                                }
+                                Spacer(Modifier.height(10.dp))
+                            }
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                PrismField(
+                                    value = qqStickerDescDraft,
+                                    onValueChange = { qqStickerDescDraft = it },
+                                    placeholder = "描述（如：粉发小人举着「抱抱」牌子）",
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Spacer(Modifier.width(8.dp))
+                                Text(
+                                    text = "保存",
+                                    color = PrismIndigo,
+                                    fontSize = 13.sp,
+                                    modifier = Modifier.clickable {
+                                        // 优先作用于用户点选的那张，未选则作用于最后一张
+                                        val targetId = qqStickerSelectedId
+                                            ?: qqStickerState.value.lastOrNull()?.id
+                                        targetId?.let {
+                                            viewModel.setQqStickerDescription(it, qqStickerDescDraft)
+                                            qqScope.launch {
+                                                kotlinx.coroutines.delay(300)
+                                                qqStickerState.value =
+                                                    qqApp?.qqStickerStore?.userStickers() ?: emptyList()
+                                                qqStickerMessageSink.value = viewModel.qqStickerMessage.value
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
             }
             // 随机策略（US-3108 AC-2；用户裁定"择优真人感"——泊松更突发，均匀更平缓）
             item {

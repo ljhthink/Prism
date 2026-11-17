@@ -95,6 +95,14 @@ app/src/main/assets/models/streaming-zipformer-*/
 # 用户角色包与克隆音频素材（ADR-048：用户角色包不入 APK/assets/公开仓库；
 # voice-clone-kit 为个人克隆音色素材，guardrail TKN-VOICE-BUGFIX-002 D1）
 cyrene.rolepack
+# 2026-11-15（ADR-076）：v7.1 起，**角色卡源文本与生成器不再入库**（用户私有资产，
+# 明确要求不得提交/上传）。v7 的 `docs/design/cyrene-rolecard-v7.md` 是历史遗留的已入库文件，
+# 本轮**不改动**它；v7.1 的增量源文本与生成脚本一律 `.local` 后缀 + 本规则忽略。
+docs/design/*.local.md
+docs/design/*.local.js
+# 二进制下载残留（浏览器重复下载会生成 "xxx.apk.1" 之类的副本；第三方 APK 不入库）
+*.apk
+*.apk.[0-9]*
 # ⚠️ 2026-09-24（ADR-060）收窄：原先整体忽略 `voice-clone-kit/`，导致**能复算出生产的
 # 工具链脚本（含音频参数的唯一事实来源，如 build-local-voicepack.ps1 的 $SilenceScale）
 # 完全不在版本控制内** —— 即"改了什么参数无从追溯、也进不了代码审查"。

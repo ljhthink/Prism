@@ -161,6 +161,32 @@ class QqInboxStore(
     /** 待处理条数（UI/诊断用）。 */
     fun size(): Int = synchronized(lock) { items.size }
 
+    /**
+     * **启动时回收陈旧 claim**（2026-11-16 新增；guardrail R2-M-01）。
+     *
+     * 为什么必须有：`claimDue` 会把 `nextAttemptAtMs = now + CLAIM_TTL_MS` **持久化**。
+     * 进程被杀/崩溃后重启，这些"处理中"条目要等满整段租约才能再被领取。ADR-077 把
+     * 租约由 120s 提到 300s（覆盖"两轮排队"以消除双回复），代价是**崩溃重启后最长
+     * 5 分钟不回复**——与 US-3129 AC-4「恢复后 ≤60s」直接冲突。
+     *
+     * 单进程应用：启动时**不可能有别的实例正在处理**，故可安全地把所有"未来才可取"的
+     * 条目前移到 `nowMs`。重试退避（`retryLater`）同样被前移是**有意的**——启动是
+     * 一次全新的处理机会，且 `attempts` 仍在，超额会照常放弃。
+     *
+     * @return 被回收的条目数（供启动日志）
+     */
+    fun reclaimStaleClaims(nowMs: Long): Int = synchronized(lock) {
+        var reclaimed = 0
+        items.entries.forEach { (id, item) ->
+            if (item.nextAttemptAtMs > nowMs) {
+                items[id] = item.copy(nextAttemptAtMs = nowMs)
+                reclaimed++
+            }
+        }
+        if (reclaimed > 0) persist()
+        reclaimed
+    }
+
     /** 处理成功：移除。 */
     fun done(id: String) {
         synchronized(lock) {
@@ -339,8 +365,26 @@ class QqInboxStore(
         /** 单轮最多处理条数（防一次重连把风控/费用打爆）。 */
         const val MAX_PER_ROUND = 5
 
-        /** 「处理中」租约：进程中途被杀后，条目在该时长后自动重新可取。 */
-        const val CLAIM_TTL_MS = 120_000L
+        /**
+         * 单批合并条数（2026-11-15 新增；ADR-076）。
+         *
+         * 对方连发时一次生成覆盖整批（真人不会逐条点答）；上限 4 是为了一次回复
+         * 不至于被 8 条无关内容稀释，同时保证租约（[CLAIM_TTL_MS]）远大于一次生成耗时。
+         */
+        const val BURST_LIMIT = 4
+
+        /**
+         * 「处理中」租约：进程中途被杀后，条目在该时长后自动重新可取。
+         *
+         * **2026-11-16（guardrail M-07）：120s → 300s**。
+         * 最坏单轮临界区（`replyMutex` 内）实测量级：
+         * 生成 ≤10s + 工具回路预算 15s + 拟人节奏 ≤25s + 气泡间隔 ≤8s ≈ **58s**。
+         * 事件流与 15s worker 共用同一把锁，且**claim 发生在等锁之前**——两条协程排队
+         * 即可超过 120s → 租约过期 → 二次领取 → **双回复**（与 ADR-076 R2-02 同族）。
+         * 300s 覆盖"两轮排队 + 余量"；代价仅是进程被杀后最晚 5 分钟才重取（可接受：
+         * 崩溃恢复本就是低频路径，而双回复是用户可见的严重缺陷）。
+         */
+        const val CLAIM_TTL_MS = 300_000L
 
         /** 单条正文上限。 */
         const val MAX_TEXT_CHARS = 2_000
@@ -397,6 +441,23 @@ object QqInboxPolicy {
         // 旧实现把它归 DONE，等于配置好后那条消息也永远不会再被回复。
         "未配置目标联系人", "无激活的 LLM Provider", "API Key 不可用"
     )
+
+    /**
+     * 节流类挂起的时长（2026-11-15 新增；ADR-076）。
+     *
+     * **真机根因**：`QqThrottle.PASSIVE_MIN_GAP_MS` 只有 **3s**（防同一条消息双发），
+     * 而挂起统一用 60s → 只差 3 秒就能发，却排到 60 秒后；这 60 秒里新消息继续进队，
+     * 回复于是永远落后一条（真机实测 21:50:37 回的是 21:49:12 的消息）。
+     * 这里按原因分流：**间隔过短 → 4s 短重试**；通道/环境类保持 60s。
+     */
+    fun holdMs(reason: String): Long =
+        if (reason.contains("间隔过短")) THROTTLE_HOLD_MS else CHANNEL_HOLD_MS
+
+    /** 节流短重试（略大于 [io.prism.qq.QqThrottle.PASSIVE_MIN_GAP_MS] 的 3s）。 */
+    const val THROTTLE_HOLD_MS = 4_000L
+
+    /** 通道/环境类挂起。 */
+    const val CHANNEL_HOLD_MS = 60_000L
 
     /** 消息已处理过：直接完成。 */
     private val DONE_PATTERNS = listOf("已回应过", "该消息已回应过", "最后一条为自己发出")

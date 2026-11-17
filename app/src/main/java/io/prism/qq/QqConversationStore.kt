@@ -33,7 +33,9 @@ class QqConversationStore(
         val dir: Boolean, // true=收到，false=发出
         val text: String,
         val at: Long,
-        val messageId: String? = null
+        val messageId: String? = null,
+        /** 媒体可读说明（2026-11-15；ADR-076）：`[表情包]` 这类占位符之外的语义。 */
+        val note: String? = null
     )
 
     private val file = File(rootDir, "qq_conversations.json")
@@ -41,17 +43,28 @@ class QqConversationStore(
     /** contact → 时间升序条目。 */
     private var store: LinkedHashMap<String, MutableList<Entry>> = read()
 
-    /** 读取最近 [limit] 条（时间升序；无记录返回空列表）。 */
+    /**
+     * 读取最近 [limit] 条（**严格时间升序**；无记录返回空列表）。
+     *
+     * 2026-11-15（ADR-076）修复：此前直接 `takeLast` 的是**追加顺序**。真机取证显示
+     * 追加顺序 ≠ 会话顺序（事件补发/重连补发会让旧消息后到，例如 21:49:12 的消息
+     * 排在 21:50:08 之后），而 [QqContextBuilder.trimByBudget] 假设升序 →
+     * 交给模型的历史是错序的。
+     *
+     * 写入侧已在 [append] 里维持"列表序 == 时间序"；这里的 `sortedBy` 作为**读出侧兜底**
+     * （防旧版本写下的乱序文件在首次启动时仍被错读）。两处都在，语义一致。
+     */
     @Synchronized
     fun recent(contact: String, limit: Int): List<QqMessage> {
         if (limit <= 0) return emptyList()
         val list = store[contact.trim()] ?: return emptyList()
-        return list.takeLast(limit).map {
+        return list.sortedBy { it.at }.takeLast(limit).map {
             QqMessage(
                 messageId = it.messageId,
                 incoming = it.dir,
                 text = it.text,
-                timestampMs = it.at
+                timestampMs = it.at,
+                mediaNote = it.note
             )
         }
     }
@@ -64,7 +77,9 @@ class QqConversationStore(
     @Synchronized
     fun append(contact: String, message: QqMessage): Boolean {
         val key = contact.trim()
-        if (key.isEmpty() || message.text.isBlank()) return false
+        if (key.isEmpty()) return false
+        // 纯媒体消息的 text 是占位符、note 才是语义；两者都为空才没有可记的内容
+        if (message.text.isBlank() && message.mediaNote.isNullOrBlank()) return false
         val list = store.getOrPut(key) { mutableListOf() }
         // 协议端同一条消息可能被事件与轮询各追加一次
         if (!message.messageId.isNullOrBlank() && list.any { it.messageId == message.messageId }) {
@@ -74,8 +89,20 @@ class QqConversationStore(
             dir = message.incoming,
             text = message.text.take(MAX_TEXT_CHARS),
             at = if (message.timestampMs > 0) message.timestampMs else clock(),
-            messageId = message.messageId
+            messageId = message.messageId,
+            note = message.mediaNote?.take(MAX_NOTE_CHARS)
         )
+        // 2026-11-15（ADR-076）：**维持"列表序 == 时间序"这一不变量**。
+        // 真机取证：事件/重连补发会让旧消息后到（21:49:12 的消息排在 21:50:08 之后）。
+        // 只改 `recent()` 的读出排序是不够的——[trim] 与 [trimTotal] 都按**位置**淘汰，
+        // 若列表序 ≠ 时间序，被淘汰的会是"插入最早"而不是"时间最旧"，即可能删掉最新一条。
+        // 因此在**写入侧**归位（O(n log n)，n ≤ 200），让淘汰与读出共用同一语义。
+        // `sortedBy` 是稳定排序，同一时间戳的相对序不变。
+        if (list.size > 1) {
+            val normalized = list.sortedBy { it.at }
+            list.clear()
+            list.addAll(normalized)
+        }
         trim(list)
         trimTotal()
         return persist()
@@ -123,7 +150,8 @@ class QqConversationStore(
                     dir = obj["d"]?.jsonPrimitive?.contentOrNull == "1",
                     text = text,
                     at = obj["a"]?.jsonPrimitive?.contentOrNull?.toLongOrNull() ?: 0L,
-                    messageId = obj["m"]?.jsonPrimitive?.contentOrNull
+                    messageId = obj["m"]?.jsonPrimitive?.contentOrNull,
+                    note = obj["n"]?.jsonPrimitive?.contentOrNull
                 )
             }.toMutableList()
             if (entries.isNotEmpty()) result[contact] = entries
@@ -138,7 +166,8 @@ class QqConversationStore(
             append(store.entries.joinToString(",") { (contact, entries) ->
                 "${q(contact)}:[" + entries.joinToString(",") { e ->
                     "{\"d\":\"${if (e.dir) 1 else 0}\",\"t\":${q(e.text)},\"a\":${e.at}" +
-                        (e.messageId?.let { ",\"m\":${q(it)}" } ?: "") + "}"
+                        (e.messageId?.let { ",\"m\":${q(it)}" } ?: "") +
+                        (e.note?.let { ",\"n\":${q(it)}" } ?: "") + "}"
                 } + "]"
             })
             append("}")
@@ -183,5 +212,8 @@ class QqConversationStore(
 
         /** 单条正文上限（防超长粘贴撑爆文件）。 */
         const val MAX_TEXT_CHARS = 2_000
+
+        /** 单条媒体说明上限（ADR-076：说明是短句，超长说明一定是异常输入）。 */
+        const val MAX_NOTE_CHARS = 200
     }
 }

@@ -111,33 +111,52 @@ class QqProactiveComposer(
          * 并在看不到画面时**不编造**。
          */
         mediaNote: String? = null,
-        now: LocalDateTime = LocalDateTime.now()
+        now: LocalDateTime = LocalDateTime.now(),
+        /**
+         * 本轮之前**还没回过**的连发消息（旧→新；2026-11-15；ADR-076）。
+         *
+         * 逐条回复会让"连发 3 条 → 3 次生成、3 条回复、每条只接住一句"，
+         * 且生成期间新消息继续排队 → 永远落后一条。批合并后一次回复覆盖整批。
+         */
+        pending: List<QqMessage> = emptyList(),
+        /** 本轮回复形状提示（[QqReplyShape.pick]；2026-11-15；ADR-076）。 */
+        shapeHint: String? = null,
+        /** 上一条消息的时间（用于给人设"间隔感"；0=未知）。 */
+        lastMessageAtMs: Long = 0L,
+        /**
+         * **角色日记**（最近若干条；2026-11-16；ADR-077）。
+         *
+         * 与 [memorySection] 分开传的原因：记忆是"关于用户的事实"（系统抽取），
+         * 日记是"她自己写的心里话"——混在一段里模型会把两者当成同类素材复述。
+         */
+        diarySection: List<String> = emptyList()
     ): String? {
         if (baseUrl.isBlank() || apiKey.isBlank() || model.isBlank()) return null
+        // 2026-11-15（ADR-076）：system **只放静态人设**。
+        // 旧实现把「口语、简短（不超过 60 字）」写进 system，与角色包 §十五
+        // 「长度只由此刻说多少才够决定，不许一律短」正面冲突——真机回复被压平成
+        // 20–40 字单段、且每条都以问句收尾。矛盾指令会显著降低遵循（研究证据），
+        // 故这里**不再替人设规定长度**，只保留跨角色通用的一句话。
         val persona = personaSystemPrompt?.takeIf { it.isNotBlank() }
-            ?.let { "$it\n\n【本次任务】" }
-            ?: "你是一个像真人一样和用户聊天的 AI 伙伴${companionAddress?.let { "（用户叫你「$it」）" } ?: ""}。\n\n【本次任务】"
-        val memory = memorySection?.trim()?.takeIf { it.isNotEmpty() }
-            ?.let { "\n\n【关于用户的相关记忆（供你自然运用，不要直接复述）】\n$it" }
-            ?: ""
-        val mediaRule = if (imageDataUrl != null) {
-            "\n\n【注意】对方这条消息包含图片，图片已随消息提供，请依据**你实际看到的画面**回应；" +
-                "看不清就如实说看不清，**严禁编造画面内容**。"
-        } else if (!mediaNote.isNullOrBlank()) {
-            "\n\n【注意】对方这条消息包含图片/表情包，但你**看不到画面**。" +
-                "只能依据下方给出的说明回应；**严禁编造画面内容**。"
-        } else {
-            ""
-        }
-        val system = persona + memory + mediaRule +
-            "\n\n对方刚给你发了一条消息，请**像真人那样自然、即时地回一句**。" +
-            "要求：口语、简短（不超过 60 字）、承接对方话题，可以有语气词/表情；" +
-            "不要引号、不要自称 AI、不要解释你在做什么，只输出回复正文本身。" +
-            (mediaHint?.takeIf { it.isNotBlank() } ?: "")
-        val userContext = buildReplyUserContext(history, incoming, mediaNote)
+            ?.let { "$it\n\n$SCENE_HINT" }
+            ?: "你是一个像真人一样和用户聊天的 AI 伙伴" +
+            "${companionAddress?.let { "（用户叫你「$it」）" } ?: ""}。\n\n$SCENE_HINT"
+        val userContext = buildReplyUserContext(
+            history = history,
+            incoming = incoming,
+            mediaNote = mediaNote,
+            pending = pending,
+            memorySection = memorySection,
+            mediaHint = mediaHint,
+            shapeHint = shapeHint,
+            now = now,
+            lastMessageAtMs = lastMessageAtMs,
+            imageAttached = imageDataUrl != null,
+            diarySection = diarySection
+        )
         val body = buildRequestJson(
             model = model,
-            system = system,
+            system = persona,
             userContext = userContext,
             reply = true,
             imageDataUrl = imageDataUrl
@@ -181,8 +200,13 @@ class QqProactiveComposer(
     }
 
     companion object {
-        /** 生成消息长度上限（防跑飞）。 */
-        const val MAX_LEN = 200
+        /**
+         * 生成消息长度上限（防跑飞）。
+         *
+         * 2026-11-15（ADR-076）：由 200 提到 480——多气泡最多 3×120 字，
+         * 旧的 200 字上限会把第 3 条气泡从中间截断。
+         */
+        const val MAX_LEN = 480
 
         /**
          * 进入 prompt 的历史条数上限（US-3112；2026-10-26 随配置域扩到 200）。
@@ -200,26 +224,154 @@ class QqProactiveComposer(
      *
      * 截断策略：最多 [MAX_HISTORY_IN_PROMPT] 条、单条 [MAX_CHARS_PER_MESSAGE] 字——
      * 防止长聊天把 prompt 撑爆（上下文窗口与 token 成本双重约束）。
+     *
+     * 2026-11-15（ADR-076）新增（**全部可选，默认不改变旧输出**）：
+     * - [pending]：本轮之前还没回的连发消息（一次回复覆盖整批）；
+     * - [shapeHint]：本轮回复形状（由 [QqReplyShape] 抽样，破"每条都问句收尾"）；
+     * - [now] / [lastMessageAtMs]：时间感（"这么晚还不睡""隔了一夜"来自这里）；
+     * - 末尾**深度提醒**：研究证据显示在历史之后重复一次身份/语域提示，对后段漂移最有效。
      */
     internal fun buildReplyUserContext(
         history: List<QqMessage>,
         incoming: String,
         /** 媒体说明（OCR 文字 / 无法识别 / 表情包提示）；空=纯文本消息。 */
-        mediaNote: String? = null
-    ): String {
+        mediaNote: String? = null,
+        /** 本轮之前还没回的连发消息（旧→新；ADR-076）。 */
+        pending: List<QqMessage> = emptyList(),
+        /** L2/L3 记忆合并段（ADR-076 起放在 user 末段，避免每轮变化的文本打断缓存前缀）。 */
+        memorySection: String? = null,
+        /** 表情/语音指令提示。 */
+        mediaHint: String? = null,
+        /** 本轮回复形状提示。 */
+        shapeHint: String? = null,
+        /** 当前时间；null=不注入时间感（保持旧输出，供既有测试与降级路径使用）。 */
+        now: LocalDateTime? = null,
+        /** 上一条消息时间（毫秒；0=未知）。 */
+        lastMessageAtMs: Long = 0L,
+        /** 本轮是否随消息附带了图片。 */
+        imageAttached: Boolean = false,
+        /** 角色日记（最近若干条；ADR-077）。 */
+        diarySection: List<String> = emptyList()
+    ): String = buildString {
+        if (now != null) {
+            append("【现在】").append(formatNow(now))
+            gapText(now, lastMessageAtMs)?.let { append("，").append(it) }
+            append('\n')
+        }
         val lines = history.takeLast(MAX_HISTORY_IN_PROMPT).map { message ->
             val who = if (message.incoming) "对方" else "我"
-            "$who：${message.text.trim().take(MAX_CHARS_PER_MESSAGE)}"
+            val body = message.mediaNote?.takeIf { it.isNotBlank() } ?: message.text
+            "$who：${body.trim().take(MAX_CHARS_PER_MESSAGE)}"
         }
-        val historyBlock = if (lines.isEmpty()) {
-            ""
-        } else {
-            "最近对话（由旧到新）：\n" + lines.joinToString("\n") + "\n\n"
+        if (lines.isNotEmpty()) {
+            append("最近对话（由旧到新）：\n").append(lines.joinToString("\n")).append("\n\n")
         }
+        if (pending.isNotEmpty()) {
+            append("他在这之前还连发了几句（你还没回）：\n")
+            pending.forEach { message ->
+                val body = message.mediaNote?.takeIf { it.isNotBlank() } ?: message.text
+                append("- ").append(body.trim().take(MAX_CHARS_PER_MESSAGE)).append('\n')
+            }
+            append("（不用逐条点答，接住最要紧的那句就行）\n\n")
+        }
+        append("对方刚发来：「${incoming.trim().take(MAX_CHARS_PER_MESSAGE)}」")
         val note = mediaNote?.trim()?.takeIf { it.isNotEmpty() }
-            ?.let { "\n（$it）" }
-            ?: ""
-        return historyBlock + "对方刚发来：「${incoming.trim().take(MAX_CHARS_PER_MESSAGE)}」" + note
+        if (note != null) append("\n（$note）")
+        // 只有**真的随消息附了图**时才需要这条：说明 mediaNote 里已含"看不到画面"的成因
+        // （[io.prism.qq.QqMediaFailure.noteFor]），重复一遍会稀释指令。
+        if (imageAttached) {
+            append("\n（图片已随消息提供：按你**实际看到的画面**回应，看不清就说看不清，严禁编造。）")
+        }
+        memorySection?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            append("\n\n【关于用户的相关记忆（供你自然运用，不要直接复述）】\n").append(it)
+        }
+        // 2026-11-16（ADR-077）：角色自己的日记。**必须**标注"你自己写的、不必给他看"，
+        // 否则模型会把这些内心话当成聊天素材复述出来（"我记得我写过……"）。
+        if (diarySection.isNotEmpty()) {
+            append("\n\n【你自己写下的日记（只有你能看到；不必跟他提起，也不要复述）】\n")
+            append(diarySection.joinToString("\n"))
+        }
+        // 以下三段只在"有时间感"的生产路径注入：旧调用（测试/降级）输出保持不变。
+        if (now != null) {
+            shapeHint?.takeIf { it.isNotBlank() }?.let { append("\n\n【这一轮】").append(it) }
+            mediaHint?.takeIf { it.isNotBlank() }?.let { append("\n\n").append(it.trim()) }
+            append("\n\n").append(TAIL_NOTE)
+        }
+    }
+
+    /**
+     * 生产路径的末尾深度提醒（静态文本，短——只锚身份与语域，不复述人设）。
+     *
+     * **不得与角色包冲突**：角色包 §十五 明确「解释、分析、方案、步骤、代码可以很长、
+     * 可以用 Markdown 结构」。故这里**不能**写"别列点/别展开"——那会重新制造一条
+     * 与 persona 矛盾的指令（正是本轮要修的病根，见 ADR-076 E7）。
+     * 只否定"没人要求的总结/客服腔/自称助手"，不否定"把复杂的事讲清楚"。
+     */
+    private const val TAIL_NOTE =
+        "【最后】你就是你，不是助手：别自称 AI、别套客服腔、别在结尾硬加总结；" +
+            "该讲清楚的时候就讲清楚。他刚说的最算数。"
+
+    /** 追加在 persona 之后的静态场景声明（静态前缀，利于 provider 前缀缓存）。 */
+    private const val SCENE_HINT =
+        "【场景】在 QQ 上和他私聊，你在手机上一句一句地回。只写你要说的话本身，" +
+            "不写动作、神态、旁白。想分几条说就单独一行写 --- 分隔（最多 3 条，别硬拆）。"
+
+    /**
+     * **工具回路**用的 system prompt（2026-11-16；ADR-077）。
+     *
+     * 与单次补全的区别只有两点：
+     * 1. 允许（并鼓励）在需要时**先调用工具再回答**——真机反馈"嘴上说去查、实际没查"；
+     * 2. 附带日记触发判据（角色自己判断什么值得记）。
+     *
+     * **沿用同一条静态 persona + 同一个 SCENE_HINT**：不新增 system 条数，
+     * 也不改人设语义（ADR-076 的核心结论：不要在 persona 后塞与它冲突的规则）。
+     */
+    internal fun buildSystemPromptForTools(
+        personaSystemPrompt: String?,
+        diaryEnabled: Boolean
+    ): String {
+        val base = personaSystemPrompt?.takeIf { it.isNotBlank() }
+            ?.let { "$it\n\n$SCENE_HINT" }
+            ?: "你是一个像真人一样和用户聊天的 AI 伙伴。\n\n$SCENE_HINT"
+        val toolHint = "\n\n【可以真的去做】他说的事需要查资料、看热榜、翻资料库、记待办、" +
+            "生成文档，或者要看一眼手机时，你**直接去做**，然后基于真实结果回答——" +
+            "不要只说「人家去查」却没有查。做完就自然地说结果，不要报流水账。"
+        val diaryHint = if (diaryEnabled) "\n\n" + io.prism.qq.DiaryLocalToolExecutor.TRIGGER_HINT else ""
+        return base + toolHint + diaryHint + "\n\n" + TAIL_NOTE
+    }
+
+    /** 时间 → 可读字符串（供人设感知时段）。 */
+    private fun formatNow(now: LocalDateTime): String {
+        val period = when (now.hour) {
+            in 5..8 -> "清晨"
+            in 9..11 -> "上午"
+            in 12..13 -> "中午"
+            in 14..17 -> "下午"
+            in 18..22 -> "晚上"
+            else -> "深夜"
+        }
+        val week = arrayOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")[
+            (now.dayOfWeek.value - 1).coerceIn(0, 6)
+        ]
+        return "%04d-%02d-%02d %02d:%02d（%s·%s）".format(
+            now.year, now.monthValue, now.dayOfMonth, now.hour, now.minute, week, period
+        )
+    }
+
+    /** "距上一条消息"的可读间隔；未知/未来时间返回 null。 */
+    private fun gapText(now: LocalDateTime, lastMessageAtMs: Long): String? {
+        if (lastMessageAtMs <= 0L) return null
+        val nowMs = now.atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val delta = nowMs - lastMessageAtMs
+        if (delta <= 0L) return null
+        val minutes = delta / 60_000L
+        val text = when {
+            minutes < 1L -> "刚刚才聊过"
+            minutes < 60L -> "距他上一条约 $minutes 分钟"
+            minutes < 60L * 24 -> "距他上一条约 ${minutes / 60} 小时"
+            else -> "距他上一条约 ${minutes / (60 * 24)} 天"
+        }
+        return text
     }
 
     /**

@@ -78,6 +78,55 @@ class RolePackLoaderTest {
     }
 
     @Test
+    fun `生效包 - 同 id 存在遗留副本时必须优先规范存储名`() = runBlocking<Unit> {
+        // 2026-11-15（ADR-076 复审）：真机升级 v7.1 后目录里同时有 cyrene.json（新）与
+        // cyrene.rolepack（旧）。`findPackFile` 用 `firstOrNull` 按 id 匹配，若文件枚举
+        // 无序就可能加载旧版本（与 ADR-052 E1 同类陷阱）。这里刻意先写"旧"副本。
+        val stale = packJsonA.replace("A 的人设", "旧版本人设")
+        File(baseDir, "pack-a.rolepack").writeText(stale)
+        loader.import("a.rolepack", packJsonA)  // 规范名 pack-a.json
+        store.value = "pack-a"
+        assertEquals(
+            "必须优先规范存储名 .json（否则真机会静默加载旧资产）",
+            "A 的人设",
+            loader.effectiveRolePack().persona.systemPrompt
+        )
+        // 反向对照：只留遗留副本时也能正常加载（不因优先级规则而失效）
+        File(baseDir, "pack-a.json").delete()
+        assertEquals(
+            "仅有遗留副本时应仍可加载（扩展名不限）",
+            "旧版本人设",
+            loader.effectiveRolePack().persona.systemPrompt
+        )
+    }
+
+    @Test
+    fun `删除 - 同 id 存在遗留副本时必须一并删除（R4-L-02）`() = runBlocking<Unit> {
+        // 只删 .json 会让遗留 .rolepack 残留 → "删除后列表里还有、且静默加载旧版本"
+        File(baseDir, "pack-a.rolepack").writeText(packJsonA.replace("A 的人设", "旧版本人设"))
+        loader.import("a.rolepack", packJsonA)
+        assertTrue("应报告删除成功", loader.remove("pack-a"))
+        assertTrue(
+            "同 id 的全部文件都必须删除（实际残留：${baseDir.listFiles()?.map { it.name }}）",
+            baseDir.listFiles().isNullOrEmpty()
+        )
+        assertTrue(loader.list().isEmpty())
+    }
+
+    @Test
+    fun `列举 - 同 id 存在遗留副本时只展示一张卡（R4-L-01）`() = runBlocking<Unit> {
+        // 遗留副本的 name 刻意不同：若"先排序再去重"，展示的可能是旧那份
+        File(baseDir, "pack-a.rolepack").writeText(
+            """{"schema":"prism-rolepack/1","id":"pack-a","name":"旧名字","persona":{"systemPrompt":"旧版本人设"}}"""
+        )
+        loader.import("a.rolepack", packJsonA)
+        val packs = loader.list()
+        assertEquals("同 id 只能出现一张卡", 1, packs.size)
+        assertEquals("展示的必须是规范名那份（新）", "角色A", packs.single().name)
+        assertEquals("A 的人设", packs.single().persona.systemPrompt)
+    }
+
+    @Test
     fun `导入 - 畸形 JSON 抛异常且不落盘`() = runBlocking<Unit> {
         assertThrows(RolePackParseException::class.java) {
             runBlocking { loader.import("bad.rolepack", "{ broken json") }

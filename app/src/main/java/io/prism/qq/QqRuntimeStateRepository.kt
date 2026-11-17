@@ -309,6 +309,24 @@ class QqRuntimeStateRepository(
     }
 
     /**
+     * 为**同一次回复的额外气泡**补记账（2026-11-15 新增；ADR-076 / guardrail M-03 复审）。
+     *
+     * 背景：[recordReplied] 一次只往被动窗口写 **1** 条时间戳，而一次回复可能拆成最多
+     * 3 条真实 `send_private_msg`。若不补记，"60 秒内最多 N 条" 的窗口实际允许 3N 次外发。
+     * 调用方在发送成功后按 `已发气泡数 - 1` 调用本方法（首次那条由 [recordReplied] 负责）。
+     *
+     * @param extra 额外外发次数（<=0 直接返回，不写盘）
+     */
+    suspend fun recordExtraPassiveSends(atMs: Long, extra: Int) {
+        if (extra <= 0) return
+        edit { prefs ->
+            var current: String? = prefs[PASSIVE_REPLY_AT]
+            repeat(extra) { current = appendPassiveTimestamp(current, atMs) }
+            current?.let { prefs[PASSIVE_REPLY_AT] = it }
+        }
+    }
+
+    /**
      * 记录已回应过的协议端消息 ID（US-3111 AC-3 幂等键；跨重启持久化）。
      *
      * 与 [setLastReplied] 一起写入，使无障碍通道的去重逻辑不受影响。

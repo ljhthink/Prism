@@ -50,10 +50,17 @@ object QqContextBuilder {
      */
     fun estimateCost(text: String): Int = text.length + PER_MESSAGE_OVERHEAD
 
-    /** 把历史转成进入 prompt 的文本块（`我` / `对方`）。 */
+    /**
+     * 把历史转成进入 prompt 的文本块（`我` / `对方`）。
+     *
+     * 2026-11-15（ADR-076）：媒体消息**优先用可读说明**（[QqMessage.mediaNote]）。
+     * 只把 `[表情包]` 这类占位符交给模型时，它要么假装知道、要么接一个不存在的话题——
+     * 这是真机"说得莫名其妙"的直接来源之一。
+     */
     fun render(messages: List<QqMessage>): String = messages.joinToString("\n") { message ->
         val who = if (message.incoming) "对方" else "我"
-        "$who：${message.text}"
+        val body = message.mediaNote?.takeIf { it.isNotBlank() } ?: message.text
+        "$who：$body"
     }
 
     private const val PER_MESSAGE_OVERHEAD = 8

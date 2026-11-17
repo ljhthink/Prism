@@ -103,6 +103,10 @@ class RolePackLoader(
                     .onFailure { Log.w(TAG, "skip malformed rolepack file=${f.name}: ${it::class.simpleName}") }
                     .getOrNull()
             }
+            // guardrail R4-L-01：同一 id 存在多个文件（规范名 + 遗留副本）时只展示一张卡。
+            // **先去重再按显示名排序**：`packFiles()` 已让 `.json` 规范名优先，
+            // 而遗留副本的 `name` 字段可能与新版不同——若先排序，展示的可能是旧那份。
+            .distinctBy { it.id }
             .sortedBy { it.name }
     }
 
@@ -151,10 +155,16 @@ class RolePackLoader(
      *   （下次 [effectiveRolePack] 回落 B0——删除自动回落语义）
      */
     suspend fun remove(id: String): Boolean = withContext(ioDispatcher) {
-        val target = findPackFile(id)
-        val removed = target != null && target.delete()
+        // 2026-11-15（guardrail R4-L-02）：**必须删除该 id 的全部文件**。
+        // 原实现只删 `findPackFile(id)` 命中的那一个；即便本轮已让命中确定化（`.json` 优先），
+        // 遗留副本（如旧版 `cyrene.rolepack`）仍会残留 → 用户"删除"后列表里还有、
+        // 且 `effectiveRolePack` 会**静默加载旧版本**（与 ADR-052 E1 同类）。
+        val targets = packFiles().filter { f ->
+            runCatching { RolePackParser.parse(f.readText()) }.getOrNull()?.id == id
+        }
+        val removed = targets.count { it.delete() } > 0
         if (removed) {
-            Log.i(TAG, "rolepack removed: id=$id")
+            Log.i(TAG, "rolepack removed: id=$id files=${targets.size}")
             if (selectedIdStore.get() == id) {
                 selectedIdStore.set(null)
             }
@@ -202,9 +212,21 @@ class RolePackLoader(
         }
     }
 
-    /** 目录下全部候选文件（跳过子目录；扩展名不限——.rolepack/.json 均可由内容识别）。 */
+    /**
+     * 目录下全部候选文件（跳过子目录；扩展名不限——.rolepack/.json 均可由内容识别）。
+     *
+     * 2026-11-15（ADR-076 复审）：**必须确定化排序**。`listFiles()` 的返回顺序由文件系统
+     * 决定，而 [findPackFile] 用 `firstOrNull` 按 id 匹配——同一 id 存在多个文件时
+     * （规范存储名 `cyrene.json` + 历史遗留副本 `cyrene.rolepack`）会**不确定命中**。
+     * 真机实证：升级 v7.1 后目录里同时存在 `.json`(新) 与 `.rolepack`(旧)，不清理即可能
+     * 加载到旧版本，且界面上看不出来（与 ADR-052 E1 "真机跑的不是预期版本"同类）。
+     *
+     * 排序规则：**规范存储名（`.json`）优先**，其余按文件名升序——保证"导入覆盖"语义。
+     */
     private fun packFiles(): List<File> =
-        baseDir.listFiles()?.filter { it.isFile } ?: emptyList()
+        baseDir.listFiles()?.filter { it.isFile }
+            ?.sortedWith(compareBy<File>({ if (it.extension == "json") 0 else 1 }, { it.name }))
+            ?: emptyList()
 
     /** 按 id 定位角色包文件（逐文件宽松解析比对；损坏文件自然不匹配）。 */
     private fun findPackFile(id: String): File? =

@@ -66,6 +66,22 @@ class SettingsViewModel(
     private val rolePackLoader: io.prism.voice.rolepack.RolePackLoader? = null,
     /** 批次24（ADR-051）：桌宠门面；null 时桌宠管理降级为不可用（向后兼容，保持 JVM 可测） */
     private val petManager: io.prism.pet.PetManager? = null,
+    /**
+     * 2026-11-16（ADR-077）：QQ 表情库；null 时表情管理降级为不可用（向后兼容，保持 JVM 可测）。
+     *
+     * **这个注入是本批次的关键**：审计发现 `QqStickerStore.importImage()` 此前
+     * **全仓零调用方**（只有单测），即用户**根本没有办法**把自己的表情包交给 Prism，
+     * 于是 `catalogForPrompt()` 恒空、模型只能发内置 face。
+     */
+    private val qqStickerStore: io.prism.qq.QqStickerStore? = null,
+    /**
+     * 2026-11-16（ADR-077）：ContentResolver 提供者（读用户选的图片）。
+     *
+     * 为什么不直接拿 `Application`：本类是纯 `ViewModel`（非 `AndroidViewModel`），
+     * 工厂里能拿到 app，但实例方法里拿不到——注入一个 lambda 比让整个类改继承更小改动，
+     * 也保持 JVM 单测不碰 Android 框架（与既有 `phoneControlStatusProvider` 同范式）。
+     */
+    private val contentResolverProvider: (() -> android.content.ContentResolver?)? = null,
     /** 批次24（ADR-051）：桌宠配置仓库；null 时桌宠配置状态降级为默认值（向后兼容） */
     private val petConfigRepository: io.prism.pet.PetConfigRepository? = null,
     /**
@@ -1100,6 +1116,106 @@ class SettingsViewModel(
     /** 最近一次导入结果提示（成功/失败均可读）。 */
     val petMessage: StateFlow<String?> = _petMessage.asStateFlow()
 
+    // ==================== 2026-11-16（ADR-077）：QQ 自定义表情库 ====================
+
+    private val _qqStickers = MutableStateFlow<List<io.prism.qq.QqStickerStore.UserSticker>>(emptyList())
+
+    /** 当前已导入的 QQ 表情（UI 列表）。 */
+    val qqStickers: StateFlow<List<io.prism.qq.QqStickerStore.UserSticker>> = _qqStickers.asStateFlow()
+
+    private val _qqStickerMessage = MutableStateFlow<String?>(null)
+
+    /** 最近一次表情导入/删除的可读结果（成功或失败原因）。 */
+    val qqStickerMessage: StateFlow<String?> = _qqStickerMessage.asStateFlow()
+
+    /** 刷新表情列表（导入/删除后调用；store 是内存快照，读本身零 IO）。 */
+    fun refreshQqStickers() {
+        _qqStickers.value = qqStickerStore?.userStickers() ?: emptyList()
+    }
+
+    /**
+     * 导入一张 QQ 表情图片。
+     *
+     * @param uri 相册/文件选择器返回的图片
+     * @param emotion 情绪标签（可空；空=不参与情绪匹配，仅靠描述被指名）
+     */
+    fun importQqSticker(uri: android.net.Uri, emotion: String) {
+        val store = qqStickerStore
+        if (store == null) {
+            _qqStickerMessage.value = "表情库不可用"
+            return
+        }
+        viewModelScope.launch {
+            try {
+                val resolver = contentResolverProvider?.invoke()
+                if (resolver == null) {
+                    _qqStickerMessage.value = "导入失败：无法读取相册"
+                    return@launch
+                }
+                val bytes: ByteArray? = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    resolver.openInputStream(uri)?.use { it.readBytes() }
+                }
+                if (bytes == null || bytes.isEmpty()) {
+                    _qqStickerMessage.value = "导入失败：读不到图片内容"
+                    return@launch
+                }
+                if (bytes.size > io.prism.qq.QqStickerStore.MAX_IMAGE_BYTES) {
+                    _qqStickerMessage.value =
+                        "导入失败：图片过大（${bytes.size / 1024}KB，上限 ${io.prism.qq.QqStickerStore.MAX_IMAGE_BYTES / 1024}KB）"
+                    return@launch
+                }
+                val id = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    store.importImage(bytes, emotion)
+                }
+                if (id == null) {
+                    _qqStickerMessage.value = "导入失败：存储写入异常"
+                } else {
+                    _qqStickerMessage.value = "已导入（${store.userStickers().size} 张）。" +
+                        "建议补一句描述，模型才知道什么时候用它"
+                    refreshQqStickers()
+                }
+            } catch (e: CancellationException) {
+                throw e // BR-error-handling-007
+            } catch (e: Exception) {
+                _qqStickerMessage.value = "导入失败：${e.message ?: e::class.simpleName}"
+            }
+        }
+    }
+
+    /** 修改表情描述（打标结果可手改；也是"让模型能挑中它"的唯一语义来源）。 */
+    fun setQqStickerDescription(id: String, description: String) {
+        val store = qqStickerStore ?: return
+        viewModelScope.launch {
+            // guardrail R2-M-03：写盘必须在 IO 线程（整份 JSON 重写）
+            val ok = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                store.setDescription(id, description)
+            }
+            if (ok) {
+                _qqStickerMessage.value = "描述已更新"
+                refreshQqStickers()
+            } else {
+                _qqStickerMessage.value = "描述更新失败（表情可能已被删除）"
+            }
+        }
+    }
+
+    /** 删除一张表情（同时删文件）。 */
+    fun deleteQqSticker(id: String) {
+        val store = qqStickerStore ?: return
+        viewModelScope.launch {
+            // guardrail R2-M-03：删文件 + 重写 index 必须在 IO 线程
+            val ok = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                store.removeUserSticker(id)
+            }
+            if (ok) {
+                _qqStickerMessage.value = "已删除"
+                refreshQqStickers()
+            } else {
+                _qqStickerMessage.value = "删除失败（表情可能已不存在）"
+            }
+        }
+    }
+
     init {
         if (petConfigRepository != null) {
             viewModelScope.launch {
@@ -1387,6 +1503,9 @@ class SettingsViewModel(
                     // 批次24（ADR-051）：桌宠门面 + 配置仓库
                     petManager = app.petManager,
                     petConfigRepository = app.petConfigRepository,
+                    // 2026-11-16（ADR-077）：QQ 自定义表情库（导入/描述/删除）
+                    qqStickerStore = app.qqStickerStore,
+                    contentResolverProvider = { app.contentResolver },
                     // LVC-1（ADR-053）：本地音色包仓库（设置页展示安装状态 + 选项门控）
                     localVoicePackStore = app.localVoicePackStore,
                     // TKN-LVC-016（ADR-057）：音色包导入器（设置页「导入音色包」）

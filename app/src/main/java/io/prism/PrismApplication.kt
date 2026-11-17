@@ -830,6 +830,30 @@ class PrismApplication : Application() {
     }
 
     /**
+     * **角色日记**（2026-11-16；ADR-077）。
+     *
+     * 只落在 `filesDir/diaries/<roleId>.json`，仅本机可见。
+     * 与 L2/L3 记忆的区别：记忆是系统抽取的"事实"，日记是角色自己写的"心里话"。
+     */
+    val roleDiaryStore: io.prism.qq.RoleDiaryStore by lazy {
+        io.prism.qq.RoleDiaryStore(filesDir)
+    }
+
+    /**
+     * **日记工具**（`diary__write`；2026-11-16；ADR-077）。
+     *
+     * 角色 id 在**调用时**求值（支持热切换角色包），而不是在构造时固化。
+     */
+    val diaryLocalToolExecutor: io.prism.qq.DiaryLocalToolExecutor by lazy {
+        io.prism.qq.DiaryLocalToolExecutor(
+            store = roleDiaryStore,
+            roleIdProvider = {
+                runCatching { rolePackLoader.effectiveRolePack().id }.getOrNull()
+            }
+        )
+    }
+
+    /**
      * Prism 侧会话记录（2026-10-26；US-3112 修订）。
      *
      * 无障碍通道只能读到最后一条气泡、协议端历史接口也可能缺失——本地会话记录是
@@ -1146,7 +1170,9 @@ class PrismApplication : Application() {
                 // 批次24（ADR-051 D8）：桌宠动作工具（pet__play_action）
                 petLocalToolExecutor,
                 // QQ 小号助手（ADR-062）：qq__* 工具
-                qqLocalToolExecutor
+                qqLocalToolExecutor,
+                // 2026-11-16（ADR-077）：角色日记（diary__write）
+                diaryLocalToolExecutor
             )
         )
     }
@@ -1928,15 +1954,179 @@ class PrismApplication : Application() {
             }.getOrNull()
 
             /**
-             * 应答主体（**必须经 [autoReplyOnce] 进入**，本函数不含临界区保护）。
+             * **有界工具回路**（2026-11-16；ADR-077）：让 QQ 聊天能真的调用 Prism 能力。
              *
-             * @param override 协议端事件携带的消息（事件驱动路径）；null=无障碍轮询路径
+             * 复用 [io.prism.skill.SkillExecutor.executeLoop]（含熔断/429/配对净化），
+             * 本函数只负责：过滤工具（[io.prism.qq.QqReplyToolPolicy]）→ 组 prompt →
+             * 调回路 → 抽最终文本。任何失败返回 null，由调用方回落单次补全。
+             *
+             * @return 最终回复正文；null=不适合/失败（调用方必须回落）
              */
-            suspend fun autoReplyLocked(override: io.prism.qq.channel.QqMessage?): io.prism.qq.QqReplyOutcome.ReplyResult {
+            suspend fun composeReplyWithTools(
+                cfg: io.prism.qq.QqConfig,
+                provider: io.prism.data.ProviderConfig,
+                apiKey: String,
+                persona: String?,
+                replyTarget: String,
+                history: List<io.prism.qq.channel.QqMessage>,
+                memory: String?,
+                mediaHint: String?,
+                imageDataUrl: String?,
+                mediaNote: String?,
+                pending: List<io.prism.qq.channel.QqMessage>,
+                shapeHint: String?,
+                lastMessageAtMs: Long,
+                diarySection: List<String>
+            ): String? {
+                if (!cfg.replyToolsEnabled) return null
+                // 带图的一轮先走单次补全（多模态 + 工具组合在部分端点会 400；视觉链路更脆弱）
+                if (imageDataUrl != null) return null
+                val allTools = io.prism.ui.chat.ConversationViewModel.buildTools(
+                    enabledSkills = runCatching { skillRegistry.enabledSkills() }.getOrDefault(emptyList()),
+                    webSearchEnabled = true,
+                    documentToolsEnabled = true,
+                    // 2026-11-16（guardrail M-06）：手机操控必须**同时**满足
+                    // ①用户在 QQ 设置里显式开启 ②设备性能档位允许。
+                    // 原实现只看 ①，MINIMAL / CHAT_ONLY 档位也能在 QQ 里开手机操控。
+                    phoneControlEnabled = cfg.replyPhoneControlEnabled &&
+                        runCatching { tierManager.currentTier.isPhoneControlEnabled }.getOrDefault(false),
+                    hotListEnabled = true,
+                    todoWriteEnabled = true,
+                    diaryEnabled = cfg.diaryEnabled
+                ) + runCatching {
+                    io.prism.network.KnowledgeBaseLocalToolExecutor.buildToolDefinitions()
+                }.getOrDefault(emptyList())
+                val phoneControlAllowed = cfg.replyPhoneControlEnabled &&
+                    runCatching { tierManager.currentTier.isPhoneControlEnabled }.getOrDefault(false)
+                val tools = io.prism.qq.QqReplyToolPolicy.filter(
+                    allTools, phoneControlEnabled = phoneControlAllowed
+                )
+                if (!io.prism.qq.QqReplyToolLoop.shouldUseTools(
+                        tools = tools,
+                        enabled = cfg.replyToolsEnabled,
+                        hasVisibleText = replyTarget.isNotBlank()
+                    )
+                ) {
+                    return null
+                }
+                val userContent = io.prism.qq.QqProactiveComposer.buildReplyUserContext(
+                    history = history,
+                    incoming = replyTarget,
+                    mediaNote = mediaNote,
+                    pending = pending,
+                    memorySection = memory,
+                    mediaHint = mediaHint,
+                    shapeHint = shapeHint,
+                    now = java.time.LocalDateTime.now(),
+                    lastMessageAtMs = lastMessageAtMs,
+                    imageAttached = false,
+                    diarySection = diarySection
+                )
+                val systemPrompt = io.prism.qq.QqProactiveComposer.buildSystemPromptForTools(
+                    personaSystemPrompt = persona,
+                    diaryEnabled = cfg.diaryEnabled
+                )
+                val messages = io.prism.qq.QqReplyToolLoop.buildMessages(userContent)
+                val startedAt = System.currentTimeMillis()
+                val toolNames = mutableListOf<String>()
+                // 2026-11-16（自查修复）：预算必须**真的中断**，不能只事后打 warn。
+                // 原实现把 `isBudgetExhausted` 放在回路完成之后调用——若端点卡住，
+                // `replyMutex` 会被占住远超预算，收件箱 120s 租约过期 → 二次领取 → 双回复。
+                // `withTimeoutOrNull` 只吞自己的 TimeoutCancellationException，外层取消照常传播。
+                val updated = kotlinx.coroutines.withTimeoutOrNull(cfg.replyToolBudgetMs) {
+                    skillExecutor.executeLoop(
+                        provider = openAICompatibleProvider,
+                        config = provider,
+                        messages = messages,
+                        systemPrompt = systemPrompt,
+                        ragContext = null,
+                        tools = tools,
+                        mcpServers = emptyList(),
+                        maxRounds = io.prism.qq.QqReplyToolPolicy.DEFAULT_MAX_ROUNDS,
+                        thinkingEnabled = null,
+                        reasoningEffort = null,
+                        onEvent = { event ->
+                            io.prism.qq.QqReplyToolLoop.toolNameOf(event)?.let { toolNames += it }
+                        }
+                    )
+                }
+                val took = System.currentTimeMillis() - startedAt
+                if (updated == null) {
+                    android.util.Log.w(
+                        "QqProactiveSchedule",
+                        "工具回路超预算（${cfg.replyToolBudgetMs}ms）已中断（已用 ${took}ms，" +
+                            "工具=${toolNames.distinct().joinToString(",").ifEmpty { "无" }}），回落单次补全"
+                    )
+                    return null
+                }
+                val text = io.prism.qq.QqReplyToolLoop.extractFinalText(updated)
+                if (text == null) {
+                    // 2026-11-17 真机取证：这里是**静默回落**——回路跑满轮数时最后一条是
+                    // 带 toolCalls 的占位消息（没有正文），extractFinalText 返回 null，
+                    // 于是整次工具调用结果被丢弃并退回单次补全 → 用户看到"她说去查但没查"。
+                    //
+                    // **修复：强制作答**。把回路里已拿到的工具结果抽成摘要，交给一次
+                    // **禁用工具**的单次补全——保证"查到的结果真的被用上"。
+                    val digest = io.prism.qq.QqReplyToolLoop.extractToolDigest(updated)
+                    val digestContext = io.prism.qq.QqReplyToolLoop.digestContext(digest)
+                    if (digestContext == null) {
+                        // 模型压根没调工具（1 条消息 / 0 条结果）：这是**正常**的"这轮不需要查"，
+                        // 不是异常。不要打 warn，否则真机日志会被正常轮次刷满。
+                        android.util.Log.i(
+                            "QqProactiveSchedule",
+                            "工具回路结束（未调用工具，${updated.size} 条消息）→ 回落单次补全"
+                        )
+                        return null
+                    }
+                    android.util.Log.w(
+                        "QqProactiveSchedule",
+                        "工具回路未产出最终文本（${updated.size} 条消息，轮数用尽）：" +
+                            "工具=${toolNames.distinct().joinToString(",").ifEmpty { "无" }} " +
+                            "结果=${digest.size} 条 → 强制作答"
+                    )
+                    return composer.composeReply(
+                        baseUrl = provider.baseUrl,
+                        apiKey = apiKey,
+                        model = provider.models.firstOrNull().orEmpty(),
+                        personaSystemPrompt = persona,
+                        companionAddress = null,
+                        incoming = replyTarget,
+                        history = history,
+                        memorySection = memory,
+                        mediaHint = null,
+                        imageDataUrl = null,
+                        mediaNote = digestContext,
+                        now = java.time.LocalDateTime.now(),
+                        pending = pending,
+                        shapeHint = shapeHint,
+                        lastMessageAtMs = lastMessageAtMs,
+                        diarySection = diarySection
+                    )?.also {
+                        android.util.Log.i("QqProactiveSchedule", "强制作答成功（已带上 ${digest.size} 条工具结果）")
+                    }
+                }
+                android.util.Log.i(
+                    "QqProactiveSchedule",
+                    "工具回路=完成 耗时=${took}ms 工具=${toolNames.distinct().joinToString(",").ifEmpty { "无" }}"
+                )
+                // 预算超了但已有文本 → 照常使用（比丢回复好），只是记一条诊断
+                return text
+            }
+
+            /**
+             * 应答主体（**必须经 [autoReplyOnce] / [autoReplyBurst] 进入**，本函数不含临界区保护）。
+             *
+             * @param batch 本轮的待回消息（时间升序；**最后一条**才是"刚发来的"，其余是还没回的连发）。
+             *   单条场景传 `listOf(msg)`；轮询路径传 null（自己从通道读）。
+             */
+            suspend fun autoReplyLocked(batch: List<io.prism.qq.channel.QqMessage>?): io.prism.qq.QqReplyOutcome.ReplyResult {
                 val cfg = qqConfigRepository.get()
                 val contact = cfg.targetContact
                 if (contact.isBlank()) return io.prism.qq.QqReplyOutcome.skipped("未配置目标联系人")
                 val channel = activeQqChannel()
+                // 2026-11-15（ADR-076）：批合并。收件箱一次可领多条连发消息，
+                // 逐条生成会让"连发 3 条 → 3 条回复、每条只接住一句"，且生成期间新消息继续排队。
+                val sortedBatch = batch?.sortedBy { it.timestampMs }?.takeIf { it.isNotEmpty() }
 
                 // 2026-10-26（US-3125）：QQ 已离线时明确跳过。
                 // 真机实证：账号态周期性失效后，回复链路会一路走到发送失败并累计熔断，
@@ -1960,7 +2150,7 @@ class PrismApplication : Application() {
                     if (guard.blocked) return io.prism.qq.QqReplyOutcome.skipped(guard.reason)
                 }
 
-                val incoming = override ?: run {
+                val incoming = sortedBatch?.last() ?: run {
                     // US-3111 AC-1（guardrail G-01）：轮询路径只服务**实际生效**的无障碍通道。
                     // 判据统一走 QqAutoReplyDispatch（与单测同一实现）——不能用 cfg.transport，
                     // 否则"协议端未配置 + 无障碍可用"这一原始故障场景仍然永久静默。
@@ -1983,19 +2173,27 @@ class PrismApplication : Application() {
 
                 val now = System.currentTimeMillis()
                 val rt = qqRuntimeStateRepository.get()
-                val hash = incoming.text.hashCode()
-                if (io.prism.qq.QqReplyDedup.isDuplicate(
-                        messageId = incoming.messageId,
+                // 2026-11-15（guardrail M-01，ADR-076 复审）：**去重按条、且在生成之前**。
+                // 原实现只拿批的**末条**比幂等键：末条恰好已回过 → 整批判 DONE →
+                // `claimed.forEach { done() }` 把还没回过的前几条一并删掉（静默丢消息）。
+                // 现在逐条剔除"已回应过"的，剩下的才是本轮真正要回的；全被剔除才整批 DONE。
+                val replyBatch = (sortedBatch ?: listOf(incoming)).filter { message ->
+                    !io.prism.qq.QqReplyDedup.isDuplicate(
+                        messageId = message.messageId,
                         lastMessageId = rt.lastRepliedMessageId,
-                        hash = hash,
+                        hash = message.text.hashCode(),
                         lastHash = rt.lastRepliedMessageHash.toIntOrNull() ?: 0,
                         lastRepliedAtMs = rt.lastRepliedAtMs,
                         nowMs = now,
                         repliedMessageIds = rt.repliedMessageIds
                     )
-                ) {
+                }
+                if (replyBatch.isEmpty()) {
                     return io.prism.qq.QqReplyOutcome.skipped("该消息已回应过")
                 }
+                // 过滤后重新派生：末条仍是"刚发来的"，其余是还没回的连发
+                val replyTarget = replyBatch.last()
+                val burst = replyBatch.dropLast(1)
                 // 2026-10-26 真机修复：被动应答**不再套用主动消息的节流**。
                 // 用户 19:09 的实证：18:53 回过一次 → 19:09 的新消息被判"未达最小间隔
                 // （还需约 14 分钟）"直接丢弃。minInterval/dailyCap/maxPerDay 的语义是
@@ -2009,15 +2207,53 @@ class PrismApplication : Application() {
                     ?: return io.prism.qq.QqReplyOutcome.failed("无激活的 LLM Provider，无法生成回复")
                 val key = apiKeyRepository.readApiKeyOnce(provider.apiKeyRef)
                     ?: return io.prism.qq.QqReplyOutcome.failed("激活 Provider 的 API Key 不可用")
-                val persona = runCatching {
-                    rolePackLoader.effectiveRolePack().persona.systemPrompt
-                }.getOrNull()
+                // 2026-11-15（ADR-076 / PRD AC-10 部署一致性）：记录**生效角色包版本**。
+                // 没有这条日志时，真机"人设没变"无从分辨是"提示词没生效"还是"加载了旧资产"
+                // ——ADR-052 E1 正是真机跑着 v5 却以为在测 v6。只记元数据，不记正文。
+                val rolePack = runCatching { rolePackLoader.effectiveRolePack() }
+                    .onFailure {
+                        android.util.Log.w(
+                            "QqProactiveSchedule",
+                            "角色包加载失败（按通用模板）：${it::class.simpleName}"
+                        )
+                    }
+                    .getOrNull()
+                rolePack?.let {
+                    android.util.Log.i(
+                        "QqProactiveSchedule",
+                        "角色包=id:${it.id} version:${it.version} " +
+                            "persona=${it.persona.systemPrompt.length} 字"
+                    )
+                }
+                val persona = rolePack?.persona?.systemPrompt
 
                 // US-3112 AC-1/AC-2：读取最近 N 条；失败逐级降级（API → 本地会话 → 仅当前一条）
                 // 2026-10-26：新增 Prism 侧会话记录作为第 2 级——无障碍通道恒为 ≤1 条，
                 // 没有本地记录时"回复接不上话"（用户真机反馈的核心体验问题）。
                 // 同时按字符预算裁剪（条数可到 200，但必须防 prompt 撑爆）。
-                runCatching { qqConversationStore.append(contact, incoming) }
+                //
+                // 2026-11-15（ADR-076）：整批入账；整批从历史中剔除（否则同一句话既在
+                // "最近对话"里、又在"他刚发来"里，模型会当成两件事分别回应）。
+                val batchIds = replyBatch.mapNotNull { it.messageId }.toSet()
+                // 排除集合同时覆盖"本批"与"当前这一条"：同一句话出现在两处会被当成两件事。
+                val excludeIds = if (replyTarget.messageId.isNullOrBlank()) {
+                    batchIds
+                } else {
+                    batchIds + replyTarget.messageId
+                }
+                val batchTexts = replyBatch.map { it.text }.toSet()
+                burst.forEach { message ->
+                    runCatching {
+                        qqConversationStore.append(
+                            contact,
+                            if (message.mediaNote.isNullOrBlank() && message.media.isNotEmpty()) {
+                                message.copy(mediaNote = io.prism.qq.QqMediaDescriber.describe(message.media))
+                            } else {
+                                message
+                            }
+                        )
+                    }
+                }
                 val channelHistory = runCatching { channel.recentMessages(contact, cfg.historyLimit) }
                     .getOrDefault(emptyList())
                 val sourceHistory = if (channelHistory.isEmpty()) {
@@ -2026,19 +2262,33 @@ class PrismApplication : Application() {
                     channelHistory
                 }
                 val history = sourceHistory
+                    // 2026-11-15（ADR-076）：历史必须按消息时间归一。通道 API 当前返回升序，
+                    // 但本地会话记录是**追加序**（真机取证：21:49:12 的消息排在 21:50:08 之后），
+                    // 不稳定排序可保序，不会把同一时间戳的消息打乱。
+                    .sortedBy { it.timestampMs }
+                    .filterNot { !it.messageId.isNullOrBlank() && it.messageId in excludeIds }
                     .let { list ->
                         when {
-                            !incoming.messageId.isNullOrBlank() ->
-                                list.filterNot { it.messageId == incoming.messageId }
-                            list.isNotEmpty() && list.last().text == incoming.text ->
-                                list.dropLast(1)
+                            list.isEmpty() -> list
+                            // 无 messageId 的通道（无障碍）只能用文本尾部判重
+                            list.last().text in batchTexts -> list.dropLast(1)
                             else -> list
                         }
                     }
                     .let { io.prism.qq.QqContextBuilder.trimByBudget(it, cfg.historyCharBudget) }
                 // guardrail M-08：L2+L3 合并后硬上限 1200 字符，防 L3 全量画像撑爆 prompt
                 val memory = if (cfg.memoryInjectionEnabled) {
-                    buildMemorySection(incoming.text)?.take(MAX_MEMORY_SECTION_CHARS)
+                    buildMemorySection(replyTarget.text)?.take(MAX_MEMORY_SECTION_CHARS)
+                } else {
+                    null
+                }
+                // 2026-11-16（ADR-077）：**角色日记**注入（最近 3 条）。
+                // 与 L2/L3 语义不同：那是系统抽取的事实，这是她自己写的心里话。
+                // 明确标注"你自己写下的、不必给他看"，避免她把这些当聊天素材复述出来。
+                val diarySection = if (cfg.diaryEnabled) {
+                    runCatching {
+                        rolePack?.id?.let { roleId -> roleDiaryStore.promptSection(roleId) }
+                    }.getOrNull()?.takeIf { it.isNotEmpty() }
                 } else {
                     null
                 }
@@ -2051,18 +2301,18 @@ class PrismApplication : Application() {
                 // **`face`（QQ 内置表情，如 14=开心）被整条丢弃** → 模型只看到 `[表情]` 占位符，
                 // 既不知道是哪个表情也不知道情绪。现在改为：对所有媒体都生成可读说明，
                 // 图片再叠加视觉/OCR 增强。
-                val mediaRef = incoming.media.firstOrNull {
+                val mediaRef = replyTarget.media.firstOrNull {
                     it.kind == io.prism.qq.channel.QqMediaKind.IMAGE ||
                         it.kind == io.prism.qq.channel.QqMediaKind.STICKER
                 }
                 var imageDataUrl: String? = null
                 var mediaNote: String? = null
-                if (incoming.media.isNotEmpty()) {
+                if (replyTarget.media.isNotEmpty()) {
                     // 先为**全部**媒体生成说明（face/语音/视频都算），保证模型一定"看得到"
-                    mediaNote = io.prism.qq.QqMediaDescriber.describe(incoming.media)
+                    mediaNote = io.prism.qq.QqMediaDescriber.describe(replyTarget.media)
                     android.util.Log.i(
                         "QqProactiveSchedule",
-                        "媒体说明：${incoming.media.size} 项 → ${mediaNote?.take(120).orEmpty()}"
+                        "媒体说明：${replyTarget.media.size} 项 → ${mediaNote?.take(120).orEmpty()}"
                     )
                 }
                 if (mediaRef != null) {
@@ -2102,29 +2352,100 @@ class PrismApplication : Application() {
                     )
                 }
 
+                // 2026-11-15（ADR-076）：本轮入站消息入账（带媒体说明），供本地历史复用。
+                // 必须在 mediaNote 算完之后——否则历史里只剩 `[表情包]` 占位符。
+                runCatching {
+                    qqConversationStore.append(
+                        contact,
+                        replyTarget.copy(mediaNote = mediaNote?.takeIf { it.isNotBlank() })
+                    )
+                }
+                // 回复形状由代码抽样（破"每条都问句收尾"的模板化）
+                val shapeHint = io.prism.qq.QqReplyShape.pick()
+                val lastMessageAtMs = history.lastOrNull()?.timestampMs
+                    ?: burst.lastOrNull()?.timestampMs
+                    ?: 0L
+                // 2026-11-17：表情库目录**提前算**，既供 promptHint，也进诊断日志。
+                // 没有这条日志时，"导入后模型仍不发自定义表情"无法区分是
+                // ①库没加载 ②目录为空 ③模型没选中——真机排障会绕远路。
+                val stickerCatalog = if (cfg.mediaReplyEnabled &&
+                    channel.transport == io.prism.qq.channel.QqTransport.ONEBOT
+                ) {
+                    runCatching { qqStickerStore.catalogForPrompt() }.getOrDefault(emptyList())
+                } else {
+                    emptyList()
+                }
+                android.util.Log.i(
+                    "QqProactiveSchedule",
+                    "上下文：历史=${history.size} 条 批=${replyBatch.size} 条 " +
+                        "媒体=${replyTarget.media.size} 记忆=${memory?.length ?: 0} 字 " +
+                        // guardrail 2026-11-17：措辞必须说清两个数不是"少了"——
+                        // 目录数受 CATALOG_IN_PROMPT(20) 截断，导入总数可以更大。
+                        "表情目录=${stickerCatalog.size}(上限${io.prism.qq.QqStickerStore.CATALOG_IN_PROMPT})" +
+                        "/导入${runCatching { qqStickerStore.userStickers().size }.getOrDefault(0)} 张 " +
+                        "形状=${shapeHint.take(10)}"
+                )
+                val composeStartedAt = System.currentTimeMillis()
+
                 val reply = run {
                     val mediaHint = if (cfg.mediaReplyEnabled &&
                         channel.transport == io.prism.qq.channel.QqTransport.ONEBOT
                     ) {
+                        // 2026-11-16（ADR-077）：把**用户导入的自定义表情目录**交给模型。
+                        // 只给情绪标签时它永远只能落到内置 face 上——这正是"发不出非内置表情"
+                        // 的结构性原因（真机 files/qq_stickers/ 为空、importImage 零调用方）。
+                        // 目录已在上方提前算好（同一份，避免二次读盘与日志/提示词不一致）。
                         io.prism.qq.QqReplyDirective.promptHint(
-                            enabledSticker = cfg.stickerChancePercent > 0,
-                            enabledVoice = cfg.voiceChancePercent > 0
+                            enabledSticker = cfg.stickerChancePercent > 0 || stickerCatalog.isNotEmpty(),
+                            enabledVoice = cfg.voiceChancePercent > 0,
+                            catalog = stickerCatalog
                         )
                     } else {
                         null
                     }
+                    // 2026-11-16（ADR-077）：**先试有界工具回路**，失败/超时/无工具一律回落单次补全。
+                    // 不变量：绝不因为工具回路的问题丢一条回复（回落路径与 ADR-076 完全一致）。
+                    val viaTools = runCatching {
+                        composeReplyWithTools(
+                            cfg = cfg,
+                            provider = provider,
+                            apiKey = key,
+                            persona = persona,
+                            replyTarget = replyTarget.text,
+                            history = history,
+                            memory = memory,
+                            mediaHint = mediaHint,
+                            imageDataUrl = imageDataUrl,
+                            mediaNote = mediaNote,
+                            pending = burst,
+                            shapeHint = shapeHint,
+                            lastMessageAtMs = lastMessageAtMs,
+                            diarySection = diarySection.orEmpty()
+                        )
+                    }.onFailure {
+                        android.util.Log.w(
+                            "QqProactiveSchedule",
+                            "工具回路异常，回落单次补全：${it::class.simpleName}"
+                        )
+                    }.getOrNull()
+                    if (viaTools != null) return@run viaTools
                     val first = composer.composeReply(
                         baseUrl = provider.baseUrl,
                         apiKey = key,
                         model = provider.models.firstOrNull().orEmpty(),
                         personaSystemPrompt = persona,
                         companionAddress = null,
-                        incoming = incoming.text,
+                        incoming = replyTarget.text,
                         history = history,
                         memorySection = memory,
                         mediaHint = mediaHint,
                         imageDataUrl = imageDataUrl,
-                        mediaNote = mediaNote
+                        mediaNote = mediaNote,
+                        now = java.time.LocalDateTime.now(),
+                        pending = burst,
+                        shapeHint = shapeHint,
+                        lastMessageAtMs = lastMessageAtMs,
+                        diarySection = diarySection.orEmpty()
                     )
                     if (first != null || imageDataUrl == null) {
                         first
@@ -2150,12 +2471,17 @@ class PrismApplication : Application() {
                             model = provider.models.firstOrNull().orEmpty(),
                             personaSystemPrompt = persona,
                             companionAddress = null,
-                            incoming = incoming.text,
+                            incoming = replyTarget.text,
                             history = history,
                             memorySection = memory,
                             mediaHint = mediaHint,
                             imageDataUrl = null,
-                            mediaNote = degradedNote
+                            mediaNote = degradedNote,
+                            now = java.time.LocalDateTime.now(),
+                            pending = burst,
+                            shapeHint = shapeHint,
+                            lastMessageAtMs = lastMessageAtMs,
+                            diarySection = diarySection.orEmpty()
                         )
                     }
                 } ?: return io.prism.qq.QqReplyOutcome.failed("回复生成失败（端点/模型异常）")
@@ -2172,54 +2498,200 @@ class PrismApplication : Application() {
                 // "发个表情包"，模型回了纯文字，于是永远发不出去。
                 // 现在：① 模型给了标记 → 一定发；② 用户明确要表情 → 代码兜底发；
                 // ③ 都没有才按概率随机附带。
-                val wantsSticker = io.prism.qq.QqMediaIntent.wantsSticker(incoming.text)
+                val wantsSticker = io.prism.qq.QqMediaIntent.wantsSticker(replyTarget.text)
+                // 2026-11-16（ADR-077）：**指名发送**——模型可以点具体那一张自定义表情。
+                // 解析顺序：id/关键词 → 情绪 → 内置 face（逐级降级，永不"发不出去"）。
+                val resolvedRef = parsed.stickerRef?.let { ref ->
+                    runCatching { qqStickerStore.findByIdOrKeyword(ref) }.getOrNull()
+                }
+                var stickerRefId: String? = resolvedRef?.id
                 // 记录本轮的"决策来源"，用于真机对账（BR-observability-005 精神：
                 // 只有结果没有来源，无法判断"是模型配合还是代码兜底"）。
                 var stickerSource = "none"
                 val stickerEmotion = when {
                     !allowMedia -> null
+                    // 指名命中 → 用它（此时不需要情绪）
+                    stickerRefId != null -> {
+                        stickerSource = "指名"
+                        parsed.stickerEmotion ?: resolvedRef?.emotion?.takeIf { it.isNotBlank() }
+                    }
                     parsed.stickerEmotion != null -> {
                         stickerSource = "指令"
                         parsed.stickerEmotion
                     }
                     wantsSticker -> {
                         stickerSource = "意图"
-                        io.prism.qq.QqMediaIntent.guessEmotion(incoming.text)
+                        io.prism.qq.QqMediaIntent.guessEmotion(replyTarget.text)
                             ?: io.prism.qq.QqMediaIntent.DEFAULT_EMOTION
                     }
-                    cfg.stickerChancePercent > 0 &&
-                        kotlin.random.Random.nextInt(100) < cfg.stickerChancePercent -> {
+                    // 2026-11-16（guardrail M-03）：**概率只在闸门里掷一次**。
+                    // 原实现这里先 roll 一次（`Random.nextInt(100) < chance`），再过
+                    // `QqStickerGate` 又 roll 一次 → 25% 实际 ≈ 6.25%，与 ADR 表述矛盾。
+                    // 这里只表达"本轮允许按概率附带"的意图，真正的概率判定交给闸门。
+                    cfg.stickerChancePercent > 0 -> {
                         stickerSource = "概率"
-                        io.prism.qq.QqMediaIntent.guessEmotion(incoming.text)
+                        io.prism.qq.QqMediaIntent.guessEmotion(replyTarget.text)
                             ?: io.prism.qq.QqMediaIntent.DEFAULT_EMOTION
                     }
                     else -> null
                 }
+                // 2026-11-16（ADR-077）：**发送闸门**（复用 dsh-qq-bot 的 chance/maxPerHour/dupTTL/force）。
+                // 原来只有 25% 概率、没有任何刹车 → 同一张图能连发，真机表现为"刷图感"。
+                val stickerGateDecision = if (stickerEmotion == null && stickerRefId == null) {
+                    null
+                } else {
+                    val explicitlyRequested = stickerSource in setOf("指名", "指令", "意图")
+                    val gateKey = stickerRefId
+                        ?: io.prism.qq.QqStickerGate.faceKey(
+                            io.prism.qq.QqStickerCatalog.faceIdFor(stickerEmotion!!).orEmpty()
+                        )
+                    io.prism.qq.QqStickerGate.decide(
+                        stickerId = gateKey,
+                        explicitlyRequested = explicitlyRequested,
+                        nowMs = System.currentTimeMillis(),
+                        sendsInLastHour = runCatching { qqStickerStore.sendsInLastHour(System.currentTimeMillis()) }
+                            .getOrDefault(0),
+                        sentWithinTtl = stickerRefId?.let { id ->
+                            runCatching {
+                                qqStickerStore.sentWithinTtl(
+                                    id,
+                                    System.currentTimeMillis(),
+                                    cfg.stickerDuplicateTtlHours * 60L * 60_000L
+                                )
+                            }.getOrDefault(false)
+                        } ?: false,
+                        config = io.prism.qq.QqStickerGate.Config(
+                            maxPerHour = cfg.stickerMaxPerHour,
+                            duplicateTtlHours = cfg.stickerDuplicateTtlHours,
+                            chancePercent = cfg.stickerChancePercent
+                        )
+                    )
+                }
+                val stickerAllowed = stickerGateDecision?.let { io.prism.qq.QqStickerGate.allows(it) } == true
+                if (!stickerAllowed && stickerGateDecision != null) {
+                    // guardrail R2 复核：**只有真正被刹车挡下**才值得记 warn 级日志；
+                    // `DenyChance` 只是"这轮没掷中"（约 75% 的轮次都会出现），
+                    // 用"拦截"措辞会让真机排障误判成"表情被限制"。
+                    if (stickerGateDecision != io.prism.qq.QqStickerGate.Decision.DenyChance) {
+                        android.util.Log.i(
+                            "QqProactiveSchedule",
+                            "表情闸门=${stickerGateDecision}（源=$stickerSource）——本轮只发文本"
+                        )
+                    }
+                    stickerRefId = null
+                }
+                val effectiveStickerEmotion = if (stickerAllowed) stickerEmotion else null
                 // 语音同理：模型给标记就发，用户点名要语音也发；不再二次随机
                 val wantVoice = allowMedia && (parsed.voice ||
-                    io.prism.qq.QqMediaIntent.wantsVoice(incoming.text))
+                    io.prism.qq.QqMediaIntent.wantsVoice(replyTarget.text))
                 android.util.Log.i(
                     "QqProactiveSchedule",
                     "媒体指令=${if (parsed.hasDirective) "有" else "无"} " +
-                        "sticker=${stickerEmotion ?: "none"}（源=$stickerSource） voice=$wantVoice " +
+                        "sticker=${stickerRefId ?: effectiveStickerEmotion ?: "none"}" +
+                        "（源=$stickerSource） voice=$wantVoice " +
                         "intent=${if (wantsSticker) "要表情" else "-"}"
                 )
                 // 只发媒体（模型只给了标记）时不能发空文本
+                // 2026-11-16（guardrail M-04）：闸门拦截后 stickerRefId/effectiveStickerEmotion 都为空，
+                // 原实现回落 **原始 reply**（含 `[[sticker:id:…]]` 字面量）→ 用户会收到一串标记。
+                // 必须回落 `parsed.text`（已 stripMarkers），必要时再兜一层 stripMarkers。
                 val textToSend = parsed.text.ifBlank {
-                    if (stickerEmotion != null || wantVoice) "" else reply
-                }
-                val previousScope = io.prism.qq.QqLocalToolExecutor.enterPassiveReplyScope()
-                val sendResult = try {
-                    if (textToSend.isBlank()) {
-                        // 纯媒体回复：以媒体发送结果作为整体结果
-                        "SKIP:TEXT_EMPTY"
+                    if (effectiveStickerEmotion != null || stickerRefId != null || wantVoice) {
+                        ""
                     } else {
-                        channel.sendText(contact, textToSend)
+                        io.prism.qq.QqReplyDirective.stripMarkers(reply)
+                    }
+                }
+                // 2026-11-15（ADR-076）：一次回复可拆成**多条短消息**——真人在 QQ 上
+                // 通常是"先应一声、再补一句"。约束：最多 3 条、单条 ≤120 字、仅协议端
+                // （无障碍通道一次只能注入一条气泡）。
+                //
+                // guardrail M-03：多气泡会把**真实外发次数**放大，而被动窗口
+                // （`PASSIVE_MAX_IN_WINDOW`/`PASSIVE_WINDOW_MS`）按"回复"计数，
+                // `recordReplied` 一次只记 1 条时间戳 → 窗口限流被 3 倍绕过。
+                // 因此这里按**窗口剩余额度**截断气泡数（不足就合并成一条，语义不丢）。
+                val windowSlots = io.prism.qq.QqThrottle.availableSendSlots(rt, System.currentTimeMillis())
+                val maxBubblesNow = windowSlots.coerceIn(1, io.prism.qq.QqReplyBubbles.MAX_BUBBLES)
+                val bubbles = when {
+                    textToSend.isBlank() -> emptyList()
+                    channel.transport != io.prism.qq.channel.QqTransport.ONEBOT ->
+                        listOf(textToSend)
+                    else -> io.prism.qq.QqReplyBubbles.split(textToSend)
+                        .let { if (it.size <= maxBubblesNow) it else listOf(it.joinToString("\n")) }
+                }
+                // 2026-11-16（ADR-077）：**拟人节奏**——发之前先像人一样"想一想 + 打字"。
+                // 真机取证：此前 2.4–4.4 s 就是全部耗时（=生成耗时），用户感觉秒回、有压力。
+                // 模型依据 Stephanie2(EMNLP 2026) 的 latency = 思考 + 打字；
+                // 与 ADR-076 的固定 700 ms 气泡间隔一起被逐条取代（见下方 bubbleGaps）。
+                val pacingConfig = io.prism.qq.QqReplyPacing.Config(
+                    enabled = cfg.pacingEnabled,
+                    charsPerSecond = cfg.typingCharsPerSecond,
+                    minDelayMs = cfg.minReplyDelayMs,
+                    maxDelayMs = cfg.maxReplyDelayMs
+                )
+                val pacingDelayMs = io.prism.qq.QqReplyPacing.delayMsFor(
+                    replyText = textToSend,
+                    now = java.time.LocalDateTime.now(),
+                    lastMessageAtMs = lastMessageAtMs,
+                    config = pacingConfig
+                )
+                // 2026-11-16（guardrail M-07）：**临界区总预算**。pacing 延迟在 `replyMutex` 内，
+                // 若本轮已经因为生成/工具回路花掉大量时间，再叠加最多 25s 会拉长锁占用，
+                // 造成"claim 早于等锁 → 租约过期 → 二次领取 → 双回复"（已另把 CLAIM_TTL 提到 300s 兜底）。
+                // 这里再加一道软约束：本轮已耗时超过阈值就跳过表演性延迟——宁可这次快一点。
+                val elapsedBeforePacing = System.currentTimeMillis() - composeStartedAt
+                val pacingBudgetLeft = (io.prism.qq.QqReplyToolPolicy.PACING_CRITICAL_BUDGET_MS - elapsedBeforePacing)
+                    .coerceAtLeast(0L)
+                val effectivePacingMs = pacingDelayMs.coerceAtMost(pacingBudgetLeft)
+                if (effectivePacingMs < pacingDelayMs) {
+                    android.util.Log.i(
+                        "QqProactiveSchedule",
+                        "拟人节奏被临界区预算压缩：${pacingDelayMs}ms → ${effectivePacingMs}ms（已耗时 ${elapsedBeforePacing}ms）"
+                    )
+                }
+                if (effectivePacingMs > 0L) {
+                    android.util.Log.i(
+                        "QqProactiveSchedule",
+                        "拟人节奏：等待 ${effectivePacingMs}ms（字数=${textToSend.length} 气泡=${bubbles.size}）"
+                    )
+                    kotlinx.coroutines.delay(effectivePacingMs)
+                }
+                // 逐气泡间隔：按该气泡字数估"打完这句 + 想到下一句"，取代固定 700 ms。
+                val bubbleGaps = io.prism.qq.QqReplyPacing.bubbleGapsMs(bubbles, pacingConfig)
+                val previousScope = io.prism.qq.QqLocalToolExecutor.enterPassiveReplyScope()
+                var sendResult = if (bubbles.isEmpty()) "SKIP:TEXT_EMPTY" else ""
+                // 只有**真正发出**的气泡才进会话记录（guardrail M-02）：中途失败时若把未发的
+                // 气泡也记账，下一轮历史里会出现"我说过"但用户从未收到的话。
+                val sentBubbles = mutableListOf<String>()
+                try {
+                    for ((index, bubble) in bubbles.withIndex()) {
+                        val single = channel.sendText(contact, bubble)
+                        sendResult = single
+                        if (single.startsWith("错误") || single.startsWith("⚠️")) break
+                        sentBubbles += bubble
+                        // 气泡之间留一点"人正在打字"的间隔；最后一条不等待
+                        if (index < bubbles.lastIndex) {
+                            val gap = bubbleGaps.getOrElse(index) {
+                                io.prism.qq.QqReplyBubbles.BUBBLE_GAP_MS
+                            }
+                            if (gap > 0L) kotlinx.coroutines.delay(gap)
+                        }
                     }
                 } finally {
                     io.prism.qq.QqLocalToolExecutor.exitPassiveReplyScope(previousScope)
                 }
+                // guardrail M-02：**部分送达不得整批重试**（否则用户会看到"说了两遍开头"）。
+                // 只要有一条气泡真的发出去，本轮即视为已送达（记 DONE + 诊断日志），
+                // 剩余失败的气泡不再重放——宁可少一句，不重复整段。
+                val partiallySent = sentBubbles.isNotEmpty() && bubbles.size > sentBubbles.size
+                if (partiallySent) {
+                    android.util.Log.w(
+                        "QqProactiveSchedule",
+                        "气泡部分送达：${sentBubbles.size}/${bubbles.size}（剩余不重试，防重复整段）"
+                    )
+                }
                 val textOk = sendResult == "SKIP:TEXT_EMPTY" ||
+                    sentBubbles.isNotEmpty() ||
                     (!sendResult.startsWith("错误") && !sendResult.startsWith("⚠️"))
                 // 文本成功（或本次本就无文本）才继续媒体
                 if (textOk && channel.transport == io.prism.qq.channel.QqTransport.ONEBOT) {
@@ -2236,9 +2708,11 @@ class PrismApplication : Application() {
                             )
                         }
                     }
-                    if (stickerEmotion != null) {
+                    if (effectiveStickerEmotion != null || stickerRefId != null) {
+                        // 2026-11-16（ADR-077）：指名（id）走 stickerId 参数，情绪走 emotion；
+                        // 通道内部按 id → 情绪 → 内置 face 逐级解析（见 OneBotQqChannel.resolveSticker）。
                         val stickerResult = runCatching {
-                            channel.sendSticker(contact, stickerEmotion, null)
+                            channel.sendSticker(contact, effectiveStickerEmotion, stickerRefId)
                         }.getOrElse {
                             android.util.Log.w(
                                 "QqProactiveSchedule",
@@ -2249,8 +2723,24 @@ class PrismApplication : Application() {
                         android.util.Log.i(
                             "QqProactiveSchedule",
                             "表情发送=${if (stickerResult.startsWith("错误")) "fail" else "ok"}" +
-                                (if (stickerResult.startsWith("错误")) "（${stickerResult.take(60)}）" else "")
+                                (if (stickerResult.startsWith("错误")) "（${stickerResult.take(60)}）" else "") +
+                                "（${stickerRefId ?: effectiveStickerEmotion}）"
                         )
+                        // 发送成功才记账（闸门的"每小时上限/同图 TTL"依赖它）
+                        val sentOk = !stickerResult.startsWith("错误") && !stickerResult.startsWith("⚠️")
+                        if (sentOk) {
+                            runCatching {
+                                val nowSticker = System.currentTimeMillis()
+                                // 2026-11-16（自查修复）：**任何**表情（指名/情绪/内置 face/mface）
+                                // 都要计入小时上限；原实现只在指名用户表情时记账 →
+                                // "每小时 6 张"对内置表情形同虚设。
+                                if (stickerRefId != null) {
+                                    qqStickerStore.markSent(stickerRefId!!, nowSticker)
+                                } else {
+                                    qqStickerStore.recordSend(nowSticker)
+                                }
+                            }
+                        }
                     }
                 }
                 android.util.Log.i(
@@ -2262,25 +2752,98 @@ class PrismApplication : Application() {
                             "（${sendResult.take(80)}）"
                         } else "")
                 )
-                if (textToSend.isNotBlank()) {
+                android.util.Log.i(
+                    "QqProactiveSchedule",
+                    "生成耗时=${System.currentTimeMillis() - composeStartedAt}ms " +
+                        "气泡=${sentBubbles.size}/${bubbles.size}"
+                )
+                // 2026-11-15（ADR-076）：**每一条真正发出的气泡**都入账（真机历史里"我"连续
+                // 两条是真实现象，不该被合并成一段）。中途失败时只记已发出的部分。
+                sentBubbles.forEach { bubble ->
                     runCatching {
                         qqConversationStore.append(
                             contact,
                             io.prism.qq.channel.QqMessage(
                                 messageId = null,
                                 incoming = false,
-                                text = textToSend,
+                                text = bubble,
                                 timestampMs = System.currentTimeMillis()
                             )
                         )
                     }
                 }
+                // 仅媒体回复（无文本）也必须在历史里留痕：否则模型不知道自己刚发过表情，
+                // 下一轮会重复发/或对"你怎么不发"这类话莫名其妙。
+                if (sentBubbles.isEmpty() && textOk && (effectiveStickerEmotion != null || stickerRefId != null)) {
+                    val label = stickerRefId
+                        ?.let { id -> runCatching { qqStickerStore.findByIdOrKeyword(id) }.getOrNull()?.description }
+                        ?.takeIf { !it.isNullOrBlank() }
+                        ?: effectiveStickerEmotion
+                    runCatching {
+                        qqConversationStore.append(
+                            contact,
+                            io.prism.qq.channel.QqMessage(
+                                messageId = null,
+                                incoming = false,
+                                text = "[表情]",
+                                timestampMs = System.currentTimeMillis(),
+                                mediaNote = "发了一个「$label」的表情"
+                            )
+                        )
+                    }
+                }
                 // "SKIP:TEXT_EMPTY" = 本次只发媒体（无文本），按成功记账，避免被误判为失败类别
-                val result = if (sendResult == "SKIP:TEXT_EMPTY") "已发送（仅媒体）" else sendResult
+                // guardrail M-02：部分送达也算成功（否则整批 RETRY 会重发已发出的气泡）
+                val result = when {
+                    sendResult == "SKIP:TEXT_EMPTY" -> "已发送（仅媒体）"
+                    partiallySent || sentBubbles.isNotEmpty() -> "已发送"
+                    else -> sendResult
+                }
                 val sentAt = System.currentTimeMillis()
+                val todayKey = io.prism.qq.QqThrottle.todayKey(sentAt, java.time.ZoneId.systemDefault())
                 val kind = io.prism.qq.QqFailureClassifier.classify(result)
                 val failed = result.startsWith("错误") || result.startsWith("⚠️")
+                // guardrail R2-M-03：**窗口记账必须按真实外发条数**（recordReplied 一次只记 1 条）。
+                // 只改"读"（availableSendSlots）不改"写"，上限仍会被气泡数放大。
+                val extraSends = (sentBubbles.size - 1).coerceAtLeast(0)
+                // guardrail M-04：整批写幂等键（重投前几条会被二次回复）
+                suspend fun markBatchReplied() {
+                    qqRuntimeStateRepository.setLastReplied(replyTarget.text.hashCode().toString(), sentAt)
+                    replyBatch.forEach { m ->
+                        m.messageId?.let { qqRuntimeStateRepository.setLastRepliedMessageId(it) }
+                    }
+                }
                 when {
+                    // guardrail R2-M-01：**部分送达不得清 FAILURE_STREAK**。
+                    // "前几条发出去、后面被拒"恰恰是账号级故障（风控/禁言/协议端拒绝）的典型形态，
+                    // 一条气泡发出去只证明"这一刻连接没断"，不证明"账号没被限制"。
+                    // 故：结算仍按 DONE（不重试，防重复整段），但记账走 recordUnconfirmedReplied
+                    // ——计窗口、推进 lastFiredAt，**刻意不动 streak**（与既有 G-r3-01 设计一致）。
+                    partiallySent -> {
+                        android.util.Log.i(
+                            "QqProactiveSchedule",
+                            "被动回复部分送达：按未确认记账（不重试、不清熔断计数）"
+                        )
+                        qqRuntimeStateRepository.recordUnconfirmedReplied(sentAt, todayKey)
+                        qqRuntimeStateRepository.recordExtraPassiveSends(sentAt, extraSends)
+                        markBatchReplied()
+                        // guardrail R3-M-01：**"不重试"与"计失败"必须解耦**。
+                        // 上面走 recordUnconfirmedReplied 是**刻意不动** FAILURE_STREAK（防假阴性洗白），
+                        // 但因此 failed 分支在本情形下不可达 → 账号级失败完全不计数 →
+                        // 熔断在"前几条过、后面被拒"（风控最典型的形态）时永不触发。
+                        // 这里用**未被归一化的 sendResult**（保留失败气泡的原始错误串）补计：
+                        // 不重发是为了不重复内容，计失败是为了让熔断看见账号被拒。
+                        val partialKind = io.prism.qq.QqFailureClassifier.classify(sendResult)
+                        if (io.prism.qq.QqFailureClassifier.countsTowardCircuit(partialKind)) {
+                            qqRuntimeStateRepository.recordFailure(
+                                io.prism.qq.QqThrottle.FAILURE_STREAK_THRESHOLD
+                            )
+                            android.util.Log.i(
+                                "QqProactiveSchedule",
+                                "被动回复部分送达且属账号级失败：计入熔断（kind=$partialKind）"
+                            )
+                        }
+                    }
                     // guardrail G-r4-01：「未确认」= 消息很可能已送达。这里**必须**与主动路径
                     // 对齐：① 记账（否则 minInterval/dailyCap 失效）；② 标记已回复（否则去重失效，
                     // 配合探针 15 分钟强制放行会变成"每 ~15 分钟重复回复同一条"）。
@@ -2289,12 +2852,9 @@ class PrismApplication : Application() {
                     // 也不能用 recordReplied（它会清 FAILURE_STREAK，把假阴性"洗白"成成功）。
                     failed && io.prism.qq.QqFailureClassifier.isUnconfirmedDelivery(kind) -> {
                         android.util.Log.i("QqProactiveSchedule", "被动回复未确认（可能已送达）：记账并标记已回复")
-                        qqRuntimeStateRepository.recordUnconfirmedReplied(
-                            sentAt,
-                            io.prism.qq.QqThrottle.todayKey(sentAt, java.time.ZoneId.systemDefault())
-                        )
-                        qqRuntimeStateRepository.setLastReplied(incoming.text.hashCode().toString(), sentAt)
-                        incoming.messageId?.let { qqRuntimeStateRepository.setLastRepliedMessageId(it) }
+                        qqRuntimeStateRepository.recordUnconfirmedReplied(sentAt, todayKey)
+                        qqRuntimeStateRepository.recordExtraPassiveSends(sentAt, extraSends)
+                        markBatchReplied()
                     }
                     failed -> {
                         // guardrail G-08：只有内容/发送被拒才计入熔断；环境类失败（熄屏/显示面/
@@ -2308,11 +2868,10 @@ class PrismApplication : Application() {
                     }
                     else -> {
                         // guardrail M-06：回复只计当日总数（每日上限仍生效），不消耗定时主动消息配额
-                        qqRuntimeStateRepository.recordReplied(
-                            sentAt, io.prism.qq.QqThrottle.todayKey(sentAt, java.time.ZoneId.systemDefault())
-                        )
-                        qqRuntimeStateRepository.setLastReplied(incoming.text.hashCode().toString(), sentAt)
-                        incoming.messageId?.let { qqRuntimeStateRepository.setLastRepliedMessageId(it) }
+                        qqRuntimeStateRepository.recordReplied(sentAt, todayKey)
+                        // guardrail R2-M-03：按真实外发条数补记账（否则 60s 窗口实际被放大到 3 倍）
+                        qqRuntimeStateRepository.recordExtraPassiveSends(sentAt, extraSends)
+                        markBatchReplied()
                     }
                 }
                 // D-01：显式区分「已发送」（未确认送达也算已产出出站动作）
@@ -2330,7 +2889,18 @@ class PrismApplication : Application() {
             suspend fun autoReplyOnce(
                 override: io.prism.qq.channel.QqMessage? = null
             ): io.prism.qq.QqReplyOutcome.ReplyResult =
-                replyMutex.withLock { autoReplyLocked(override) }
+                replyMutex.withLock { autoReplyLocked(override?.let { listOf(it) }) }
+
+            /**
+             * **批量应答**（2026-11-15 新增；ADR-076）。
+             *
+             * 收件箱里同一轮的连发消息合并成**一次**生成：真人不会对"连发 3 条"逐条点答，
+             * 逐条生成既慢（3× 延迟）又只能接住其中一句。
+             */
+            suspend fun autoReplyBurst(
+                batch: List<io.prism.qq.channel.QqMessage>
+            ): io.prism.qq.QqReplyOutcome.ReplyResult =
+                replyMutex.withLock { autoReplyLocked(batch.ifEmpty { null }) }
             io.prism.qq.QqProactiveGateway.autoReply = { autoReplyOnce() }
 
             // 2026-10-26（US-3124 验收）：debug 探针的端到端入口——用**合成入站消息**
@@ -2455,63 +3025,79 @@ class PrismApplication : Application() {
                 // 2026-11-15（ADR-074）：返回**实际处理条数**，供重试 worker 判断是否需要退避
                 // （收件箱为空时不应保持 15s 高频轮询）。
                 var handled = 0
-                // guardrail R2-02：**逐条领取**（每次只 claim 1 条），领到就串行处理完再领下一条。
-                // 一次领 5 条时，尾部条目会在 120s 租约内过期，被 15s worker 二次领取 →
-                // 双重 LLM 生成 + attempts 多计。逐条领取天然对齐"租约 > 单条处理耗时"。
+                // 2026-11-15（ADR-076 / guardrail M-03 复审）：`maxRounds` 的语义由
+                // **"条"改为"轮"**——每轮领取至多 `BURST_LIMIT`(4) 条、只做 1 次生成。
+                // 故单次调用的上限是 `maxRounds × 4` 条消息 / `maxRounds` 次生成 /
+                // 至多 `maxRounds × 3` 次外发。补发入口（20 轮）因此最多 80 条 / 20 次生成，
+                // 而不是旧注释写的"5 条/轮 × 20 = 100 条"。
                 //
-                // guardrail R-1（验收）：补发场景下积压可能 >20 条，而 5 条/轮 × 15s
-                // 满足不了 AC-4 的"恢复后 ≤60s 内回复"。补发入口显式传更大的预算。
+                // guardrail R-1（验收）：补发窗口 60 分钟内积压可能 >20 条，故补发入口显式传
+                // 更大的轮数；被动外发仍受 `QqThrottle` 的 60s 窗口（20 条）与气泡额度双重约束。
                 repeat(maxRounds) {
-                    val due = qqInboxStore.claimDue(System.currentTimeMillis(), limit = 1)
-                    val item = due.firstOrNull() ?: return handled
+                    val claimed = qqInboxStore.claimDue(
+                        System.currentTimeMillis(),
+                        limit = io.prism.qq.QqInboxStore.BURST_LIMIT
+                    )
+                    if (claimed.isEmpty()) return handled
                     // guardrail R2-04：**不要在处理前摘掉**实时原文——HOLD/RETRY 后
                     // 下一次领取就拿不到 media 了（图片会退化成「[媒体消息]」）。
                     // 只在条目真正终结（DONE/放弃）时清理。
-                    val live = liveInboxMessages[item.id]
                     // 2026-11-15（US-3132 修复「非内置表情包看不见」）：
                     // 缓存未命中时必须**从落盘快照重建 media**，否则图片/表情包会退化成
                     // 纯文本（mediaRef=null → 视觉与 OCR 全失效，只剩一句文字说明）。
-                    val msg = live ?: io.prism.qq.channel.QqMessage(
-                        messageId = item.id,
-                        incoming = true,
-                        text = item.text,
-                        timestampMs = item.atMs,
-                        media = item.media.map {
-                            io.prism.qq.channel.QqMediaRef(
-                                kind = runCatching {
-                                    io.prism.qq.channel.QqMediaKind.valueOf(it.kind)
-                                }.getOrDefault(io.prism.qq.channel.QqMediaKind.IMAGE),
-                                url = it.url?.takeIf { u -> u.isNotBlank() },
-                                fileName = it.fileName?.takeIf { f -> f.isNotBlank() },
-                                fileSize = it.fileSize,
-                                summary = it.summary?.takeIf { s -> s.isNotBlank() }
-                            )
-                        }
-                    )
-                    val result = autoReplyOnce(msg)
-                    val now = System.currentTimeMillis()
-                    when (io.prism.qq.QqInboxPolicy.decide(result.kind, result.message)) {
-                        io.prism.qq.QqInboxPolicy.Decision.DONE -> {
-                            qqInboxStore.done(item.id)
-                            liveInboxMessages.remove(item.id)
-                        }
-                        // 通道/环境类跳过：不动预算，等下一轮（否则断线几分钟就烧光重试次数）
-                        io.prism.qq.QqInboxPolicy.Decision.HOLD ->
-                            qqInboxStore.hold(item.id, now + 60_000L)
-                        io.prism.qq.QqInboxPolicy.Decision.RETRY -> {
-                            val dropped = qqInboxStore.retryLater(item.id, result.message, now)
-                            if (dropped) {
-                                liveInboxMessages.remove(item.id)
-                                android.util.Log.i(
-                                    "QqProactiveSchedule",
-                                    "收件箱放弃（重试次数用尽，attempts=${item.attempts + 1}）"
+                    val messages = claimed.map { item ->
+                        liveInboxMessages[item.id] ?: io.prism.qq.channel.QqMessage(
+                            messageId = item.id,
+                            incoming = true,
+                            text = item.text,
+                            timestampMs = item.atMs,
+                            media = item.media.map {
+                                io.prism.qq.channel.QqMediaRef(
+                                    kind = runCatching {
+                                        io.prism.qq.channel.QqMediaKind.valueOf(it.kind)
+                                    }.getOrDefault(io.prism.qq.channel.QqMediaKind.IMAGE),
+                                    url = it.url?.takeIf { u -> u.isNotBlank() },
+                                    fileName = it.fileName?.takeIf { f -> f.isNotBlank() },
+                                    fileSize = it.fileSize,
+                                    summary = it.summary?.takeIf { s -> s.isNotBlank() }
                                 )
+                            }
+                        )
+                    }.sortedBy { it.timestampMs }
+                    val result = autoReplyBurst(messages)
+                    val decision = io.prism.qq.QqInboxPolicy.decide(result.kind, result.message)
+                    val now = System.currentTimeMillis()
+                    // 批内条目**必须**全部终结（不变量：claim 过的条目不得悬空到租约回收）。
+                    claimed.forEach { item ->
+                        when (decision) {
+                            io.prism.qq.QqInboxPolicy.Decision.DONE -> {
+                                qqInboxStore.done(item.id)
+                                liveInboxMessages.remove(item.id)
+                            }
+                            // 通道/环境类跳过：不动预算，等下一轮（否则断线几分钟就烧光重试次数）
+                            // 2026-11-15（ADR-076）：节流类只差 3s → 4s 短重试，不再统一 60s。
+                            io.prism.qq.QqInboxPolicy.Decision.HOLD -> qqInboxStore.hold(
+                                item.id,
+                                now + io.prism.qq.QqInboxPolicy.holdMs(result.message)
+                            )
+                            io.prism.qq.QqInboxPolicy.Decision.RETRY -> {
+                                val dropped = qqInboxStore.retryLater(item.id, result.message, now)
+                                if (dropped) {
+                                    liveInboxMessages.remove(item.id)
+                                    android.util.Log.i(
+                                        "QqProactiveSchedule",
+                                        "收件箱放弃（重试次数用尽，attempts=${item.attempts + 1}）"
+                                    )
+                                }
                             }
                         }
                     }
                     // guardrail L-02：只记三态与原因，不回显正文/联系人
-                    android.util.Log.i("QqProactiveSchedule", "（收件箱）" + result.logLine)
-                    handled += 1
+                    android.util.Log.i(
+                        "QqProactiveSchedule",
+                        "（收件箱）批=${claimed.size} 条 " + result.logLine
+                    )
+                    handled += claimed.size
                 }
                 return handled
             }
@@ -2623,6 +3209,19 @@ class PrismApplication : Application() {
                 if (!cfg.enabled || !cfg.riskAccepted) return
                 val rt = runCatching { qqRuntimeStateRepository.get() }.getOrNull() ?: return
                 val now = System.currentTimeMillis()
+                // 2026-11-16（guardrail R2-M-01）：**启动先回收陈旧 claim**。
+                // claimDue 会把 nextAttemptAt 持久化为 now+CLAIM_TTL_MS（ADR-077 已提到 300s），
+                // 进程被杀重启后这些条目要等满租约才可再领 → 最长 5 分钟不回复，
+                // 与 US-3129 AC-4「恢复后 ≤60s」冲突。单进程应用启动时不可能有别的实例在处理。
+                runCatching {
+                    val reclaimed = qqInboxStore.reclaimStaleClaims(now)
+                    if (reclaimed > 0) {
+                        android.util.Log.i(
+                            "QqProactiveSchedule",
+                            "启动回收陈旧 claim：$reclaimed 条（原需等满 ${io.prism.qq.QqInboxStore.CLAIM_TTL_MS / 1000}s）"
+                        )
+                    }
+                }
                 val verdict = io.prism.qq.QqStartupCompensation.evaluate(
                     nowMs = now,
                     lastSeenAtMs = qqInboxStore.lastSeenAtMs(),

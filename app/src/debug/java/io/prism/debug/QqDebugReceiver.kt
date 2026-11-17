@@ -354,6 +354,123 @@ class QqDebugReceiver : BroadcastReceiver() {
                         val result = reply(probe)
                         "simulate_inbound=${result.logLine} media=${media.size}"
                     }
+                    // 2026-11-17：**写入 API Key**（仅 debug 构建）。
+                    //
+                    // 为什么需要：Tavily / 智谱等搜索增强 Key 只能从设置页手输，而
+                    // 「导入 Key + 端到端验证」在自动化验收里必须可脚本化。本入口复用
+                    // 生产同一个 `ApiKeyRepository`（Tink AEAD 加密落盘），**不回显 Key 明文**。
+                    //
+                    // ⚠️ 风险与边界（guardrail F-3，务必保持）：
+                    // - **仅限个人调试设备**：本 receiver 带 `android.permission.DUMP`
+                    //   （signature|privileged|development），第三方应用发不了这条广播；
+                    // - 但 `adb shell` 命令行本身会把 Key 写进 shell 历史与 `ps` 输出
+                    //   —— 这是**操作方**的风险，不是代码风险；用完请轮换 Key；
+                    // - **不返回任何与 Key 内容相关的度量**（长度是弱指纹，已删除）；
+                    // - 只在 `src/debug`（release 包不含本文件）。
+                    "apikey" -> runBlocking {
+                        val keyRef = intent.getStringExtra("ref")?.trim().orEmpty()
+                        val value = intent.getStringExtra("value")?.trim().orEmpty()
+                        if (keyRef.isBlank() || value.isBlank()) {
+                            "apikey=缺少 ref 或 value"
+                        } else {
+                            app.apiKeyRepository.saveApiKey(keyRef, value)
+                            val readBack = app.apiKeyRepository.readApiKeyOnce(keyRef)
+                            // guardrail F-3：不报长度（弱指纹），只报是否可读回
+                            "apikey=ref:$keyRef saved=${readBack != null}"
+                        }
+                    }
+                    // 2026-11-17：**表情库自检**（不发送任何消息）。
+                    // 覆盖 ADR-077 B2 的本地全链路：库加载 → 目录生成 → 情绪挑选 → 指名解析。
+                    "stickers" -> runBlocking {
+                        val store = app.qqStickerStore
+                        val all = store.userStickers()
+                        val catalog = store.catalogForPrompt()
+                        val picked = store.pick("抱抱")
+                        val pickedDesc = when (picked) {
+                            is io.prism.qq.QqStickerStore.Sticker.ImageFile ->
+                                "ImageFile(" + picked.file.name + ")"
+                            is io.prism.qq.QqStickerStore.Sticker.Mface ->
+                                "Mface(" + picked.mface.emojiId + ")"
+                            is io.prism.qq.QqStickerStore.Sticker.BuiltinFace ->
+                                "BuiltinFace(" + picked.faceId + ")"
+                            null -> "null"
+                        }
+                        // 指名解析：`[[sticker:id:u03]]` 必须命中具体一张
+                        val parsed = io.prism.qq.QqReplyDirective.parse("好呀 [[sticker:id:u03]]")
+                        val refHit = parsed.stickerRef?.let { store.findByIdOrKeyword(it)?.id }
+                        buildString {
+                            append("stickers=").append(all.size)
+                            append(" catalog=").append(catalog.size)
+                            append(" withDesc=").append(all.count { it.description.isNotBlank() })
+                            append(" pick(抱抱)=").append(pickedDesc)
+                            append(" ref(").append(parsed.stickerRef).append(")->").append(refHit)
+                            append(" sample=").append(catalog.firstOrNull()?.take(60))
+                        }
+                    }
+                    // 2026-11-17：**真实搜索调用**（不发送任何消息）。
+                    // 用于验证搜索增强链（Bocha → 智谱 → SearXNG → Tavily → Bing/Baidu 兜底）
+                    // 在真机上是否真的可用——尤其"只配了 Tavily"的情形。
+                    //
+                    // guardrail F-1：参数名必须是 **`maxResults`**（执行器只认这个键；
+                    // 传 `count` 会被静默忽略，于是"限 3 条"的意图不生效）。
+                    // guardrail F-2：**只回条数与首条标题，不回正文**——搜索结果含外部摘要，
+                    // 不应该落进 logcat（bugreport/分享时会被带出）。
+                    "search" -> runBlocking {
+                        val query = intent.getStringExtra("query")?.trim().orEmpty()
+                        if (query.isBlank()) {
+                            "search=缺少 query"
+                        } else {
+                            val tool = intent.getStringExtra("tool") ?: io.prism.network.WebSearchLocalToolExecutor.TOOL_SEARCH
+                            val limit = intent.getStringExtra("max")
+                                ?.toIntOrNull()?.coerceIn(1, 10) ?: 3
+                            val started = System.currentTimeMillis()
+                            val out = app.webSearchLocalToolExecutor.execute(
+                                tool,
+                                mapOf("query" to query, "maxResults" to limit)
+                            )
+                            val took = System.currentTimeMillis() - started
+                            val ok = !out.startsWith("错误")
+                            // 只取条数与首行标题（不取摘要正文）。
+                            // 注意：必须匹配**行首**的 `[n]` —— 正文里的引用标记（如 `[2][5]`）
+                            // 也会命中裸 `[n]`，上一版因此把 3 条数成了 6 条。
+                            val items = Regex("""(?m)^\[(\d+)]""").findAll(out).count()
+                            val firstLine = out.lineSequence()
+                                .firstOrNull { it.contains('.') && it.length > 8 }
+                                ?.take(50) ?: "-"
+                            "search took=${took}ms tool=$tool ok=$ok limit=$limit " +
+                                "items=$items first=$firstLine"
+                        }
+                    }
+                    // 2026-11-17：**日记自检**。
+                    //
+                    // guardrail F-4：**默认 dry-run**——原实现会真的写一条并占掉
+                    // 当日 3 条额度中的 1 条；而且 `--es role` 只影响"读回"，真正写入的
+                    // 角色由 `roleIdProvider`（当前生效角色包）决定 → 会造成假阴性。
+                    // 现在：默认只做只读检查（all / countToday / promptSection），
+                    // 传 `--ez write true` 才真正写一条，且写后**如实报告实际角色**。
+                    "diary" -> runBlocking {
+                        val write = intent.getBooleanExtra("write", false)
+                        val roleId = intent.getStringExtra("role")
+                            ?: runCatching { app.rolePackLoader.effectiveRolePack().id }.getOrNull()
+                            ?: "default"
+                        val store = app.roleDiaryStore
+                        if (!write) {
+                            val section = store.promptSection(roleId)
+                            "diary(dry-run) role=$roleId total=${store.all(roleId).size} " +
+                                "today=${store.countToday(roleId, System.currentTimeMillis())} " +
+                                "inject=${section.size} head=" + (section.lastOrNull()?.take(60) ?: "-")
+                        } else {
+                            val text = intent.getStringExtra("text")
+                                ?: "今天他让我把表情包一张张看过去，看得眼睛都花了。"
+                            val result = app.diaryLocalToolExecutor.execute(
+                                "diary__write",
+                                mapOf("text" to text, "mood" to "软")
+                            )
+                            val section = store.promptSection(roleId)
+                            "diary(write) result=${result.take(40)} total=${store.all(roleId).size} " +
+                                "inject=${section.size} head=" + (section.lastOrNull()?.take(60) ?: "-")
+                        }
+                    }
                     // 2026-10-26（US-3124 排查）：打印当前激活 Provider 的视觉判定依据。
                     // 真机现象：用户认为模型支持多模态，但媒体日志显示 vision=false——
                     // 需要区分"模型名启发式没命中"与"用户显式关掉了开关"。

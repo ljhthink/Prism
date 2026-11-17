@@ -81,6 +81,20 @@ function main() {
   // 非 persona 层从既有角色包原样透传（worldbook 40 条背景设定 / 风格 / 音色 / 表情 / 记忆）
   const prev = JSON.parse(fs.readFileSync(PACK, 'utf8').replace(/^\uFEFF/, ''));
 
+  // 2026-11-15（ADR-076）：**防误降级护栏**。
+  // v7.1 起 persona 增量维护在本地专属的 `build-cyrene-rolecard-v7.1.local.js`，
+  // 而本脚本仍会把资产重写回 7.0.0。若有人在 v7.1 之后误跑本脚本，就会**静默回退**
+  // 用户私有角色卡（且因为资产是 gitignored，回退不会出现在任何 diff 里）。
+  // 故：磁盘资产版本高于本脚本产出时直接拒绝。
+  if (prev.version && prev.version !== OUT_VERSION && prev.version > OUT_VERSION) {
+    console.error(
+      `[拒绝] 磁盘资产为 v${prev.version}，高于本脚本产出的 v${OUT_VERSION}。` +
+        '请改用 docs/design/build-cyrene-rolecard-v7.1.local.js（或更高版本的生成器），' +
+        '避免静默回退角色卡。'
+    );
+    process.exit(3);
+  }
+
   const systemPrompt = field(md, 'systemPrompt');
   const callSystemPrompt = field(md, 'callSystemPrompt');
   const address = field(md, 'address');

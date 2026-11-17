@@ -282,6 +282,17 @@ class ConversationViewModel(
      */
     private val qqToolExecutor: io.prism.qq.QqLocalToolExecutor? = null,
     /**
+     * 2026-11-16（ADR-077）：角色日记工具执行器（`diary__write`）。
+     *
+     * 非 null 时把 `diary__write` 注入 [buildTools]，让角色能把"想记住的瞬间"写成
+     * 第一人称日记（本地）。**是否真的写**由执行器判定（每日上限 / 角色 id），
+     * 这里只做"是否暴露工具"的门控——与 `qq__*` / `pet__*` 同范式，避免会话中途
+     * 工具集变化破坏 provider 前缀缓存。
+     *
+     * 生产环境由 [Factory] 从 [PrismApplication.diaryLocalToolExecutor] 注入。
+     */
+    private val diaryToolExecutor: io.prism.qq.DiaryLocalToolExecutor? = null,
+    /**
      * 批次24（ADR-051 D8）：桌宠动作工具执行器（`pet__play_action`）。
      *
      * 非 null 时把 `pet__play_action` 注入 [buildTools]，使角色能对自己的桌面形象下达
@@ -1494,7 +1505,9 @@ class ConversationViewModel(
                 // 桌宠未开启时执行器返回可读说明，不改变工具集 → 不破坏 provider 前缀缓存）
                 petActionEnabled = petLocalToolExecutor != null,
                 // QQ 小号助手（ADR-062）：qq__* 工具（未开启时执行器返回可读说明，同上范式）
-                qqToolsEnabled = qqToolExecutor != null
+                qqToolsEnabled = qqToolExecutor != null,
+                // 2026-11-16（ADR-077）：角色日记 diary__write（纯本地能力，恒启用）
+                diaryEnabled = diaryToolExecutor != null
             )
             // UXR4 问题 2/3（ADR-024）+ ADR-050：知识库工具在 **能力开启 + 嵌入可用** 时注入
             //（LLM 可主动枚举/检索/读取知识库）。ADR-050 后这是知识库正文进入上下文的**唯一通道**，
@@ -3244,7 +3257,9 @@ class ConversationViewModel(
             // 批次24（ADR-051 D8）：桌宠动作工具（pet__play_action，默认 false 向后兼容既有测试）
             petActionEnabled: Boolean = false,
             // QQ 小号助手（ADR-062）：qq__* 工具（默认 false 向后兼容既有测试）
-            qqToolsEnabled: Boolean = false
+            qqToolsEnabled: Boolean = false,
+            // 2026-11-16（ADR-077）：角色日记 diary__write（默认 false 向后兼容既有测试）
+            diaryEnabled: Boolean = false
         ): List<ToolDefinition> {
             val skillTools = enabledSkills.flatMap { entry ->
                 (entry.manifest.tools ?: emptyList()).map { toolDecl ->
@@ -3310,8 +3325,14 @@ class ConversationViewModel(
             } else {
                 emptyList()
             }
+            // 2026-11-16（ADR-077）：角色日记（diary__write）——纯本地能力
+            val diaryTools = if (diaryEnabled) {
+                listOf(io.prism.qq.DiaryLocalToolExecutor.buildToolDefinition())
+            } else {
+                emptyList()
+            }
             return skillTools + crossAppTools + webSearchTools + documentTools + askUserTools +
-                phoneControlTools + hotListTools + todoTools + petTools + qqTools
+                phoneControlTools + hotListTools + todoTools + petTools + qqTools + diaryTools
         }
 
         /**
@@ -3562,6 +3583,8 @@ class ConversationViewModel(
                     petLocalToolExecutor = app.petLocalToolExecutor,
                     // QQ 小号助手（ADR-062）：qq__* 工具（发送/签名/定时）
                     qqToolExecutor = app.qqLocalToolExecutor,
+                    // 2026-11-16（ADR-077）：角色日记（diary__write，本地）
+                    diaryToolExecutor = app.diaryLocalToolExecutor,
                     // TASK-20260910-001：文本聊天播报管理器（播放按钮；引擎跟随语音通话设置）
                     textPlayback = io.prism.voice.TextPlaybackController(
                         app,

@@ -3,6 +3,7 @@ package io.prism.qq
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
@@ -136,6 +137,50 @@ class QqConfigRepository(
         it[WAKE_ON_SCREEN_OFF] = enabled
     }
 
+    // ==================== 2026-11-16（ADR-077）：节奏 / 表情闸门 / 工具 / 日记 ====================
+
+    /** 拟人节奏总开关（guardrail M-02：必须给用户"关掉 25s 延迟"的逃生口）。 */
+    suspend fun setPacingEnabled(enabled: Boolean) = edit { it[PACING_ENABLED] = enabled }
+
+    /** 打字速度（字/秒；读侧再 clamped 收敛；NaN 回落到默认）。 */
+    suspend fun setTypingCharsPerSecond(cps: Double) = edit {
+        it[TYPING_CPS] = if (cps.isNaN()) QqReplyPacing.DEFAULT_CHARS_PER_SECOND else cps
+    }
+
+    /** 单轮延迟上下限（毫秒；真正的区间校验在 `QqConfig.clamped()`）。 */
+    suspend fun setReplyDelayRange(minMs: Long, maxMs: Long) = edit {
+        it[MIN_REPLY_DELAY] = minMs.coerceAtLeast(0L)
+        it[MAX_REPLY_DELAY] = maxMs.coerceAtLeast(0L)
+    }
+
+    /** 表情小时上限（0=不限）。 */
+    suspend fun setStickerMaxPerHour(n: Int) = edit {
+        it[STICKER_MAX_PER_HOUR] = n.coerceIn(0, 60)
+    }
+
+    /** 同图去重 TTL（小时；0=不去重）。 */
+    suspend fun setStickerDuplicateTtlHours(hours: Int) = edit {
+        it[STICKER_DUP_TTL_HOURS] = hours.coerceIn(0, 24 * 7)
+    }
+
+    /** QQ 回复是否允许调用 Prism 工具。 */
+    suspend fun setReplyToolsEnabled(enabled: Boolean) = edit { it[REPLY_TOOLS] = enabled }
+
+    /** 是否允许在 QQ 回复里使用手机操控（高风险，默认关）。 */
+    suspend fun setReplyPhoneControlEnabled(enabled: Boolean) = edit {
+        it[REPLY_PHONE_CONTROL] = enabled
+    }
+
+    /** 工具回路总预算（毫秒）。 */
+    suspend fun setReplyToolBudgetMs(ms: Long) = edit {
+        it[REPLY_TOOL_BUDGET] = ms.coerceIn(
+            QqReplyToolPolicy.MIN_BUDGET_MS, QqReplyToolPolicy.MAX_BUDGET_MS
+        )
+    }
+
+    /** 是否允许角色写日记。 */
+    suspend fun setDiaryEnabled(enabled: Boolean) = edit { it[DIARY_ENABLED] = enabled }
+
     private suspend fun edit(block: (androidx.datastore.preferences.core.MutablePreferences) -> Unit) {
         dataStore.edit(block)
     }
@@ -167,7 +212,18 @@ class QqConfigRepository(
         stickerChancePercent = prefs[STICKER_CHANCE] ?: 25,
         voiceChancePercent = prefs[VOICE_CHANCE] ?: 10,
         memoryInjectionEnabled = prefs[MEMORY_INJECTION] ?: true,
-        wakeOnScreenOff = prefs[WAKE_ON_SCREEN_OFF] ?: true
+        wakeOnScreenOff = prefs[WAKE_ON_SCREEN_OFF] ?: true,
+        // 2026-11-16（ADR-077；guardrail M-02）：新配置项必须持久化，否则"可配"是空话
+        pacingEnabled = prefs[PACING_ENABLED] ?: true,
+        typingCharsPerSecond = prefs[TYPING_CPS] ?: QqReplyPacing.DEFAULT_CHARS_PER_SECOND,
+        minReplyDelayMs = prefs[MIN_REPLY_DELAY] ?: QqReplyPacing.DEFAULT_MIN_DELAY_MS,
+        maxReplyDelayMs = prefs[MAX_REPLY_DELAY] ?: QqReplyPacing.DEFAULT_MAX_DELAY_MS,
+        stickerMaxPerHour = prefs[STICKER_MAX_PER_HOUR] ?: QqStickerGate.DEFAULT_MAX_PER_HOUR,
+        stickerDuplicateTtlHours = prefs[STICKER_DUP_TTL_HOURS] ?: QqStickerGate.DEFAULT_DUPLICATE_TTL_HOURS,
+        replyToolsEnabled = prefs[REPLY_TOOLS] ?: true,
+        replyPhoneControlEnabled = prefs[REPLY_PHONE_CONTROL] ?: false,
+        replyToolBudgetMs = prefs[REPLY_TOOL_BUDGET] ?: QqReplyToolPolicy.DEFAULT_BUDGET_MS,
+        diaryEnabled = prefs[DIARY_ENABLED] ?: true
     ).clamped()
 
     companion object {
@@ -205,5 +261,17 @@ class QqConfigRepository(
         private val VOICE_CHANCE = intPreferencesKey("qq_voice_chance")
         private val MEMORY_INJECTION = booleanPreferencesKey("qq_memory_injection")
         private val WAKE_ON_SCREEN_OFF = booleanPreferencesKey("qq_wake_on_screen_off")
+
+        // 2026-11-16（ADR-077）：节奏 / 表情闸门 / 工具回路 / 日记
+        private val PACING_ENABLED = booleanPreferencesKey("qq_pacing_enabled")
+        private val TYPING_CPS = doublePreferencesKey("qq_typing_cps")
+        private val MIN_REPLY_DELAY = longPreferencesKey("qq_min_reply_delay_ms")
+        private val MAX_REPLY_DELAY = longPreferencesKey("qq_max_reply_delay_ms")
+        private val STICKER_MAX_PER_HOUR = intPreferencesKey("qq_sticker_max_per_hour")
+        private val STICKER_DUP_TTL_HOURS = intPreferencesKey("qq_sticker_dup_ttl_hours")
+        private val REPLY_TOOLS = booleanPreferencesKey("qq_reply_tools")
+        private val REPLY_PHONE_CONTROL = booleanPreferencesKey("qq_reply_phone_control")
+        private val REPLY_TOOL_BUDGET = longPreferencesKey("qq_reply_tool_budget_ms")
+        private val DIARY_ENABLED = booleanPreferencesKey("qq_diary_enabled")
     }
 }

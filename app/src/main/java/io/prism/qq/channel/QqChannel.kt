@@ -80,13 +80,19 @@ enum class QqMediaKind {
  * @param text 文本正文（媒体消息带占位符，如 `[图片]`）
  * @param timestampMs 消息时间（毫秒；未知时为 0）
  * @param media 该消息携带的媒体引用（2026-10-26 新增；空=纯文本）
+ * @param mediaNote 媒体的**可读说明**（2026-11-15 新增；ADR-076）。
+ *
+ * 历史里的 `[表情包]` / `[图片]` 只是占位符，模型无从得知画面或情绪；其直接后果是
+ * 回复"莫名其妙地接上一个不存在的话题"。这里把 [io.prism.qq.QqMediaDescriber] 的
+ * 说明随消息一起带进历史（仅本地会话记录/提示词使用，不落协议端）。
  */
 data class QqMessage(
     val messageId: String?,
     val incoming: Boolean,
     val text: String,
     val timestampMs: Long,
-    val media: List<QqMediaRef> = emptyList()
+    val media: List<QqMediaRef> = emptyList(),
+    val mediaNote: String? = null
 )
 
 interface QqChannel {

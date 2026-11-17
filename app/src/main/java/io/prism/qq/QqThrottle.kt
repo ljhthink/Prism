@@ -125,9 +125,27 @@ object QqThrottle {
         return Decision.Allow
     }
 
+    /**
+     * **本轮还能真实外发几条**（2026-11-15 新增；ADR-076 / guardrail M-03）。
+     *
+     * 为什么需要：多气泡让"一次回复"变成最多 3 次真实 `send_private_msg`，而
+     * [recordReplied] 一次只往 [QqRuntimeState.passiveReplyTimestamps] 记 **1** 条时间戳 →
+     * 窗口限流被气泡数放大（20 条/分钟的上限实际可到 60 次外发）。
+     *
+     * 这里给出"窗口还能容纳几条"，调用方据此**截断气泡数**（不足就合并成一条），
+     * 使窗口上限始终约束**真实外发次数**而不是回复次数。
+     *
+     * @return ≥1（调用方至少保留一条，避免因额度为 0 而完全不说话）
+     */
+    fun availableSendSlots(state: QqRuntimeState, nowMs: Long): Int {
+        val recent = state.passiveReplyTimestamps.count { ts ->
+            ts in 1..nowMs && nowMs - ts < PASSIVE_WINDOW_MS
+        }
+        return (PASSIVE_MAX_IN_WINDOW - recent).coerceAtLeast(1)
+    }
+
     /** 被动回复的最小间隔（防同一条消息被双发；不构成"打扰"限制）。 */
     const val PASSIVE_MIN_GAP_MS: Long = 3_000L
-
     /** 被动回复滑动窗口长度。 */
     const val PASSIVE_WINDOW_MS: Long = 60_000L
 
