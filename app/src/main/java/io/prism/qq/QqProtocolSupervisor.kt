@@ -156,7 +156,18 @@ class QqProtocolSupervisor(
      */
     private suspend fun maybeAutoRestart(nowMs: Long): RestartOutcome {
         val state = repository.get()
-        val alreadyRunning = isProtocolPortListening()
+        // 2026-11-18：**Termux 不活着时，状态文件不可信**（刚被 force-stop 时它仍新鲜，
+        // 见 repairAll 内同款不变量说明）。否则自愈会因"状态文件说在跑"直接 GiveUp，
+        // 而这正是本次连续 20 小时未自愈的形态之一。
+        val termuxState = QqTermuxBridge.termuxProcessState()
+        val alreadyRunning = if (termuxState == QqTermuxBridge.TermuxState.ALIVE) {
+            isProtocolPortListening()
+        } else if (termuxState == QqTermuxBridge.TermuxState.DEAD) {
+            false
+        } else {
+            // UNKNOWN：查不出来时保守——沿用状态文件判定，避免把查询故障当成"已死"而狂重启。
+            isProtocolPortListening()
+        }
         val decision = QqProtocolRestartPolicy.decide(
             nowMs = nowMs,
             state = QqProtocolRestartPolicy.State(
@@ -180,6 +191,25 @@ class QqProtocolSupervisor(
                 // （正是 allow-external-apps 未开时的常见状态）会让 attempts 恒为 0 →
                 // 每分钟无限重试、永不给 GiveUp、也永远不告警，还伴生每分钟一次 Shizuku 调用。
                 // 现在：无论提交成功与否，都先落账；用尽 3 次后策略自然转为 GiveUp，交给告警。
+                //
+                // 2026-11-18（真机 RCA）：**自愈前必须先解除 Termux 的 force-stop**。
+                // HyperOS「锁屏后清理内存」会 `force-stop com.termux`（真机日志
+                // `ProcessSceneCleaner: LockScreenClean: force-stop pkgName=com.termux`）。
+                // force-stop 之后 RUN_COMMAND 的 `startService` 被 AMS **静默丢弃**：
+                // 不抛异常、不执行。监督器于是每分钟记一条"状态文件已陈旧，判定协议端已停止"，
+                // 却永远拉不起链——本次真机连续 20 小时未自愈、端口 3000 一直超时即此。
+                //
+                // 先留一条"Termux 当时是否活着"的日志，否则下次 RCA 又只能靠猜。
+                val termuxAlive = QqTermuxBridge.isTermuxProcessAlive()
+                if (!termuxAlive) {
+                    Log.w(TAG, "Termux 进程不存在（疑似被系统 force-stop），尝试解除停止状态后自愈")
+                    QqTermuxBridge.ensureUnstoppedAwait()
+                } else if (alreadyRunning) {
+                    // Termux 活着且状态文件新鲜 → 真的在跑，不重复拉起（防自踢）。
+                    // Termux 不活着时 alreadyRunning 已在上面被强制判为 false
+                    // （刚 force-stop 的状态文件仍"新鲜"，不可信）。
+                    Log.i(TAG, "Termux 存活且状态文件新鲜，判定协议端仍在运行，不重复拉起（防自踢）")
+                }
                 val deploy = deployScriptsDetailed()
                 val deployed = deploy.ok
                 val submitted: Boolean = if (!deployed) {
@@ -475,13 +505,43 @@ class QqProtocolSupervisor(
      */
     suspend fun repairAll(): RepairReport {
         val power = repairPowerPolicy()
+        // 2026-11-18（guardrail M1）：**一键修复必须先解除 force-stop**。
+        //
+        // 原实现直接走到 [QqTermuxBridge.probeVerified]——而 force-stop 后探针的
+        // `startService` 同样被静默丢弃，probe 必然 false，于是：
+        // - `started` 恒为 false；
+        // - readiness 被归类为 `EXTERNAL_APPS_BLOCKED`，UI 让用户去开
+        //   `allow-external-apps`——**方向完全错误，永远修不好**；
+        // - `restartForDeploy` / `restartAndWait` 因 `probed=false` 永不可达。
+        //
+        // 放在 power/deploy 之后、probe 之前：先恢复 Termux 的接收能力，再探针。
+        val termuxAlive = QqTermuxBridge.isTermuxProcessAlive()
+        if (!termuxAlive) {
+            Log.w(TAG, "一键修复：Termux 进程不存在（疑似被系统 force-stop），先解除 stopped")
+            QqTermuxBridge.ensureUnstoppedAwait()
+        }
         val deploy = deployScriptsQuietly()
         val deployed = deploy.ok
         // 先用**闭环探针**验证「命令真的被执行」——不是只看 Intent 有没有抛异常。
         // 真机教训：allow-external-apps=false 时 startService 正常返回、Termux 内部拒绝执行。
         val probed = if (deployed) QqTermuxBridge.probeVerified(appContext) else false
         // D-1（验收必修）：手动路径同样要判"是否已经在跑"
-        val alreadyRunning = isProtocolPortListening()
+        //
+        // 2026-11-18（真机 E2E 现场发现）：**Termux 刚被 force-stop 时，状态文件仍是新鲜的**。
+        // 脚本每 10 秒写一次，进程被杀后文件保留最后时间戳，`STATUS_FRESH_MS=30s` 内
+        // 它看起来完全正常（真机实测：force-stop 后 14 秒触发修复，读到
+        // `ts=… age=14s → 判定 3000 仍在监听`，但此时 proot/Xvfb/qq 全部为 0）。
+        // 后果：修复"正确地"解除了 stopped，却因 alreadyRunning=true 跳过启动 → 仍然没起。
+        //
+        // 不变量：**Termux 进程不存在时，它内部跑的 run2 链必然也已死**——
+        // 此时状态文件无论多新鲜都不可信。这比调小新鲜度窗口更准确
+        // （窗口调小会误伤正常刷新，而这条不变量是因果推断）。
+        val alreadyRunning = if (termuxAlive) {
+            isProtocolPortListening()
+        } else {
+            Log.i(TAG, "Termux 曾被 force-stop，判定 run2 链已死（忽略状态文件新鲜度）")
+            false
+        }
         // 2026-11-14（ADR-072 F3）：**脚本内容变了就必须重启**，否则新逻辑永不生效
         // （运行中的 bash 已把 while 循环读进内存，新实例又被 flock 静默拒绝）。
         //

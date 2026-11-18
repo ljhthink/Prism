@@ -60,6 +60,27 @@ object QqTermuxBridge {
     /** Termux 内 bash 的绝对路径（`$PREFIX/bin/bash`）。 */
     private const val TERMUX_BASH = "/data/data/com.termux/files/usr/bin/bash"
 
+    // ---- force-stop 解除（2026-11-18；HyperOS 锁屏清理导致协议端永久起不来） ----
+
+    /**
+     * Termux 主 Activity（**解除 force-stop 状态**用）。
+     *
+     * 2026-11-18 真机取证：HyperOS 的「锁屏后清理内存」会 `force-stop com.termux`。
+     * force-stop 不只杀进程，它把应用置为 **stopped** 状态——此后 `startService`
+     * （RUN_COMMAND）会被 AMS **静默丢弃**（不抛异常！），调用方误以为"已提交"。
+     * 解除 stopped 的**唯一可靠方式是拉起该应用的 Activity**（shell 身份即可）。
+     */
+    private const val TERMUX_ACTIVITY = "$TERMUX_PACKAGE/.app.TermuxActivity"
+
+    /** 主用户 id（Termux 装在机主空间；QQ 小号在 XSpace=999，两者不同）。 */
+    private const val USER_OWNER = 0
+
+    /** 解除 stopped 后等待 Termux 进程出现的上限。 */
+    private const val UNSTOP_WAIT_MS = 8_000L
+
+    /** 解除 stopped 的轮询间隔。 */
+    private const val UNSTOP_POLL_MS = 400L
+
     /** Termux 的 HOME（`RUN_COMMAND_WORKDIR` 必须是 Termux 可访问目录）。 */
     private const val TERMUX_HOME = "/data/data/com.termux/files/home"
 
@@ -187,12 +208,184 @@ object QqTermuxBridge {
     // ==================== 动作 ====================
 
     /**
+     * Termux 进程的**三态**判定结果（2026-11-18）。
+     *
+     * 为什么不是简单的 Boolean：`ps` 查询本身可能失败（Shizuku 刚被系统回收、
+     * user service 断连）。把"查不到"当成"已死"，会让 [start] 直接拒绝提交命令
+     * ——那是把一次**可恢复的查询失败**变成**服务不可用**，比原 bug 更糟。
+     */
+    enum class TermuxState {
+        /** 明确看到 com.termux 进程。 */
+        ALIVE,
+
+        /** 查询成功且确实没有 com.termux 进程（force-stop 的典型形态）。 */
+        DEAD,
+
+        /** 查不出来（Shizuku 未就绪 / ps 失败）——**不可据此做破坏性决定**。 */
+        UNKNOWN
+    }
+
+    /**
+     * 判定 Termux 进程状态（三态；见 [TermuxState]）。
+     *
+     * ## 匹配规则（guardrail M3，2026-11-18 修正）
+     *
+     * `ps -A -o PID,NAME` 的 NAME 列，**精确匹配** `com.termux` 或
+     * `com.termux:<子进程>`；**不能**用子串 `contains("com.termux")`——
+     * Termux 生态有独立插件包 `com.termux.api` / `com.termux.boot` /
+     * `com.termux.widget`，它们装了就会命中子串，把"Termux 已被 force-stop"
+     * 误判成 ALIVE → 跳过 unstop → **本次 20 小时的故障会原样复现**。
+     *
+     * 也**不能**换成 `pgrep -f`：Termux 里跑的 bash 其 argv 含
+     * `/data/data/com.termux/files/usr/bin/bash`，`-f` 会命中它，同样误判。
+     *
+     * ## 排除 Prism 自身
+     *
+     * Prism 进程的 NAME 是 `io.prism`，不含 `com.termux`，故 NAME 列下本不存在
+     * 自匹配；但脚本/参数里可能出现该串，为稳妥仍排除。
+     */
+    fun termuxProcessState(): TermuxState = runCatching {
+        val ps = ShizukuShell.execPsForDebug()
+            ?: return TermuxState.UNKNOWN
+        val hit = ps.lineSequence().any { line -> isTermuxProcessLine(line) }
+        if (hit) TermuxState.ALIVE else TermuxState.DEAD
+    }.getOrDefault(TermuxState.UNKNOWN)
+
+    /**
+     * 单行 `ps` 输出是否代表 Termux 主进程（或它的子进程）。
+     *
+     * 取该行**最后一列**作为 NAME（`ps -A -o PID,NAME` 只有两列，PID 在前）。
+     * 纯函数，便于单测直接钉住插件包/argv 等误判样本。
+     */
+    internal fun isTermuxProcessLine(line: String): Boolean {
+        val name = line.trim().substringAfterLast(' ').trim()
+        if (name.isEmpty() || name.contains("io.prism")) return false
+        return name == TERMUX_PACKAGE || name.startsWith("$TERMUX_PACKAGE:")
+    }
+
+    /**
+     * Termux 进程当前是否**明确**活着（`ALIVE` 才算 true）。
+     *
+     * 注意语义：返回 false 表示"不是 ALIVE"（可能 DEAD，也可能 UNKNOWN）。
+     * 需要区分两者时用 [termuxProcessState]。
+     */
+    fun isTermuxProcessAlive(): Boolean = termuxProcessState() == TermuxState.ALIVE
+
+    /**
+     * **解除 Termux 的 force-stop 状态**（2026-11-18 新增；真机取证后必须加的一步）。
+     *
+     * ## 为什么这一步不可省
+     *
+     * 真机日志（HyperOS `ProcessSceneCleaner`，2026-11-18 01:41）：
+     * ```
+     * LockScreenClean: force-stop pkgName=com.termux
+     * ActivityManager: Force stopping com.termux ... : LockScreenClean
+     * ```
+     * force-stop 不只是"杀进程"，它把应用置为 **stopped** 状态；此后
+     * `startService(RUN_COMMAND)` **既不抛异常也不执行**，于是监督器日志写着
+     * "已提交协议端拉起"、状态文件却永远不再更新——本次真机连续 **20 小时**
+     * 无人自愈、端口 3000 一直超时，就是这条链。
+     *
+     * ## 做法
+     *
+     * 1. 先看进程是否活着——**绝大多数调用不会产生副作用**（alive 直接返回）；
+     * 2. 不活着 → 用 shell 身份 `am start -n com.termux/.app.TermuxActivity`
+     *    解除 stopped（Termux 会短暂到前台，属恢复路径的已知代价）；
+     * 3. 轮询 `ps` 最多 [UNSTOP_WAIT_MS]，以**进程真的出现**为成功判据
+     *    （不看 `am` 返回值——与 RUN_COMMAND「提交≠执行」同一教训）。
+     *
+     * 本函数是**阻塞版**（供非挂起的 [start] 使用，最长 8 秒）；协程内请用
+     * [ensureUnstoppedAwait]，避免占用调度线程。
+     *
+     * @return true=Termux 进程存在（原本就在跑，或刚被成功拉起）
+     */
+    fun ensureUnstopped(): Boolean = runBlockingUnstop(waitMs = UNSTOP_WAIT_MS)
+
+    /**
+     * [ensureUnstopped] 的挂起版：等待用 `delay`，不占用调度线程。
+     *
+     * 监督器（[io.prism.qq.QqProtocolSupervisor]）的自动重启路径必须用这个版本。
+     */
+    suspend fun ensureUnstoppedAwait(): Boolean = awaitUnstop(waitMs = UNSTOP_WAIT_MS)
+
+    /** 阻塞实现（供 [start] 等同步入口；调用方必须在后台线程）。 */
+    private fun runBlockingUnstop(waitMs: Long): Boolean {
+        when (termuxProcessState()) {
+            TermuxState.ALIVE -> return true
+            // 查不出来：不做破坏性决定，交给 RUN_COMMAND 自己尝试（它失败也只是没起）
+            TermuxState.UNKNOWN -> {
+                Log.w(TAG, "Termux 进程状态未知（Shizuku/ps 不可用），跳过解除 stopped")
+                return false
+            }
+            TermuxState.DEAD -> Unit
+        }
+        if (!requestUnstop()) return termuxProcessState() == TermuxState.ALIVE
+        val deadline = System.currentTimeMillis() + waitMs
+        while (System.currentTimeMillis() < deadline) {
+            if (termuxProcessState() == TermuxState.ALIVE) return true
+            runCatching { Thread.sleep(UNSTOP_POLL_MS) }
+        }
+        return termuxProcessState() == TermuxState.ALIVE
+    }
+
+    /** 挂起实现（供协程入口；等待用 delay）。 */
+    private suspend fun awaitUnstop(waitMs: Long): Boolean {
+        when (termuxProcessState()) {
+            TermuxState.ALIVE -> return true
+            TermuxState.UNKNOWN -> {
+                Log.w(TAG, "Termux 进程状态未知（Shizuku/ps 不可用），跳过解除 stopped")
+                return false
+            }
+            TermuxState.DEAD -> Unit
+        }
+        if (!requestUnstop()) return termuxProcessState() == TermuxState.ALIVE
+        val deadline = System.currentTimeMillis() + waitMs
+        while (System.currentTimeMillis() < deadline) {
+            if (termuxProcessState() == TermuxState.ALIVE) return true
+            kotlinx.coroutines.delay(UNSTOP_POLL_MS)
+        }
+        return termuxProcessState() == TermuxState.ALIVE
+    }
+
+    /** 提交"解除 stopped"命令（拉起 Termux 主 Activity）；不做等待。 */
+    private fun requestUnstop(): Boolean {
+        if (!ShizukuShell.isReady()) {
+            Log.w(TAG, "Termux 进程不存在且 Shizuku 未就绪，无法解除 force-stop")
+            return false
+        }
+        Log.i(TAG, "Termux 进程不存在（可能被系统 force-stop），拉起 Activity 以解除 stopped 状态")
+        val started = runCatching {
+            ShizukuShell.amStartForUser(TERMUX_ACTIVITY, USER_OWNER)
+        }.getOrDefault(false)
+        if (!started) Log.w(TAG, "am start TermuxActivity 失败（shell 身份不可用？）")
+        return started
+    }
+
+    /**
      * 启动协议端（`bash /data/local/tmp/run2.sh`）。
      *
      * 脚本自身已内置「单实例 + 快速登录 + 日志镜像到 /sdcard + 不自动重启（防自踢）」，
      * 因此重复调用是**幂等**的（第二个实例检测到既有 NapCat 会自行退出）。
+     *
+     * 2026-11-18：**先解除 force-stop 再提交**——force-stop 后 `startService`
+     * 会被静默丢弃（不抛异常），只凭"提交成功"判断会永远误报"已提交"。
+     *
+     * @return true=命令已提交**且 Termux 进程确实可接收**；false=未提交或 Termux 已被系统禁止拉起
      */
-    fun start(context: Context): Boolean = run(context, QqProtocolScripts.RUN_SCRIPT)
+    fun start(context: Context): Boolean {
+        // 只有**明确判定 Termux 已死且解除失败**时才拒绝提交：
+        // - UNKNOWN（查询失败）不拒绝——那是把可恢复的查询故障升级成服务不可用；
+        // - DEAD 但拉起成功 → 继续提交。
+        val deadUnrecoverable = termuxProcessState() == TermuxState.DEAD && !ensureUnstopped()
+        if (deadUnrecoverable) {
+            // 有 shell 能力却仍拉不起 Termux = 系统禁止自启/被 force-stop 且不允许恢复。
+            // 此时提交 RUN_COMMAND 只会被静默丢弃，返回 true 会制造"已提交"的假象
+            // （与 2026-11-02 "提交成功≠执行成功"是同一类错误）。
+            Log.w(TAG, "Termux 无法恢复（force-stop 未能解除），不提交 RUN_COMMAND")
+            return false
+        }
+        return run(context, QqProtocolScripts.RUN_SCRIPT)
+    }
 
     /**
      * 仅当**没有在跑**时才启动（供手动"启动"按钮使用，防自踢）。
@@ -214,6 +407,14 @@ object QqTermuxBridge {
      * 会让 UI 显示"已提交重启"而实际协议端已被杀且未拉起——最坏形态（用户以为在线）。
      */
     fun restart(context: Context): Boolean {
+        // 2026-11-18（guardrail M2）：**必须先解除 stopped**。
+        // UI「重启」按钮走的就是本函数；force-stop 后 STOP/RUN 两个 startService
+        // 都被静默丢弃，原实现仍返回 true，UI 显示"已提交重启"而实际什么都没发生。
+        val deadUnrecoverable = termuxProcessState() == TermuxState.DEAD && !ensureUnstopped()
+        if (deadUnrecoverable) {
+            Log.w(TAG, "Termux 无法恢复（force-stop 未能解除），不提交重启")
+            return false
+        }
         val stopped = run(context, QqProtocolScripts.STOP_SCRIPT)
         if (!stopped) Log.w(TAG, "重启前停止脚本未成功，仍尝试启动")
         return run(context, QqProtocolScripts.RUN_SCRIPT)
@@ -261,6 +462,10 @@ object QqTermuxBridge {
         // **"写入时刻 ≥ 本次提交时刻"** 做时间下界，防止"脚本被拒、回执未更新"时
         // 误读上一次的 `stopped=1`（那会导致旧链未退就 RUN → 撞 flock 静默失败）。
         val attemptFloorMs = System.currentTimeMillis() - 1_000L
+        // 2026-11-18：**先解除 force-stop**。Termux 被系统 force-stop 后，
+        // STOP/RUN 两个 `startService` 都会被静默丢弃（不抛异常），
+        // 于是"重启"看着提交成功、实际什么都没发生。
+        ensureUnstoppedAwait()
         val stopSubmitted = run(context, QqProtocolScripts.STOP_SCRIPT)
         if (!stopSubmitted) {
             Log.w(TAG, "停止脚本未被接受，仍尝试启动")
