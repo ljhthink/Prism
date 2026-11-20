@@ -1,4 +1,4 @@
-﻿# docs/reports/ —— 运行时报告目录
+# docs/reports/ —— 运行时报告目录
 
 > CLAUDE.md 5.3「动态报告目录化」规定的运行时报告存放目录。
 
