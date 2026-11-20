@@ -17,7 +17,7 @@ kotlinxSerialization = "1.11.0"
 kotlinxSerializationJson = "1.11.0"
 mcp = "0.12.0"
 documentfile = "1.0.1"
-onnxruntime = "1.27.0"
+onnxruntime = "1.28.0"
 poiOoxml = "5.5.1"
 # R1（UXR10 真机修复）：桌面 PDFBox 3.0.8 依赖 java.awt（Android 无此包）→ 真机解析 PDF 崩溃。
 # 生产切换为 pdfbox-android（com.tom-roush，Apache PDFBox 2.0.27 的 Android 官方移植，Apache 2.0，
