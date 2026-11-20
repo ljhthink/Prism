@@ -148,9 +148,9 @@ class QqProtocolSupervisorParseTest {
 
     @Test
     fun `从真实日志行解析出扫码地址`() {
-        val log = "WebUi User Panel Url: http://127.0.0.1:6099/webui?token=d73a559d3139"
+        val log = "WebUi User Panel Url: http://127.0.0.1:6099/webui?token=FAKESAMPLE0TOKEN"
         assertEquals(
-            "http://127.0.0.1:6099/webui?token=d73a559d3139",
+            "http://127.0.0.1:6099/webui?token=FAKESAMPLE0TOKEN",
             QqProtocolSupervisor.parseWebUiUrl(log)
         )
     }
@@ -182,11 +182,11 @@ class QqProtocolSupervisorParseTest {
 
     @Test
     fun `H1 token 含点 减号 下划线时不被截断`() {
-        // 真机默认 token 形如 QQgiGKiNyi29k5.T（含点）——原正则只认字母数字会截断成错误 URL
+        // 真机默认 token 形如 FAKE0TOKEN1.Abcd（含点）——原正则只认字母数字会截断成错误 URL
         assertEquals(
-            "http://127.0.0.1:6099/webui?token=QQgiGKiNyi29k5.T",
+            "http://127.0.0.1:6099/webui?token=FAKE0TOKEN1.Abcd",
             QqProtocolSupervisor.parseWebUiUrl(
-                "WebUi User Panel Url: http://127.0.0.1:6099/webui?token=QQgiGKiNyi29k5.T"
+                "WebUi User Panel Url: http://127.0.0.1:6099/webui?token=FAKE0TOKEN1.Abcd"
             )
         )
         assertEquals(
@@ -375,7 +375,7 @@ class QqProtocolScriptsTest {
      * H4 的真正保险（2026-11-01 第二轮审查 H-1 修复）。
      *
      * **原测试是假绿**：它只匹配 `token\s*=`，而首轮被删掉的旧写法是
-     * `T="${1:-QQgiGKiNyi29k5.T}"` —— 把 token 原样加回去该用例**依然全绿**。
+     * `T="${1:-FAKE0TOKEN1.Abcd}"` —— 把 token 原样加回去该用例**依然全绿**。
      *
      * 现在改为「禁止凭据形态」：
      * - 任何 `T=`/`TOKEN=`/`token=`/`Authorization:` 后跟长串；
@@ -420,7 +420,7 @@ class QqProtocolScriptsTest {
         "token= 长串" to Regex("""token\s*=\s*["']?[A-Za-z0-9._~+/-]{8,}""", RegexOption.IGNORE_CASE),
         "Authorization 头" to Regex("""Authorization\s*:\s*\S{8,}""", RegexOption.IGNORE_CASE),
         "Bearer 后长串字面量" to Regex("""Bearer\s+[A-Za-z0-9._~+/-]{12,}"""),
-        "已知历史 token" to Regex("""QQgiGKiNyi29k5\.T"""),
+        "已知历史 token" to Regex("""FAKE0TOKEN1\.Abcd"""),
         // 真机 token 形态：至少 6 位字母数字 + 「点」+ 4 位，且**同时含大写与数字**
         //（否则 `meta_event.lifecycle.connect` 这类固定协议词会误报，见下方用例）
         "高熵点号串（真机 token 形态）" to
@@ -431,11 +431,11 @@ class QqProtocolScriptsTest {
     @Test
     fun `H1 禁止形态能抓到旧写法（反向验证）`() {
         val oldForms = listOf(
-            """T="${'$'}{1:-QQgiGKiNyi29k5.T}"""",
-            "T=QQgiGKiNyi29k5.T",
+            """T="${'$'}{1:-FAKE0TOKEN1.Abcd}"""",
+            "T=FAKE0TOKEN1.Abcd",
             "NAPCAT_TOKEN=abcdef123456",
             "Authorization: Bearer abcdef1234567890",
-            "curl -H 'Authorization: Bearer QQgiGKiNyi29k5.T'"
+            "curl -H 'Authorization: Bearer FAKE0TOKEN1.Abcd'"
         )
         oldForms.forEach { sample ->
             assertTrue(

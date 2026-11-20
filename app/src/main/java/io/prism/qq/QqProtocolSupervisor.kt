@@ -830,8 +830,8 @@ class QqProtocolSupervisor(
          * WebUI 地址识别（只匹配回环，避免把外网地址当扫码入口）。
          *
          * **H1 修复**：token 字符集必须认同 `._~+/=` 与 `-`——真机默认 token 就带点
-         * （`tools/napcat-on-phone/verify.sh` 历史注释里的 `QQgiGKiNyi29k5.T`），
-         * 原来只认 `[A-Za-z0-9]` 会把 token 截断成"看起来对、实际鉴权必失败"的地址。
+         * （形如 `<字母数字>.<大写字母>`，故正则不能只认 `[A-Za-z0-9]`，否则会把 token
+         * 截断成"看起来对、实际鉴权必失败"的地址）。
          */
         private val WEBUI_REGEX = Regex(
             """https?://(?:127\.0\.0\.1|localhost|\[::1]):\d+/webui\?token=[A-Za-z0-9._~+/=-]+"""

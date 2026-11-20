@@ -1,8 +1,14 @@
 #!/bin/bash
 # 把 WS token 统一成 HTTP token，交给 NapCat 热重载后立即验证
+#
+# 2026-11-18（远程提交前安全清理）：**token 不得硬编码在仓库里**。
+# 原版把真机 HTTP/WS token 直接写在脚本第 4~5 行，随仓库公开即等于公开凭据
+# （即使是 loopback 服务，也违反 rules/07 §19 密钥不入库）。
+# 现在改为从环境变量读取，由使用者在 Termux 里显式传入：
+#   PRISM_HTTP_TOK='<http token>' PRISM_WS_TOK='<ws token>' bash tokfix-inner.sh
 CFG=/opt/QQ/resources/app/config/onebot11_3904755943.json
-HTTP_TOK="QQgiGKiNyi29k5.T"
-WS_TOK="yoWIOqS~gXZ-4u.J"
+HTTP_TOK="${PRISM_HTTP_TOK:?需要设置环境变量 PRISM_HTTP_TOK（NapCat HTTP token）}"
+WS_TOK="${PRISM_WS_TOK:?需要设置环境变量 PRISM_WS_TOK（NapCat 当前 WS token）}"
 
 echo "== 1) 备份 =="
 [ -f "$CFG.bak" ] || cp "$CFG" "$CFG.bak"
