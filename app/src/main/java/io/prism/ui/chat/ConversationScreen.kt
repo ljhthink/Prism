@@ -628,19 +628,15 @@ fun ConversationScreen(
 
         // 批次20（VC-005，ADR-044）：语音通话全屏覆盖层（共享本页 ConversationViewModel，
         // 语音轮次与文字轮次同会话同历史；挂断即关闭覆盖层）
-        // **进入/退出用淡入淡出**（用户报告"点击后闪过之前的 UI"）：
-        // 直接 `if (visible) { ... }` 是硬切——首帧插入前会露出下面完整的一帧聊天页。
-        // AnimatedVisibility + fadeIn 让首帧就是半透明的覆盖层底，不再有"看到聊天页"的瞬间；
-        // 同时也盖住装配期占位的切换（两者底色现已一致）。
-        androidx.compose.animation.AnimatedVisibility(
-            visible = voiceCallVisible,
-            enter = androidx.compose.animation.fadeIn(
-                animationSpec = androidx.compose.animation.core.tween(durationMillis = 160)
-            ),
-            exit = androidx.compose.animation.fadeOut(
-                animationSpec = androidx.compose.animation.core.tween(durationMillis = 120)
-            )
-        ) {
+        // **直接 if，不做 AnimatedVisibility**（guardrail R4-M-01 纠正了我上一版的错误归因）：
+        //
+        // 我原本加 fadeIn 想"柔化硬切"，但 `fadeIn` 的 t=0 是 **alpha=0（全透明）**——
+        // 首帧反而让聊天页 100% 可见 160ms，比硬切更糟；退出期 120ms 内覆盖层的
+        // `pointerInput` 还会吞掉点击（挂断后立刻点聊天页没反应）。
+        //
+        // "闪过之前的 UI" 的真实根因是**装配期占位用了旧靛蓝 `#141A2E`**（见 VoiceCallOverlay
+        // 占位块注释），换色后占位与正式界面底色逐字相同，切换时没有任何可感知变化。
+        if (voiceCallVisible) {
             VoiceCallOverlay(
                 conversation = viewModel,
                 onDismiss = { voiceCallVisible = false },

@@ -4,9 +4,6 @@ import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -60,7 +57,6 @@ import io.prism.ui.components.PrismIconButton
 import io.prism.ui.components.PrismTextAction
 import io.prism.ui.components.PrismIcons
 import io.prism.ui.components.PrismRow
-import io.prism.ui.components.PrismGroup
 import io.prism.ui.components.PrismHairline
 import io.prism.ui.components.DotTone
 import io.prism.ui.components.PrismMini
@@ -74,15 +70,12 @@ import io.prism.ui.components.PrismKv
 import io.prism.ui.components.PrismDangerRow
 import io.prism.ui.components.PrismFootnote
 import io.prism.ui.components.PrismCardBox
-import io.prism.ui.components.PrismCard
 import androidx.compose.ui.text.font.FontFamily
 import io.prism.ui.theme.PrismSize
 import androidx.compose.ui.text.style.TextOverflow
 import io.prism.ui.theme.PrismType
 import io.prism.ui.components.PrismField
 import io.prism.ui.components.PrismSegmented
-import io.prism.ui.components.PrismStatusDot
-import io.prism.ui.components.PrismDotState
 import io.prism.ui.components.PrismSwitch
 import io.prism.ui.components.PrismTopBar
 import io.prism.ui.components.PrismSheet
@@ -98,7 +91,6 @@ import io.prism.ui.theme.PrismPanel
 import io.prism.ui.theme.PrismText
 import io.prism.ui.theme.PrismTextDim
 import io.prism.ui.theme.PrismTextFaint
-import io.prism.ui.theme.PrismWarning
 
 /** 能力中枢分段。 */
 private enum class CapSegment(val label: String) { MCP("MCP"), SKILLS("技能"), MEMORY("记忆") }
@@ -1499,10 +1491,13 @@ private fun androidx.compose.foundation.lazy.LazyListScope.memoryPanelItems(
                 note = "超出后压缩成摘要并回注"
             ) {
                 Spacer(Modifier.height(PrismSize.s2))
+                // guardrail R4-M-04：原实现用 `memories.size`（**L2 跨会话全量**）冒充
+                // "当前会话占用"，同屏出现两个相同的 N，语义完全错。
+                // 本页拿不到当前会话消息数（ConversationViewModel 不在这个作用域），
+                // 所以如实只讲 L1 的**配置**，不编造占用数字。
                 PrismKv(
-                    key = "当前会话",
-                    value = "${memories.size} 条记忆 · 窗口 $windowSize 轮",
-                    mono = true
+                    key = "滑动窗口",
+                    value = "保留最近 $windowSize 轮原文，超出部分摘要压缩"
                 )
                 PrismActionsRow {
                     PrismMini(text = "修改 N", onClick = { viewModel.showWindowSizeEditor() })
@@ -1520,8 +1515,15 @@ private fun androidx.compose.foundation.lazy.LazyListScope.memoryPanelItems(
             ) {
                 if (memories.isEmpty()) {
                     // 设计稿这里永远有 mock 数据；真实设备可能为空，如实说明来源与触发条件
+                    // guardrail R4-M-05：原文案「对话结束时会自动保存」是**承诺**，但实际
+                    // 保存依赖三个前置条件，任一不满足就静默 0 条：
+                    //   ① 会话结束（新对话 / 切会话 / 页面销毁）才触发持久化
+                    //   ② 该轮被判定为重要轮次（闲聊不保存）
+                    //   ③ 嵌入模型就绪（档位未启用嵌入 / 模型未落地 → 跳过该轮）
+                    // 改为"说明条件"，不承诺结果。
                     Text(
-                        text = "还没有跨会话记忆。对话结束时会自动保存关键片段，之后回到这里即可看到。",
+                        text = "还没有跨会话记忆。它在会话结束时才会写入，且只保存被判定为" +
+                            "重要的轮次、并要求嵌入模型可用——三者缺一就不会产生记录。",
                         color = PrismTextFaint,
                         fontSize = PrismType.meta,
                         lineHeight = PrismType.metaLine,
@@ -1569,7 +1571,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.memoryPanelItems(
             }
         }
     }
-    items(profiles, key = { "profile-${it.key}" }) { profile ->
+    items(profiles, key = { "profile-${it.key}-${it.updatedAt}" }) { profile ->
         ProfileRow(
             profile = profile,
             modifier = Modifier.padding(horizontal = 20.dp),
@@ -1585,48 +1587,6 @@ private fun androidx.compose.foundation.lazy.LazyListScope.memoryPanelItems(
                 text = "清除全部记忆",
                 onClick = { viewModel.showClearConfirm() }
             )
-        }
-    }
-}
-
-/**
- * L1 概览卡（US-036 记忆管理 UI 入口）—— 可点击修改窗口大小 N。
- *
- * 与原 Mock [MemoryCard] 区别：[onClick] 非空时整卡可点击触发 L1 编辑弹层。
- */
-@Composable
-private fun MemoryOverviewCard(
-    title: String,
-    desc: String,
-    meta: String,
-    accent: Color,
-    modifier: Modifier = Modifier,
-    onClick: (() -> Unit)? = null
-) {
-    // 设计稿 `.card` + `.card-head` + `.card-note`：**没有 ◈ 字形图标**（那是旧版装饰）。
-    // `accent` 参数保留在签名里（调用点仍传，表达"这是哪一层"），但不再渲染 —— 层次
-    // 由分组标题（L1 / L2 / L3）表达，卡内再放一个彩色字只是噪音。
-    @Suppress("UNUSED_EXPRESSION")
-    accent
-    Column(modifier = modifier.fillMaxWidth().padding(bottom = 12.dp)) {
-        PrismCardBox(
-            title = title,
-            headMeta = null,
-            note = desc
-        ) {
-            if (meta.isNotBlank()) {
-                Text(
-                    text = meta,
-                    color = PrismTextFaint,
-                    fontSize = PrismType.meta,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
-            if (onClick != null) {
-                PrismActionsRow {
-                    PrismMini(text = "修改", onClick = onClick)
-                }
-            }
         }
     }
 }
@@ -2069,5 +2029,6 @@ private fun FilesystemAuthorizationSection() {
         onClick = { launcher.launch(null) }
     )
 }
+
 
 

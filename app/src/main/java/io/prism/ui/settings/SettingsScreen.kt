@@ -29,6 +29,9 @@ import io.prism.ui.theme.PrismType
 import io.prism.ui.components.PrismStatusStrip
 import io.prism.ui.components.DotTone
 import io.prism.ui.components.PrismDot
+import io.prism.ui.components.PrismHairline
+import androidx.compose.foundation.layout.heightIn
+import io.prism.ui.theme.PrismLineStrong
 import io.prism.ui.components.PrismRow
 import io.prism.ui.components.PrismIcons
 import androidx.compose.material3.Text
@@ -122,6 +125,9 @@ fun SettingsScreen(
     // v1 批次16（US-1603）：「生物识别解锁」M0 起 UI 占位从未实现，已整行移除（连同本地 state）。
     var tierSheetVisible by remember { mutableStateOf(false) }
     var providerListVisible by remember { mutableStateOf(false) }
+
+    // guardrail R4-M-03：待删除端点（非 null 时弹二次确认）
+    var deleteProviderTarget by remember { mutableStateOf<io.prism.data.ProviderConfig?>(null) }
     var apiKeyVisible by remember { mutableStateOf(false) }
     var thinkingSheetVisible by remember { mutableStateOf(false) }
     var toolApprovalSheetVisible by remember { mutableStateOf(false) }
@@ -788,12 +794,14 @@ fun SettingsScreen(
             }
             item {
                 Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = PrismSize.s6)) {
-                    // 设计稿 `.danger-row`「删除这个端点」：走既有 deleteProvider。
-                    // 无激活端点时点不动（不弹空白确认框）。
+                    // 设计稿 `.danger-row`「删除这个端点」。**必须二次确认**（guardrail R4-M-03）：
+                    // 原实现直接 `deleteProvider` → `repository.remove` 立即物理删除，
+                    // 删掉的是当前激活端点会连带让聊天没有模型可用、Keystore 里的 apiKey 变孤儿。
+                    // 设计稿该处 mock 明确标注「需要二次确认」。
                     PrismDangerRow(
                         text = "删除这个端点",
                         onClick = {
-                            activeProvider?.let { viewModel.deleteProvider(it) }
+                            activeProvider?.let { deleteProviderTarget = it }
                         }
                     )
                 }
@@ -1080,8 +1088,15 @@ fun SettingsScreen(
                                 color = PrismText,
                                 fontSize = PrismType.body
                             )
+                            // guardrail R4-M-02：原副标题「协议端在线 · NapCat」只由 enabled 推导，
+                            // 是**假的在线状态**（enabled 只表示"功能开着"，不代表协议端连上）。
+                            // 改为优先用真实协议端状态（qqProtocolStateText 来自 qqProtocolStatus 轮询）。
                             Text(
-                                text = if (qqConfig.enabled) "协议端在线 · NapCat" else "未连接协议端",
+                                text = when {
+                                    !qqConfig.enabled -> "未开启 · 开启前需确认风险告知"
+                                    !qqProtocolStateText.isNullOrBlank() -> qqProtocolStateText
+                                    else -> "已开启 · 协议端状态未知"
+                                },
                                 color = PrismTextFaint,
                                 fontSize = PrismType.meta,
                                 modifier = Modifier.padding(top = 2.dp)
@@ -1129,25 +1144,9 @@ fun SettingsScreen(
                     }
                 )
             }
-            // US-3101 AC-1/AC-2：总开关（默认关）+ 风险告知确认前置
-            item {
-                SetRow(
-                    title = "QQ 小号助手",
-                    subtitle = if (qqConfig.enabled) "已开启 · AI 可以小号身份发消息/改签名" else "未开启 · 开启前需确认风险告知",
-                    trailing = {
-                        PrismSwitch(
-                            checked = qqConfig.enabled,
-                            onCheckedChange = { on ->
-                                if (on && !qqConfig.riskAccepted) {
-                                    qqRiskDialogVisible = true
-                                } else {
-                                    qqScope.launch { qqApp?.qqConfigRepository?.setEnabled(on) }
-                                }
-                            }
-                        )
-                    }
-                )
-            }
+            // US-3101 AC-1/AC-2：总开关已上移到页面顶部的状态卡（guardrail R4-M-02）——
+            // 原实现此处还有第二枚同 checked、同回调的开关，连接子页里两枚同时可见，
+            // 用户会以为"要开两个"。风险告知闸门保留在状态卡的 onCheckedChange 里。
             // ADR-064 / US-3110：传输通道（默认协议端；无障碍为兜底）
             item {
                 SetRow(
@@ -1639,6 +1638,48 @@ fun SettingsScreen(
                 )
             }
             } // SYSTEM
+        }
+
+        // M-03：删除端点二次确认
+        PrismSheetHost(
+            visible = deleteProviderTarget != null,
+            onDismiss = { deleteProviderTarget = null }
+        ) {
+            val target = deleteProviderTarget
+            PrismSheet(
+                title = "删除端点",
+                subtitle = "此操作不可撤销"
+            ) {
+                Text(
+                    text = "确认删除「${target?.name ?: ""}」？删除后该端点的 API Key 将失去引用。",
+                    color = PrismTextDim,
+                    fontSize = 14.sp,
+                    lineHeight = 21.sp
+                )
+                Spacer(Modifier.height(PrismSize.s5))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    PrismButton(
+                        text = "确认删除",
+                        variant = PrismButtonVariant.Danger,
+                        onClick = {
+                            target?.let { viewModel.deleteProvider(it) }
+                            deleteProviderTarget = null
+                        },
+                        fillWidth = false,
+                        modifier = Modifier.weight(1f)
+                    )
+                    PrismButton(
+                        text = "取消",
+                        variant = PrismButtonVariant.Ghost,
+                        onClick = { deleteProviderTarget = null },
+                        fillWidth = false,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
         }
 
         // Provider 列表弹层
@@ -3599,8 +3640,13 @@ private fun voiceSelfCheckColor(message: String): Color =
     if (message.startsWith("自检通过")) PrismMint else PrismWarning
 
 /**
- * 引擎选择选项行（批次23-A，A4）—— 单选样式 + 置灰态（云端引擎 Key 未配置时不可选）。
- * 视觉复用 [ToolApprovalOptionRow] 模式，增加 enabled 维度。
+ * 引擎单选项 —— **设计稿 `.option` / `radioRow()`**（`screens.js:830` `settingsVoice()`）。
+ *
+ * 结构：18dp 空心圆环 + 名称 15sp + 副标题 11sp 等宽 + 行尾琥珀对勾 + 底部分隔线。
+ * 旧实现是「34dp 方块里放 ✓/◈/— 字形 + 彩色实底 + 圆角边框」，属另一套视觉语言
+ * （用户反馈「语音与形象与设计存在较大出入」的直接原因之一）。
+ *
+ * 保留 `enabled` 能力（云端项需先配 Key），未启用时整体降透明度且不可点。
  */
 @Composable
 private fun VoiceEngineOptionRow(
@@ -3610,47 +3656,59 @@ private fun VoiceEngineOptionRow(
     enabled: Boolean = true,
     onClick: () -> Unit
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .alpha(if (enabled) 1f else 0.5f)
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (selected) PrismMint.copy(alpha = 0.08f) else PrismPanel2)
-            .border(
-                1.dp,
-                if (selected) PrismMint.copy(alpha = 0.4f) else PrismLine,
-                RoundedCornerShape(12.dp)
-            )
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                enabled = enabled,
-                onClick = onClick
-            )
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Box(
+    Column(modifier = Modifier.alpha(if (enabled) 1f else 0.45f)) {
+        Row(
             modifier = Modifier
-                .size(34.dp)
-                .background(
-                    if (selected) PrismMint.copy(alpha = 0.12f) else PrismPanel2,
-                    RoundedCornerShape(10.dp)
+                .fillMaxWidth()
+                .heightIn(min = 54.dp)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    enabled = enabled,
+                    onClick = onClick
                 ),
-            contentAlignment = Alignment.Center
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(PrismSize.s3)
         ) {
-            Text(
-                text = if (selected) "✓" else if (enabled) "◈" else "—",
-                color = if (selected) PrismMint else PrismTextDim,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold
+            // `.ring`：18dp 空心圆环，选中时描边琥珀 + 12% 填充
+            Box(
+                modifier = Modifier
+                    .size(18.dp)
+                    .border(
+                        width = 1.dp,
+                        color = if (selected) PrismAccent else PrismLineStrong,
+                        shape = androidx.compose.foundation.shape.CircleShape
+                    )
+                    .background(
+                        if (selected) PrismAccent.copy(alpha = 0.12f)
+                        else androidx.compose.ui.graphics.Color.Transparent,
+                        androidx.compose.foundation.shape.CircleShape
+                    )
             )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = label,
+                    color = if (enabled) PrismText else PrismTextDim,
+                    fontSize = PrismType.body
+                )
+                Text(
+                    text = description,
+                    color = PrismTextFaint,
+                    fontSize = PrismType.micro,
+                    lineHeight = PrismType.microLine,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+            if (selected) {
+                Icon(
+                    imageVector = PrismIcons.Check,
+                    contentDescription = "已选中",
+                    tint = PrismAccent,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
         }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(text = label, color = PrismText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Text(text = description, color = PrismTextFaint, fontSize = 11.sp)
-        }
+        PrismHairline()
     }
 }
 
