@@ -1,4 +1,4 @@
-package io.prism.ui.chat
+﻿package io.prism.ui.chat
 
 import android.app.Activity
 import android.content.Context
@@ -110,14 +110,19 @@ import io.prism.voice.VoiceCallOverlay
 import io.prism.ui.model.ChatMessage
 import io.prism.ui.model.Role
 import io.prism.ui.model.SearchResult
+import io.prism.ui.theme.PrismBg
+import io.prism.ui.theme.PrismAccent
 import io.prism.ui.theme.PrismCyan
+import io.prism.ui.theme.PrismDanger
 import io.prism.ui.theme.PrismError
 import io.prism.ui.theme.PrismIndigo
 import io.prism.ui.theme.PrismIndigoSoft
 import io.prism.ui.theme.PrismLine
+import io.prism.ui.theme.PrismLineStrong
 import io.prism.ui.theme.PrismMint
 import io.prism.ui.theme.PrismPanel
 import io.prism.ui.theme.PrismPanel2
+import io.prism.ui.theme.PrismPanel3
 import io.prism.ui.theme.PrismText
 import io.prism.ui.theme.PrismTextDim
 import io.prism.ui.theme.PrismTextFaint
@@ -329,51 +334,18 @@ fun ConversationScreen(
         // 键盘弹出时 NavBar 上移带动 content 收缩，消息列表 weight(1f) 自然收缩，
         // 输入区贴合 NavBar 上缘；顶部状态栏 inset 由 PrismApp 的 statusBarsPadding 统一处理。
         Column(modifier = Modifier.fillMaxSize()) {
-            PrismTopBar(
-                title = "Prism",
-                subtitle = "深空 AI · ${activeProvider?.name ?: "未配置"}",
-                actions = {
-                    // 批次20（VC-005，ADR-044）：语音通话入口（全屏覆盖层，轮次进同一会话）
-                    PrismTopBarAction(
-                        icon = { Icon(Icons.Filled.Mic, null, tint = PrismTextDim) },
-                        contentDescription = "语音通话",
-                        onClick = { voiceCallVisible = true }
-                    )
-                    // UX-001 问题 4（ADR-021）：历史会话入口（顶栏按钮，null 时隐藏）
-                    if (onOpenHistory != null) {
-                        PrismTopBarAction(
-                            icon = { Icon(Icons.Filled.History, null, tint = PrismTextDim) },
-                            contentDescription = "历史会话",
-                            onClick = onOpenHistory
-                        )
-                    }
-                    PrismTopBarAction(
-                        icon = { Icon(Icons.Filled.Add, null, tint = PrismTextDim) },
-                        contentDescription = "新会话",
-                        onClick = { viewModel.startNewConversation() }
-                    )
-                    PrismTopBarAction(icon = { Icon(Icons.Filled.Bolt, null, tint = PrismTextDim) }, contentDescription = "能力")
-                }
+            // UI v2（ADR-079）：单行顶栏——模式胶囊（端点 / 知识库）+ 三个图标动作。
+            // 去掉「Prism / 深空 AI · xxx」标题栏：它不携带信息，却占 52dp 消息可视区。
+            ChatHeaderBar(
+                providerName = activeProvider?.name,
+                ragLabel = ragLabelOf(ragTarget),
+                ragActive = ragTarget != RagTarget.Off,
+                onProviderClick = { providerSelectorVisible = true },
+                onRagClick = { ragSelectorVisible = true },
+                onVoiceCall = { voiceCallVisible = true },
+                onOpenHistory = onOpenHistory,
+                onNewConversation = { viewModel.startNewConversation() }
             )
-
-            // Provider 选择器 + RAG 模式切换器并排（US-007 + US-019）
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                ProviderChip(
-                    name = activeProvider?.name,
-                    onClick = { providerSelectorVisible = true },
-                    modifier = Modifier.weight(1f)
-                )
-                RagModeChip(
-                    target = ragTarget,
-                    onClick = { ragSelectorVisible = true }
-                )
-            }
 
             LazyColumn(
                 state = listState,
@@ -425,16 +397,18 @@ fun ConversationScreen(
                         toolArgsById = toolArgsById
                     )
                 }
-                // UX-001 问题 7（ADR-022）：工具调用状态可视化 —— 调用中显示「正在调用工具: xxx」
-                activeTool?.let { toolName ->
-                    item { ToolCallIndicator(toolName) }
-                }
+                // UI v2（ADR-079）：原「工具指示 + 打字指示」两条并列提示，合并为一张
+                // 带时间轴的执行轨迹卡（设计稿 `.trace`）。数据仍只来自 isTyping/activeTool，
+                // 每步耗时由组件本地实测，不编造。
                 if (isTyping) {
-                    // ADR-050（2026-09-12）：知识库**不再自动检索**——`ragRetrieving` 因此恒为 false
-                    // （ConversationViewModel 侧已无置位路径，字段保留以备将来接工具事件），
-                    // 本指示事实上恒显示「正在思考…」。"正在查资料"的可见性改由上方工具调用
-                    // 指示（activeTool → ToolCallIndicator）承载：知识库工具会显示为「查知识库」。
-                    item { TypingIndicator(isRagOn = ragRetrieving) }
+                    item {
+                        AgentTraceCard(
+                            isTyping = isTyping,
+                            activeTool = activeTool,
+                            thinkingEnabled = thinkingEnabled,
+                            isRagOn = ragRetrieving
+                        )
+                    }
                 }
             }
 
@@ -706,6 +680,13 @@ private fun CapabilityToggleChip(
             fontWeight = if (checked) FontWeight.SemiBold else FontWeight.Normal
         )
     }
+}
+
+/** RAG 模式胶囊文案（UI v2：与设计稿「全库检索 / 知识库关」一致）。 */
+private fun ragLabelOf(target: RagTarget): String = when (target) {
+    RagTarget.Off -> "知识库关"
+    RagTarget.AllLibraries -> "全库检索"
+    is RagTarget.SpecificLibrary -> "知识库 #${target.kbId}"
 }
 
 /** 当前 Provider 胶囊 —— 点击弹出切换列表（US-007）。 */
@@ -2191,75 +2172,104 @@ private fun MessageInputBar(
             }
         }
 
+        // UI v2（ADR-079）：输入区按设计稿 `.composer-shell` 重排——
+        // ①「＋」在输入框**左侧**（原在右侧且与发送键同为圆形，语义易混）；
+        // ② 占位符与输入文本共用同一 Box 中心线，不再偏低；
+        // ③ 发送改为**文字按钮**（发送 / 停止），不再是 ➤ 箭头。
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PrismPanel, RoundedCornerShape(22.dp))
+                .border(1.dp, PrismLineStrong, RoundedCornerShape(22.dp))
+                .padding(4.dp),
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             Box(
                 modifier = Modifier
-                    .weight(1f)
-                    .background(PrismPanel, RoundedCornerShape(24.dp))
-                    .border(1.dp, PrismLine, RoundedCornerShape(24.dp))
-                    .padding(horizontal = 16.dp, vertical = 13.dp)
-            ) {
-                if (value.isEmpty()) {
-                    Text(
-                        text = "输入问题…",
-                        color = PrismTextFaint,
-                        fontSize = 14.sp
-                    )
-                }
-                BasicTextField(
-                    value = value,
-                    onValueChange = onValueChange,
-                    textStyle = androidx.compose.ui.text.TextStyle(
-                        color = PrismText,
-                        fontSize = 14.sp
-                    ),
-                    cursorBrush = SolidColor(PrismCyan),
-                    maxLines = 4,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
+                    .size(36.dp)
                     .clip(CircleShape)
-                    .background(
-                        Brush.linearGradient(listOf(PrismIndigo, PrismIndigoSoft)),
-                        CircleShape
-                    )
-                    .border(1.dp, PrismIndigo.copy(alpha = 0.5f), CircleShape)
-                    // R5：附件存在时也可发送（"只发图/文件不配字"场景）
-                    // v1 批次11（终止输出）：isGenerating 时按钮始终可点（作为「停止」入口），即使输入为空
-                    .clickable(enabled = value.isNotBlank() || hasAttachment || isGenerating) { onSend() },
-                contentAlignment = Alignment.Center
-            ) {
-                // v1 批次11（终止输出）：生成中显示「■ 停止」以替代「➤ 发送」，提示可二次点击终止
-                Text(
-                    text = if (isGenerating) "■" else "➤",
-                    color = if (isGenerating) PrismCyan else Color.White,
-                    fontSize = 17.sp
-                )
-            }
-            // UXR9 US-907："＋"折叠栏开关（发送按钮右侧）—— 相册 / 文件两种上传方式
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (uploadBarExpanded) PrismIndigoSoft.copy(alpha = 0.5f) else PrismPanel,
-                        CircleShape
-                    )
-                    .border(1.dp, if (uploadBarExpanded) PrismIndigo else PrismLine, CircleShape)
                     .clickable { uploadBarExpanded = !uploadBarExpanded },
                 contentAlignment = Alignment.Center
             ) {
+                if (uploadBarExpanded) {
+                    Icon(
+                        imageVector = io.prism.ui.components.PrismIcons.Close,
+                        contentDescription = "收起附件",
+                        tint = PrismAccent,
+                        modifier = Modifier.size(18.dp)
+                    )
+                } else {
+                    Icon(
+                        imageVector = io.prism.ui.components.PrismIcons.Plus,
+                        contentDescription = "添加附件",
+                        tint = PrismTextDim,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+            BasicTextField(
+                value = value,
+                onValueChange = onValueChange,
+                textStyle = androidx.compose.ui.text.TextStyle(
+                    color = PrismText,
+                    fontSize = 15.sp,
+                    lineHeight = 22.sp
+                ),
+                cursorBrush = SolidColor(PrismAccent),
+                maxLines = 4,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 4.dp, vertical = 7.dp),
+                decorationBox = { innerTextField ->
+                    Box(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentAlignment = Alignment.CenterStart
+                    ) {
+                        if (value.isEmpty()) {
+                            Text(
+                                text = "给 Prism 发消息",
+                                color = PrismTextFaint,
+                                fontSize = 15.sp,
+                                lineHeight = 22.sp
+                            )
+                        }
+                        innerTextField()
+                    }
+                }
+            )
+            // 发送 / 停止：文字按钮；生成中变成描边「停止」，语义与既有 onSend 分支一致。
+            val sendEnabled = value.isNotBlank() || hasAttachment || isGenerating
+            val sendBg = when {
+                isGenerating -> Color.Transparent
+                sendEnabled -> PrismText
+                else -> PrismPanel3
+            }
+            val sendFg = when {
+                isGenerating -> PrismDanger
+                sendEnabled -> PrismBg
+                else -> PrismTextFaint
+            }
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(sendBg)
+                    .then(
+                        if (isGenerating) {
+                            Modifier.border(1.dp, PrismDanger.copy(alpha = 0.4f), RoundedCornerShape(18.dp))
+                        } else {
+                            Modifier
+                        }
+                    )
+                    .clickable(enabled = sendEnabled) { onSend() }
+                    .padding(horizontal = 14.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    text = if (uploadBarExpanded) "✕" else "＋",
-                    color = if (uploadBarExpanded) PrismIndigo else PrismTextDim,
-                    fontSize = 18.sp
+                    text = if (isGenerating) "停止" else "发送",
+                    color = sendFg,
+                    fontSize = 13.sp,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
                 )
             }
         }
@@ -2635,3 +2645,8 @@ private fun EditAiMessageSheet(
         )
     }
 }
+
+
+
+
+
