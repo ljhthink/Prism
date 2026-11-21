@@ -1,4 +1,4 @@
-package io.prism.phonecontrol.bg
+﻿package io.prism.phonecontrol.bg
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -29,9 +29,9 @@ class DisplayBackendTest {
     }
 
     @Test
-    fun `阶梯四级 - 完整到最小逐级剥离且顺序稳定`() {
+    fun `阶梯六级 - 完整到非镜像逐级剥离且顺序稳定`() {
         val ladder = HiddenDisplayFlags.LADDER
-        assertEquals(4, ladder.size)
+        assertEquals(6, ladder.size)
         assertEquals(HiddenDisplayFlags.FULL, ladder[0])
         // 第二级：仅去掉 TRUSTED（保留扩展位）
         assertEquals(0x1FAC1, ladder[1])
@@ -85,3 +85,5 @@ class DisplayBackendTest {
         )
     }
 }
+
+

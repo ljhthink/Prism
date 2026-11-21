@@ -115,6 +115,11 @@ object PrismIcons {
         line("close", "M6 6 L18 18", "M18 6 L6 18")
     }
 
+    /** AI 消息标记 `ai-mark` 的闪电（设计稿 `bolt`，13dp）。 */
+    val Bolt: ImageVector by lazy {
+        line("bolt", "M11.5 3 L5 13 L10 13 L9 21 L16.5 10.5 L11 10.5 L11.5 3 Z")
+    }
+
     /** 端点模式胶囊的下拉箭头（`.mode-chip .chev`，比 [ChevronRight] 更小且朝下）。 */
     val ChevronDown: ImageVector by lazy {
         line("chevronDown", "M6 9 L12 15 L18 9")

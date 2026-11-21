@@ -103,6 +103,7 @@ import io.prism.ui.components.PrismButtonVariant
 import io.prism.ui.components.PrismGlassCard
 import io.prism.ui.components.PrismField
 import io.prism.ui.components.PrismSheet
+import io.prism.ui.components.PrismIcons
 import io.prism.ui.components.PrismSheetHost
 import io.prism.ui.components.PrismTopBar
 import io.prism.ui.components.PrismTopBarAction
@@ -123,9 +124,11 @@ import io.prism.ui.theme.PrismMint
 import io.prism.ui.theme.PrismPanel
 import io.prism.ui.theme.PrismPanel2
 import io.prism.ui.theme.PrismPanel3
+import io.prism.ui.theme.PrismSize
 import io.prism.ui.theme.PrismText
 import io.prism.ui.theme.PrismTextDim
 import io.prism.ui.theme.PrismTextFaint
+import io.prism.ui.theme.PrismType
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -499,7 +502,7 @@ fun ConversationScreen(
 
         // Provider 切换弹层（US-007）
         PrismSheetHost(visible = providerSelectorVisible, onDismiss = { providerSelectorVisible = false }) {
-            ProviderSelectorSheet(
+            ProviderListSheet(
                 providers = providers,
                 activeId = activeProvider?.id,
                 onSelect = { viewModel.setActiveProvider(it); providerSelectorVisible = false },
@@ -509,7 +512,7 @@ fun ConversationScreen(
 
         // RAG 模式切换弹层（US-019）
         PrismSheetHost(visible = ragSelectorVisible, onDismiss = { ragSelectorVisible = false }) {
-            RagModeSelectorSheet(
+            RagModeSheet(
                 current = ragTarget,
                 onSelect = { viewModel.setRagTarget(it); ragSelectorVisible = false },
                 onClose = { ragSelectorVisible = false }
@@ -763,39 +766,6 @@ private fun RagModeChip(target: RagTarget, onClick: () -> Unit) {
 }
 
 /** RAG 模式切换弹层（US-019，ADR-012 5.2；语义按 ADR-050 收窄为"知识库能力开关"）。 */
-@Composable
-private fun RagModeSelectorSheet(
-    current: RagTarget,
-    onSelect: (RagTarget) -> Unit,
-    onClose: () -> Unit
-) {
-    PrismSheet(
-        title = "知识库检索模式",
-        subtitle = "开启后 AI 可主动检索你的知识库并在回答中标注引用来源；不该查时不会查"
-    ) {
-        RagModeOption(
-            label = "全库检索",
-            description = "AI 需要时可在全部知识库中检索并引用",
-            selected = current is RagTarget.AllLibraries,
-            onClick = { onSelect(RagTarget.AllLibraries) }
-        )
-        Spacer(Modifier.height(8.dp))
-        RagModeOption(
-            label = "关闭知识库",
-            description = "AI 不检索知识库，按普通对话回答",
-            selected = current is RagTarget.Off,
-            onClick = { onSelect(RagTarget.Off) }
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "提示：指定库检索将通过知识库管理页选择具体库后启用（暂未开放）",
-            color = PrismTextFaint,
-            fontSize = 11.sp
-        )
-        Spacer(Modifier.height(16.dp))
-        PrismButton(text = "关闭", variant = PrismButtonVariant.Ghost, onClick = onClose)
-    }
-}
 
 /** RAG 模式选项行（US-019）。 */
 @Composable
@@ -831,52 +801,6 @@ private fun RagModeOption(label: String, description: String, selected: Boolean,
 }
 
 /** Provider 切换列表弹层（US-007）。 */
-@Composable
-private fun ProviderSelectorSheet(
-    providers: List<ProviderConfig>,
-    activeId: Long?,
-    onSelect: (Long) -> Unit,
-    onClose: () -> Unit
-) {
-    PrismSheet(
-        title = "切换 Provider",
-        subtitle = "切换后保留对话历史，新消息走新 Provider"
-    ) {
-        if (providers.isEmpty()) {
-            Text(text = "尚未配置 Provider，请到「设置」中添加并激活。", color = PrismTextFaint, fontSize = 12.sp)
-            Spacer(Modifier.height(16.dp))
-        }
-        providers.forEach { config ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(PrismPanel2)
-                    .border(1.dp, if (config.id == activeId) PrismMint.copy(alpha = 0.4f) else PrismLine, RoundedCornerShape(12.dp))
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = { onSelect(config.id) }
-                    )
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text(text = "◈", color = PrismIndigo, fontSize = 14.sp)
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(text = config.name, color = PrismText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    Text(text = config.baseUrl, color = PrismTextFaint, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                if (config.id == activeId) {
-                    Text(text = "当前", color = PrismMint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-        }
-        Spacer(Modifier.height(8.dp))
-        PrismButton(text = "关闭", variant = PrismButtonVariant.Ghost, onClick = onClose)
-    }
-}
 
 /**
  * 单个消息气泡。
@@ -1112,14 +1036,14 @@ private fun SystemNoticeBubble(message: ChatMessage) {
 
 @Composable
 private fun UserBubble(message: ChatMessage) {
+    // UI v2（ADR-079）：设计稿 `.msg-user` —— surface-2 实底 + 1px 细线 + 14dp 圆角 +
+    // 10/12 内边距 + 右侧对齐 + 最大宽 300dp。原「靛蓝渐变 + 单角切角」属旧语言，已删。
     Box(
         modifier = Modifier
-            .background(
-                Brush.linearGradient(listOf(PrismIndigo.copy(alpha = 0.45f), PrismIndigoSoft.copy(alpha = 0.35f))),
-                RoundedCornerShape(topStart = 18.dp, topEnd = 6.dp, bottomStart = 18.dp, bottomEnd = 18.dp)
-            )
-            .border(1.dp, PrismIndigo.copy(alpha = 0.4f), RoundedCornerShape(topStart = 18.dp, topEnd = 6.dp, bottomStart = 18.dp, bottomEnd = 18.dp))
-            .padding(horizontal = 15.dp, vertical = 11.dp)
+            .widthIn(max = 300.dp)
+            .background(PrismPanel2, RoundedCornerShape(PrismSize.rCard))
+            .border(1.dp, PrismLine, RoundedCornerShape(PrismSize.rCard))
+            .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
         Column(horizontalAlignment = Alignment.End) {
             // UXR8 N3（ADR-030）：图片消息渲染（data URL 解码 → Bitmap → Image）
@@ -1145,8 +1069,8 @@ private fun UserBubble(message: ChatMessage) {
                 Text(
                     text = message.content,
                     color = PrismText,
-                    fontSize = 14.sp,
-                    lineHeight = 23.sp
+                    fontSize = PrismType.body,
+                    lineHeight = PrismType.bodyLine
                 )
             }
         }
@@ -1561,6 +1485,21 @@ private fun prismMarkdownTypography(): MarkdownTypography {
 @Composable
 private fun AiBubble(message: ChatMessage, showThinking: Boolean, isStreaming: Boolean) {
     Column(modifier = Modifier.fillMaxWidth()) {
+        // UI v2（ADR-079）：设计稿 `.ai-mark` —— AI 回复**无气泡容器**，仅在正文上方
+        // 给一个 13dp 闪电 + 「Prism」的 11sp 微标记；下方留 6dp。
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(PrismSize.s2),
+            modifier = Modifier.padding(bottom = 6.dp)
+        ) {
+            Icon(
+                imageVector = PrismIcons.Bolt,
+                contentDescription = null,
+                tint = PrismTextFaint,
+                modifier = Modifier.size(13.dp)
+            )
+            Text(text = "Prism", color = PrismTextFaint, fontSize = PrismType.micro)
+        }
         // 思维链折叠区域（UX-001 问题 7）：置于答案上方，默认收起，与最终答案视觉区分。
         // UXR4 问题 1/4/6（ADR-024）：展示受 [showThinking]（深度思考开关）控制——
         // 开关关闭时即使 thinkingChain 有内容（协议层为回传而累积）也不展示思考区。
@@ -2645,6 +2584,7 @@ private fun EditAiMessageSheet(
         )
     }
 }
+
 
 
 

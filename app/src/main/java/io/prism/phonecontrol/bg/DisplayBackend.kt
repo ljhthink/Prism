@@ -1,4 +1,4 @@
-package io.prism.phonecontrol.bg
+﻿package io.prism.phonecontrol.bg
 
 // 隐藏虚拟屏后端设计参考/派生自 opencyvis/opencyvis-phone (Apache-2.0)：
 // 特权虚拟屏创建与 flag 逐级降级范式（见根目录 NOTICE 与 ADR-065）。未引入其产品壳。
@@ -237,6 +237,18 @@ internal const val HIDDEN_DISPLAY_NAME = "prism-hidden-vd"
 internal object HiddenDisplayFlags {
 
     const val PUBLIC = 1 shl 0
+
+    /**
+     * 2026-11-21（真机 M2012K10C / Android 13 / SDK 33 修复）：**非镜像**标记。
+     *
+     * Android 13+ 的 DisplayManagerService 对"不含本标记"的虚拟屏按**屏幕共享/镜像**处理，
+     * 直接要求 `CAPTURE_VIDEO_OUTPUT`（signature|privileged）：shell 侧一旦没被授予该权限就抛
+     * `SecurityException: Requires CAPTURE_VIDEO_OUTPUT ... in order to create a screen sharing
+     * virtual display`——这正是本机隐藏执行面建屏失败、回落可见 overlay 副屏的原因。
+     *
+     * 带上本标记后系统不再要求捕获权限（我们本就不镜像，画面由自持 ImageReader 消费）。
+     */
+    const val OWN_CONTENT_ONLY = 1 shl 3
     const val SUPPORTS_TOUCH = 1 shl 6
     const val ROTATES_WITH_CONTENT = 1 shl 7
     const val SHOW_SYSTEM_DECORATIONS = 1 shl 9
@@ -255,7 +267,26 @@ internal object HiddenDisplayFlags {
     const val FULL = BASE or TRUSTED or OWN_DISPLAY_GROUP or ALWAYS_UNLOCKED or
         TOUCH_FEEDBACK_DISABLED or OWN_FOCUS or DEVICE_DISPLAY_GROUP or STEAL_TOP_FOCUS_DISABLED
 
-    /** 逐级降级：完整 → 去 TRUSTED → 最小 + TRUSTED → 最小。 */
-    val LADDER = intArrayOf(FULL, FULL and TRUSTED.inv(), BASE or TRUSTED, BASE)
+    /** 非镜像基座（Android 13 起避开 CAPTURE_VIDEO_OUTPUT 检查）。 */
+    const val BASE_OWN = BASE or OWN_CONTENT_ONLY
+
+    /** 非镜像 + TRUSTED（部分 ROM 只放行 trusted 的 own-content 屏）。 */
+    const val TRUSTED_OWN = OWN_CONTENT_ONLY or TRUSTED or SUPPORTS_TOUCH or SHOW_SYSTEM_DECORATIONS
+
+    /**
+     * 逐级降级：完整 → 去 TRUSTED → 最小 + TRUSTED → 最小 → **非镜像** → 非镜像 + TRUSTED。
+     *
+     * 后两级是 2026-11-21 真机修复（M2012K10C / Android 13）：前四级都会被判为「屏幕共享」
+     * 而要求 CAPTURE_VIDEO_OUTPUT（shell 侧未授予），见 [OWN_CONTENT_ONLY]。
+     */
+    val LADDER = intArrayOf(
+        FULL,
+        FULL and TRUSTED.inv(),
+        BASE or TRUSTED,
+        BASE,
+        BASE_OWN,
+        TRUSTED_OWN
+    )
 }
+
 
