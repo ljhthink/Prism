@@ -19,6 +19,16 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import io.prism.ui.components.PrismCardBox
+import io.prism.ui.components.PrismKv
+import io.prism.ui.components.PrismActionsRow
+import io.prism.ui.components.PrismMini
+import io.prism.ui.components.PrismDangerRow
+import io.prism.ui.theme.PrismSize
+import io.prism.ui.theme.PrismType
+import io.prism.ui.components.PrismStatusStrip
+import io.prism.ui.components.DotTone
+import io.prism.ui.components.PrismDot
 import io.prism.ui.components.PrismRow
 import io.prism.ui.components.PrismIcons
 import androidx.compose.material3.Text
@@ -721,35 +731,72 @@ fun SettingsScreen(
                 SettingsDetailHeader(title = section.title, onBack = onBack)
             }
             if (section == SettingsSection.MODEL) {
-            item { SetSection("模型与端点") }
+            // ===== 设计稿 `settingsModel()`：当前端点（.card + .kv）→ 生成 → 密钥 → danger-row =====
+            item { SetSection("当前端点") }
             item {
-                SetRow(
-                    title = "Provider 配置",
-                    subtitle = activeProvider?.let { "已激活：${it.name}" } ?: "OpenAI / Anthropic / Ollama …",
-                    onClick = { providerListVisible = true }
-                )
+                Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+                    PrismCardBox {
+                        val p0 = activeProvider
+                        PrismKv(key = "名称", value = p0?.name ?: "未配置")
+                        PrismKv(key = "Base URL", value = p0?.baseUrl ?: "—", mono = true)
+                        PrismKv(
+                            key = "模型",
+                            value = p0?.models?.firstOrNull()?.takeIf { it.isNotBlank() } ?: "—",
+                            mono = true
+                        )
+                        PrismKv(
+                            key = "API Key",
+                            value = if (p0 != null) "已保存 · Keystore" else "未保存"
+                        )
+                        PrismKv(key = "激活", value = if (p0 != null) "是" else "否")
+                        PrismActionsRow {
+                            PrismMini(text = "切换端点", onClick = { providerListVisible = true })
+                            PrismMini(text = "新建自定义", onClick = { viewModel.newCustomProvider() })
+                        }
+                    }
+                }
             }
-            item {
-                SetRow(
-                    title = "API Key",
-                    subtitle = "Keystore 加密 · ${if (activeProvider != null) "已配置" else "未配置"}",
-                    onClick = { apiKeyVisible = true }
-                )
-            }
-            // 问题 8a（ADR-020）：深度思考设置（开关 + 强度选择）
+            item { SetSection("生成") }
             item {
                 SetRow(
                     title = "深度思考",
                     subtitle = if (thinkingEnabled) {
                         "已开启 · 强度 ${effortLabel(reasoningEffort)}"
                     } else {
-                        "关闭 · 开启后模型先推理再回答"
+                        "已关闭 · 开启后模型先推理再回答"
                     },
                     trailing = {
                         PrismSwitch(checked = thinkingEnabled, onCheckedChange = { viewModel.setThinkingEnabled(it) })
                     },
                     onClick = { thinkingSheetVisible = true }
                 )
+            }
+            item { SetSection("密钥") }
+            item {
+                SetRow(
+                    title = "API Key",
+                    subtitle = "按端点保存 · Keystore 加密",
+                    onClick = { apiKeyVisible = true }
+                )
+            }
+            item {
+                SetRow(
+                    title = "自定义请求头",
+                    subtitle = activeProvider?.headers?.size?.let { "$it 条" } ?: "0 条",
+                    onClick = { providerListVisible = true }
+                )
+            }
+            item {
+                Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = PrismSize.s6)) {
+                    // 设计稿 `.danger-row`「删除这个端点」：走既有 deleteProvider。
+                    // 无激活端点时点不动（不弹空白确认框）。
+                    PrismDangerRow(
+                        text = "删除这个端点",
+                        onClick = {
+                            activeProvider?.let { viewModel.deleteProvider(it) }
+                        }
+                    )
+                }
             }
             } // MODEL
             if (section == SettingsSection.BEHAVIOR) {
@@ -792,6 +839,44 @@ fun SettingsScreen(
             }
             } // BEHAVIOR
             if (section == SettingsSection.PHONE) {
+            // 设计稿 `settingsPhone()`：**顶部三格状态条**（无障碍 / Shizuku / 悬浮窗）。
+            // 原实现直接从「无障碍自动恢复」一行开始，用户要读完整行文字才知道三个权限各自状态。
+            item {
+                Column(
+                    modifier = Modifier.padding(
+                        start = 20.dp, end = 20.dp,
+                        top = PrismSize.s2, bottom = PrismSize.s4
+                    )
+                ) {
+                    val a11yOk = phoneControlConnected
+                    val shizukuTone = when (shizukuState) {
+                        io.prism.phonecontrol.bg.ShizukuShell.State.READY -> DotTone.Ok
+                        io.prism.phonecontrol.bg.ShizukuShell.State.NOT_RUNNING,
+                        io.prism.phonecontrol.bg.ShizukuShell.State.NOT_AUTHORIZED -> DotTone.Warn
+                        else -> DotTone.Neutral
+                    }
+                    PrismStatusStrip(
+                        cells = listOf(
+                            Triple("无障碍", if (a11yOk) "已开启" else "未开启", if (a11yOk) DotTone.Ok else DotTone.Warn),
+                            Triple(
+                                "Shizuku",
+                                when (shizukuState) {
+                                    io.prism.phonecontrol.bg.ShizukuShell.State.READY -> "就绪"
+                                    io.prism.phonecontrol.bg.ShizukuShell.State.NOT_RUNNING -> "未运行"
+                                    io.prism.phonecontrol.bg.ShizukuShell.State.NOT_AUTHORIZED -> "未授权"
+                                    io.prism.phonecontrol.bg.ShizukuShell.State.NOT_INSTALLED -> "未安装"
+                                },
+                                shizukuTone
+                            ),
+                            Triple(
+                                "悬浮窗",
+                                if (canDrawOverlays) "已授权" else "未授权",
+                                if (canDrawOverlays) DotTone.Ok else DotTone.Warn
+                            )
+                        )
+                    )
+                }
+            }
             // ADR-046 修订（2026-10-26；PRD US-3116）：无障碍自愈 + Shizuku 单实例说明。
             // 真机实测 HyperOS 安全中心会清掉本应用的无障碍注册，故这里给"状态 + 一键恢复 + 开关"。
             item {
@@ -970,7 +1055,52 @@ fun SettingsScreen(
             } // PHONE
             if (section == SettingsSection.QQ) {
             // ==================== QQ 小号助手（ADR-062/063；US-3101/3105/3108） ====================
-            item { SetSection("QQ 小号助手") }
+            // 设计稿 `settingsQq()` 顶部是一张**总开关状态卡**：状态点 + 「已开启/已关闭」+ 副行 +
+            // 右侧总开关。原实现只有一行「QQ 小号助手」文案，用户看不出小号到底开没开。
+            item {
+                Column(
+                    modifier = Modifier.padding(
+                        start = 20.dp, end = 20.dp,
+                        top = PrismSize.s2, bottom = PrismSize.s2
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(PrismPanel, RoundedCornerShape(PrismSize.rCard))
+                            .border(1.dp, PrismLine, RoundedCornerShape(PrismSize.rCard))
+                            .padding(PrismSize.s4),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(PrismSize.s3)
+                    ) {
+                        PrismDot(if (qqConfig.enabled) DotTone.Ok else DotTone.Neutral)
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (qqConfig.enabled) "已开启" else "已关闭",
+                                color = PrismText,
+                                fontSize = PrismType.body
+                            )
+                            Text(
+                                text = if (qqConfig.enabled) "协议端在线 · NapCat" else "未连接协议端",
+                                color = PrismTextFaint,
+                                fontSize = PrismType.meta,
+                                modifier = Modifier.padding(top = 2.dp)
+                            )
+                        }
+                        PrismSwitch(
+                            checked = qqConfig.enabled,
+                            onCheckedChange = { on ->
+                                // 沿用原有风险确认路径：开启时若未确认风险，先弹风险告知
+                                if (on && !qqConfig.riskAccepted) {
+                                    qqRiskDialogVisible = true
+                                } else {
+                                    qqScope.launch { qqApp?.qqConfigRepository?.setEnabled(on) }
+                                }
+                            }
+                        )
+                    }
+                }
+            }
             // 2026-11-01（US-3128）：协议端管家——把「启动/修复/扫码」变成按钮，并回读校验电源策略。
             // 放在总开关之前是有意的：用户打开小号助手后第一件事就是让协议端跑起来。
             item {
@@ -1464,7 +1594,7 @@ fun SettingsScreen(
             } // VOICE
             if (section == SettingsSection.SYSTEM) {
             // v1 批次15（US-1501/1502/1507）：搜索增强（智谱 / Tavily / SearXNG）
-            item { SetSection("搜索增强") }
+            item { SetSection("搜索") }
             item {
                 SetRow(
                     title = "搜索引擎增强",
@@ -4230,6 +4360,9 @@ private fun PetToggleRow(
         PrismSwitch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
+
+
+
 
 
 

@@ -628,7 +628,19 @@ fun ConversationScreen(
 
         // 批次20（VC-005，ADR-044）：语音通话全屏覆盖层（共享本页 ConversationViewModel，
         // 语音轮次与文字轮次同会话同历史；挂断即关闭覆盖层）
-        if (voiceCallVisible) {
+        // **进入/退出用淡入淡出**（用户报告"点击后闪过之前的 UI"）：
+        // 直接 `if (visible) { ... }` 是硬切——首帧插入前会露出下面完整的一帧聊天页。
+        // AnimatedVisibility + fadeIn 让首帧就是半透明的覆盖层底，不再有"看到聊天页"的瞬间；
+        // 同时也盖住装配期占位的切换（两者底色现已一致）。
+        androidx.compose.animation.AnimatedVisibility(
+            visible = voiceCallVisible,
+            enter = androidx.compose.animation.fadeIn(
+                animationSpec = androidx.compose.animation.core.tween(durationMillis = 160)
+            ),
+            exit = androidx.compose.animation.fadeOut(
+                animationSpec = androidx.compose.animation.core.tween(durationMillis = 120)
+            )
+        ) {
             VoiceCallOverlay(
                 conversation = viewModel,
                 onDismiss = { voiceCallVisible = false },

@@ -102,19 +102,29 @@ fun VoiceCallOverlay(
             apiKeyRepository = app.apiKeyRepository
         )
     }
+    // 装配期占位（约 100–200ms）。
+    //
+    // **回归修复**：原实现用 `Brush.verticalGradient(PrismBg, #141A2E, PrismBg)` ——
+    // `#141A2E` 是**旧靛蓝深空主题**的第二档底色，UI v2 改暖灰后它成了残留。
+    // 用户点「语音通话」先看到这个靛蓝框、再切到暖灰主界面，体感就是"闪过之前的 UI"。
+    // 现在：底用与主界面完全相同的两层渐变（无第二色相），且叠 fadeIn 与主界面同节奏，
+    // 装配完成时视觉上只是内容淡入，不再有整层换色。
     val controller = controllerHolder ?: run {
         Box(
             modifier = modifier
                 .fillMaxSize()
+                .background(PrismBg)
                 .background(
-                    Brush.verticalGradient(listOf(PrismBg, Color(0xFF141A2E), PrismBg))
+                    Brush.verticalGradient(
+                        colors = listOf(Color(0xFF1A1C18), PrismBg, PrismBg)
+                    )
                 ),
             contentAlignment = Alignment.Center
         ) {
             androidx.compose.material3.Text(
                 "语音引擎准备中…",
                 color = PrismTextFaint,
-                fontSize = 14.sp
+                fontSize = 13.sp
             )
         }
         return

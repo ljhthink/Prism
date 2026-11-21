@@ -65,6 +65,14 @@ import io.prism.ui.components.PrismHairline
 import io.prism.ui.components.DotTone
 import io.prism.ui.components.PrismMini
 import io.prism.ui.components.PrismActionsRow
+import androidx.compose.material3.LinearProgressIndicator
+import io.prism.ui.components.PrismNoteLine
+import io.prism.ui.theme.PrismAccent
+import io.prism.ui.theme.PrismOk
+import androidx.compose.foundation.lazy.items
+import io.prism.ui.components.PrismKv
+import io.prism.ui.components.PrismDangerRow
+import io.prism.ui.components.PrismFootnote
 import io.prism.ui.components.PrismCardBox
 import io.prism.ui.components.PrismCard
 import androidx.compose.ui.text.font.FontFamily
@@ -168,49 +176,30 @@ fun CapabilitiesScreen(
                     onSelect = { segment = CapSegment.entries[it] }
                 )
             }
-            item {
-                AnimatedVisibility(
-                    visible = segment == CapSegment.MCP,
-                    enter = fadeIn() + slideInVertically { it / 4 },
-                    exit = fadeOut()
-                ) {
-                    McpPanel(
-                        servers = servers,
-                        viewModel = viewModel,
-                        onServerClick = { viewModel.selectServer(it) }
-                    )
-                }
-            }
-            item {
-                AnimatedVisibility(
-                    visible = segment == CapSegment.SKILLS,
-                    enter = fadeIn() + slideInVertically { it / 4 },
-                    exit = fadeOut()
-                ) {
-                    SkillsPanel(
-                        skills = skills,
-                        onSkillClick = { skillsViewModel.selectSkill(it) },
-                        onToggle = { id, enabled -> skillsViewModel.setSkillEnabled(id, enabled) },
-                        onInstallClick = {
-                            skillsViewModel.resetInstallState()
-                            showInstallSheet = true
-                        }
-                    )
-                }
-            }
-            item {
-                AnimatedVisibility(
-                    visible = segment == CapSegment.MEMORY,
-                    enter = fadeIn() + slideInVertically { it / 4 },
-                    exit = fadeOut()
-                ) {
-                    MemoryPanel(
-                        memories = memories,
-                        profiles = profiles,
-                        windowSize = windowSize,
-                        viewModel = memoryViewModel
-                    )
-                }
+            // 三轮分段改为 **LazyListScope 扩展**：每个面板的行都是本 LazyColumn 的
+            // 独立 item（按需组合 / 离屏回收）。原实现是 item { AnimatedVisibility { Column{...} } }，
+            // 进入面板时一次性组合全部行 —— 记忆/技能/Server 多时会卡（用户反馈"进入记忆页卡顿"）。
+            when (segment) {
+                CapSegment.MCP -> mcpPanelItems(
+                    servers = servers,
+                    viewModel = viewModel,
+                    onServerClick = { viewModel.selectServer(it) }
+                )
+                CapSegment.SKILLS -> skillsPanelItems(
+                    skills = skills,
+                    onSkillClick = { skillsViewModel.selectSkill(it) },
+                    onToggle = { id, enabled -> skillsViewModel.setSkillEnabled(id, enabled) },
+                    onInstallClick = {
+                        skillsViewModel.resetInstallState()
+                        showInstallSheet = true
+                    }
+                )
+                CapSegment.MEMORY -> memoryPanelItems(
+                    memories = memories,
+                    profiles = profiles,
+                    windowSize = windowSize,
+                    viewModel = memoryViewModel
+                )
             }
         }
 
@@ -298,8 +287,15 @@ fun CapabilitiesScreen(
 }
 
 /** MCP 工具面板 —— 本地/远程分组展示动态 Server + 预设快捷添加。 */
-@Composable
-private fun McpPanel(
+/**
+ * MCP 面板 —— **LazyListScope 扩展**（本轮性能修复）。
+ *
+ * 原实现是一个 `@Composable Column { ... forEach { ... } }` 塞在 LazyColumn 的**单个 item** 里，
+ * 所有 Server 行在进入页面时**一次性全部组合**：Server/预设多时首帧明显掉帧
+ * （用户反馈"点击进入记忆页面会有一会卡顿"，技能/记忆面板同一模式、同一根因）。
+ * 改成 `LazyListScope` 扩展后，每行是外层 LazyColumn 的独立 item，按需组合、离屏回收。
+ */
+private fun androidx.compose.foundation.lazy.LazyListScope.mcpPanelItems(
     servers: List<McpServerConfig>,
     viewModel: CapabilitiesViewModel,
     onServerClick: (McpServerConfig) -> Unit
@@ -307,40 +303,47 @@ private fun McpPanel(
     val local = servers.filter { it.serverType == McpServerType.LOCAL }
     val remote = servers.filter { it.serverType == McpServerType.REMOTE }
 
-    Column {
-        SectionHeader("本地内置 · ${local.size}", "管理")
-        if (local.isEmpty()) EmptySection("暂无本地 Server，点击右上角 + 或下方预设添加")
-        local.forEach { server ->
-            // UX-001 问题 8（ADR-022）：本地 Server 也观测连接状态（工具数探测），
-            // 避免「未实现工具也显示连接成功」——McpRow 默认回退 isEnabled 绿点（误导）。
-            val status: CapabilitiesViewModel.ConnectionStatus? = if (server.isEnabled) {
-                val flow = remember(server.id, server.isEnabled) { viewModel.observeConnectionStatus(server) }
-                flow.collectAsState(initial = CapabilitiesViewModel.ConnectionStatus.Connecting).value
-            } else null
-            McpRow(
-                server,
-                Modifier.padding(horizontal = 20.dp),
-                connectionStatus = status,
-                onClick = { onServerClick(server) },
-                onToggle = { checked -> viewModel.setEnabled(server.id, checked) }
-            )
+    item { SectionHeader("本地内置 · ${local.size}", "管理") }
+    if (local.isEmpty()) {
+        item { EmptySection("暂无本地 Server，点击右上角 + 或下方预设添加") }
+    }
+    items(local, key = { "mcp-local-${it.id}" }) { server ->
+        // UX-001 问题 8（ADR-022）：本地 Server 也观测连接状态（工具数探测），
+        // 避免「未实现工具也显示连接成功」——McpRow 默认回退 isEnabled 绿点（误导）。
+        val status: CapabilitiesViewModel.ConnectionStatus? = if (server.isEnabled) {
+            val flow = remember(server.id, server.isEnabled) { viewModel.observeConnectionStatus(server) }
+            flow.collectAsState(initial = CapabilitiesViewModel.ConnectionStatus.Connecting).value
+        } else {
+            null
         }
+        McpRow(
+            server,
+            Modifier.padding(horizontal = 20.dp),
+            connectionStatus = status,
+            onClick = { onServerClick(server) },
+            onToggle = { checked -> viewModel.setEnabled(server.id, checked) }
+        )
+    }
 
-        SectionHeader("远程模板 · ${remote.size}", "+ 自定义")
-        if (remote.isEmpty()) EmptySection("暂无远程 Server，点击下方预设一键添加")
-        remote.forEach { RemoteMcpRow(it, viewModel, Modifier.padding(horizontal = 20.dp), onClick = { onServerClick(it) }) }
+    item { SectionHeader("远程模板 · ${remote.size}", "+ 自定义") }
+    if (remote.isEmpty()) {
+        item { EmptySection("暂无远程 Server，点击下方预设一键添加") }
+    }
+    items(remote, key = { "mcp-remote-${it.id}" }) { server ->
+        RemoteMcpRow(server, viewModel, Modifier.padding(horizontal = 20.dp), onClick = { onServerClick(server) })
+    }
 
-        // 预设快捷添加（基于 McpServerPresets；本地零配置直接创建，远程预设填 Key 后添加）
-        SectionHeader("从预设添加", "模板")
-        CapabilitiesViewModel.presets.forEach { preset ->
-            PresetRow(preset, Modifier.padding(horizontal = 20.dp), onClick = {
-                if (preset.serverType == McpServerType.LOCAL) {
-                    viewModel.createFromPreset(preset)
-                } else {
-                    viewModel.startPresetEdit(preset)
-                }
-            })
-        }
+    // 预设快捷添加（本地零配置直接创建；远程预设填 Key 后添加）
+    item { SectionHeader("从预设添加", "模板") }
+    items(CapabilitiesViewModel.presets.size, key = { idx -> "mcp-preset-$idx" }) { idx ->
+        val preset = CapabilitiesViewModel.presets[idx]
+        PresetRow(preset, Modifier.padding(horizontal = 20.dp), onClick = {
+            if (preset.serverType == McpServerType.LOCAL) {
+                viewModel.createFromPreset(preset)
+            } else {
+                viewModel.startPresetEdit(preset)
+            }
+        })
     }
 }
 
@@ -741,25 +744,39 @@ private fun ValidationError(text: String) {
  * - 启用/禁用开关落库（经 [SkillsViewModel.setSkillEnabled]）
  * - US-028："+ 安装" action 可点击，触发远程安装弹层
  */
-@Composable
-private fun SkillsPanel(
+/** 技能面板 —— LazyListScope 扩展（同 [mcpPanelItems] 的性能理由）。 */
+private fun androidx.compose.foundation.lazy.LazyListScope.skillsPanelItems(
     skills: List<SkillUiModel>,
     onSkillClick: (SkillUiModel) -> Unit,
     onToggle: (Long, Boolean) -> Unit,
     onInstallClick: () -> Unit
 ) {
-    Column {
-        SectionHeader("已安装 · ${skills.size}", "+ 安装", onActionClick = onInstallClick)
-        if (skills.isEmpty()) {
-            EmptySection("暂无 Skill，启动时自动扫描内置预设；点击右上角 + 从 URL 安装")
-        }
-        skills.forEach { skill ->
-            SkillRow(
-                skill = skill,
-                modifier = Modifier.padding(horizontal = 20.dp),
-                onClick = { onSkillClick(skill) },
-                onToggle = { enabled -> onToggle(skill.config.id, enabled) }
-            )
+    val enabledCount = skills.count { it.config.isEnabled }
+    item {
+        // 设计稿 `.count-line`
+        Text(
+            text = "${skills.size} 个技能 · $enabledCount 个启用",
+            color = PrismTextFaint,
+            fontSize = PrismType.micro,
+            modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 16.dp)
+        )
+    }
+    item { SectionHeader("技能", null) }
+    items(skills, key = { "skill-${it.config.id}" }) { skill ->
+        SkillRow(
+            skill = skill,
+            modifier = Modifier.padding(horizontal = 20.dp),
+            onClick = { onSkillClick(skill) },
+            onToggle = { enabled -> onToggle(skill.config.id, enabled) }
+        )
+    }
+    item {
+        // 设计稿 `.actions-row`：从 URL 安装
+        Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+            PrismActionsRow {
+                PrismMini(text = "从 URL 安装", onClick = onInstallClick)
+            }
+            PrismFootnote("技能启动时自动扫描；安装前校验 https、Content-Type 与 10MB 上限。")
         }
     }
 }
@@ -1290,21 +1307,18 @@ private fun DetailSection(label: String, content: @Composable () -> Unit) {
 }
 
 /**
- * Skill 远程安装弹层（US-028，ADR-013 5.6）。
+ * 从 URL 安装 Skill —— **严格按设计稿 `skill-install`**（`design/prism-ui-v1/screens.js:976`）。
  *
- * **交互流程**：
- * 1. 用户输入 URL（必须 https，扩展名 .skill.md / .zip / .md）
- * 2. 点击「安装」→ 触发 [onInstall] → state 变为 [InstallState.Installing]
- * 3. 安装中：禁用输入框 + 按钮，展示 loading
- * 4. 成功：展示 slug + 自动关闭弹层（[onDismiss]）
- * 5. 失败：展示脱敏错误信息，允许重试
- *
- * **安全提示**：展示「标准校验」策略说明（https + 大小限制 + 沙箱解析 + zip slip 防护），
- * 让用户了解安全边界。
- *
- * @param state 当前安装状态（来自 [SkillsViewModel.installState]）
- * @param onInstall 安装回调，接收 URL
- * @param onDismiss 关闭弹层回调（安装进行中由调用方阻止 dismiss）
+ * 设计稿结构（此前我按通用表单自己拼了一套，与稿不符，此处逐项对齐）：
+ * ```
+ * 从 URL 安装 Skill
+ * 仅 https · Content-Type 白名单 · ≤ 10MB
+ * ┌ Skill URL ──────────────┐   ← .field 下划线式
+ * https://example.com/skill.skill.md   ← .note-line 示例
+ * ▓▓▓▓▓▓░░░░░░░░░░░░           ← .progress 进度条
+ * 校验通过后解压到应用私有目录，恶意路径会被拒绝。  ← .note-line
+ * [安装] [取消]                ← .btn-row 并排（primary + ghost）
+ * ```
  */
 @Composable
 private fun SkillInstallSheet(
@@ -1314,72 +1328,83 @@ private fun SkillInstallSheet(
 ) {
     var url by remember { mutableStateOf("") }
     val isInstalling = state is SkillsViewModel.InstallState.Installing
-    // URL 输入校验：非空 + https 前缀（与 SkillDownloader.validateUrl 第一道防线对齐，UI 即时反馈）
     val urlTrimmed = url.trim()
+    // UI 即时反馈，与 SkillDownloader.validateUrl 第一道防线对齐
     val urlValid = urlTrimmed.startsWith("https://") && urlTrimmed.length > 8
     val canSubmit = urlValid && !isInstalling
 
     PrismSheet(
         title = "从 URL 安装 Skill",
-        subtitle = "标准校验 · https · ≤10MB · 沙箱解析"
+        subtitle = "仅 https · Content-Type 白名单 · ≤ 10MB"
     ) {
         PrismField(
             label = "Skill URL",
             value = url,
-            onValueChange = { if (!isInstalling) url = it },
-            placeholder = "https://example.com/skill.skill.md",
-            hint = "支持 .skill.md 单文件或 .zip 打包（含 SKILL.md）"
+            onValueChange = { if (!isInstalling) url = it }
         )
-        if (url.isNotEmpty() && !urlValid) {
-            ValidationError("URL 需以 https:// 开头")
+        // 设计稿的示例行（`.note-line`）
+        PrismNoteLine("https://example.com/skill.skill.md")
+
+        // 进度条（`.progress`）：安装中按不定态展示，其余态不显示进度条而是状态行
+        if (isInstalling) {
+            Spacer(Modifier.height(PrismSize.s3))
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(3.dp),
+                color = PrismAccent,
+                trackColor = PrismLine
+            )
         }
-        Spacer(Modifier.height(12.dp))
 
-        // 安全策略说明（让用户了解校验边界）
-        Text(
-            text = "校验策略：仅 https · Content-Length ≤10MB · Content-Type 白名单 · " +
-                "ZIP slip 防护 · YAML 沙箱解析 · slug 格式校验 · 30s 超时",
-            color = PrismTextFaint,
-            fontSize = 10.5.sp,
-            lineHeight = 15.sp
-        )
-        Spacer(Modifier.height(16.dp))
-
-        // 状态展示
+        // 状态行：设计稿只有一句策略说明，实际错误/成功在这里如实补充
+        Spacer(Modifier.height(PrismSize.s3))
         when (state) {
-            is SkillsViewModel.InstallState.Installing -> {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.5.dp)
-                    Text(text = "正在下载并校验…", color = PrismTextDim, fontSize = 12.sp)
-                }
-            }
-            is SkillsViewModel.InstallState.Success -> {
-                Text(text = "✓ 安装成功：${state.slug}", color = PrismMint, fontSize = 12.sp)
-            }
-            is SkillsViewModel.InstallState.Fail -> {
+            is SkillsViewModel.InstallState.Installing ->
+                Text("正在下载并校验…", color = PrismTextDim, fontSize = PrismType.meta)
+
+            is SkillsViewModel.InstallState.Success ->
+                Text("✓ 安装成功：${state.slug}", color = PrismOk, fontSize = PrismType.meta)
+
+            is SkillsViewModel.InstallState.Fail ->
                 ValidationError(state.message)
-            }
-            is SkillsViewModel.InstallState.Idle -> { /* 无状态展示 */ }
-        }
-        if (state is SkillsViewModel.InstallState.Success || state is SkillsViewModel.InstallState.Fail) {
-            Spacer(Modifier.height(12.dp))
+
+            is SkillsViewModel.InstallState.Idle ->
+                if (url.isNotEmpty() && !urlValid) {
+                    ValidationError("URL 需以 https:// 开头")
+                } else {
+                    // 设计稿正文最后一句
+                    Text(
+                        text = "校验通过后解压到应用私有目录，恶意路径会被拒绝。",
+                        color = PrismTextFaint,
+                        fontSize = PrismType.micro,
+                        lineHeight = PrismType.microLine
+                    )
+                }
         }
 
-        PrismButton(
-            text = if (isInstalling) "安装中…" else "安装 Skill",
-            enabled = canSubmit,
-            onClick = { onInstall(urlTrimmed) }
-        )
-        Spacer(Modifier.height(8.dp))
-        PrismButton(
-            text = if (state is SkillsViewModel.InstallState.Success) "完成" else "取消",
-            variant = PrismButtonVariant.Ghost,
-            enabled = !isInstalling,
-            onClick = onDismiss
-        )
+        Spacer(Modifier.height(PrismSize.s5))
+        // `.btn-row`：primary + ghost **并排**
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(PrismSize.s2)
+        ) {
+            PrismButton(
+                text = if (isInstalling) "安装中…" else "安装",
+                enabled = canSubmit,
+                onClick = { onInstall(urlTrimmed) },
+                fillWidth = false,
+                modifier = Modifier.weight(1f)
+            )
+            PrismButton(
+                text = if (state is SkillsViewModel.InstallState.Success) "完成" else "取消",
+                variant = PrismButtonVariant.Ghost,
+                enabled = !isInstalling,
+                onClick = onDismiss,
+                fillWidth = false,
+                modifier = Modifier.weight(1f)
+            )
+        }
     }
 }
 
@@ -1448,60 +1473,118 @@ private fun StatusChip(text: String, active: Boolean, modifier: Modifier = Modif
  *
  * **空态**：L2/L3 为空时展示空态提示文案，引导用户使用。
  */
-@Composable
-private fun MemoryPanel(
+/**
+ * 记忆面板 —— LazyListScope 扩展（同 [mcpPanelItems] 的性能理由）。
+ *
+ * 设计稿 `memoryPanel()` 结构：
+ * ```
+ * 会话内 → card（滑动窗口 / 当前会话 / 修改 N）
+ * 跨会话 → card（已记住的主题 · N 条 + 逐条 .kv）
+ * 用户画像 → card（显式 N 条 / 隐式 N 条 + 添加画像）
+ * 清除全部记忆 → .danger-row
+ * ```
+ */
+private fun androidx.compose.foundation.lazy.LazyListScope.memoryPanelItems(
     memories: List<io.prism.data.MemoryRecord>,
     profiles: List<io.prism.data.UserProfile>,
     windowSize: Int,
     viewModel: MemoryManagementViewModel
 ) {
-    Column {
-        SectionHeader("三层记忆 · 一键清除", "清除", onActionClick = { viewModel.showClearConfirm() })
-
-        // L1 会话内 —— 滑动窗口 + 摘要压缩（点击修改 N）
-        MemoryOverviewCard(
-            title = "L1 · 会话内",
-            desc = "滑动窗口 + 每 N 轮摘要压缩",
-            meta = "当前 N = $windowSize（点击修改）",
-            accent = PrismIndigo,
-            modifier = Modifier.padding(horizontal = 20.dp),
-            onClick = { viewModel.showWindowSizeEditor() }
-        )
-
-        // L2 跨会话 —— 对话历史向量化存储 + top-k 检索
-        SectionHeader("L2 · 跨会话 · ${memories.size} 条", null)
-        if (memories.isEmpty()) {
-            EmptySection("暂无跨会话记忆，对话结束时自动保存关键片段")
-        } else {
-            memories.forEach { record ->
-                MemoryRow(
-                    memory = record,
-                    modifier = Modifier.padding(horizontal = 20.dp),
-                    onDelete = { viewModel.deleteMemory(record.id) }
+    item { SectionHeader("会话内", null) }
+    item {
+        Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+            PrismCardBox(
+                title = "滑动窗口",
+                headMeta = "$windowSize 轮",
+                note = "超出后压缩成摘要并回注"
+            ) {
+                Spacer(Modifier.height(PrismSize.s2))
+                PrismKv(
+                    key = "当前会话",
+                    value = "${memories.size} 条记忆 · 窗口 $windowSize 轮",
+                    mono = true
                 )
+                PrismActionsRow {
+                    PrismMini(text = "修改 N", onClick = { viewModel.showWindowSizeEditor() })
+                }
             }
         }
+    }
 
-        // L3 用户画像 —— 显式 + 隐式偏好
-        SectionHeader(
-            title = "L3 · 用户画像 · ${profiles.size} 条",
-            action = "+ 新增",
-            onActionClick = {
-                // 传入 id=0 + 空 key/value 表示新建
-                viewModel.selectProfileForEdit(io.prism.data.UserProfile(key = "", value = ""))
+    item { SectionHeader("跨会话", null) }
+    item {
+        Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+            PrismCardBox(
+                title = "已记住的主题",
+                headMeta = "${memories.size} 条"
+            ) {
+                if (memories.isEmpty()) {
+                    // 设计稿这里永远有 mock 数据；真实设备可能为空，如实说明来源与触发条件
+                    Text(
+                        text = "还没有跨会话记忆。对话结束时会自动保存关键片段，之后回到这里即可看到。",
+                        color = PrismTextFaint,
+                        fontSize = PrismType.meta,
+                        lineHeight = PrismType.metaLine,
+                        modifier = Modifier.padding(top = PrismSize.s2)
+                    )
+                }
             }
+        }
+    }
+    // 记忆逐条（懒加载）
+    items(memories, key = { "mem-${it.id}" }) { record ->
+        MemoryRow(
+            memory = record,
+            modifier = Modifier.padding(horizontal = 20.dp),
+            onDelete = { viewModel.deleteMemory(record.id) }
         )
-        if (profiles.isEmpty()) {
-            EmptySection("暂无用户画像，可在对话中设定偏好或由 AI 自动抽取")
-        } else {
-            profiles.forEach { profile ->
-                ProfileRow(
-                    profile = profile,
-                    modifier = Modifier.padding(horizontal = 20.dp),
-                    onClick = { viewModel.selectProfileForEdit(profile) },
-                    onDelete = { viewModel.deleteProfile(profile.key) }
-                )
+    }
+
+    // ---- L3 用户画像 ----
+    item { SectionHeader("用户画像", null) }
+    item {
+        val explicitCount = profiles.count {
+            it.category == io.prism.data.ProfileCategory.EXPLICIT.name
+        }
+        val implicitCount = profiles.size - explicitCount
+        Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+            PrismCardBox(title = "画像条目", headMeta = "${profiles.size} 条") {
+                Spacer(Modifier.height(PrismSize.s2))
+                PrismKv(key = "显式", value = "$explicitCount 条 · 你填写的偏好")
+                PrismKv(key = "隐式", value = "$implicitCount 条 · 从对话抽取")
+                PrismActionsRow {
+                    PrismMini(text = "添加画像", onClick = {
+                        viewModel.selectProfileForEdit(io.prism.data.UserProfile(key = "", value = ""))
+                    })
+                }
+                if (profiles.isEmpty()) {
+                    Text(
+                        text = "还没有画像条目。可在对话中说明偏好，或点「添加画像」手动写入。",
+                        color = PrismTextFaint,
+                        fontSize = PrismType.meta,
+                        lineHeight = PrismType.metaLine,
+                        modifier = Modifier.padding(top = PrismSize.s2)
+                    )
+                }
             }
+        }
+    }
+    items(profiles, key = { "profile-${it.key}" }) { profile ->
+        ProfileRow(
+            profile = profile,
+            modifier = Modifier.padding(horizontal = 20.dp),
+            onClick = { viewModel.selectProfileForEdit(profile) },
+            onDelete = { viewModel.deleteProfile(profile.key) }
+        )
+    }
+
+    // 设计稿 `.danger-row`：清除全部记忆
+    item {
+        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = PrismSize.s6)) {
+            PrismDangerRow(
+                text = "清除全部记忆",
+                onClick = { viewModel.showClearConfirm() }
+            )
         }
     }
 }
@@ -1605,17 +1688,12 @@ private fun relativeRecall(at: Long): String {
 
 
 /**
- * 单条 L3 用户画像行（US-036 AC-3 编辑/删除）。
+ * 用户画像行 —— 设计稿 `memoryPanel()` 的「用户画像」块。
  *
- * **展示**：
- * - 左侧 accent 色点（EXPLICIT=PrismIndigo / IMPLICIT=PrismMint）
- * - 中间：key + value + category 标签
- * - 右侧：删除按钮
- * - 整行点击 → 编辑弹层
- *
- * @param profile 待展示的画像
- * @param onClick 整行点击回调（编辑）
- * @param onDelete 删除回调
+ * 设计稿结构是 **`.card` 内两组 `.kv`（显式 N 条 / 隐式 N 条）+ `.actions-row` 添加画像**，
+ * 再加一条 `.danger-row` 清除全部记忆；单条画像没有独立卡片。
+ * 这里保留"可点击编辑 / 可删除"的能力（功能不能丢），但视觉改成 `.kv` 行：
+ * 左键（显式/隐式标签）、右值（内容），行尾一个 `.mini` 删除。
  */
 @Composable
 private fun ProfileRow(
@@ -1625,51 +1703,37 @@ private fun ProfileRow(
     onDelete: () -> Unit
 ) {
     val isExplicit = profile.category == io.prism.data.ProfileCategory.EXPLICIT.name
-    val accent = if (isExplicit) PrismIndigo else PrismMint
-    val categoryLabel = if (isExplicit) "显式" else "隐式"
-    PrismCard(modifier = modifier.fillMaxWidth().padding(bottom = 8.dp), onClick = onClick) {
+    Column(modifier = modifier) {
         Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onClick
+                )
+                .padding(vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(accent)
+            Text(
+                text = if (isExplicit) "显式" else "隐式",
+                color = PrismTextFaint,
+                fontSize = PrismType.micro,
+                modifier = Modifier.width(34.dp)
             )
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    // O1：显式偏好显示自然语言原句；隐式偏好 value 为 LLM 抽取短语，需 key 提供语义
-                    text = if (isExplicit) profile.value else "${profile.key}：${profile.value}",
-                    color = PrismText,
-                    fontSize = 12.5.sp,
-                    fontWeight = FontWeight.Medium
-                )
-                Text(
-                    text = "$categoryLabel · 更新于 ${formatTimestamp(profile.updatedAt)}",
-                    color = PrismTextFaint,
-                    fontSize = 10.5.sp,
-                    modifier = Modifier.padding(top = 3.dp)
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .size(28.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(PrismPanel2)
-                    .border(1.dp, PrismLine, RoundedCornerShape(8.dp))
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = onDelete
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(text = "✕", color = PrismTextDim, fontSize = 12.sp)
-            }
+            Text(
+                // O1：显式偏好显示自然语言原句；隐式偏好 value 为 LLM 抽取短语，需 key 提供语义
+                text = if (isExplicit) profile.value else "${profile.key}：${profile.value}",
+                color = PrismText,
+                fontSize = PrismType.sub,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Spacer(Modifier.width(PrismSize.s2))
+            PrismMini(text = "删除", onClick = onDelete, danger = true)
         }
+        PrismHairline()
     }
 }
 
