@@ -92,6 +92,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.draw.drawBehind
 import io.prism.ui.theme.PrismOk
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -1699,21 +1701,24 @@ private fun SkillCallCard(
             .fillMaxWidth()
             .padding(vertical = 4.dp)
             // 左侧 2dp 琥珀竖条 = 设计稿 `border-left: 2px solid var(--accent)`。
-            // **绘制顺序**：drawBehind 在 background/border **之前**注册，因此竖条先画、
-            // 背景与描边后画——后画的会盖住先画的。所以顺序必须是
-            // drawBehind → background → border（此前写成 background→border→drawBehind
-            // 会让竖条画在背景之上但被 border 的 1px 叠一半，视觉上偏细）。
+            //
+            // **绘制顺序**（guardrail R3-M-02 纠正了我此前的错误结论）：Compose 按 modifier
+            // **链从左到右**绘制，`drawBehind` 最后注册 = 最后绘制 = 在最上层。因此正确顺序是
+            // `background → border → drawBehind`（HEAD 版本即如此）。
+            // 若把 drawBehind 放最前，不透明背景 (#171816) 会把竖条整块盖住 → 真机不可见。
+            .background(PrismPanel, RoundedCornerShape(PrismSize.rControl))
+            .border(1.dp, PrismLine, RoundedCornerShape(PrismSize.rControl))
             .drawBehind {
+                // 圆角内画竖条：上下各留一个圆角半径，避免盖住圆角；高度兜底非负。
                 val r = 10.dp.toPx()
+                val barHeight = (size.height - 2 * r).coerceAtLeast(0f)
                 drawRoundRect(
                     color = PrismAccent,
-                    size = androidx.compose.ui.geometry.Size(2.dp.toPx(), size.height - 2 * r),
+                    size = androidx.compose.ui.geometry.Size(2.dp.toPx(), barHeight),
                     topLeft = androidx.compose.ui.geometry.Offset(0f, r),
                     cornerRadius = androidx.compose.ui.geometry.CornerRadius(1.dp.toPx())
                 )
             }
-            .background(PrismPanel, RoundedCornerShape(PrismSize.rControl))
-            .border(1.dp, PrismLine, RoundedCornerShape(PrismSize.rControl))
             .padding(start = 13.dp, end = 11.dp, top = 9.dp, bottom = 9.dp)
     ) {
         Column(modifier = Modifier.weight(1f)) {
@@ -2328,7 +2333,14 @@ private fun MessageInputBar(
                     ),
                     cursorBrush = SolidColor(PrismAccent),
                     maxLines = 4,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        // 占位符语义（ac-verifier B3 回归）：占位符视觉 Text 在 decorationBox 里，
+                        // 与输入框本体分离后 uiautomator/读屏抓不到它。这里把「消息」
+                        // 与占位提示挂到输入框节点上，空文本时读屏会念出提示。
+                        .semantics {
+                            contentDescription = if (value.isEmpty()) "给 Prism 发消息" else "消息"
+                        }
                 )
             }
             // 发送 / 停止：文字按钮；生成中变成描边「停止」，语义与既有 onSend 分支一致。

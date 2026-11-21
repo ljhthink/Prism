@@ -86,6 +86,9 @@ fun PrismApp() {
     // 历史页选中会话后写入，经此状态传递给聊天页；聊天页 LaunchedEffect 触发
     // `loadSession` 后通过 [ConversationScreen.onSessionLoaded] 清空（一次性消费）。
     var pendingSessionId by remember { mutableStateOf<Long?>(null) }
+
+    // UI v2（ADR-079）：历史页「新对话」的一次性令牌（自增即触发，聊天页消费）。
+    var newConversationTick by remember { androidx.compose.runtime.mutableIntStateOf(0) }
     // UI v2（ADR-079 D2）：设置详情页当前分区；null = 设置首页。
     var settingsSection by remember { mutableStateOf<io.prism.ui.settings.SettingsSection?>(null) }
 
@@ -135,6 +138,7 @@ fun PrismApp() {
                     ConversationScreen(
                         onOpenHistory = { navController.navigate(PrismDestinations.CONVERSATION_LIST) },
                         sessionIdToLoad = pendingSessionId,
+                        newConversationTick = newConversationTick,
                         onSessionLoaded = { pendingSessionId = null }
                     )
                 }
@@ -159,8 +163,12 @@ fun PrismApp() {
                             pendingSessionId = sessionId
                             navController.popBackStack()
                         },
+                        // UI v2（ADR-079）：历史页顶栏「新对话」——回到聊天页并**真的开新会话**。
+                        // guardrail R3-M-04：整文件覆盖时漏了令牌自增，导致点「新对话」只返回、
+                        // 旧对话原样保留（功能回归）。令牌由聊天页 LaunchedEffect 消费。
                         onCreateNew = {
                             pendingSessionId = null
+                            newConversationTick += 1
                             navController.popBackStack()
                         }
                     )

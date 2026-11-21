@@ -64,6 +64,8 @@ import io.prism.ui.components.PrismGroup
 import io.prism.ui.components.PrismHairline
 import io.prism.ui.components.DotTone
 import io.prism.ui.components.PrismMini
+import io.prism.ui.components.PrismActionsRow
+import io.prism.ui.components.PrismCardBox
 import io.prism.ui.components.PrismCard
 import androidx.compose.ui.text.font.FontFamily
 import io.prism.ui.theme.PrismSize
@@ -1518,19 +1520,30 @@ private fun MemoryOverviewCard(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null
 ) {
-    PrismCard(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(bottom = 12.dp),
-        onClick = onClick
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(text = "◈  ", color = accent, fontSize = 15.sp, fontWeight = FontWeight.Bold)
-                Text(text = title, color = PrismText, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+    // 设计稿 `.card` + `.card-head` + `.card-note`：**没有 ◈ 字形图标**（那是旧版装饰）。
+    // `accent` 参数保留在签名里（调用点仍传，表达"这是哪一层"），但不再渲染 —— 层次
+    // 由分组标题（L1 / L2 / L3）表达，卡内再放一个彩色字只是噪音。
+    @Suppress("UNUSED_EXPRESSION")
+    accent
+    Column(modifier = modifier.fillMaxWidth().padding(bottom = 12.dp)) {
+        PrismCardBox(
+            title = title,
+            headMeta = null,
+            note = desc
+        ) {
+            if (meta.isNotBlank()) {
+                Text(
+                    text = meta,
+                    color = PrismTextFaint,
+                    fontSize = PrismType.meta,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
             }
-            Text(text = desc, color = PrismTextDim, fontSize = 12.sp, lineHeight = 18.sp, modifier = Modifier.padding(top = 6.dp))
-            Text(text = meta, color = PrismTextFaint, fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
+            if (onClick != null) {
+                PrismActionsRow {
+                    PrismMini(text = "修改", onClick = onClick)
+                }
+            }
         }
     }
 }

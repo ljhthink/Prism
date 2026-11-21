@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -322,15 +321,21 @@ fun PrismSegUnderline(
                 // 下划线必须与**文字同宽**：这里用 Column(wrapContentWidth) + Box(fillMaxWidth)
                 // 让 Box 的 fillMaxWidth 指代"Column 的宽度"（= 文字宽），而不是外层 Row 的宽度。
                 // 直接用 Row 里的 fillMaxWidth 会撑满整行 → 三段下划线互相重叠（本轮修）。
+                // **宽度必须用 IntrinsicSize.Max**（guardrail R3-M-01）：
+                // Row 给非 weight 子项下发的是「剩余可用宽」，`wrapContentWidth()` 只放松
+                // minWidth、不改 maxWidth → 第一个 tab 的 `fillMaxWidth()` 仍吃满整行，
+                // Column 被撑到整行宽，后两个 tab 的 maxWidth≈0、标签不可见。
+                // `width(IntrinsicSize.Max)` 让 Column 的宽度 = 内容（文字）最大内在宽，
+                // 于是内层 `fillMaxWidth()` 指代"文字宽"，三段下划线各随其文字、互不重叠。
                 Column(
                     modifier = Modifier
+                        .width(androidx.compose.foundation.layout.IntrinsicSize.Max)
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
                             indication = null,
                             onClick = { onSelect(index) }
                         )
                         .padding(top = 14.dp, bottom = 15.dp)
-                        .wrapContentWidth()
                 ) {
                     Text(
                         text = label,
