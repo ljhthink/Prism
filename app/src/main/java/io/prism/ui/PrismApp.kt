@@ -1,4 +1,4 @@
-﻿package io.prism.ui
+package io.prism.ui
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -64,8 +64,8 @@ object PrismDestinations {
 
 /** 底部 4 主入口。 */
 private val bottomNavItems = listOf(
-    PrismNavItem(PrismDestinations.CHAT, "聊天", Icons.AutoMirrored.Filled.Chat),
-    PrismNavItem(PrismDestinations.KNOWLEDGE, "知识库", Icons.Filled.MenuBook),
+    PrismNavItem(PrismDestinations.CHAT, "对话", Icons.AutoMirrored.Filled.Chat),
+    PrismNavItem(PrismDestinations.KNOWLEDGE, "知识", Icons.Filled.MenuBook),
     PrismNavItem(PrismDestinations.CAPABILITIES, "能力", Icons.Filled.Bolt),
     PrismNavItem(PrismDestinations.SETTINGS, "设置", Icons.Filled.Settings)
 )
@@ -86,11 +86,8 @@ fun PrismApp() {
     // 历史页选中会话后写入，经此状态传递给聊天页；聊天页 LaunchedEffect 触发
     // `loadSession` 后通过 [ConversationScreen.onSessionLoaded] 清空（一次性消费）。
     var pendingSessionId by remember { mutableStateOf<Long?>(null) }
-
-    // UI v2（ADR-079）：历史页「新对话」的一次性令牌（自增即触发）。
-    var newConversationTick by remember { androidx.compose.runtime.mutableIntStateOf(0) }
-
-    // UI v2（ADR-079）：历史页「新对话」的一次性令牌（自增即触发，聊天页消费后无需回写）。
+    // UI v2（ADR-079 D2）：设置详情页当前分区；null = 设置首页。
+    var settingsSection by remember { mutableStateOf<io.prism.ui.settings.SettingsSection?>(null) }
 
     Scaffold(
         containerColor = PrismBg,
@@ -113,6 +110,8 @@ fun PrismApp() {
                         launchSingleTop = true
                         restoreState = true
                     }
+                    // 切走设置 Tab 时回到首页，避免下次进入直接落在某个详情页。
+                    if (route != PrismDestinations.SETTINGS) settingsSection = null
                 }
             )
         }
@@ -136,13 +135,21 @@ fun PrismApp() {
                     ConversationScreen(
                         onOpenHistory = { navController.navigate(PrismDestinations.CONVERSATION_LIST) },
                         sessionIdToLoad = pendingSessionId,
-                        newConversationTick = newConversationTick,
                         onSessionLoaded = { pendingSessionId = null }
                     )
                 }
                 composable(PrismDestinations.KNOWLEDGE) { KnowledgeBaseScreen() }
                 composable(PrismDestinations.CAPABILITIES) { CapabilitiesScreen() }
-                composable(PrismDestinations.SETTINGS) { SettingsScreen() }
+                composable(PrismDestinations.SETTINGS) {
+                    // UI v2（ADR-079 D2）：设置分为「首页 6 入口」+「详情页 47 项」两级。
+                    // section 状态放在导航图之外（Tab 内切换不新增返回栈条目），
+                    // 系统返回键在详情页时先回到首页。
+                    SettingsScreen(
+                        section = settingsSection,
+                        onOpenSection = { settingsSection = it },
+                        onBack = { settingsSection = null }
+                    )
+                }
                 // UX-001 问题 4（ADR-021）：会话历史列表页。
                 // 选中会话 → 写入 pendingSessionId 并返回聊天页（聊天页自动 loadSession 恢复）。
                 composable(PrismDestinations.CONVERSATION_LIST) {
@@ -152,11 +159,8 @@ fun PrismApp() {
                             pendingSessionId = sessionId
                             navController.popBackStack()
                         },
-                        // UI v2（ADR-079）：历史页顶栏「新对话」——回到聊天页并开新会话。
-                        // 用一次性自增令牌驱动聊天页的 startNewConversation（不改 ViewModel 契约）。
                         onCreateNew = {
                             pendingSessionId = null
-                            newConversationTick += 1
                             navController.popBackStack()
                         }
                     )

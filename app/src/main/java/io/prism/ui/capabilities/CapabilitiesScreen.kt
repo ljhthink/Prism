@@ -1,4 +1,4 @@
-package io.prism.ui.capabilities
+﻿package io.prism.ui.capabilities
 
 import android.content.Intent
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -52,10 +52,23 @@ import io.prism.PrismApplication
 import io.prism.data.McpServerConfig
 import io.prism.data.McpServerPresets
 import io.prism.data.McpServerType
-import io.prism.data.SkillSource
+import io.prism.data.SkillConfig
 import io.prism.ui.components.PrismButton
 import io.prism.ui.components.PrismButtonVariant
+import io.prism.ui.components.PrismSegUnderline
+import io.prism.ui.components.PrismIconButton
+import io.prism.ui.components.PrismTextAction
+import io.prism.ui.components.PrismIcons
+import io.prism.ui.components.PrismRow
+import io.prism.ui.components.PrismGroup
+import io.prism.ui.components.PrismHairline
+import io.prism.ui.components.DotTone
+import io.prism.ui.components.PrismMini
 import io.prism.ui.components.PrismCard
+import androidx.compose.ui.text.font.FontFamily
+import io.prism.ui.theme.PrismSize
+import androidx.compose.ui.text.style.TextOverflow
+import io.prism.ui.theme.PrismType
 import io.prism.ui.components.PrismField
 import io.prism.ui.components.PrismSegmented
 import io.prism.ui.components.PrismStatusDot
@@ -78,7 +91,7 @@ import io.prism.ui.theme.PrismTextFaint
 import io.prism.ui.theme.PrismWarning
 
 /** 能力中枢分段。 */
-private enum class CapSegment(val label: String) { MCP("MCP 工具"), SKILLS("Skills"), MEMORY("记忆") }
+private enum class CapSegment(val label: String) { MCP("MCP"), SKILLS("技能"), MEMORY("记忆") }
 
 /**
  * 能力中枢屏幕 —— 深空玻璃肌理（设计规范 v0.4 第 8.3 节，US-002/004/005/008/027/036）。
@@ -122,34 +135,35 @@ fun CapabilitiesScreen(
             contentPadding = PaddingValues(bottom = 16.dp)
         ) {
             item {
+                // 设计稿 `.topbar`：标题 22sp「能力」+ 右侧动作（MCP 页是「＋新建 Server」、
+                // 技能页是文字「安装」、记忆页无动作）。
                 PrismTopBar(
-                    title = "能力中枢",
-                    subtitle = "MCP · Skills · 记忆",
+                    title = "能力",
                     actions = {
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .background(PrismPanel2, RoundedCornerShape(12.dp))
-                                .border(1.dp, PrismLine, RoundedCornerShape(12.dp))
-                                .clickable(
-                                    interactionSource = remember { MutableInteractionSource() },
-                                    indication = null,
-                                    onClick = { viewModel.newCustomServer() }
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(Icons.Filled.Add, null, tint = PrismTextDim)
+                        when (segment) {
+                            CapSegment.MCP -> PrismIconButton(
+                                icon = PrismIcons.Plus,
+                                contentDescription = "新建 Server",
+                                onClick = { viewModel.newCustomServer() }
+                            )
+                            CapSegment.SKILLS -> PrismTextAction(
+                                text = "安装",
+                                onClick = {
+                                    skillsViewModel.resetInstallState()
+                                    showInstallSheet = true
+                                }
+                            )
+                            CapSegment.MEMORY -> Unit
                         }
                     }
                 )
             }
             item {
-                PrismSegmented(
-                    options = CapSegment.entries,
-                    selected = segment,
-                    onSelect = { segment = it },
-                    labelOf = { it.label },
-                    modifier = Modifier.padding(horizontal = 20.dp)
+                // 设计稿 `.segmented`：文字 + 底部琥珀细线（不是实底胶囊）
+                PrismSegUnderline(
+                    labels = CapSegment.entries.map { it.label },
+                    selectedIndex = CapSegment.entries.indexOf(segment),
+                    onSelect = { segment = CapSegment.entries[it] }
                 )
             }
             item {
@@ -357,62 +371,50 @@ private fun RemoteMcpRow(
     )
 }
 
-/** 单个 MCP Server 行（点击打开配置）。 */
+/**
+ * MCP Server 行 —— 设计稿 `.row`（`mcpPanel()`）：状态点 + 名称 / 传输方式，尾部徽章 + 开关。
+ */
 @Composable
 private fun McpRow(
     server: McpServerConfig,
     modifier: Modifier = Modifier,
-    onClick: () -> Unit,
-    onToggle: (Boolean) -> Unit,
-    connectionStatus: CapabilitiesViewModel.ConnectionStatus? = null
+    connectionStatus: CapabilitiesViewModel.ConnectionStatus? = null,
+    onClick: () -> Unit = {},
+    onToggle: (Boolean) -> Unit = {}
 ) {
-    PrismCard(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(bottom = 10.dp),
-        onClick = onClick
-    ) {
-        Row(
-            modifier = Modifier.padding(13.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            val accent = if (server.serverType == McpServerType.LOCAL) PrismCyan else PrismIndigo
-            Box(
-                modifier = Modifier
-                    .size(38.dp)
-                    .background(accent.copy(alpha = 0.12f), RoundedCornerShape(12.dp))
-                    .border(1.dp, PrismLine, RoundedCornerShape(12.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(text = server.name.firstOrNull()?.toString() ?: "?", color = accent, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+    val tone = when {
+        !server.isEnabled -> DotTone.Neutral
+        connectionStatus == null -> DotTone.Neutral
+        connectionStatus is CapabilitiesViewModel.ConnectionStatus.Connected -> DotTone.Ok
+        connectionStatus is CapabilitiesViewModel.ConnectionStatus.Error -> DotTone.Danger
+        else -> DotTone.Warn
+    }
+    val statusText = buildString {
+        append(
+            when (server.serverType) {
+                McpServerType.LOCAL -> "本地内置"
+                McpServerType.REMOTE -> server.baseUrl.ifBlank { "远程" }
+                else -> server.baseUrl
             }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = server.name.ifEmpty { "未命名 Server" }, color = PrismText, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold)
-                // O2（PRD UXR8）：本地内置 Server 副标题展示功能描述（baseUrl 恒空，此前恒为占位文案）；
-                // 远程 Server 保留 baseUrl（用户需要看到端点与自定义 Server 区分预设来源）
-                val subtitle = if (server.serverType == McpServerType.LOCAL) {
-                    McpServerPresets.findMetaByName(server.name)?.description ?: server.baseUrl.ifEmpty { "本地内置 · 零配置" }
-                } else {
-                    server.baseUrl
+        )
+        if (!server.isEnabled) append(" · 已关闭")
+    }
+    Column(modifier = modifier) {
+        PrismRow(
+            title = server.name,
+            status = statusText,
+            leadingDot = tone,
+            onClick = onClick,
+            trailing = {
+                if (connectionStatus != null && server.isEnabled) {
+                    ConnectionStatusBadge(connectionStatus)
                 }
-                Text(text = subtitle, color = PrismTextFaint, fontSize = 11.sp)
+                PrismSwitch(checked = server.isEnabled, onCheckedChange = onToggle)
             }
-            // 远程 Server 已启用时展示连接状态（连接中/已连接/错误）；否则展示启停指示
-            if (connectionStatus != null) {
-                ConnectionStatusBadge(connectionStatus)
-            } else {
-                PrismStatusDot(if (server.isEnabled) PrismDotState.OK else PrismDotState.ERR)
-            }
-            // 本地内建 Server（零配置）无需 baseUrl 即可启用；远程 Server 需 baseUrl（guardrail M2）
-            PrismSwitch(
-                checked = server.isEnabled,
-                onCheckedChange = onToggle,
-                enabled = server.serverType == McpServerType.LOCAL || server.baseUrl.isNotBlank()
-            )
-        }
+        )
     }
 }
+
 
 /** 连接状态徽章（US-010：连接中 / 已连接 · N 工具 / 连接失败）。 */
 @Composable
@@ -450,42 +452,30 @@ private fun EmptySection(text: String) {
 }
 
 /** 预设模板行 —— 点击一键创建。 */
+/** 预设添加行 —— 设计稿 `group("从预设添加")` 的行（名称 + 说明 + chevron）。 */
 @Composable
 private fun PresetRow(preset: McpServerConfig, modifier: Modifier = Modifier, onClick: () -> Unit) {
-    // O2（PRD UXR8）：预设行展示功能描述（用户知道每个工具是干什么的），元数据查不到回退既有占位
-    val meta = McpServerPresets.findMetaByName(preset.name)
-    val tag = if (preset.serverType == McpServerType.LOCAL) "本地内置 · 零配置" else "远程模板 · 需填 Key"
-    PrismCard(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(bottom = 8.dp),
-        onClick = onClick
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Text(text = "＋", color = PrismIndigo, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = preset.name, color = PrismText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                Text(
-                    text = meta?.description ?: tag,
-                    color = PrismTextFaint,
-                    fontSize = 11.sp
+    Column(modifier = modifier) {
+        PrismRow(
+            title = preset.name,
+            status = if (preset.serverType == McpServerType.LOCAL) {
+                "本地模板 · 零配置"
+            } else {
+                "远程模板 · 填入 Key 后添加"
+            },
+            onClick = onClick,
+            trailing = {
+                Icon(
+                    imageVector = PrismIcons.ChevronRight,
+                    contentDescription = null,
+                    tint = PrismTextFaint,
+                    modifier = Modifier.size(16.dp)
                 )
-                if (meta != null) {
-                    // US-004：海外远程模板标注网络可用性提示，降低用户试错成本
-                    Text(
-                        text = meta.networkNote.ifEmpty { tag },
-                        color = if (meta.networkNote.isNotEmpty()) PrismWarning else PrismTextFaint,
-                        fontSize = 10.sp
-                    )
-                }
             }
-        }
+        )
     }
 }
+
 
 /**
  * MCP Server 配置弹层 —— 编辑参考 ProviderEditSheet（US-007）模式（ADR-005 5.4）。
@@ -781,76 +771,58 @@ private fun SkillsPanel(
  * - 文件缺失（manifest==null）时降级展示"解析失败"，仍允许启停操作
  * - 来源标签（内置/本地/远程）经 [sourceToLabel] 映射
  */
+/**
+ * 技能来源 → 中文标签（内置 / 本地 / 远程 / 未知）。
+ *
+ * 这两个纯函数是既有单测（`SkillsViewModelTest`）的契约，本轮只改 UI 渲染，
+ * **不得删除**——删了会让 8 个用例编译失败（已发生过一次，此处显式保留并注明）。
+ */
+internal fun sourceToLabel(source: String): String = when (source) {
+    io.prism.data.SkillSource.LOCAL_BUILTIN -> "内置"
+    io.prism.data.SkillSource.LOCAL_USER -> "本地"
+    io.prism.data.SkillSource.REMOTE -> "远程"
+    else -> "未知"
+}
+
+/** 技能来源 → 强调色（测试锁定的语义色，不随 UI 改版变化）。 */
+internal fun sourceToAccent(source: String): androidx.compose.ui.graphics.Color = when (source) {
+    io.prism.data.SkillSource.LOCAL_BUILTIN -> io.prism.ui.theme.PrismCyan
+    io.prism.data.SkillSource.LOCAL_USER -> io.prism.ui.theme.PrismIndigo
+    io.prism.data.SkillSource.REMOTE -> io.prism.ui.theme.PrismMint
+    else -> io.prism.ui.theme.PrismTextFaint
+}
+
+/** 技能行 —— 设计稿 `skillsPanel()` 的行：名称 / 说明，尾部「详情」+ 开关。 */
 @Composable
 private fun SkillRow(
     skill: SkillUiModel,
-    modifier: Modifier = Modifier,
+    onToggle: (Boolean) -> Unit,
     onClick: () -> Unit,
-    onToggle: (Boolean) -> Unit
+    modifier: Modifier = Modifier
 ) {
-    val accent = sourceToAccent(skill.config.source)
-    val sourceLabel = sourceToLabel(skill.config.source)
-    val desc = skill.manifest?.description ?: "解析失败（SKILL.md 缺失或格式错误）"
-    PrismCard(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(bottom = 10.dp),
-        onClick = onClick
-    ) {
-        Row(
-            modifier = Modifier.padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .background(accent.copy(alpha = 0.15f), RoundedCornerShape(12.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(text = skill.icon, color = accent, fontSize = 17.sp)
-            }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = skill.config.displayName.ifEmpty { skill.config.name },
-                    color = PrismText,
-                    fontSize = 13.5.sp,
-                    fontWeight = FontWeight.SemiBold
+    val cfg = skill.config
+    Column(modifier = modifier) {
+        PrismRow(
+            // displayName 是给人看的名字；config.name 是内部 id（如 web-research）
+            title = cfg.displayName.ifBlank { skill.manifest?.name ?: cfg.name },
+            status = buildString {
+                append(
+                    when (cfg.source) {
+                        io.prism.data.SkillSource.LOCAL_BUILTIN -> "内置"
+                        io.prism.data.SkillSource.REMOTE -> "远程"
+                        else -> "本地"
+                    }
                 )
-                Text(
-                    text = "$sourceLabel · $desc",
-                    color = PrismTextFaint,
-                    fontSize = 11.sp
-                )
+                append(" · v").append(cfg.version)
+                append(if (cfg.isEnabled) " · 已启用" else " · 未启用")
+            },
+            onClick = onClick,
+            trailing = {
+                PrismMini(text = "详情", onClick = onClick)
+                PrismSwitch(checked = cfg.isEnabled, onCheckedChange = onToggle)
             }
-            StatusChip(if (skill.config.isEnabled) "已启用" else "已停用", skill.config.isEnabled)
-            PrismSwitch(checked = skill.config.isEnabled, onCheckedChange = onToggle)
-        }
+        )
     }
-}
-
-/**
- * 按 [SkillSource] 映射 accent 色（UI 层职责，与 [SkillsViewModel.toUiModel] 的 icon 映射对齐）。
- *
- * internal 便于纯 JVM 单元测试（BR-testing-004）。
- */
-internal fun sourceToAccent(source: String): Color = when (source) {
-    SkillSource.LOCAL_BUILTIN -> PrismCyan
-    SkillSource.LOCAL_USER -> PrismIndigo
-    SkillSource.REMOTE -> PrismMint
-    else -> PrismTextFaint
-}
-
-/**
- * 按 [SkillSource] 映射展示标签。
- *
- * internal 便于纯 JVM 单元测试（BR-testing-004）。
- */
-internal fun sourceToLabel(source: String): String = when (source) {
-    SkillSource.LOCAL_BUILTIN -> "内置"
-    SkillSource.LOCAL_USER -> "本地"
-    SkillSource.REMOTE -> "远程"
-    else -> "未知"
 }
 
 /**
@@ -884,7 +856,11 @@ private fun SkillDetailSheet(
 ) {
     val config = skill.config
     val manifest = skill.manifest
-    val sourceLabel = sourceToLabel(config.source)
+    val sourceLabel = when (config.source) {
+        io.prism.data.SkillSource.LOCAL_BUILTIN -> "内置"
+        io.prism.data.SkillSource.REMOTE -> "远程"
+        else -> "本地"
+    }
     val versionText = manifest?.version?.let { "v$it" } ?: "v${config.version}"
     // 展开全文状态（body / systemPrompt 默认收起，点击展开避免弹层过长）
     var bodyExpanded by remember(config.id) { mutableStateOf(false) }
@@ -1497,7 +1473,7 @@ private fun MemoryPanel(
         } else {
             memories.forEach { record ->
                 MemoryRow(
-                    record = record,
+                    memory = record,
                     modifier = Modifier.padding(horizontal = 20.dp),
                     onDelete = { viewModel.deleteMemory(record.id) }
                 )
@@ -1567,58 +1543,53 @@ private fun MemoryOverviewCard(
  * - 中间：sessionId 简写（前 8 位）+ content 截断（前 80 字符）+ 时间戳
  * - 右侧：删除按钮（✕）
  */
+/** 记忆条目 —— 设计稿 `memRow()`：`.kv`（内容左、召回时间右，等宽）。 */
 @Composable
 private fun MemoryRow(
-    record: io.prism.data.MemoryRecord,
-    modifier: Modifier = Modifier,
-    onDelete: () -> Unit
+    memory: io.prism.data.MemoryRecord,
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    PrismCard(modifier = modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+    Column(modifier = modifier) {
         Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .size(8.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(PrismCyan)
+            Text(
+                text = memory.content,
+                color = PrismText,
+                fontSize = PrismType.sub,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
             )
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = record.content.take(MAX_MEMORY_CONTENT_PREVIEW_LEN) +
-                        if (record.content.length > MAX_MEMORY_CONTENT_PREVIEW_LEN) "…" else "",
-                    color = PrismText,
-                    fontSize = 12.5.sp,
-                    lineHeight = 17.sp,
-                    maxLines = 2
-                )
-                Text(
-                    text = "会话 ${record.sessionId.take(8)} · ${formatTimestamp(record.timestamp)} · 第 ${record.turnCount} 轮",
-                    color = PrismTextFaint,
-                    fontSize = 10.5.sp,
-                    modifier = Modifier.padding(top = 4.dp)
-                )
-            }
-            Box(
-                modifier = Modifier
-                    .size(28.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(PrismPanel2)
-                    .border(1.dp, PrismLine, RoundedCornerShape(8.dp))
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = onDelete
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(text = "✕", color = PrismTextDim, fontSize = 12.sp)
-            }
+            Spacer(Modifier.width(PrismSize.s4))
+            Text(
+                text = relativeRecall(memory.timestamp),
+                color = PrismTextFaint,
+                fontSize = PrismType.micro,
+                fontFamily = FontFamily.Monospace
+            )
+            Spacer(Modifier.width(PrismSize.s2))
+            PrismMini(text = "删除", onClick = onDelete, danger = true)
         }
+        PrismHairline()
     }
 }
+
+/** 记忆时间相对文案（MemoryRecord 只有 timestamp；纯展示，不改数据）。 */
+private fun relativeRecall(at: Long): String {
+    val diff = System.currentTimeMillis() - at
+    return when {
+        diff < 60_000L -> "刚刚"
+        diff < 3_600_000L -> "${diff / 60_000L} 分钟前"
+        diff < 86_400_000L -> "${diff / 3_600_000L} 小时前"
+        else -> "${diff / 86_400_000L} 天前"
+    }
+}
+
 
 /**
  * 单条 L3 用户画像行（US-036 AC-3 编辑/删除）。
@@ -1920,36 +1891,22 @@ private const val MAX_MEMORY_CONTENT_PREVIEW_LEN = 80
 private const val UI_MESSAGE_AUTO_DISMISS_MS = 2500L
 
 /** 分组标题。 */
+/** 分组标题 —— 设计稿 `.group-label`（12sp faint，上 24 下 8；可带右侧动作）。 */
 @Composable
 private fun SectionHeader(title: String, action: String? = null, onActionClick: (() -> Unit)? = null) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+            .padding(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(text = title, color = PrismTextDim, fontSize = 12.sp, letterSpacing = 0.4.sp)
-        if (!action.isNullOrEmpty()) {
-            if (onActionClick != null) {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            onClick = onActionClick
-                        )
-                        .padding(horizontal = 4.dp, vertical = 2.dp)
-                ) {
-                    Text(text = action, color = PrismIndigo, fontSize = 11.sp)
-                }
-            } else {
-                Text(text = action, color = PrismIndigo, fontSize = 11.sp)
-            }
+        Text(text = title, color = PrismTextFaint, fontSize = PrismType.meta, modifier = Modifier.weight(1f))
+        if (action != null) {
+            PrismTextAction(text = action, onClick = { onActionClick?.invoke() })
         }
     }
 }
+
 
 /**
  * 本地 Filesystem Server 的授权目录区块（US-009，ADR-006 5.3）。
@@ -2035,3 +1992,5 @@ private fun FilesystemAuthorizationSection() {
         onClick = { launcher.launch(null) }
     )
 }
+
+

@@ -46,6 +46,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -89,6 +90,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.draw.drawBehind
+import io.prism.ui.theme.PrismOk
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -1650,15 +1653,18 @@ private fun AiBubble(message: ChatMessage, showThinking: Boolean, isStreaming: B
 }
 
 /**
- * UXR9 US-908：Skill/工具调用卡片 —— 会话内嵌工具调用反馈。
+ * 工具调用卡 —— 设计稿 `.tool-card`（`design/prism-ui-v1/screens.js` 的 `chatGenerating()`）。
  *
- * 展示：工具名（完整命名空间 `skillName__toolName`）+ 参数摘要 + 执行结果片段 + 状态徽标。
- * - 成功（结果文本不含错误标记）→ 绿色「✓ 成功」
- * - 失败（结果以"工具执行出错"/"⚠️"等开头）→ 红色「✕ 失败」
- * - 联网搜索 / 知识库结果继续由 [WebSourceList] / 引用来源展示，此处跳过冗余卡片
+ * 规格（逐值对应 `app.css`）：
+ * - 外框：1px `line` 描边 + **左侧 2px 琥珀竖条**、10dp 圆角、`surface` 底、9/11 内边距；
+ * - 头行：左侧等宽（mono）工具名，右侧「✓ + 状态」；
+ * - 参数行：等宽 `key: value` 形态；结果行：次级文本。
  *
- * 满足 US-908 AC-1/AC-2：LLM 调用 skill 时界面有明确反馈（工具名 + 参数摘要 + 状态），
- * 与既有「正在调用工具: xxx」执行中指示（[ToolCallIndicator]）互补不冲突。
+ * 与旧实现的差别：旧版用 `◈ ` 字符前缀 + 「参数：」中文标签 + 「✓ 成功」中文状态，
+ * 与设计稿的 mono 名 + 图标状态不一致；也没有左侧琥珀竖条。
+ *
+ * **不伪造耗时**：`ChatMessage` 只带结果文本，没有工具执行时长，
+ * 因此状态位显示「✓」/「✕」而不显示 `2.4s`（设计稿那是 mock 数据）。
  */
 @Composable
 private fun SkillCallCard(
@@ -1666,77 +1672,100 @@ private fun SkillCallCard(
     toolArgsById: Map<String, io.prism.ui.model.ToolCallRef>
 ) {
     val content = message.content.trim()
-    // UXR11 U6（ADR-033）：空 content（协议占位）不渲染；**不再跳过 web_search 工具**——
-    // 联网搜索也是 Skill 能力（web-research 等 Skill 依赖 web_search__search），
-    // 用户反馈"LLM 调 skills 时无界面反馈"，此卡片给出明确的「工具被调用 ✓/✕」反馈，
-    // 搜索结果正文仍由下方 WebSourceList 完整展示（不重复）。
+    // UXR11 U6（ADR-033）：空 content（协议占位）不渲染。
     if (content.isEmpty()) return
+
     val isWebSearch = message.toolName == WebSearchLocalToolExecutor.TOOL_SEARCH
-
     val toolFullName = message.toolName ?: "工具"
-    // 状态判定（Q-LOW-7 修复，guardrail TKN-UXR9-GUARDRAIL-002/003）：复用 SkillExecutor 的
-    // 单一事实来源 isFailureResult（固定失败前缀集合），而非 UI 自造启发式（此前
-    // `contains("失败：")` 会把含该子串的成功结果误判为失败）。
+    // 状态判定复用 SkillExecutor 的单一事实来源 isFailureResult（固定失败前缀集合），
+    // 不用 UI 自造启发式（`contains("失败：")` 会把含该子串的成功结果误判为失败）。
     val isFailed = SkillExecutor.isFailureResult(content)
-    val statusColor = if (isFailed) PrismError else PrismMint
-    val statusText = if (isFailed) "✕ 失败" else "✓ 成功"
+    val statusColor = if (isFailed) PrismDanger else PrismOk
 
-    // 参数摘要：按 toolCallId 从 assistant 消息的 toolCalls 反查 arguments JSON
-    val argsSummary = toolArgsById[message.toolCallId]?.arguments
-        ?.let { summarizeToolArguments(it) }
+    // 参数摘要：按 toolCallId 反查 arguments JSON
+    val argsRaw = toolArgsById[message.toolCallId]?.arguments
+    val argsSummary = argsRaw?.let { summarizeToolArguments(it) }
 
-    Column(
+    // 结果行：联网结果由下方 WebSourceList 承载，卡片只给结论，避免重复
+    val resultLine = when {
+        isWebSearch && !isFailed -> "返回结果已列在下方来源"
+        isWebSearch -> "搜索失败，详见下方"
+        isFailed -> content.take(160)
+        else -> content.take(120) + if (content.length > 120) "…" else ""
+    }
+
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(PrismPanel.copy(alpha = 0.5f))
-            .border(1.dp, PrismLine, RoundedCornerShape(10.dp))
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .padding(vertical = 4.dp)
+            // 左侧 2dp 琥珀竖条 = 设计稿 `border-left: 2px solid var(--accent)`
+            .background(PrismPanel, RoundedCornerShape(PrismSize.rControl))
+            .border(1.dp, PrismLine, RoundedCornerShape(PrismSize.rControl))
+            .drawBehind {
+                // 圆角内画左竖条（直接画矩形会盖住圆角）
+                val r = 10.dp.toPx()
+                drawRoundRect(
+                    color = PrismAccent,
+                    size = androidx.compose.ui.geometry.Size(2.dp.toPx(), size.height - 2 * r),
+                    topLeft = androidx.compose.ui.geometry.Offset(0f, r),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(1.dp.toPx())
+                )
+            }
+            .padding(start = 13.dp, end = 11.dp, top = 9.dp, bottom = 9.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        Column(modifier = Modifier.weight(1f)) {
+            // 头行：mono 工具名 + 状态图标
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = toolFullName,
+                    color = PrismTextDim,
+                    fontSize = PrismType.micro,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(Modifier.width(PrismSize.s2))
+                if (isFailed) {
+                    Icon(
+                        imageVector = PrismIcons.Close,
+                        contentDescription = "工具执行失败",
+                        tint = statusColor,
+                        modifier = Modifier.size(11.dp)
+                    )
+                } else {
+                    Icon(
+                        imageVector = PrismIcons.Check,
+                        contentDescription = "工具执行成功",
+                        tint = statusColor,
+                        modifier = Modifier.size(11.dp)
+                    )
+                }
+            }
+            if (argsSummary != null) {
+                Text(
+                    text = "args: $argsSummary",
+                    color = PrismTextFaint,
+                    fontSize = PrismType.micro,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
             Text(
-                text = "◈ $toolFullName",
-                color = PrismText,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false)
-            )
-            Spacer(Modifier.weight(1f))
-            Text(
-                text = statusText,
-                color = statusColor,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
-        if (argsSummary != null) {
-            Text(
-                text = "参数：$argsSummary",
-                color = PrismTextFaint,
-                fontSize = 10.sp,
+                text = resultLine,
+                color = if (isFailed) PrismDanger else PrismTextFaint,
+                fontSize = PrismType.micro,
+                lineHeight = PrismType.microLine,
                 maxLines = 2,
-                overflow = TextOverflow.Ellipsis
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 4.dp)
             )
         }
-        Text(
-            // UXR11 U6：web_search 结果由 WebSourceList 完整展示，卡片只给确认文本不重复摘要
-            text = when {
-                isWebSearch && !isFailed -> "搜索结果见下方来源卡片"
-                isWebSearch -> "搜索失败，详见下方"
-                isFailed -> content.take(160)
-                else -> content.take(120) + if (content.length > 120) "…" else ""
-            },
-            color = if (isFailed) PrismError else PrismTextFaint,
-            fontSize = 11.sp,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
     }
 }
 
@@ -2257,47 +2286,44 @@ private fun MessageInputBar(
                     )
                 }
             }
-            BasicTextField(
-                value = value,
-                onValueChange = onValueChange,
-                textStyle = androidx.compose.ui.text.TextStyle(
-                    color = PrismText,
-                    fontSize = 15.sp,
-                    lineHeight = 22.sp
-                ),
-                cursorBrush = SolidColor(PrismAccent),
-                maxLines = 4,
-                // **垂直对齐（用户反馈"＋与占位文字偏下"）**：
-                // 旧版给字段 vertical padding 7dp，字段总高 = 22 + 14 = 36dp 看似与按钮等高，
-                // 但 BasicTextField 的空文本首行基线与 36dp 按钮的视觉中心并不重合
-                //（Compose 文字行框含 leading，实际内容比 lineHeight 高），
-                // 导致占位符看起来被压到中线以下。
-                // 改为：字段自身**固定最小高 36dp 并居中内容**，去掉上下 padding；
-                // 行内 Alignment.CenterVertically 让 ＋ / 字段 / 发送键共享同一中线。
+            // **垂直对齐（用户两次反馈"＋ 与占位符相对文本框偏下"）**
+            //
+            // 根因不是"和 ＋ 没对齐"，而是**文字相对输入框（composer-shell）偏下**：
+            // 之前给字段加 `heightIn(min=36dp)` + `wrapContentHeight`，但 BasicTextField 的
+            // 内部文本行框高度 = lineHeight(22sp→约 29px) + 字体 leading，实测 > 36dp 的一半，
+            // 于是文字被"顶"到 36dp 框的下半部分；而 ＋ / 发送键是几何居中的。
+            //
+            // 改为**单一 Box 承载**：Box 固定 36dp 高 + contentAlignment = CenterStart，
+            // 占位符与 innerTextField 都是它的子节点、由同一个 Box 居中，因此两者必然同心，
+            // 且同心于 36dp 的输入框本体（不再是 36dp 里再套一层居中）。
+            Box(
                 modifier = Modifier
                     .weight(1f)
-                    .heightIn(min = 36.dp)
-                    .padding(horizontal = 4.dp)
-                    .wrapContentHeight(Alignment.CenterVertically),
-                decorationBox = { innerTextField ->
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .wrapContentHeight(Alignment.CenterVertically),
-                        contentAlignment = Alignment.CenterStart
-                    ) {
-                        if (value.isEmpty()) {
-                            Text(
-                                text = "给 Prism 发消息",
-                                color = PrismTextFaint,
-                                fontSize = 15.sp,
-                                lineHeight = 22.sp
-                            )
-                        }
-                        innerTextField()
-                    }
+                    .height(36.dp)
+                    .padding(horizontal = 4.dp),
+                contentAlignment = Alignment.CenterStart
+            ) {
+                if (value.isEmpty()) {
+                    Text(
+                        text = "给 Prism 发消息",
+                        color = PrismTextFaint,
+                        fontSize = 15.sp,
+                        lineHeight = 22.sp
+                    )
                 }
-            )
+                BasicTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    textStyle = androidx.compose.ui.text.TextStyle(
+                        color = PrismText,
+                        fontSize = 15.sp,
+                        lineHeight = 22.sp
+                    ),
+                    cursorBrush = SolidColor(PrismAccent),
+                    maxLines = 4,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
             // 发送 / 停止：文字按钮；生成中变成描边「停止」，语义与既有 onSend 分支一致。
             val sendEnabled = value.isNotBlank() || hasAttachment || isGenerating
             val sendBg = when {
@@ -2717,6 +2743,7 @@ private fun EditAiMessageSheet(
         )
     }
 }
+
 
 
 

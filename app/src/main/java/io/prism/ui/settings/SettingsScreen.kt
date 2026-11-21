@@ -1,5 +1,6 @@
-package io.prism.ui.settings
+﻿package io.prism.ui.settings
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -10,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -17,6 +19,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import io.prism.ui.components.PrismRow
+import io.prism.ui.components.PrismIcons
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -43,15 +47,26 @@ import io.prism.data.ProviderPresets
 import io.prism.config.ToolApprovalMode
 import io.prism.tier.PerformanceTier
 import io.prism.tier.TierConfigRepository
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material3.Icon
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import io.prism.ui.theme.PrismOk
+import io.prism.ui.theme.PrismWarning
+import io.prism.ui.theme.PrismPanel
 import io.prism.ui.components.PrismButton
 import io.prism.ui.components.PrismButtonVariant
 import io.prism.ui.components.PrismField
-import io.prism.ui.components.PrismGlassCard
+import io.prism.ui.components.PrismCard
 import io.prism.ui.components.PrismSheet
 import io.prism.ui.components.PrismSheetHost
 import io.prism.ui.components.PrismSegmented
 import io.prism.ui.components.PrismSwitch
 import io.prism.ui.components.PrismTopBar
+import io.prism.ui.theme.PrismAccent
 import io.prism.ui.theme.PrismDanger
 import io.prism.ui.theme.PrismPanel2
 import io.prism.ui.theme.PrismIndigo
@@ -79,8 +94,21 @@ private const val QQ_POLL_MS = 2_000L
  */
 @Composable
 fun SettingsScreen(
+    section: SettingsSection? = null,
+    onOpenSection: (SettingsSection) -> Unit = {},
+    onBack: () -> Unit = {},
     viewModel: SettingsViewModel = viewModel(factory = SettingsViewModel.Factory)
 ) {
+    // 首页：只有 6 个任务入口 + 运行状态。详情见下方按 [section] 过滤的同一份内容，
+    // 47 个设置项一个不删（ADR-079 D2/D6）。
+    if (section == null) {
+        SettingsHome(onOpenSection = onOpenSection, viewModel = viewModel)
+        return
+    }
+    // M-05（guardrail）：详情页先拦系统返回键回到设置首页，而不是直接弹出 SETTINGS 回聊天页。
+    androidx.activity.compose.BackHandler { onBack() }
+
+
     // v1 批次16（US-1603）：「生物识别解锁」M0 起 UI 占位从未实现，已整行移除（连同本地 state）。
     var tierSheetVisible by remember { mutableStateOf(false) }
     var providerListVisible by remember { mutableStateOf(false) }
@@ -252,9 +280,9 @@ fun SettingsScreen(
                     (if (s.selfId > 0) "（${s.selfId}）" else "") +
                     if (s.appVersion.isNotBlank()) " · NapCat ${s.appVersion}" else ""
             io.prism.qq.QqProtocolHealth.State.QQ_OFFLINE ->
-                "⚠ QQ 已离线（需在 PC 上重新登录协议端）"
+                "QQ 已离线（需在 PC 上重新登录协议端）"
             io.prism.qq.QqProtocolHealth.State.UNREACHABLE ->
-                "⚠ 协议端不可达（${s.detail}）"
+                "协议端不可达（${s.detail}）"
         }
     }
     // 2026-10-26（ADR-066）：协议端地址单输入 + 真实连接诊断
@@ -403,7 +431,7 @@ fun SettingsScreen(
                     Text(
                         "填 PC 的局域网 IP（HTTP 默认 3000、WS 自动 3001）。" +
                             "127.0.0.1 是手机自己；协议端在 PC 上时不要填它。",
-                        color = Color(0xFF7A8699),
+                        color = PrismTextFaint,
                         fontSize = 12.sp
                     )
                     androidx.compose.material3.OutlinedTextField(
@@ -427,11 +455,11 @@ fun SettingsScreen(
                     if (qqConfig.oneBotToken.isNotBlank()) {
                         Text(
                             "已保存令牌（已隐藏）。清空令牌请点击下方文字。",
-                            color = Color(0xFF7A8699)
+                            color = PrismTextFaint
                         )
                         Text(
                             if (qqClearToken) "✓ 保存后将清除令牌（再点一次取消）" else "点击此处标记清除令牌",
-                            color = Color(0xFFFF7A6B),
+                            color = PrismDanger,
                             modifier = Modifier.clickable {
                                 qqClearToken = !qqClearToken
                             }
@@ -489,9 +517,9 @@ fun SettingsScreen(
                         Text(
                             qqDiagText,
                             color = if (qqDiagText.startsWith("已连接")) {
-                                Color(0xFF4CAF50)
+                                PrismOk
                             } else {
-                                Color(0xFFFFB74D)
+                                PrismWarning
                             },
                             fontSize = 12.sp
                         )
@@ -552,7 +580,7 @@ fun SettingsScreen(
                         placeholder = { Text("22:00") }
                     )
                     // 常用预设：一键填入起止，减少打字
-                    Text("常用时段", fontSize = 12.sp, color = Color(0xFF9BB8FF))
+                    Text("常用时段", fontSize = 12.sp, color = PrismAccent)
                     androidx.compose.foundation.layout.Row {
                         listOf(
                             "07:00" to "22:00",
@@ -587,7 +615,7 @@ fun SettingsScreen(
                         label = { Text("最小间隔（分钟，≥1）") }
                     )
                     if (qqScheduleError.isNotBlank()) {
-                        Text(text = qqScheduleError, color = Color(0xFFFF7A6B), fontSize = 12.sp)
+                        Text(text = qqScheduleError, color = PrismDanger, fontSize = 12.sp)
                     }
                 }
             },
@@ -651,7 +679,7 @@ fun SettingsScreen(
                         label = { Text("N（1~200）") }
                     )
                     if (qqHistoryError.isNotBlank()) {
-                        Text(text = qqHistoryError, color = Color(0xFFFF7A6B), fontSize = 12.sp)
+                        Text(text = qqHistoryError, color = PrismDanger, fontSize = 12.sp)
                     }
                 }
             },
@@ -674,19 +702,28 @@ fun SettingsScreen(
         )
     }
 
+    // UI v2（ADR-079 D2）：QQ 与「语音/形象」按设计稿拆成子页（原先单页平铺 20+ 行）。
+    var qqTab by remember { mutableStateOf(QqSubTab.CONNECTION) }
+    var voiceTab by remember { mutableStateOf(VoiceSubTab.SPEECH) }
+
+    // M-1（guardrail R3）：切子页必须**回到顶部**。否则从「表情库」滚到底再切「连接」，
+    // 列表沿用旧偏移被钳到底、子页切换条滚出视口，用户会以为设置项消失。
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    LaunchedEffect(qqTab, voiceTab) { listState.scrollToItem(0) }
+
     Box {
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxWidth(),
             contentPadding = PaddingValues(bottom = 16.dp)
         ) {
             item {
-                PrismTopBar(title = "设置", subtitle = "偏好 · 安全 · 设备")
+                SettingsDetailHeader(title = section.title, onBack = onBack)
             }
+            if (section == SettingsSection.MODEL) {
             item { SetSection("模型与端点") }
             item {
                 SetRow(
-                    icon = "◈",
-                    iconColor = PrismIndigo,
                     title = "Provider 配置",
                     subtitle = activeProvider?.let { "已激活：${it.name}" } ?: "OpenAI / Anthropic / Ollama …",
                     onClick = { providerListVisible = true }
@@ -694,8 +731,6 @@ fun SettingsScreen(
             }
             item {
                 SetRow(
-                    icon = "⌁",
-                    iconColor = PrismMint,
                     title = "API Key",
                     subtitle = "Keystore 加密 · ${if (activeProvider != null) "已配置" else "未配置"}",
                     onClick = { apiKeyVisible = true }
@@ -704,8 +739,6 @@ fun SettingsScreen(
             // 问题 8a（ADR-020）：深度思考设置（开关 + 强度选择）
             item {
                 SetRow(
-                    icon = "◔",
-                    iconColor = PrismIndigo,
                     title = "深度思考",
                     subtitle = if (thinkingEnabled) {
                         "已开启 · 强度 ${effortLabel(reasoningEffort)}"
@@ -718,12 +751,12 @@ fun SettingsScreen(
                     onClick = { thinkingSheetVisible = true }
                 )
             }
+            } // MODEL
+            if (section == SettingsSection.BEHAVIOR) {
             // UXR8 N1（ADR-030）：用户规则（类 ChatGPT Custom Instructions 双字段）
             item { SetSection("用户规则") }
             item {
                 SetRow(
-                    icon = "✎",
-                    iconColor = Color(0xFF9BB8FF),
                     title = "AI 行为偏好",
                     subtitle = userRulesSubtitle(userRulesAboutMe, userRulesHowToRespond),
                     onClick = { userRulesSheetVisible = true }
@@ -736,8 +769,6 @@ fun SettingsScreen(
             item { SetSection("识图（纯文本模型）") }
             item {
                 SetRow(
-                    icon = "👁",
-                    iconColor = Color(0xFFFFB84D),
                     title = "云端视觉旁路",
                     subtitle = buildString {
                         if (visionConsent) append("已授权") else append("未授权")
@@ -752,8 +783,6 @@ fun SettingsScreen(
             }
             item {
                 SetRow(
-                    icon = "◎",
-                    iconColor = PrismIndigo,
                     title = "自动旁路",
                     subtitle = if (visionAutoBypass) "开启 · 图片自动转为描述/文字后回答" else "关闭",
                     trailing = {
@@ -761,6 +790,8 @@ fun SettingsScreen(
                     }
                 )
             }
+            } // BEHAVIOR
+            if (section == SettingsSection.PHONE) {
             // ADR-046 修订（2026-10-26；PRD US-3116）：无障碍自愈 + Shizuku 单实例说明。
             // 真机实测 HyperOS 安全中心会清掉本应用的无障碍注册，故这里给"状态 + 一键恢复 + 开关"。
             item {
@@ -768,12 +799,6 @@ fun SettingsScreen(
                 val selfHeal = (context.applicationContext as? io.prism.PrismApplication)
                     ?.isAccessibilitySelfHealEnabled() ?: true
                 SetRow(
-                    icon = "♻",
-                    iconColor = if (a11yState == io.prism.phonecontrol.health.AccessibilityHealth.State.OK) {
-                        PrismMint
-                    } else {
-                        Color(0xFFFF7A6B)
-                    },
                     title = "无障碍自动恢复",
                     subtitle = buildString {
                         append(
@@ -814,8 +839,6 @@ fun SettingsScreen(
             item { SetSection("手机操控（LLM 操控手机）") }
             item {
                 SetRow(
-                    icon = "🖐",
-                    iconColor = PrismMint,
                     title = "无障碍服务",
                     subtitle = if (phoneControlConnected) {
                         "已开启 · AI 可读取屏幕并执行点击/滑动/输入"
@@ -835,8 +858,6 @@ fun SettingsScreen(
             // 支付/密码/验证码为不可绕过硬拦截（固定行为），发送/删除/拨号策略由本行循环切换。
             item {
                 SetRow(
-                    icon = "🛡",
-                    iconColor = Color(0xFFFF7A6B),
                     title = "高危操作拦截",
                     subtitle = "支付/密码/验证码一律硬拦截 · 发送/删除/拨号：" +
                         highRiskApprovalSubtitle(highRiskApprovalMode),
@@ -846,8 +867,6 @@ fun SettingsScreen(
             // 批次20（BG-005，ADR-045）：后台模式说明 + 悬浮窗权限引导入口（点击跳系统授权页）
             item {
                 SetRow(
-                    icon = "🪟",
-                    iconColor = PrismIndigo,
                     title = "后台操控（执行面）",
                     subtitle = buildString {
                         append(
@@ -871,8 +890,6 @@ fun SettingsScreen(
             // ADR-065（US-3114 AC-1/AC-5）：隐藏执行面开关（默认开；失败自动回落兼容模式）
             item {
                 SetRow(
-                    icon = "👁",
-                    iconColor = PrismIndigo,
                     title = "隐藏执行面",
                     subtitle = if (hiddenDisplaySaveError != null) {
                         hiddenDisplaySaveError ?: ""
@@ -893,8 +910,6 @@ fun SettingsScreen(
             // ADR-065（US-3114 AC-3）：Watch 悬浮窗（≤2fps；关闭不中断执行）
             item {
                 SetRow(
-                    icon = "📺",
-                    iconColor = PrismIndigo,
                     title = "观看 AI 操作（Watch）",
                     subtitle = when {
                         watchError.isNotEmpty() -> watchError
@@ -919,8 +934,6 @@ fun SettingsScreen(
             // 未授权→点击授权；就绪→提示全能力）
             item {
                 SetRow(
-                    icon = "⚡",
-                    iconColor = PrismIndigo,
                     title = "Shizuku（后台化增强）",
                     subtitle = shizukuSubtitle,
                     onClick = {
@@ -949,27 +962,21 @@ fun SettingsScreen(
             // UXR3 问题 10（ADR-023）：工具审批模式（手动审批 / 自动审批 / 禁用）
             item {
                 SetRow(
-                    icon = "⚙",
-                    iconColor = PrismIndigo,
                     title = "工具权限",
                     subtitle = toolApprovalSubtitle(toolApprovalMode),
                     onClick = { toolApprovalSheetVisible = true }
                 )
             }
-            // UXR8 N3（ADR-030）：图片直传隐私说明（方案 A 无云端旁路，图片直达用户自配端点）
-            item {
-                SetRow(
-                    icon = "🖼",
-                    iconColor = Color(0xFF9BB8FF),
-                    title = "图片消息",
-                    subtitle = "图片直传你配置的模型端点（无云端旁路），不支持视觉的模型会提示降级"
-                )
-            }
-            // 批次22 修复轮五（2026-09-07）：语音通话热词（同音字偏置，用户词库）
+            } // PHONE
+            if (section == SettingsSection.QQ) {
             // ==================== QQ 小号助手（ADR-062/063；US-3101/3105/3108） ====================
             item { SetSection("QQ 小号助手") }
             // 2026-11-01（US-3128）：协议端管家——把「启动/修复/扫码」变成按钮，并回读校验电源策略。
             // 放在总开关之前是有意的：用户打开小号助手后第一件事就是让协议端跑起来。
+            item {
+                QqSubTabRow(selected = qqTab, onSelect = { qqTab = it })
+            }
+            whenTab(qqTab == QqSubTab.CONNECTION) {
             item {
                 QqProtocolSupervisorSection(
                     supervisor = qqApp?.qqProtocolSupervisor,
@@ -995,8 +1002,6 @@ fun SettingsScreen(
             // US-3101 AC-1/AC-2：总开关（默认关）+ 风险告知确认前置
             item {
                 SetRow(
-                    icon = "🐧",
-                    iconColor = PrismMint,
                     title = "QQ 小号助手",
                     subtitle = if (qqConfig.enabled) "已开启 · AI 可以小号身份发消息/改签名" else "未开启 · 开启前需确认风险告知",
                     trailing = {
@@ -1013,20 +1018,9 @@ fun SettingsScreen(
                     }
                 )
             }
-            item {
-                SetRow(
-                    icon = "⚠️",
-                    iconColor = Color(0xFFFF7A6B),
-                    title = "风险告知",
-                    subtitle = if (qqConfig.riskAccepted) "已确认（自动化操作小号存在被平台限制/冻结的可能）" else "未确认 · 开启总开关前必须确认",
-                    onClick = { qqRiskDialogVisible = true }
-                )
-            }
             // ADR-064 / US-3110：传输通道（默认协议端；无障碍为兜底）
             item {
                 SetRow(
-                    icon = "🔌",
-                    iconColor = PrismIndigo,
                     title = "传输通道",
                     subtitle = (if (qqConfig.transport == io.prism.qq.channel.QqTransport.ONEBOT) {
                         "首选协议端 OneBot 11（未连接时自动改用无障碍兜底）· 点击切换为仅无障碍"
@@ -1035,7 +1029,7 @@ fun SettingsScreen(
                     }) + if (qqConfig.transport == io.prism.qq.channel.QqTransport.ONEBOT &&
                         qqConfig.oneBotToken.isBlank()
                     ) {
-                        "\n⚠ 协议端未配置 access_token，当前实际走无障碍兜底"
+                        "\n协议端未配置 access_token，当前实际走无障碍兜底"
                     } else {
                         ""
                     } + if (qqEffectiveChannelText.isBlank()) "" else "\n${qqEffectiveChannelText}",
@@ -1054,8 +1048,6 @@ fun SettingsScreen(
             // US-3110 AC-1/AC-3/AC-7：协议端连接配置与状态
             item {
                 SetRow(
-                    icon = "🌐",
-                    iconColor = PrismIndigo,
                     title = "协议端连接",
                     subtitle = buildString {
                         // 2026-10-26（US-3125）：WS 连接 ≠ QQ 在线，必须分开展示
@@ -1089,8 +1081,6 @@ fun SettingsScreen(
             // US-3110 AC-1：连接测试（实时探测当前通道）
             item {
                 SetRow(
-                    icon = "📡",
-                    iconColor = PrismMint,
                     title = "连接测试",
                     subtitle = "点击检测当前生效通道与连接状态",
                     onClick = {
@@ -1104,23 +1094,10 @@ fun SettingsScreen(
                 )
             }
             // US-308 AC-3（原文保留）：目标联系人（小号对用户主号的备注名）
-            item {
-                SetRow(
-                    icon = "👤",
-                    iconColor = PrismIndigo,
-                    title = "定时消息联系人",
-                    subtitle = qqConfig.targetContact.ifBlank { "未配置 · 小号对你的备注名（定时消息发给谁）" },
-                    onClick = {
-                        qqContactDraft = qqConfig.targetContact
-                        qqContactDialogVisible = true
-                    }
-                )
             }
-            // US-3108 AC-1/AC-2：随机定时主动消息
+            whenTab(qqTab == QqSubTab.SCHEDULE) {
             item {
                 SetRow(
-                    icon = "⏰",
-                    iconColor = PrismIndigo,
                     title = "随机定时主动消息",
                     subtitle = if (qqConfig.scheduleEnabled) {
                         // 2026-10-31：上限由用户自定；0 = 不限，文案要如实说明
@@ -1145,8 +1122,102 @@ fun SettingsScreen(
             // US-3109：双向对话（你发消息给小号 → AI 后台以小号身份自动回复）
             item {
                 SetRow(
-                    icon = "💬",
-                    iconColor = PrismIndigo,
+                    title = "活跃时段",
+                    subtitle = "%s - %s（点击自由编辑）".format(
+                        io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute),
+                        io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
+                    ),
+                    onClick = {
+                        qqWindowStartDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute)
+                        qqWindowEndDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
+                        qqCapDraft = qqConfig.dailyCap.toString()
+                        qqPerDayDraft = qqConfig.maxPerDay.toString()
+                        qqIntervalDraft = (qqConfig.minIntervalMs / 60_000L).toString()
+                        qqScheduleError = ""
+                        qqScheduleDialogVisible = true
+                    }
+                )
+            }
+            item {
+                SetRow(
+                    title = "每日消息上限",
+                    subtitle = "${qqConfig.dailyCap} 条 / 天 · 最小间隔 ${qqConfig.minIntervalMs / 60000} 分钟（点击自由编辑）",
+                    onClick = {
+                        qqWindowStartDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute)
+                        qqWindowEndDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
+                        qqCapDraft = qqConfig.dailyCap.toString()
+                        qqPerDayDraft = qqConfig.maxPerDay.toString()
+                        qqIntervalDraft = (qqConfig.minIntervalMs / 60_000L).toString()
+                        qqScheduleError = ""
+                        qqScheduleDialogVisible = true
+                    }
+                )
+            }
+            // 2026-10-25（US-3115 AC-6）：熄屏策略 + 上次执行结果（不再"只能看熔断"）
+            item {
+                SetRow(
+                    title = "熄屏时点亮屏幕执行",
+                    subtitle = if (qqConfig.wakeOnScreenOff) {
+                        "已开启 · 到点若屏幕熄灭，会临时点亮并保持亮屏把消息发出（执行后不强制熄屏）"
+                    } else {
+                        "已关闭 · 熄屏时跳过本次定时消息并记录原因（仅在协议端可用时不受影响）"
+                    },
+                    trailing = {
+                        PrismSwitch(
+                            checked = qqConfig.wakeOnScreenOff,
+                            onCheckedChange = { on ->
+                                qqScope.launch { qqApp?.qqConfigRepository?.setWakeOnScreenOff(on) }
+                            }
+                        )
+                    }
+                )
+            }
+            item {
+                SetRow(
+                    title = "定时任务最近状态",
+                    subtitle = qqLastOutcomeText.ifBlank {
+                        "尚无执行记录（到点后这里会展示成功/跳过/失败与原因）"
+                    } + if (qqCircuitOpen) " · 已熔断（需手动恢复）" else ""
+                )
+            }
+            // US-3112 AC-1/AC-4：历史上下文条数 + 记忆注入开关（含数据外发披露）
+            item {
+                SetRow(
+                    title = "随机策略",
+                    subtitle = if (qqConfig.usePoisson) "泊松过程 · 偶发成串，更像真人想起你（点击切换）" else "时间窗内均匀采样 · 平缓随机（点击切换）",
+                    onClick = { qqScope.launch { qqApp?.qqConfigRepository?.setUsePoisson(!qqConfig.usePoisson) } }
+                )
+            }
+            // US-3105 AC-3/AC-4：熔断状态与恢复
+            if (qqCircuitOpen) {
+                item {
+                    SetRow(
+                        title = "已熔断",
+                        subtitle = "连续多次发送失败已自动停止（保护小号账号）。点击手动恢复",
+                        onClick = {
+                            qqScope.launch {
+                                qqApp?.qqRuntimeStateRepository?.resetCircuit()
+                                qqCircuitOpen = false
+                            }
+                        }
+                    )
+                }
+            }
+            }
+            whenTab(qqTab == QqSubTab.REPLY) {
+            item {
+                SetRow(
+                    title = "定时消息联系人",
+                    subtitle = qqConfig.targetContact.ifBlank { "未配置 · 小号对你的备注名（定时消息发给谁）" },
+                    onClick = {
+                        qqContactDraft = qqConfig.targetContact
+                        qqContactDialogVisible = true
+                    }
+                )
+            }
+            // US-3108 AC-1/AC-2：随机定时主动消息
+            item {
+                SetRow(
                     title = "双向对话（自动回复）",
                     subtitle = if (qqConfig.autoReplyEnabled) {
                         "已开启 · 你给小号发消息后，AI 会在后台以小号身份回你（消息正文会发送至你配置的模型端点以生成回复）"
@@ -1166,77 +1237,6 @@ fun SettingsScreen(
             // US-3115 AC-1/AC-2：活跃时段 / 每日上限 / 最小间隔**自由编辑**（不再循环预设）
             item {
                 SetRow(
-                    icon = "🕐",
-                    iconColor = PrismIndigo,
-                    title = "活跃时段",
-                    subtitle = "%s - %s（点击自由编辑）".format(
-                        io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute),
-                        io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
-                    ),
-                    onClick = {
-                        qqWindowStartDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute)
-                        qqWindowEndDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
-                        qqCapDraft = qqConfig.dailyCap.toString()
-                        qqPerDayDraft = qqConfig.maxPerDay.toString()
-                        qqIntervalDraft = (qqConfig.minIntervalMs / 60_000L).toString()
-                        qqScheduleError = ""
-                        qqScheduleDialogVisible = true
-                    }
-                )
-            }
-            item {
-                SetRow(
-                    icon = "🚦",
-                    iconColor = PrismIndigo,
-                    title = "每日消息上限",
-                    subtitle = "${qqConfig.dailyCap} 条 / 天 · 最小间隔 ${qqConfig.minIntervalMs / 60000} 分钟（点击自由编辑）",
-                    onClick = {
-                        qqWindowStartDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute)
-                        qqWindowEndDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
-                        qqCapDraft = qqConfig.dailyCap.toString()
-                        qqPerDayDraft = qqConfig.maxPerDay.toString()
-                        qqIntervalDraft = (qqConfig.minIntervalMs / 60_000L).toString()
-                        qqScheduleError = ""
-                        qqScheduleDialogVisible = true
-                    }
-                )
-            }
-            // 2026-10-25（US-3115 AC-6）：熄屏策略 + 上次执行结果（不再"只能看熔断"）
-            item {
-                SetRow(
-                    icon = "🌙",
-                    iconColor = PrismIndigo,
-                    title = "熄屏时点亮屏幕执行",
-                    subtitle = if (qqConfig.wakeOnScreenOff) {
-                        "已开启 · 到点若屏幕熄灭，会临时点亮并保持亮屏把消息发出（执行后不强制熄屏）"
-                    } else {
-                        "已关闭 · 熄屏时跳过本次定时消息并记录原因（仅在协议端可用时不受影响）"
-                    },
-                    trailing = {
-                        PrismSwitch(
-                            checked = qqConfig.wakeOnScreenOff,
-                            onCheckedChange = { on ->
-                                qqScope.launch { qqApp?.qqConfigRepository?.setWakeOnScreenOff(on) }
-                            }
-                        )
-                    }
-                )
-            }
-            item {
-                SetRow(
-                    icon = "📋",
-                    iconColor = PrismMint,
-                    title = "定时任务最近状态",
-                    subtitle = qqLastOutcomeText.ifBlank {
-                        "尚无执行记录（到点后这里会展示成功/跳过/失败与原因）"
-                    } + if (qqCircuitOpen) " · 已熔断（需手动恢复）" else ""
-                )
-            }
-            // US-3112 AC-1/AC-4：历史上下文条数 + 记忆注入开关（含数据外发披露）
-            item {
-                SetRow(
-                    icon = "🧠",
-                    iconColor = PrismIndigo,
                     title = "历史上下文条数",
                     subtitle = "最近 ${qqConfig.historyLimit} 条（点击编辑）· 消息与记忆会发送至模型端点",
                     onClick = {
@@ -1248,8 +1248,6 @@ fun SettingsScreen(
             }
             item {
                 SetRow(
-                    icon = "📚",
-                    iconColor = PrismIndigo,
                     title = "注入 Prism 记忆",
                     subtitle = if (qqConfig.memoryInjectionEnabled) {
                         "已开启 · 回复时参考跨会话记忆与用户画像（相关片段会发送至模型端点）"
@@ -1269,8 +1267,6 @@ fun SettingsScreen(
             // ==================== 2026-11-16（ADR-077）：拟人节奏 ====================
             item {
                 SetRow(
-                    icon = "🐢",
-                    iconColor = PrismIndigo,
                     title = "拟人节奏（思考 + 打字延迟）",
                     subtitle = if (qqConfig.pacingEnabled) {
                         "已开启 · ${"%.1f".format(qqConfig.typingCharsPerSecond)} 字/秒 + 思考时间，" +
@@ -1291,8 +1287,6 @@ fun SettingsScreen(
             // ==================== 2026-11-16（ADR-077）：能力接入 + 日记 ====================
             item {
                 SetRow(
-                    icon = "🧰",
-                    iconColor = PrismIndigo,
                     title = "聊天里可以调用 Prism 能力",
                     subtitle = if (qqConfig.replyToolsEnabled) {
                         "已开启 · 联网/热榜/资料库/待办/文档/写日记（上限 ${qqConfig.replyToolBudgetMs / 1000}s）"
@@ -1311,8 +1305,6 @@ fun SettingsScreen(
             }
             item {
                 SetRow(
-                    icon = "📱",
-                    iconColor = PrismIndigo,
                     title = "允许她在聊天里操作手机",
                     subtitle = if (qqConfig.replyPhoneControlEnabled) {
                         "已开启 · 后台建副屏执行（较高风险，可能抢占前台）"
@@ -1331,8 +1323,6 @@ fun SettingsScreen(
             }
             item {
                 SetRow(
-                    icon = "📔",
-                    iconColor = PrismIndigo,
                     title = "允许她写日记",
                     subtitle = if (qqConfig.diaryEnabled) {
                         "已开启 · 本地保存，每天最多 ${io.prism.qq.RoleDiaryStore.MAX_PER_DAY} 条"
@@ -1350,10 +1340,10 @@ fun SettingsScreen(
                 )
             }
             // ==================== 2026-11-16（ADR-077）：自定义表情库 ====================
+            }
+            whenTab(qqTab == QqSubTab.STICKERS) {
             item {
                 SetRow(
-                    icon = "🎭",
-                    iconColor = PrismIndigo,
                     title = "我的表情库（${qqStickerState.value.size} 张）",
                     subtitle = if (qqStickerState.value.isEmpty()) {
                         "还没有导入表情。导入后，她自己会按语境挑一张发，不再只用 QQ 内置表情"
@@ -1376,7 +1366,7 @@ fun SettingsScreen(
             }
             if (qqStickerState.value.isNotEmpty()) {
                 item {
-                    PrismGlassCard {
+                    PrismCard {
                         Column(Modifier.padding(16.dp)) {
                             qqStickerState.value.forEach { sticker ->
                                 Row(
@@ -1453,47 +1443,30 @@ fun SettingsScreen(
                 }
             }
             // 随机策略（US-3108 AC-2；用户裁定"择优真人感"——泊松更突发，均匀更平缓）
+            }
+            } // QQ
+            if (section == SettingsSection.VOICE) {
             item {
-                SetRow(
-                    icon = "🎲",
-                    iconColor = PrismIndigo,
-                    title = "随机策略",
-                    subtitle = if (qqConfig.usePoisson) "泊松过程 · 偶发成串，更像真人想起你（点击切换）" else "时间窗内均匀采样 · 平缓随机（点击切换）",
-                    onClick = { qqScope.launch { qqApp?.qqConfigRepository?.setUsePoisson(!qqConfig.usePoisson) } }
-                )
+                VoiceSubTabRow(selected = voiceTab, onSelect = { voiceTab = it })
             }
-            // US-3105 AC-3/AC-4：熔断状态与恢复
-            if (qqCircuitOpen) {
-                item {
-                    SetRow(
-                        icon = "⛔",
-                        iconColor = Color(0xFFFF7A6B),
-                        title = "已熔断",
-                        subtitle = "连续多次发送失败已自动停止（保护小号账号）。点击手动恢复",
-                        onClick = {
-                            qqScope.launch {
-                                qqApp?.qqRuntimeStateRepository?.resetCircuit()
-                                qqCircuitOpen = false
-                            }
-                        }
-                    )
-                }
-            }
+            whenTab(voiceTab == VoiceSubTab.SPEECH) {
             item { SetSection("语音通话") }
             item { VoiceHotwordsEditor() }
             // 批次23-A（ADR-048，A4）：语音引擎（ASR/TTS 云端双轨手选 + Key 配置 + 连通性自检）
             item { VoiceEngineSection(viewModel) }
+            }
+            whenTab(voiceTab == VoiceSubTab.PERSONA) {
             // 批次23-C（ADR-048）：角色包（导入 / 列表切换 / 删除——通用模板，不含具体角色内容）
             item { RolePackSection(viewModel) }
             // 批次24（ADR-051）：桌宠（开关 / 形象导入 / 尺寸 / 待机 / 权限引导）
-            item { SetSection("桌宠") }
             item { PetSection(viewModel) }
+            }
+            } // VOICE
+            if (section == SettingsSection.SYSTEM) {
             // v1 批次15（US-1501/1502/1507）：搜索增强（智谱 / Tavily / SearXNG）
             item { SetSection("搜索增强") }
             item {
                 SetRow(
-                    icon = "⌕",
-                    iconColor = PrismMint,
                     title = "搜索引擎增强",
                     subtitle = searchEnhancementSubtitle(zhipuKeyConfigured, tavilyKeyConfigured, searxngSettings != null),
                     onClick = { searchEnhancementSheetVisible = true }
@@ -1501,8 +1474,6 @@ fun SettingsScreen(
             }
             item {
                 SetRow(
-                    icon = "◍",
-                    iconColor = PrismIndigo,
                     title = "WebView 渲染抓取",
                     subtitle = "增强被反爬拦截页面的抓取成功率；仅访问公网 https 页面",
                     trailing = {
@@ -1516,8 +1487,6 @@ fun SettingsScreen(
             item { SetSection("设备档位") }
             item {
                 SetRow(
-                    icon = "▣",
-                    iconColor = Color(0xFFFF9A5C),
                     title = "性能档位",
                     subtitle = tierSubtitle(
                         override = tierOverride,
@@ -1530,13 +1499,16 @@ fun SettingsScreen(
             }
             item { SetSection("关于") }
             item {
+                // DEF-R3-01（ac-verifier B2）：原副标题写死「v0.1」，与 versionName=1.1、
+                // 设置页脚与设计稿三处矛盾（状态撒谎）。改为读 PackageManager 的真实版本
+                //（BuildConfig 未开启 buildFeatures.buildConfig，不为此改构建配置）。
+                val appVersion = remember { appVersionName(context) }
                 SetRow(
-                    icon = "◉",
-                    iconColor = PrismTextDim,
                     title = "关于 Prism",
-                    subtitle = "v0.1 · 零后端"
+                    subtitle = "v$appVersion · 零后端"
                 )
             }
+            } // SYSTEM
         }
 
         // Provider 列表弹层
@@ -1765,7 +1737,7 @@ private fun ToolApprovalSheet(
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            text = "⚠️ 自动审批下 AI 可直接读写已授权文件、打开应用、联网抓取，请谨慎开启。",
+            text = " 自动审批下 AI 可直接读写已授权文件、打开应用、联网抓取，请谨慎开启。",
             color = PrismWarning,
             fontSize = 11.sp,
             lineHeight = 16.sp
@@ -1825,7 +1797,7 @@ private fun ToolApprovalOptionRow(
             contentAlignment = Alignment.Center
         ) {
             Text(
-                text = if (selected) "✓" else "⚙",
+                text = if (selected) "✓" else "◇",
                 color = if (selected) PrismMint else PrismTextDim,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold
@@ -2412,61 +2384,334 @@ private fun ApiKeySheet(providers: List<ProviderConfig>, viewModel: SettingsView
     }
 }
 
-/** 分组标题。 */
+/**
+ * QQ 小号的四个子页（ADR-079 D2 / 设计稿 `settings-qq` + 3 个子页）。
+ *
+ * 为什么必须拆：单页平铺时 QQ 有 20+ 行、跨度 500 行源码，用户找不到「表情库」；
+ * 设计稿把它拆成 连接 / 定时与主动消息 / 自动回复 / 表情库 四页。
+ */
+private enum class QqSubTab(val label: String) {
+    CONNECTION("连接"),
+    SCHEDULE("定时"),
+    REPLY("自动回复"),
+    STICKERS("表情库")
+}
+
+/** 「语音与形象」的两个子页（设计稿 `settings-voice` / `settings-persona`）。 */
+private enum class VoiceSubTab(val label: String) {
+    SPEECH("语音"),
+    PERSONA("角色与桌宠")
+}
+
+/**
+ * LazyListScope 级条件分组。
+ *
+ * 直接写 `if (cond) { item {…} }` 也合法，但每个 item 都要各包一层，20 多个块容易错配括号；
+ * 用扩展函数后分组边界只在**组**上出现一次，且被隐藏的组不会产生空 item。
+ */
+private fun androidx.compose.foundation.lazy.LazyListScope.whenTab(
+    selected: Boolean,
+    content: androidx.compose.foundation.lazy.LazyListScope.() -> Unit
+) {
+    if (selected) content()
+}
+
+/** QQ 子页切换条。 */
 @Composable
-private fun SetSection(title: String) {
-    Text(
-        text = title,
-        color = PrismTextDim,
-        fontSize = 12.sp,
-        letterSpacing = 0.4.sp,
-        modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp)
+private fun QqSubTabRow(selected: QqSubTab, onSelect: (QqSubTab) -> Unit) {
+    PrismSegmented(
+        options = QqSubTab.entries,
+        selected = selected,
+        onSelect = onSelect,
+        labelOf = { it.label },
+        modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
     )
 }
 
-/** 设置行（玻璃面板 + 图标 + 标题/副标题 + 可选尾随控件 + 点击）。 */
+/** 「语音与形象」子页切换条。 */
 @Composable
-private fun SetRow(
-    icon: String,
-    iconColor: Color,
-    title: String,
-    subtitle: String,
-    trailing: @Composable () -> Unit = {},
-    onClick: (() -> Unit)? = null
+private fun VoiceSubTabRow(selected: VoiceSubTab, onSelect: (VoiceSubTab) -> Unit) {
+    PrismSegmented(
+        options = VoiceSubTab.entries,
+        selected = selected,
+        onSelect = onSelect,
+        labelOf = { it.label },
+        modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+    )
+}
+
+/** 读取本应用 versionName（失败时退回 "1.1"，不抛异常影响设置页渲染）。 */
+private fun appVersionName(context: android.content.Context): String =
+    runCatching {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName
+    }.getOrNull()?.takeIf { it.isNotBlank() } ?: "1.1"
+
+
+/** 分组标题（UI v2：小字、无字距、弱化）。 */
+@Composable
+private fun SetSection(title: String) {
+    // 设计稿 `.group-label`：12sp faint、组上间距 24dp、标签下 8dp。
+    Text(
+        text = title,
+        color = PrismTextFaint,
+        fontSize = 12.sp,
+        modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 24.dp, bottom = 8.dp)
+    )
+}
+
+/**
+ * 设置首页 —— 6 个任务入口 + 一行运行状态（ADR-079 D2）。
+ *
+ * 只回答「我要改哪一类」，不解释功能；每个入口的状态行是**当前真实值**，
+ * 让用户不进去也知道现状。47 个设置项全部在详情页，这里一项都不放。
+ */
+@Composable
+private fun SettingsHome(
+    onOpenSection: (SettingsSection) -> Unit,
+    viewModel: SettingsViewModel
 ) {
-    PrismGlassCard(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 5.dp)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                enabled = onClick != null,
-                onClick = { onClick?.invoke() }
-            )
-    ) {
-        Row(
-            modifier = Modifier.padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+    val providers by viewModel.providers.collectAsState()
+    val activeProvider by viewModel.activeProvider.collectAsState()
+    val thinkingEnabled by viewModel.thinkingEnabled.collectAsState()
+    val visionConsent by viewModel.visionConsent.collectAsState()
+    val phoneControlConnected by viewModel.phoneControlConnected.collectAsState()
+    val tierViewModel: TierViewModel = viewModel(factory = TierViewModel.Factory)
+    val tierOverride by tierViewModel.override.collectAsState()
+    val context = LocalContext.current
+    val qqApp = context.applicationContext as? io.prism.PrismApplication
+    val qqConfig by (qqApp?.qqConfigRepository?.config()
+        ?: kotlinx.coroutines.flow.flowOf(io.prism.qq.QqConfig.DEFAULT))
+        .collectAsState(initial = io.prism.qq.QqConfig.DEFAULT)
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        PrismTopBar(title = "设置", subtitle = null)
+        LazyColumn(
+            modifier = Modifier.fillMaxWidth(),
+            contentPadding = PaddingValues(bottom = 24.dp)
         ) {
-            Box(
-                modifier = Modifier
-                    .size(38.dp)
-                    .background(PrismPanel2, RoundedCornerShape(12.dp))
-                    .border(1.dp, PrismLine, RoundedCornerShape(12.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(text = icon, color = iconColor, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            item {
+                SettingsStatusCard(
+                    providerName = activeProvider?.name,
+                    qqEnabled = qqConfig.enabled,
+                    phoneReady = phoneControlConnected,
+                    providerCount = providers.size
+                )
             }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = title, color = PrismText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                Text(text = subtitle, color = PrismTextFaint, fontSize = 11.sp) 
+            item {
+                Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) {
+                    SettingsNavRow(
+                        title = SettingsSection.MODEL.title,
+                        status = buildString {
+                            append(activeProvider?.name ?: "未配置端点")
+                            append(" · ")
+                            append(providers.size)
+                            append(" 个端点")
+                        }
+                    ) { onOpenSection(SettingsSection.MODEL) }
+                    SettingsNavRow(
+                        title = SettingsSection.BEHAVIOR.title,
+                        status = buildString {
+                            append(if (thinkingEnabled) "深度思考开" else "深度思考关")
+                            append(" · ")
+                            append(if (visionConsent) "视觉旁路已授权" else "视觉旁路未授权")
+                        }
+                    ) { onOpenSection(SettingsSection.BEHAVIOR) }
+                    SettingsNavRow(
+                        title = SettingsSection.PHONE.title,
+                        status = if (phoneControlConnected) "无障碍已开启" else "无障碍未开启",
+                        tone = if (phoneControlConnected) PrismOk else PrismWarning
+                    ) { onOpenSection(SettingsSection.PHONE) }
+                    SettingsNavRow(
+                        title = SettingsSection.QQ.title,
+                        status = if (qqConfig.enabled) "已开启" else "已关闭",
+                        tone = if (qqConfig.enabled) PrismOk else null
+                    ) { onOpenSection(SettingsSection.QQ) }
+                    SettingsNavRow(
+                        title = SettingsSection.VOICE.title,
+                        status = "语音引擎 · 角色包 · 桌宠"
+                    ) { onOpenSection(SettingsSection.VOICE) }
+                    SettingsNavRow(
+                        title = SettingsSection.SYSTEM.title,
+                        status = tierSubtitle(
+                            override = tierOverride,
+                            detectedTier = tierViewModel.detectedTier,
+                            currentTier = tierViewModel.currentTier,
+                            totalRamBytes = tierViewModel.totalRamBytes
+                        )
+                    ) { onOpenSection(SettingsSection.SYSTEM) }
+                }
             }
-            trailing()
+            item {
+                Text(
+                    text = "Prism 1.1 · Apache 2.0",
+                    color = PrismTextFaint,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(start = 20.dp, top = 16.dp)
+                )
+            }
         }
     }
 }
+
+/** 运行状态卡：一句话结论 + 两个计数，不堆指标。 */
+@Composable
+private fun SettingsStatusCard(
+    providerName: String?,
+    qqEnabled: Boolean,
+    phoneReady: Boolean,
+    providerCount: Int
+) {
+    val ok = providerName != null
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 8.dp)
+            .background(PrismPanel, RoundedCornerShape(14.dp))
+            .border(1.dp, PrismLine, RoundedCornerShape(14.dp))
+            .padding(16.dp),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(top = 6.dp)
+                .size(6.dp)
+                .background(if (ok) PrismOk else PrismWarning, CircleShape)
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = if (ok) "运行正常" else "还没有可用端点",
+                color = PrismText,
+                fontSize = 15.sp
+            )
+            Text(
+                text = buildString {
+                    append(providerName ?: "未配置")
+                    append(" · ")
+                    // M-02（guardrail）：不伪造知识库数量；知识库信息归知识页。
+                    append(if (qqEnabled) "QQ 开" else "QQ 关")
+                    append(" · ")
+                    append(if (phoneReady) "无障碍开" else "无障碍关")
+                },
+                color = PrismTextFaint,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 3.dp)
+            )
+        }
+        if (providerCount > 1) {
+            Text(
+                text = "$providerCount 个端点",
+                color = PrismTextDim,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
+    }
+}
+
+/** 设置首页导航行：标题 + 一行状态 + 箭头，无图标。 */
+@Composable
+private fun SettingsNavRow(
+    title: String,
+    status: String,
+    tone: Color? = null,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = title, color = PrismText, fontSize = 15.sp)
+            Text(
+                text = status,
+                color = tone ?: PrismTextFaint,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 3.dp)
+            )
+        }
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = PrismTextFaint,
+            modifier = Modifier.size(18.dp)
+        )
+    }
+}
+
+/** 详情页顶栏：返回 + 页面名（居中），右侧留 36dp 保持标题居中。 */
+@Composable
+private fun SettingsDetailHeader(title: String, onBack: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clickable(onClick = onBack),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = "返回",
+                tint = PrismTextDim,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+        Text(
+            text = title,
+            color = PrismText,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.Medium,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.size(36.dp))
+    }
+}
+
+/**
+ * 设置行 —— 设计稿 `.row`（`design/prism-ui-v1/app.css`）：标题 15sp + 状态 12sp faint，
+ * 尾部控件，底边 1px 分隔线，最小高 56dp，**无卡片、无图标**。
+ */
+@Composable
+private fun SetRow(
+    title: String,
+    subtitle: String,
+    trailing: (@Composable () -> Unit)? = null,
+    onClick: (() -> Unit)? = null
+) {
+    // 设计稿 `.row` 位于 `main.scroll`（左右 20dp）之内，分隔线随之**内缩**而非通栏。
+    Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+        PrismRow(
+            title = title,
+            status = subtitle.takeIf { it.isNotBlank() },
+            onClick = onClick,
+            trailing = {
+                trailing?.invoke()
+                if (onClick != null) {
+                    Icon(
+                        imageVector = PrismIcons.ChevronRight,
+                        contentDescription = null,
+                        tint = PrismTextFaint,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+        )
+    }
+}
+
 
 /**
  * 用户规则编辑弹层（UXR8 N1，ADR-030）—— 类 ChatGPT Custom Instructions 双字段。
@@ -2727,8 +2972,6 @@ fun VoiceHotwordsEditor() {
 
     if (!expanded) {
         SetRow(
-            icon = "🔤",
-            iconColor = PrismMint,
             title = "语音热词",
             subtitle = if (hotwordCount > 0) {
                 "已配置 $hotwordCount 个 · 识别时加权提升同音字区分 · 点此编辑"
@@ -2759,7 +3002,7 @@ fun VoiceHotwordsEditor() {
             textStyle = androidx.compose.ui.text.TextStyle(color = PrismText, fontSize = 14.sp)
         )
         Spacer(Modifier.height(8.dp))
-        // ⚠️ BR-ui-003 ② / BUG-20260924-001 同类漏网点：同排两个 PrismButton 必须各给
+        //  BR-ui-003 ② / BUG-20260924-001 同类漏网点：同排两个 PrismButton 必须各给
         // `weight(1f)` 并关掉组件内部的 `fillMaxWidth()`，否则**第一个吃满整行、第二个被压成 0 宽**
         // （独立审查 H-1：本行改造前"取消"按钮实际不可见/不可点）。
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2894,8 +3137,6 @@ private fun VoiceEngineSection(viewModel: SettingsViewModel) {
 
     if (!expanded) {
         SetRow(
-            icon = "🎛",
-            iconColor = PrismIndigo,
             title = "语音引擎",
             subtitle = voiceEngineSubtitle(asrChoice, ttsChoice),
             onClick = { expanded = true }
@@ -3063,7 +3304,7 @@ private fun VoiceEngineSection(viewModel: SettingsViewModel) {
         )
 
         // ---- TKN-LVC-016（ADR-057）+ BUG-20260924-001/002：音色包 导入/列表/选用/删除 ----
-        // ⚠️ 标题与"导入"按钮**必须分两行**：PrismButton 默认 fillMaxWidth，与标题同排会各自
+        //  标题与"导入"按钮**必须分两行**：PrismButton 默认 fillMaxWidth，与标题同排会各自
         // 抢占整行宽度（真机现象："本地音色包"与"导入音色包"被挤在同一行）。
         Spacer(Modifier.height(10.dp))
         Text(
@@ -3138,7 +3379,7 @@ private fun VoiceEngineSection(viewModel: SettingsViewModel) {
 
         Spacer(Modifier.height(12.dp))
         // ---- 连通性自检（每个云端引擎一个按钮；结果就地展示）----
-        // ⚠️ 同一行放两个 PrismButton 时必须 `fillWidth = false` + `weight(1f)`：默认
+        //  同一行放两个 PrismButton 时必须 `fillWidth = false` + `weight(1f)`：默认
         // fillMaxWidth 会让**第一个**吃满整行、第二个被压成 0 宽（BUG-20260924-001 同类漏改）。
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -3270,7 +3511,7 @@ private fun VoiceEngineOptionRow(
             contentAlignment = Alignment.Center
         ) {
             Text(
-                text = if (selected) "✓" else if (enabled) "◈" else "🔒",
+                text = if (selected) "✓" else if (enabled) "◈" else "—",
                 color = if (selected) PrismMint else PrismTextDim,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold
@@ -3492,8 +3733,6 @@ private fun RolePackSection(viewModel: SettingsViewModel) {
     if (!expanded) {
         val selectedName = packs.firstOrNull { it.id == selectedId }?.name
         SetRow(
-            icon = "🎭",
-            iconColor = PrismIndigo,
             title = "角色包",
             subtitle = when {
                 packs.isEmpty() -> "未导入 · 导入角色包 JSON 可切换语音通话人格 · 点此管理"
@@ -3603,7 +3842,7 @@ private fun RolePackRow(
             contentAlignment = Alignment.Center
         ) {
             Text(
-                text = if (selected) "✓" else "🎭",
+                text = if (selected) "✓" else "○",
                 color = if (selected) PrismMint else PrismTextDim,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold
@@ -3680,8 +3919,6 @@ private fun PetSection(viewModel: SettingsViewModel) {
 
     if (!expanded) {
         SetRow(
-            icon = "🐾",
-            iconColor = PrismIndigo,
             title = "桌宠",
             subtitle = when {
                 !config.enabled -> "已关闭 · 打开后角色会出现在手机桌面上 · 点此设置"
@@ -3698,8 +3935,6 @@ private fun PetSection(viewModel: SettingsViewModel) {
 
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
         SetRow(
-            icon = "🐾",
-            iconColor = PrismIndigo,
             title = "显示桌宠",
             subtitle = "在手机桌面显示角色形象（悬浮窗，可随时收起）",
             trailing = {
@@ -3715,8 +3950,6 @@ private fun PetSection(viewModel: SettingsViewModel) {
         if (!canOverlay) {
             Spacer(Modifier.height(6.dp))
             SetRow(
-                icon = "⚠",
-                iconColor = PrismWarning,
                 title = "需要「显示在其他应用上层」权限",
                 subtitle = "桌宠是一个浮在桌面上的小窗口，必须授予该权限才能显示。点此前往系统设置开启。",
                 onClick = {
@@ -3997,3 +4230,24 @@ private fun PetToggleRow(
         PrismSwitch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
