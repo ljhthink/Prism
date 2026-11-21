@@ -738,13 +738,26 @@ private fun CreateLibrarySheet(
             Text(text = error, color = PrismDanger, fontSize = 11.sp)
         }
         Spacer(Modifier.height(20.dp))
-        PrismButton(
-            text = "创建",
-            onClick = { onCreate(name) },
-            enabled = name.isNotBlank()
-        )
-        Spacer(Modifier.height(12.dp))
-        PrismButton(text = "取消", variant = PrismButtonVariant.Ghost, onClick = onCancel)
+        // 设计稿 `.btn-row`：主按钮 + ghost **并排**（纵向两个全宽按钮看起来像两个同等重要的决定）
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            PrismButton(
+                text = "创建",
+                onClick = { onCreate(name) },
+                enabled = name.isNotBlank(),
+                fillWidth = false,
+                modifier = Modifier.weight(1f)
+            )
+            PrismButton(
+                text = "取消",
+                variant = PrismButtonVariant.Ghost,
+                onClick = onCancel,
+                fillWidth = false,
+                modifier = Modifier.weight(1f)
+            )
+        }
     }
 }
 
@@ -779,9 +792,25 @@ private fun DeleteLibraryConfirmSheet(
             Text(text = error, color = PrismDanger, fontSize = 11.sp)
         }
         Spacer(Modifier.height(20.dp))
-        PrismButton(text = "确认删除", variant = PrismButtonVariant.Danger, onClick = onConfirm)
-        Spacer(Modifier.height(12.dp))
-        PrismButton(text = "取消", variant = PrismButtonVariant.Ghost, onClick = onCancel)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            PrismButton(
+                text = "确认删除",
+                variant = PrismButtonVariant.Danger,
+                onClick = onConfirm,
+                fillWidth = false,
+                modifier = Modifier.weight(1f)
+            )
+            PrismButton(
+                text = "取消",
+                variant = PrismButtonVariant.Ghost,
+                onClick = onCancel,
+                fillWidth = false,
+                modifier = Modifier.weight(1f)
+            )
+        }
     }
 }
 
