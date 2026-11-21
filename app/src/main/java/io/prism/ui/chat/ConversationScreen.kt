@@ -27,6 +27,8 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -652,9 +654,14 @@ private fun CapabilityToggleRow(
     onWebSearchChange: (Boolean) -> Unit,
     onBackgroundControlChange: (Boolean) -> Unit
 ) {
+    // guardrail B2-1（ac-verifier R2）：720px 窄屏下三枚胶囊会溢出、末枚被裁到屏外且节点消失
+    //（无滚动/换行兜底）。设计稿是 390px 定宽帧，没覆盖这个情况。
+    // 修法：整行改为**横向可滚动**——正常宽度不滚动（内容不足一行），窄屏可滑出被遮部分；
+    // 胶囊自身尺寸不变，观感与设计稿在常规屏一致。
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
             .padding(start = PrismSize.page, end = PrismSize.page, top = 2.dp, bottom = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -1847,8 +1854,17 @@ private fun WebSourceList(results: List<SearchResult>) {
                 meta = hostOf(link),
                 onClick = if (clickable) {
                     {
-                        runCatching {
+                        // guardrail R2-L-04：原来 runCatching 静默吞掉 ActivityNotFoundException，
+                        // 用户点了没反应且不知道为什么。失败时给一次可见提示。
+                        val started = runCatching {
                             context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link)))
+                        }.isSuccess
+                        if (!started) {
+                            android.widget.Toast.makeText(
+                                context,
+                                "没有可打开该链接的应用",
+                                android.widget.Toast.LENGTH_SHORT
+                            ).show()
                         }
                         Unit
                     }
@@ -1919,10 +1935,18 @@ private fun SourceRow(
     }
 }
 
-/** 取链接的 host（`https://a.com/x` → `a.com`）；解析失败时退回空串。 */
-private fun hostOf(link: String): String = runCatching {
-    java.net.URI(link).host?.removePrefix("www.") ?: ""
-}.getOrDefault("")
+/**
+ * 取链接的 host（`https://a.com/x` → `a.com`）。
+ *
+ * **两级解析**（guardrail R2-L-05）：先 `java.net.URI`（严格，能正确剔除 user:pass 凭证），
+ * 失败或 host 为 null 时回退 Android `Uri`（宽松，能接受 IDN 中文域名、下划线主机名——
+ * 这些在 `java.net.URI` 下 host 恒为 null，会导致 meta 列静默空白）。
+ */
+private fun hostOf(link: String): String {
+    val strict = runCatching { java.net.URI(link).host }.getOrNull()
+    val host = strict ?: runCatching { Uri.parse(link).host }.getOrNull()
+    return host?.removePrefix("www.").orEmpty()
+}
 
 /**
  * AI 打字指示 —— 三点呼吸 + 状态文案（US-019 文案修正，ADR-012 5.8 修复 R-7）。
@@ -2693,6 +2717,8 @@ private fun EditAiMessageSheet(
         )
     }
 }
+
+
 
 
 
