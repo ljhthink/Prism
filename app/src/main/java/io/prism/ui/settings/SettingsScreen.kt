@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import io.prism.ui.components.PrismCardBox
 import io.prism.ui.components.PrismKv
+import io.prism.ui.components.PrismNoteLine
 import io.prism.ui.components.PrismActionsRow
 import io.prism.ui.components.PrismMini
 import io.prism.ui.components.PrismDangerRow
@@ -52,6 +53,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -128,6 +130,9 @@ fun SettingsScreen(
 
     // guardrail R4-M-03：待删除端点（非 null 时弹二次确认）
     var deleteProviderTarget by remember { mutableStateOf<io.prism.data.ProviderConfig?>(null) }
+
+    // 设计稿「开源许可」行：点击查看许可与第三方组件清单
+    var licenseSheetVisible by remember { mutableStateOf(false) }
     var apiKeyVisible by remember { mutableStateOf(false) }
     var thinkingSheetVisible by remember { mutableStateOf(false) }
     var toolApprovalSheetVisible by remember { mutableStateOf(false) }
@@ -885,6 +890,10 @@ fun SettingsScreen(
                     )
                 }
             }
+            // ===== 设计稿 `settingsPhone()` 分组①：权限与安全 =====
+            // 设计稿把「无障碍服务 / 无障碍自动恢复 / 高危操作拦截 / 工具权限」归在这一组，
+            // 「后台操控 / 隐藏执行面 / 观看执行 / Shizuku」归「执行面」。
+            item { SetSection("权限与安全") }
             // ADR-046 修订（2026-10-26；PRD US-3116）：无障碍自愈 + Shizuku 单实例说明。
             // 真机实测 HyperOS 安全中心会清掉本应用的无障碍注册，故这里给"状态 + 一键恢复 + 开关"。
             item {
@@ -929,22 +938,18 @@ fun SettingsScreen(
                 )
             }
             // v1 US-201（LLM 操控手机）：无障碍服务引导 + 用途声明（prominent disclosure）
-            item { SetSection("手机操控（LLM 操控手机）") }
             item {
+                // **不再用 trailing PrismButton**：PrismButton 默认 fillWidth=true，
+                // 塞进行的尾部会把标题压成 0 宽（真机上这行只剩一个按钮、标题彻底不可见，
+                // uiautomator 抓不到「无障碍服务」节点）。设计稿这里本就是纯状态行。
                 SetRow(
                     title = "无障碍服务",
                     subtitle = if (phoneControlConnected) {
-                        "已开启 · AI 可读取屏幕并执行点击/滑动/输入"
+                        "已开启 · AI 可读屏并点击/滑动/输入"
                     } else {
-                        "未开启 · 在系统「设置 → 无障碍」中开启"
+                        "未开启 · 点此打开系统无障碍设置"
                     },
-                    trailing = {
-                        PrismButton(
-                            text = if (phoneControlConnected) "已开启" else "去开启",
-                            variant = if (phoneControlConnected) PrismButtonVariant.Ghost else PrismButtonVariant.Primary,
-                            onClick = openAccessibilitySettings
-                        )
-                    }
+                    onClick = openAccessibilitySettings
                 )
             }
             // v1 批次16（US-1604）：安全拦截提示并入高危操作行——两者同属安全拦截功能：
@@ -957,6 +962,17 @@ fun SettingsScreen(
                     onClick = { viewModel.setHighRiskApprovalMode(nextHighRiskApprovalMode(highRiskApprovalMode)) }
                 )
             }
+            // 工具权限（设计稿未画，功能必须保留）：审批模式属于"权限"语义，归入本组。
+            // UXR3 问题 10（ADR-023）：工具审批模式（手动审批 / 自动审批 / 禁用）
+            item {
+                SetRow(
+                    title = "工具权限",
+                    subtitle = toolApprovalSubtitle(toolApprovalMode),
+                    onClick = { toolApprovalSheetVisible = true }
+                )
+            }
+            // ===== 设计稿 `settingsPhone()` 分组②：执行面 =====
+            item { SetSection("执行面") }
             // 批次20（BG-005，ADR-045）：后台模式说明 + 悬浮窗权限引导入口（点击跳系统授权页）
             item {
                 SetRow(
@@ -1052,13 +1068,22 @@ fun SettingsScreen(
                     }
                 )
             }
-            // UXR3 问题 10（ADR-023）：工具审批模式（手动审批 / 自动审批 / 禁用）
+            // 设计稿 `.actions-row`：段末一个 ghost 小按钮跳系统设置
             item {
-                SetRow(
-                    title = "工具权限",
-                    subtitle = toolApprovalSubtitle(toolApprovalMode),
-                    onClick = { toolApprovalSheetVisible = true }
-                )
+                Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = PrismSize.s5)) {
+                    PrismActionsRow {
+                        PrismMini(
+                            text = "打开系统设置",
+                            onClick = {
+                                context.startActivity(
+                                    android.content.Intent(
+                                        android.provider.Settings.ACTION_SETTINGS
+                                    ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            }
+                        )
+                    }
+                }
             }
             } // PHONE
             if (section == SettingsSection.QQ) {
@@ -1118,10 +1143,7 @@ fun SettingsScreen(
             }
             // 2026-11-01（US-3128）：协议端管家——把「启动/修复/扫码」变成按钮，并回读校验电源策略。
             // 放在总开关之前是有意的：用户打开小号助手后第一件事就是让协议端跑起来。
-            item {
-                QqSubTabRow(selected = qqTab, onSelect = { qqTab = it })
-            }
-            whenTab(qqTab == QqSubTab.CONNECTION) {
+            item { SetSection("协议端管家") }
             item {
                 QqProtocolSupervisorSection(
                     supervisor = qqApp?.qqProtocolSupervisor,
@@ -1148,6 +1170,7 @@ fun SettingsScreen(
             // 原实现此处还有第二枚同 checked、同回调的开关，连接子页里两枚同时可见，
             // 用户会以为"要开两个"。风险告知闸门保留在状态卡的 onCheckedChange 里。
             // ADR-064 / US-3110：传输通道（默认协议端；无障碍为兜底）
+            item { SetSection("连接") }
             item {
                 SetRow(
                     title = "传输通道",
@@ -1223,8 +1246,7 @@ fun SettingsScreen(
                 )
             }
             // US-308 AC-3（原文保留）：目标联系人（小号对用户主号的备注名）
-            }
-            whenTab(qqTab == QqSubTab.SCHEDULE) {
+            item { SetSection("定时与主动消息") }
             item {
                 SetRow(
                     title = "随机定时主动消息",
@@ -1332,8 +1354,7 @@ fun SettingsScreen(
                     )
                 }
             }
-            }
-            whenTab(qqTab == QqSubTab.REPLY) {
+            item { SetSection("自动回复") }
             item {
                 SetRow(
                     title = "定时消息联系人",
@@ -1469,8 +1490,7 @@ fun SettingsScreen(
                 )
             }
             // ==================== 2026-11-16（ADR-077）：自定义表情库 ====================
-            }
-            whenTab(qqTab == QqSubTab.STICKERS) {
+            item { SetSection("表情库") }
             item {
                 SetRow(
                     title = "我的表情库（${qqStickerState.value.size} 张）",
@@ -1572,17 +1592,24 @@ fun SettingsScreen(
                 }
             }
             // 随机策略（US-3108 AC-2；用户裁定"择优真人感"——泊松更突发，均匀更平缓）
-            }
             } // QQ
             if (section == SettingsSection.VOICE) {
             item {
                 VoiceSubTabRow(selected = voiceTab, onSelect = { voiceTab = it })
             }
             whenTab(voiceTab == VoiceSubTab.SPEECH) {
-            item { SetSection("语音通话") }
-            item { VoiceHotwordsEditor() }
+            // ===== 设计稿 `settingsVoice()` 的四组：识别 / 播报 / 本地音色包 / 语音热词 =====
+            // 原实现只有一个「语音通话」分组标签，四类设置混在一起——这是用户反馈
+            // 「语音与形象与设计存在较大出入」的结构性原因（不是单行样式问题）。
+            // 「识别 / 播报 / 本地音色包」三组的行都在 VoiceEngineSection 内（它同时管 ASR/TTS/音色包），
+            // 组标签在它展开态内部，折叠态仍是一行入口。
+            item { SetSection("识别") }
             // 批次23-A（ADR-048，A4）：语音引擎（ASR/TTS 云端双轨手选 + Key 配置 + 连通性自检）
             item { VoiceEngineSection(viewModel) }
+            // 设计稿把「语音热词」画成「播报」组里的一行（点进去编辑）；我们没有子页，
+            // 独立成组最诚实——它确实是一组自由编辑的文本行，不是一开关。
+            item { SetSection("语音热词") }
+            item { VoiceHotwordsEditor() }
             }
             whenTab(voiceTab == VoiceSubTab.PERSONA) {
             // 批次23-C（ADR-048）：角色包（导入 / 列表切换 / 删除——通用模板，不含具体角色内容）
@@ -1613,7 +1640,7 @@ fun SettingsScreen(
                     }
                 )
             }
-            item { SetSection("设备档位") }
+            item { SetSection("设备") }
             item {
                 SetRow(
                     title = "性能档位",
@@ -1628,16 +1655,52 @@ fun SettingsScreen(
             }
             item { SetSection("关于") }
             item {
-                // DEF-R3-01（ac-verifier B2）：原副标题写死「v0.1」，与 versionName=1.1、
-                // 设置页脚与设计稿三处矛盾（状态撒谎）。改为读 PackageManager 的真实版本
-                //（BuildConfig 未开启 buildFeatures.buildConfig，不为此改构建配置）。
+                // 设计稿 `settingsSystem()` 的「关于」组是两行：版本 / 开源许可。
+                // 原实现只有一行「关于 Prism」——把版本与许可压在同一句副标题里，
+                // 用户看不出「这是版本号」还是「这是功能描述」。
+                // DEF-R3-01（ac-verifier B2）已保证版本号取自 PackageManager，不再写死。
                 val appVersion = remember { appVersionName(context) }
-                SetRow(
-                    title = "关于 Prism",
-                    subtitle = "v$appVersion · 零后端"
-                )
+                Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+                    PrismRow(
+                        title = "版本",
+                        status = "v$appVersion · 零后端",
+                        trailing = {
+                            Text(
+                                text = "v$appVersion",
+                                color = PrismTextDim,
+                                fontSize = PrismType.meta,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    )
+                    PrismRow(
+                        title = "开源许可",
+                        status = "Apache 2.0",
+                        onClick = { licenseSheetVisible = true }
+                    )
+                }
             }
             } // SYSTEM
+        }
+
+        // 开源许可弹层（设计稿「开源许可」行）
+        PrismSheetHost(visible = licenseSheetVisible, onDismiss = { licenseSheetVisible = false }) {
+            PrismSheet(title = "开源许可", subtitle = "Prism ${appVersionName(context)}") {
+                Text(
+                    text = "Prism 采用 Apache License 2.0 发布。三方组件的完整清单与版本见仓库 NOTICE 文件。",
+                    color = PrismTextDim,
+                    fontSize = PrismType.sub,
+                    lineHeight = PrismType.subLine
+                )
+                Spacer(Modifier.height(PrismSize.s3))
+                PrismKv(key = "本应用", value = "Apache 2.0")
+                PrismKv(key = "markdown-renderer", value = "Apache 2.0")
+                PrismKv(key = "ObjectBox", value = "Apache 2.0")
+                PrismKv(key = "OkHttp", value = "Apache 2.0")
+                PrismKv(key = "Apache POI", value = "Apache 2.0")
+                Spacer(Modifier.height(PrismSize.s5))
+                PrismButton(text = "关闭", variant = PrismButtonVariant.Ghost, onClick = { licenseSheetVisible = false })
+            }
         }
 
         // M-03：删除端点二次确认
@@ -2998,118 +3061,118 @@ private fun SearchEnhancementSheet(
         }
     }
 
+    // ===== 严格按设计稿 `search`（`screens.js:1146`）重排 =====
+    //
+    // 设计稿结构：标题 + 副标题 + **三个字段直接排列**（Tavily Key / 智谱 Key / SearXNG 端点）
+    // + 一句 `.note-line` + 底部 `.btn-row`（保存 / 取消）。
+    //
+    // 原实现是"每个字段后面跟一个独立保存按钮"（保存智谱 Key / 保存 Tavily Key / 保存 SearXNG 配置），
+    // 弹层里散着 4 个按钮 + 一个"首选引擎"分段控件抢占视觉重心 —— 与设计稿的
+    // "三个字段 + 一个保存"完全不同。用户反馈「搜索引擎增强与设计存在非常大的出入」即指此。
+    //
+    // **功能不丢**：`首选引擎`（US-1509）与 SearXNG 的 Basic Auth 仍保留，但降级为
+    // 「高级」一组的两行入口，不再占据弹层主视觉；"保存"一次写全部三项。
     PrismSheet(
         title = "搜索引擎增强",
-        subtitle = "智谱 / Tavily / SearXNG · 配置后自动接入搜索链"
+        subtitle = "按 博查 → 智谱 → SearXNG → Tavily → Bing/Baidu 顺序尝试"
     ) {
-        Text(
-            text = "配置任一引擎后，联网搜索将按 博查 → 智谱 → SearXNG → Tavily → Bing/Baidu 的顺序优先使用，首个成功即返回。",
-            color = PrismTextFaint,
-            fontSize = 11.sp,
-            lineHeight = 16.sp
-        )
-        Spacer(Modifier.height(16.dp))
-        // v1 批次15.1（US-1509）：首选引擎——自建 SearXNG 后需选它为首选才会被实际使用
-        //（默认顺序下 Bocha 成功即短路，后续引擎不再尝试）
-        Text(
-            text = "首选引擎（首个尝试）",
-            color = PrismTextDim,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.4.sp,
-            modifier = Modifier.padding(bottom = 7.dp)
-        )
-        PrismSegmented(
-            options = engineOptions,
-            selected = engineOptions[selectedEngine],
-            onSelect = { option ->
-                val idx = engineOptions.indexOf(option)
-                if (idx >= 0 && idx != selectedEngine) {
-                    selectedEngine = idx
-                    viewModel.setPreferredEngine(engineValues[idx])
-                }
-            },
-            labelOf = { it }
-        )
-        Spacer(Modifier.height(16.dp))
-        PrismField(
-            label = "智谱 API Key",
-            value = zhipuKey,
-            onValueChange = { zhipuKey = it },
-            placeholder = "到 bigmodel.cn 注册获取",
-            secret = true,
-            hint = "加密保存 · 清空后保存即删除"
-        )
-        Spacer(Modifier.height(8.dp))
-        PrismButton(
-            text = "保存智谱 Key",
-            variant = PrismButtonVariant.Ghost,
-            onClick = {
-                if (zhipuKey.isEmpty()) {
-                    viewModel.removeApiKey(SettingsViewModel.ZHIPU_API_KEY_REF)
-                } else {
-                    viewModel.saveApiKey(SettingsViewModel.ZHIPU_API_KEY_REF, zhipuKey)
-                }
-            }
-        )
-        Spacer(Modifier.height(16.dp))
         PrismField(
             label = "Tavily API Key",
             value = tavilyKey,
             onValueChange = { tavilyKey = it },
-            placeholder = "到 tavily.com 注册获取",
-            secret = true,
-            hint = "加密保存 · 清空后保存即删除"
+            secret = true
         )
-        Spacer(Modifier.height(8.dp))
-        PrismButton(
-            text = "保存 Tavily Key",
-            variant = PrismButtonVariant.Ghost,
-            onClick = {
-                if (tavilyKey.isEmpty()) {
-                    viewModel.removeApiKey(SettingsViewModel.TAVILY_API_KEY_REF)
-                } else {
-                    viewModel.saveApiKey(SettingsViewModel.TAVILY_API_KEY_REF, tavilyKey)
-                }
-            }
+        Spacer(Modifier.height(PrismSize.s2))
+        PrismField(
+            label = "智谱 API Key",
+            value = zhipuKey,
+            onValueChange = { zhipuKey = it },
+            secret = true
         )
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(PrismSize.s2))
         PrismField(
             label = "SearXNG 端点",
             value = endpoint,
             onValueChange = { endpoint = it },
-            placeholder = "如 http://192.168.1.10:8080",
-            hint = "自建 SearXNG 服务地址（http/https）· 部署见 docs/runbooks/searxng-selfhost.md"
+            placeholder = "如 http://192.168.1.10:8080"
         )
-        Spacer(Modifier.height(8.dp))
-        PrismField(
-            label = "SearXNG 用户名（可选 Basic Auth）",
-            value = username,
-            onValueChange = { username = it },
-            placeholder = "未启用认证可留空"
-        )
-        Spacer(Modifier.height(8.dp))
-        PrismField(
-            label = "SearXNG 密码（可选 Basic Auth）",
-            value = password,
-            onValueChange = { password = it },
-            placeholder = "未启用认证可留空",
-            secret = true
-        )
-        Spacer(Modifier.height(8.dp))
-        PrismButton(
-            text = "保存 SearXNG 配置",
-            variant = PrismButtonVariant.Ghost,
-            onClick = { viewModel.saveSearxngSettings(endpoint, username, password) }
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "SearXNG 端点为你显式配置的自建服务，可达性由你自担；端点留空保存即清除配置。",
-            color = PrismTextFaint,
-            fontSize = 11.sp
-        )
-        Spacer(Modifier.height(20.dp))
-        PrismButton(text = "关闭", variant = PrismButtonVariant.Ghost, onClick = onClose)
+        // 设计稿正文最后一句
+        PrismNoteLine("端点留空保存即清除配置；自建服务可达性由你自担。")
+
+        // ---- 高级（设计稿未画，功能必须保留，降级为两行入口）----
+        Spacer(Modifier.height(PrismSize.s4))
+        SetSection("高级")
+        Column(modifier = Modifier.padding(horizontal = 0.dp)) {
+            PrismRow(
+                title = "首选引擎",
+                status = "当前：${engineOptions[selectedEngine]} · 点击切换（决定首个尝试的引擎）",
+                onClick = {
+                    val next = (selectedEngine + 1) % engineValues.size
+                    selectedEngine = next
+                    viewModel.setPreferredEngine(engineValues[next])
+                },
+                trailing = {
+                    PrismSwitch(
+                        checked = selectedEngine != 0,
+                        onCheckedChange = { on ->
+                            val next = if (on) engineValues.indexOf("tavily").coerceAtLeast(1) else 0
+                            selectedEngine = next
+                            viewModel.setPreferredEngine(engineValues[next])
+                        }
+                    )
+                }
+            )
+            if (endpoint.isNotBlank()) {
+                PrismField(
+                    label = "SearXNG 用户名（可选 Basic Auth）",
+                    value = username,
+                    onValueChange = { username = it },
+                    placeholder = "未启用认证可留空"
+                )
+                Spacer(Modifier.height(PrismSize.s2))
+                PrismField(
+                    label = "SearXNG 密码（可选 Basic Auth）",
+                    value = password,
+                    onValueChange = { password = it },
+                    placeholder = "未启用认证可留空",
+                    secret = true
+                )
+            }
+        }
+
+        Spacer(Modifier.height(PrismSize.s5))
+        // 设计稿 `.btn-row`：保存 / 取消 **并排**，一次写全部三项
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(PrismSize.s2)
+        ) {
+            PrismButton(
+                text = "保存",
+                fillWidth = false,
+                modifier = Modifier.weight(1f),
+                onClick = {
+                    if (tavilyKey.isEmpty()) {
+                        viewModel.removeApiKey(SettingsViewModel.TAVILY_API_KEY_REF)
+                    } else {
+                        viewModel.saveApiKey(SettingsViewModel.TAVILY_API_KEY_REF, tavilyKey)
+                    }
+                    if (zhipuKey.isEmpty()) {
+                        viewModel.removeApiKey(SettingsViewModel.ZHIPU_API_KEY_REF)
+                    } else {
+                        viewModel.saveApiKey(SettingsViewModel.ZHIPU_API_KEY_REF, zhipuKey)
+                    }
+                    viewModel.saveSearxngSettings(endpoint, username, password)
+                    onClose()
+                }
+            )
+            PrismButton(
+                text = "取消",
+                variant = PrismButtonVariant.Ghost,
+                fillWidth = false,
+                modifier = Modifier.weight(1f),
+                onClick = onClose
+            )
+        }
     }
 }
 /**
@@ -3317,14 +3380,7 @@ private fun VoiceEngineSection(viewModel: SettingsViewModel) {
 
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
         // ---- ASR 引擎选择（云端项仅在 DashScope Key 就绪时可选）----
-        Text(
-            text = "识别引擎（ASR）",
-            color = PrismTextDim,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.4.sp
-        )
-        Spacer(Modifier.height(8.dp))
+
         VoiceEngineOptionRow(
             label = "端侧识别（默认）",
             description = "完全离线 · 音频不出设备",
@@ -3354,14 +3410,8 @@ private fun VoiceEngineSection(viewModel: SettingsViewModel) {
 
         Spacer(Modifier.height(12.dp))
         // ---- TTS 引擎选择（云端项仅在 Key + GroupId 就绪时可选）----
-        Text(
-            text = "播报引擎（TTS）",
-            color = PrismTextDim,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.4.sp
-        )
-        Spacer(Modifier.height(8.dp))
+        SetSection("播报")
+
         VoiceEngineOptionRow(
             label = "系统播报（默认）",
             description = "零依赖 · 本机 TextToSpeech",
@@ -4418,6 +4468,8 @@ private fun PetToggleRow(
         PrismSwitch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
+
+
 
 
 
