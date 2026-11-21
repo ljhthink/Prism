@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -318,6 +319,9 @@ fun PrismSegUnderline(
                     animationSpec = PrismMotion.base(),
                     label = "segLine$index"
                 )
+                // 下划线必须与**文字同宽**：这里用 Column(wrapContentWidth) + Box(fillMaxWidth)
+                // 让 Box 的 fillMaxWidth 指代"Column 的宽度"（= 文字宽），而不是外层 Row 的宽度。
+                // 直接用 Row 里的 fillMaxWidth 会撑满整行 → 三段下划线互相重叠（本轮修）。
                 Column(
                     modifier = Modifier
                         .clickable(
@@ -326,13 +330,14 @@ fun PrismSegUnderline(
                             onClick = { onSelect(index) }
                         )
                         .padding(top = 14.dp, bottom = 15.dp)
+                        .wrapContentWidth()
                 ) {
                     Text(
                         text = label,
                         color = if (selected) PrismText else PrismTextFaint,
                         fontSize = PrismType.sub
                     )
-                    // 下划线：用独立 1dp Box 的 alpha 过渡，不做布局动画
+                    // 下划线：独立 1dp Box 的 alpha 过渡，不做布局动画；宽度跟随文字
                     Box(
                         modifier = Modifier
                             .padding(top = 8.dp)

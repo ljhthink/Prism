@@ -1698,11 +1698,12 @@ private fun SkillCallCard(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
-            // 左侧 2dp 琥珀竖条 = 设计稿 `border-left: 2px solid var(--accent)`
-            .background(PrismPanel, RoundedCornerShape(PrismSize.rControl))
-            .border(1.dp, PrismLine, RoundedCornerShape(PrismSize.rControl))
+            // 左侧 2dp 琥珀竖条 = 设计稿 `border-left: 2px solid var(--accent)`。
+            // **绘制顺序**：drawBehind 在 background/border **之前**注册，因此竖条先画、
+            // 背景与描边后画——后画的会盖住先画的。所以顺序必须是
+            // drawBehind → background → border（此前写成 background→border→drawBehind
+            // 会让竖条画在背景之上但被 border 的 1px 叠一半，视觉上偏细）。
             .drawBehind {
-                // 圆角内画左竖条（直接画矩形会盖住圆角）
                 val r = 10.dp.toPx()
                 drawRoundRect(
                     color = PrismAccent,
@@ -1711,6 +1712,8 @@ private fun SkillCallCard(
                     cornerRadius = androidx.compose.ui.geometry.CornerRadius(1.dp.toPx())
                 )
             }
+            .background(PrismPanel, RoundedCornerShape(PrismSize.rControl))
+            .border(1.dp, PrismLine, RoundedCornerShape(PrismSize.rControl))
             .padding(start = 13.dp, end = 11.dp, top = 9.dp, bottom = 9.dp)
     ) {
         Column(modifier = Modifier.weight(1f)) {
@@ -2299,7 +2302,11 @@ private fun MessageInputBar(
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .height(36.dp)
+                    // **必须 heightIn 而非 height**：设计稿 `.composer-field` 是
+                    // `min-height: 36px`。固定 36dp 时 2–4 行输入会被裁切（Box 不传递溢出）。
+                    // 单行 = 36dp（占位符居中）；多行时随内容增长，底部对齐由行内
+                    // `Alignment.Bottom` 保证 ＋ / 发送贴底。
+                    .heightIn(min = 36.dp)
                     .padding(horizontal = 4.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
