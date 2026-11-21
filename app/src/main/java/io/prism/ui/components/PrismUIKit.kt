@@ -34,7 +34,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.prism.ui.theme.PrismAccent
-import io.prism.ui.theme.PrismBg
 import io.prism.ui.theme.PrismDanger
 import io.prism.ui.theme.PrismLine
 import io.prism.ui.theme.PrismLineStrong
@@ -452,60 +451,5 @@ fun PrismNoteLine(text: String) {
         lineHeight = PrismType.microLine,
         modifier = Modifier.padding(top = PrismSize.s2)
     )
-}
-
-/** 主按钮（`.btn-primary`）：白底深墨字、44dp 高、10dp 圆角。 */
-@Composable
-fun PrismPrimaryButton(
-    text: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true
-) {
-    Box(
-        modifier = modifier
-            .height(PrismSize.tap)
-            .background(
-                if (enabled) PrismText else PrismPanel,
-                RoundedCornerShape(PrismSize.rControl)
-            )
-            .clickable(enabled = enabled, onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = text,
-            color = if (enabled) PrismBg else PrismTextFaint,
-            fontSize = PrismType.body,
-            fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
-        )
-    }
-}
-
-/** 次按钮（`.btn-ghost`）：透明底 + line-strong 描边 + 正文色。 */
-@Composable
-fun PrismGhostButton(
-    text: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true
-) {
-    Box(
-        modifier = modifier
-            .height(PrismSize.tap)
-            .background(Color.Transparent, RoundedCornerShape(PrismSize.rControl))
-            .border(
-                1.dp,
-                if (enabled) PrismLineStrong else PrismLine,
-                RoundedCornerShape(PrismSize.rControl)
-            )
-            .clickable(enabled = enabled, onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = text,
-            color = if (enabled) PrismText else PrismTextFaint,
-            fontSize = PrismType.body
-        )
-    }
 }
 
