@@ -2114,14 +2114,26 @@ private fun MessageInputBar(
                         modifier = Modifier.weight(1f)
                     )
                 } else {
-                    Text(
-                        text = "📄 ${pendingFileName ?: "文档"}",
-                        color = PrismTextDim,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
+                    // UI v2（ADR-079）：附件草稿的 📄 emoji 换成 14dp 线性图标（禁 emoji 于图标位）
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = PrismIcons.File,
+                            contentDescription = null,
+                            tint = PrismTextDim,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = pendingFileName ?: "文档",
+                            color = PrismTextDim,
+                            fontSize = PrismType.meta,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
                 Text(
                     text = "输入需求后发送",
@@ -2192,7 +2204,10 @@ private fun MessageInputBar(
                 .background(PrismPanel, RoundedCornerShape(22.dp))
                 .border(1.dp, PrismLineStrong, RoundedCornerShape(22.dp))
                 .padding(4.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            // 设计稿 `.composer-shell { align-items: flex-end }`：**多行时按钮贴底**。
+            // 单行时三者同为 36dp，贴底与居中结果相同（实测 ＋ 与占位符中心差 0px）；
+            // 一旦输入换行，贴底才符合设计稿，居中会让 ＋/发送悬浮在文字块中间。
+            verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             Box(
@@ -2678,6 +2693,7 @@ private fun EditAiMessageSheet(
         )
     }
 }
+
 
 
 

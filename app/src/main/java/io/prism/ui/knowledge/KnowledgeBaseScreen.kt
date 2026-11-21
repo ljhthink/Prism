@@ -420,6 +420,22 @@ private fun formatStatsSubtitle(state: KnowledgeBaseViewModel.KnowledgeBaseUiSta
     return "$libCount 个库 · $totalChunks 分片"
 }
 
+/**
+ * 分组标签（无横向 padding）—— 供**弹层内**使用。
+ *
+ * `PrismSheet` 的内容区已有 `padding(horizontal = 20.dp)`；若这里再用 `GroupLabel`
+ * （自带左右 20dp），弹层里的分组标题会比其它内容左右各窄 20dp，视觉上像被缩进了一层。
+ */
+@Composable
+private fun GroupLabelBare(text: String) {
+    Text(
+        text = text,
+        color = PrismTextFaint,
+        fontSize = PrismType.meta,
+        modifier = Modifier.padding(top = PrismSize.s3, bottom = PrismSize.s2)
+    )
+}
+
 /** 分组标签 —— 设计稿 `.group-label`：12sp 弱化、下 8dp。 */
 @Composable
 private fun GroupLabel(text: String) {
@@ -796,7 +812,7 @@ private fun ImportSheet(
     PrismSheet(title = "导入内容", subtitle = "解析 → 分片 → 向量化索引") {
         // UI v2（ADR-079）：目标库选择改用**单选行**（`.option` 语言：圆环 + 名称 + 行尾对勾），
         // 取代旧的等宽实底 segmented 色块。库数量多时等高线性排布，不会像等宽胶囊那样挤压文字。
-        GroupLabel("目标知识库")
+        GroupLabelBare("目标知识库")
         targetOptions.forEach { (id, name) ->
             val selected = id == selectedTargetId
             Row(
@@ -1127,29 +1143,35 @@ private fun ManageDocumentsSheet(
                     .padding(horizontal = 12.dp, vertical = 10.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = PrismIcons.File,
+                        contentDescription = null,
+                        tint = PrismTextFaint,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(Modifier.width(PrismSize.s2))
                     Text(
-                        text = "📄  $title",
+                        text = title,
                         color = PrismText,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontSize = PrismType.sub,
                         modifier = Modifier.weight(1f),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    // 查看内容按钮（UXR3 问题 12，ADR-023）
+                    // 查看内容：设计稿 `.mini` 是文字按钮，不是眼睛 emoji
                     Box(
                         modifier = Modifier
-                            .size(30.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(PrismCyan.copy(alpha = 0.12f))
+                            .height(32.dp)
+                            .clip(RoundedCornerShape(PrismSize.rChip))
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null,
                                 onClick = { onView(title) }
-                            ),
+                            )
+                            .padding(horizontal = 10.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(text = "👁", fontSize = 13.sp)
+                        Text(text = "查看", color = PrismTextDim, fontSize = PrismType.micro)
                     }
                     Spacer(Modifier.width(6.dp))
                     // 删除按钮
