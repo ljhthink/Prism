@@ -724,13 +724,13 @@ fun SettingsScreen(
     }
 
     // UI v2（ADR-079 D2）：QQ 与「语音/形象」按设计稿拆成子页（原先单页平铺 20+ 行）。
-    var qqTab by remember { mutableStateOf(QqSubTab.CONNECTION) }
     var voiceTab by remember { mutableStateOf(VoiceSubTab.SPEECH) }
 
     // M-1（guardrail R3）：切子页必须**回到顶部**。否则从「表情库」滚到底再切「连接」，
     // 列表沿用旧偏移被钳到底、子页切换条滚出视口，用户会以为设置项消失。
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-    LaunchedEffect(qqTab, voiceTab) { listState.scrollToItem(0) }
+    // QQ 已改为一页平铺（无子页），只在语音两个子页切换时回到顶部。
+    LaunchedEffect(voiceTab) { listState.scrollToItem(0) }
 
     Box {
         LazyColumn(
@@ -1143,7 +1143,8 @@ fun SettingsScreen(
             }
             // 2026-11-01（US-3128）：协议端管家——把「启动/修复/扫码」变成按钮，并回读校验电源策略。
             // 放在总开关之前是有意的：用户打开小号助手后第一件事就是让协议端跑起来。
-            item { SetSection("协议端管家") }
+            // M-04（guardrail R5）：这里**不再加组标签**——QqProtocolSupervisorCard 自身标题
+            // 就是「协议端管家（本机模式）」，再加一个 12sp 的组标签会出现同名标题连出两次。
             item {
                 QqProtocolSupervisorSection(
                     supervisor = qqApp?.qqProtocolSupervisor,
@@ -1603,12 +1604,13 @@ fun SettingsScreen(
             // 「语音与形象与设计存在较大出入」的结构性原因（不是单行样式问题）。
             // 「识别 / 播报 / 本地音色包」三组的行都在 VoiceEngineSection 内（它同时管 ASR/TTS/音色包），
             // 组标签在它展开态内部，折叠态仍是一行入口。
-            item { SetSection("识别") }
+            // M-05（guardrail R5）：**不在折叠态外层加组标签**。
+            // 原因：① `VoiceEngineSection` 折叠时只有一行，它同时管 ASR + TTS + 音色包，
+            // 用「识别」当组名与内容不符；② `VoiceHotwordsEditor` 折叠行标题本身就是
+            // 「语音热词」，外层再加同名组标签会连出两次。
+            // 正确做法：组标签放**展开态内部**（识别 / 播报 / 本地音色包），与设计稿一致。
             // 批次23-A（ADR-048，A4）：语音引擎（ASR/TTS 云端双轨手选 + Key 配置 + 连通性自检）
             item { VoiceEngineSection(viewModel) }
-            // 设计稿把「语音热词」画成「播报」组里的一行（点进去编辑）；我们没有子页，
-            // 独立成组最诚实——它确实是一组自由编辑的文本行，不是一开关。
-            item { SetSection("语音热词") }
             item { VoiceHotwordsEditor() }
             }
             whenTab(voiceTab == VoiceSubTab.PERSONA) {
@@ -2618,19 +2620,6 @@ private fun ApiKeySheet(providers: List<ProviderConfig>, viewModel: SettingsView
     }
 }
 
-/**
- * QQ 小号的四个子页（ADR-079 D2 / 设计稿 `settings-qq` + 3 个子页）。
- *
- * 为什么必须拆：单页平铺时 QQ 有 20+ 行、跨度 500 行源码，用户找不到「表情库」；
- * 设计稿把它拆成 连接 / 定时与主动消息 / 自动回复 / 表情库 四页。
- */
-private enum class QqSubTab(val label: String) {
-    CONNECTION("连接"),
-    SCHEDULE("定时"),
-    REPLY("自动回复"),
-    STICKERS("表情库")
-}
-
 /** 「语音与形象」的两个子页（设计稿 `settings-voice` / `settings-persona`）。 */
 private enum class VoiceSubTab(val label: String) {
     SPEECH("语音"),
@@ -2650,18 +2639,6 @@ private fun androidx.compose.foundation.lazy.LazyListScope.whenTab(
     if (selected) content()
 }
 
-/** QQ 子页切换条。 */
-@Composable
-private fun QqSubTabRow(selected: QqSubTab, onSelect: (QqSubTab) -> Unit) {
-    PrismSegmented(
-        options = QqSubTab.entries,
-        selected = selected,
-        onSelect = onSelect,
-        labelOf = { it.label },
-        modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
-    )
-}
-
 /** 「语音与形象」子页切换条。 */
 @Composable
 private fun VoiceSubTabRow(selected: VoiceSubTab, onSelect: (VoiceSubTab) -> Unit) {
@@ -2679,7 +2656,6 @@ private fun appVersionName(context: android.content.Context): String =
     runCatching {
         context.packageManager.getPackageInfo(context.packageName, 0).versionName
     }.getOrNull()?.takeIf { it.isNotBlank() } ?: "1.1"
-
 
 /**
  * 分组标签（无横向 padding）—— 供**已有横向内边距的容器内**使用。
@@ -2963,7 +2939,6 @@ private fun SetRow(
     }
 }
 
-
 /**
  * 用户规则编辑弹层（UXR8 N1，ADR-030）—— 类 ChatGPT Custom Instructions 双字段。
  *
@@ -3065,18 +3040,24 @@ private fun SearchEnhancementSheet(
         mutableStateOf(engineValues.indexOf(preferredEngine).takeIf { it >= 0 } ?: 0)
     }
 
-    if (!zhipuLoaded) {
+    // **guardrail R5-M-02**：两次 loadApiKey 原本写在组合体里（每次重组都判定一次），
+    // 且保存按钮不等它们完成就可用——「打开弹层立刻点保存」会在 Key 尚未回填时把空串
+    // 当作"清空"，静默删掉已存 Key。改为 LaunchedEffect（只跑一次）+ 保存按钮以 loaded 状态门控。
+    LaunchedEffect(Unit) {
         viewModel.loadApiKey(SettingsViewModel.ZHIPU_API_KEY_REF) { v ->
             zhipuKey = v.orEmpty()
             zhipuLoaded = true
         }
     }
-    if (!tavilyLoaded) {
+    LaunchedEffect(Unit) {
         viewModel.loadApiKey(SettingsViewModel.TAVILY_API_KEY_REF) { v ->
             tavilyKey = v.orEmpty()
             tavilyLoaded = true
         }
     }
+    val keysReady = zhipuLoaded && tavilyLoaded
+    var saveError by remember { mutableStateOf<String?>(null) }
+    var saving by remember { mutableStateOf(false) }
 
     // ===== 严格按设计稿 `search`（`screens.js:1146`）重排 =====
     //
@@ -3118,26 +3099,29 @@ private fun SearchEnhancementSheet(
 
         // ---- 高级（设计稿未画，功能必须保留，降级为两行入口）----
         Spacer(Modifier.height(PrismSize.s4))
-        SetSection("高级")
+        SetSectionBare("高级")
         Column(modifier = Modifier.padding(horizontal = 0.dp)) {
+            // **guardrail R5-M-03**：上一版把「首选引擎」做成了「二态开关 + 行点击循环」两个控件，
+            // 而且 on 分支硬编码切到 Tavily —— 5 个取值被压成 Boolean，用户在智谱/SearXNG 时
+            // 开关只能关不能换，也不再用开关选到博查/智谱（原 PrismSegmented 是 5 选 1）。
+            // 这是功能退化，不是简化。改回**单一 5 选 1 控件**（保持原有语义），
+            // 只是位置从弹层主视觉降级到「高级」组里。
             PrismRow(
                 title = "首选引擎",
-                status = "当前：${engineOptions[selectedEngine]} · 点击切换（决定首个尝试的引擎）",
-                onClick = {
-                    val next = (selectedEngine + 1) % engineValues.size
-                    selectedEngine = next
-                    viewModel.setPreferredEngine(engineValues[next])
+                status = "默认顺序 = 按 博查 → 智谱 → SearXNG → Tavily 依次尝试"
+            )
+            Spacer(Modifier.height(PrismSize.s2))
+            PrismSegmented(
+                options = engineOptions,
+                selected = engineOptions[selectedEngine],
+                onSelect = { option ->
+                    val idx = engineOptions.indexOf(option)
+                    if (idx >= 0 && idx != selectedEngine) {
+                        selectedEngine = idx
+                        viewModel.setPreferredEngine(engineValues[idx])
+                    }
                 },
-                trailing = {
-                    PrismSwitch(
-                        checked = selectedEngine != 0,
-                        onCheckedChange = { on ->
-                            val next = if (on) engineValues.indexOf("tavily").coerceAtLeast(1) else 0
-                            selectedEngine = next
-                            viewModel.setPreferredEngine(engineValues[next])
-                        }
-                    )
-                }
+                labelOf = { it }
             )
             if (endpoint.isNotBlank()) {
                 PrismField(
@@ -3157,6 +3141,16 @@ private fun SearchEnhancementSheet(
             }
         }
 
+        if (saveError != null) {
+            Spacer(Modifier.height(PrismSize.s3))
+            Text(
+                text = "保存失败：$saveError",
+                color = PrismDanger,
+                fontSize = PrismType.meta,
+                lineHeight = PrismType.metaLine
+            )
+        }
+
         Spacer(Modifier.height(PrismSize.s5))
         // 设计稿 `.btn-row`：保存 / 取消 **并排**，一次写全部三项
         Row(
@@ -3164,22 +3158,29 @@ private fun SearchEnhancementSheet(
             horizontalArrangement = Arrangement.spacedBy(PrismSize.s2)
         ) {
             PrismButton(
-                text = "保存",
+                // 未加载完成前不可点（否则空串=删除，静默丢 Key）
+                text = when {
+                    saving -> "保存中…"
+                    !keysReady -> "读取中…"
+                    else -> "保存"
+                },
+                enabled = keysReady && !saving,
                 fillWidth = false,
                 modifier = Modifier.weight(1f),
                 onClick = {
-                    if (tavilyKey.isEmpty()) {
-                        viewModel.removeApiKey(SettingsViewModel.TAVILY_API_KEY_REF)
-                    } else {
-                        viewModel.saveApiKey(SettingsViewModel.TAVILY_API_KEY_REF, tavilyKey)
+                    saving = true
+                    saveError = null
+                    // 一次写入全部三项（任一步失败 → 不关弹层 + 显示错误）
+                    viewModel.saveSearchEnhancementAll(
+                        tavilyKey = tavilyKey,
+                        zhipuKey = zhipuKey,
+                        searxngEndpoint = endpoint,
+                        searxngUsername = username,
+                        searxngPassword = password
+                    ) { error ->
+                        saving = false
+                        if (error == null) onClose() else saveError = error
                     }
-                    if (zhipuKey.isEmpty()) {
-                        viewModel.removeApiKey(SettingsViewModel.ZHIPU_API_KEY_REF)
-                    } else {
-                        viewModel.saveApiKey(SettingsViewModel.ZHIPU_API_KEY_REF, zhipuKey)
-                    }
-                    viewModel.saveSearxngSettings(endpoint, username, password)
-                    onClose()
                 }
             )
             PrismButton(
@@ -3234,7 +3235,9 @@ fun VoiceHotwordsEditor() {
         return
     }
 
-    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+    // M-01a（guardrail R5）：容器横向改为 **20dp**（设计稿 page padding），
+    // 与 SetSection 的 20dp 同源；此前是 16dp，导致「播报」标签比「识别」左 4dp。
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 4.dp)) {
         androidx.compose.material3.Text(
             "语音热词（每行一个：人名/联系人/专有名词）",
             color = PrismTextDim,
@@ -3398,6 +3401,7 @@ private fun VoiceEngineSection(viewModel: SettingsViewModel) {
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
         // ---- ASR 引擎选择（云端项仅在 DashScope Key 就绪时可选）----
 
+        SetSectionBare("识别")
         VoiceEngineOptionRow(
             label = "端侧识别（默认）",
             description = "完全离线 · 音频不出设备",
