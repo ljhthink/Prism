@@ -1,4 +1,4 @@
-package io.prism.phonecontrol.bg
+﻿package io.prism.phonecontrol.bg
 
 import android.app.ActivityOptions
 import android.content.Context
@@ -152,6 +152,19 @@ object VirtualDisplayManager {
      */
     private val launchedPackages = LinkedHashSet<Pair<String, Int>>()
 
+    /** 已启动目标的持久化清单（见 [persistLaunched]）。 */
+    private const val LAUNCHED_PREFS = "prism_vd_launched"
+
+    /**
+     * 应用上下文（[ensureDisplay] 时注入）。
+     *
+     * [shellLaunchAndVerify] 是纯 shell 路径、拿不到 context，而持久化清单必须能写盘；
+     * 用单一注入点而不是给三个调用链加重载参数，避免改动公开签名（本轮白名单禁止）。
+     */
+    @Volatile
+    private var appContext: android.content.Context? = null
+    private const val KEY_LAUNCHED = "launched_packages"
+
     /** 当前 displayId；未创建返回 [Display.INVALID_DISPLAY]。 */
     val currentDisplayId: Int
         get() = displayId
@@ -185,6 +198,7 @@ object VirtualDisplayManager {
      * @return displayId；创建失败返回 [Display.INVALID_DISPLAY]
      */
     fun ensureDisplay(context: Context): Int {
+        appContext = context.applicationContext
         if (!isSupported()) return Display.INVALID_DISPLAY
         synchronized(lock) {
             if (isCreated) {
@@ -431,6 +445,10 @@ object VirtualDisplayManager {
                 }
             }.getOrDefault(0)
             if (residualCount == 0) return
+            // 2026-11-21 修复（真机 M2012K10C / Android 13）：残留屏释放**前**必须先杀掉跑在它上面的目标。
+            // 否则系统在「显示面消失、目标仍在跑」的窗口里把 task 迁回 display 0 —— 用户看到
+            // 应用（实测 com.android.settings）自己跑到主屏，即「隐藏执行面藏不住副屏」。
+            stopPersistedLaunched(context)
             synchronized(lock) {
                 if (isCreated) return
                 val released = runCatching { ShizukuShell.releaseHiddenDisplay() }.getOrDefault(false)
@@ -491,11 +509,11 @@ object VirtualDisplayManager {
             val options = ActivityOptions.makeBasic()
             options.setLaunchDisplayId(displayId)
             context.startActivity(intent, options.toBundle())
+            val launchedUser = android.os.Process.myUserHandle().hashCode()
             synchronized(launchedPackages) {
-                launchedPackages.add(
-                    packageName to android.os.Process.myUserHandle().hashCode()
-                )
+                launchedPackages.add(packageName to launchedUser)
             }
+            appContext?.let { persistLaunched(it, packageName, launchedUser) }
             Log.i(TAG, "已启动到虚拟屏 $packageName（displayId=$displayId）")
             "已在后台虚拟屏启动应用 $packageName"
         } catch (e: SecurityException) {
@@ -547,11 +565,11 @@ object VirtualDisplayManager {
             }
         }
         if (rendered) {
+            val launchedUser = userId ?: android.os.Process.myUserHandle().hashCode()
             synchronized(launchedPackages) {
-                launchedPackages.add(
-                    packageName to (userId ?: android.os.Process.myUserHandle().hashCode())
-                )
+                launchedPackages.add(packageName to launchedUser)
             }
+            appContext?.let { persistLaunched(it, packageName, launchedUser) }
             Log.i(TAG, "已在虚拟屏渲染 $packageName（displayId=$displayId, user=${userId ?: "current"}）")
             // 2026-11-21 修文案：隐藏执行面（isHiddenMode）**主屏不出现任何小窗**，
             // 只有兼容模式（overlay）才会。原文案不分模式一律说"主屏出现小窗"，属状态撒谎。
@@ -1045,6 +1063,49 @@ object VirtualDisplayManager {
      *
      * @return 实际处理的包名列表（供调用方记日志；ADR-065 修订要求"先回收再销毁"可观测）
      */
+    /**
+     * 把"已在执行面上启动的目标"持久化（2026-11-21）。
+     *
+     * **为什么必须落盘**：App 进程被系统回收后，内存里的 [launchedPackages] 就没了，
+     * 而 shell 用户服务进程仍持有虚拟屏 → 下次启动对账只会"释放屏"却不知道屏上跑着谁，
+     * 系统便把那个应用的 task 迁回主屏（真机实测 com.android.settings 跑到用户主屏）。
+     * 有了持久化清单，对账时能先 force-stop 目标再释放屏，task 无迁移对象。
+     *
+     * 只存 `包名|userId`，不含任何用户内容；对账后立即清空。
+     */
+    private fun persistLaunched(context: Context, pkg: String, userId: Int) {
+        runCatching {
+            val prefs = context.getSharedPreferences(LAUNCHED_PREFS, Context.MODE_PRIVATE)
+            val set = prefs.getStringSet(KEY_LAUNCHED, emptySet()).orEmpty().toMutableSet()
+            if (set.add("$pkg|$userId")) {
+                prefs.edit().putStringSet(KEY_LAUNCHED, set).apply()
+            }
+        }
+    }
+
+    /** 停掉持久化清单里的全部目标并清空（对账路径专用；不动内存 [launchedPackages]）。 */
+    private fun stopPersistedLaunched(context: Context) {
+        if (!ShizukuShell.isReady()) return
+        val raw = runCatching {
+            context.getSharedPreferences(LAUNCHED_PREFS, Context.MODE_PRIVATE)
+                .getStringSet(KEY_LAUNCHED, emptySet()).orEmpty().toSet()
+        }.getOrDefault(emptySet())
+        if (raw.isEmpty()) return
+        runCatching {
+            context.getSharedPreferences(LAUNCHED_PREFS, Context.MODE_PRIVATE)
+                .edit().remove(KEY_LAUNCHED).apply()
+        }
+        val managed = mutableListOf<String>()
+        raw.forEach { entry ->
+            val parts = entry.split('|')
+            val pkg = parts.firstOrNull()?.takeIf { it.isNotBlank() } ?: return@forEach
+            val user = parts.getOrNull(1)?.toIntOrNull() ?: 0
+            val ok = runCatching { ShizukuShell.forceStopForUser(pkg, user) }.getOrDefault(false)
+            if (ok) managed += pkg else Log.w(TAG, "对账回收失败：${maskPackage(pkg)}（user=$user）")
+        }
+        if (managed.isNotEmpty()) Log.i(TAG, "启动对账：已回收泄漏目标 $managed")
+    }
+
     private fun stopLaunchedPackages(context: Context): List<String> {
         val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE)
             as android.app.ActivityManager
@@ -1239,3 +1300,5 @@ object VirtualDisplayManager {
     const val MODE_FOREGROUND = "foreground"
     const val MODE_BACKGROUND = "background"
 }
+
+
