@@ -168,6 +168,14 @@ fun ConversationScreen(
      * 完成后回调 [onSessionLoaded] 清空待加载状态（一次性消费）。
      */
     sessionIdToLoad: Long? = null,
+    /**
+     * UI v2（ADR-079）：历史页「新对话」的一次性令牌。自增即触发 [ConversationViewModel.startNewConversation]。
+     *
+     * 为什么用令牌而不是回调：聊天页与新会话的 ViewModel 生命周期由 NavHost 持有，
+     * 历史页无法直接拿到聊天页的 VM；令牌把"请求"变成可比较的值，消费端用
+     * `LaunchedEffect` 比较上一值，天然幂等（重组不会重复触发）。
+     */
+    newConversationTick: Int = 0,
     /** UX-001 问题 4（ADR-021）：loadSession 完成后回调（导航层清空待加载状态）。 */
     onSessionLoaded: () -> Unit = {}
 ) {
@@ -326,6 +334,16 @@ fun ConversationScreen(
         if (sessionIdToLoad != null) {
             viewModel.loadSession(sessionIdToLoad)
             onSessionLoaded()
+        }
+    }
+
+    // UI v2（ADR-079）：历史页点「新对话」后回到本页 → 直接开新会话。
+    // 初值 0 视为"未请求"，避免首次进入就清空正在恢复的会话。
+    var lastNewTick by remember { mutableIntStateOf(newConversationTick) }
+    LaunchedEffect(newConversationTick) {
+        if (newConversationTick != lastNewTick) {
+            lastNewTick = newConversationTick
+            viewModel.startNewConversation()
         }
     }
 

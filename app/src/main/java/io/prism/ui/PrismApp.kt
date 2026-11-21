@@ -1,4 +1,4 @@
-package io.prism.ui
+﻿package io.prism.ui
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -87,6 +87,11 @@ fun PrismApp() {
     // `loadSession` 后通过 [ConversationScreen.onSessionLoaded] 清空（一次性消费）。
     var pendingSessionId by remember { mutableStateOf<Long?>(null) }
 
+    // UI v2（ADR-079）：历史页「新对话」的一次性令牌（自增即触发）。
+    var newConversationTick by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+
+    // UI v2（ADR-079）：历史页「新对话」的一次性令牌（自增即触发，聊天页消费后无需回写）。
+
     Scaffold(
         containerColor = PrismBg,
         // UXR3 问题 1（键盘遮挡，三次修复未果）：关闭 Scaffold 自动 content insets。
@@ -131,6 +136,7 @@ fun PrismApp() {
                     ConversationScreen(
                         onOpenHistory = { navController.navigate(PrismDestinations.CONVERSATION_LIST) },
                         sessionIdToLoad = pendingSessionId,
+                        newConversationTick = newConversationTick,
                         onSessionLoaded = { pendingSessionId = null }
                     )
                 }
@@ -144,6 +150,13 @@ fun PrismApp() {
                         onBack = { navController.popBackStack() },
                         onSessionSelected = { sessionId ->
                             pendingSessionId = sessionId
+                            navController.popBackStack()
+                        },
+                        // UI v2（ADR-079）：历史页顶栏「新对话」——回到聊天页并开新会话。
+                        // 用一次性自增令牌驱动聊天页的 startNewConversation（不改 ViewModel 契约）。
+                        onCreateNew = {
+                            pendingSessionId = null
+                            newConversationTick += 1
                             navController.popBackStack()
                         }
                     )
