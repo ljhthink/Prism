@@ -68,6 +68,7 @@ import io.prism.ui.theme.PrismDanger
 import io.prism.ui.theme.PrismAccent
 import io.prism.ui.theme.PrismIndigo
 import io.prism.ui.theme.PrismLine
+import io.prism.ui.theme.PrismLineStrong
 import io.prism.ui.theme.PrismMint
 import io.prism.ui.theme.PrismPanel2
 import io.prism.ui.theme.PrismSize
@@ -793,49 +794,55 @@ private fun ImportSheet(
     }
 
     PrismSheet(title = "导入内容", subtitle = "解析 → 分片 → 向量化索引") {
-        // 目标库选择
-        Text(
-            text = "目标知识库",
-            color = PrismTextDim,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.4.sp
-        )
-        Spacer(Modifier.height(8.dp))
-        // 用 PrismSegmented 选择目标库；库数量多时可能溢出，故用 LazyRow 风格的横向 Row
-        // 简化：直接用 Row 平铺（库数量预期 <=5，4GB 低端机限制）
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            targetOptions.forEach { (id, name) ->
-                val isSelected = id == selectedTargetId
-                val bg = if (isSelected) PrismIndigo else PrismPanel2
-                val fg = if (isSelected) Color.White else PrismTextDim
+        // UI v2（ADR-079）：目标库选择改用**单选行**（`.option` 语言：圆环 + 名称 + 行尾对勾），
+        // 取代旧的等宽实底 segmented 色块。库数量多时等高线性排布，不会像等宽胶囊那样挤压文字。
+        GroupLabel("目标知识库")
+        targetOptions.forEach { (id, name) ->
+            val selected = id == selectedTargetId
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { onSelectTarget(id) }
+                    ),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(PrismSize.s3)
+            ) {
                 Box(
                     modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(bg)
+                        .size(18.dp)
                         .border(
-                            1.dp,
-                            if (isSelected) Color.Transparent else PrismLine,
-                            RoundedCornerShape(10.dp)
+                            width = 1.dp,
+                            color = if (selected) PrismAccent else PrismLineStrong,
+                            shape = androidx.compose.foundation.shape.CircleShape
                         )
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            onClick = { onSelectTarget(id) }
+                        .background(
+                            if (selected) PrismAccent.copy(alpha = 0.12f)
+                            else androidx.compose.ui.graphics.Color.Transparent,
+                            androidx.compose.foundation.shape.CircleShape
                         )
-                        .padding(vertical = 10.dp, horizontal = 6.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(text = name, color = fg, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                )
+                Text(
+                    text = name,
+                    color = if (selected) PrismText else PrismTextDim,
+                    fontSize = PrismType.body,
+                    modifier = Modifier.weight(1f)
+                )
+                if (selected) {
+                    Icon(
+                        imageVector = PrismIcons.Check,
+                        contentDescription = "已选中",
+                        tint = PrismAccent,
+                        modifier = Modifier.size(16.dp)
+                    )
                 }
             }
         }
 
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(PrismSize.s4))
 
         // 摄入状态展示（Running / Completed / Failed）
         when (ingestionState) {
@@ -902,15 +909,29 @@ private fun ImportSheet(
                 PrismButton(text = "关闭", onClick = onDismissIngestion)
             }
             KnowledgeBaseViewModel.IngestionUiState.Idle -> {
-                PrismButton(text = "选择文件", onClick = onPickFile)
-                Spacer(Modifier.height(10.dp))
-                // UX-001 问题 2（ADR-021）：文本笔记入口（只输入文字保存）
-                PrismButton(text = "文本笔记", variant = PrismButtonVariant.Ghost, onClick = onAddTextNote)
-                Spacer(Modifier.height(12.dp))
+                // 设计稿 `.btn-row`：主按钮 + ghost 并排（不给纵向两个全宽按钮——它们看起来像两个同等重要的决定）
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    PrismButton(
+                        text = "选择文件",
+                        onClick = onPickFile,
+                        modifier = Modifier.weight(1f)
+                    )
+                    PrismButton(
+                        text = "文本笔记",
+                        variant = PrismButtonVariant.Ghost,
+                        onClick = onAddTextNote,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Spacer(Modifier.height(PrismSize.s3))
                 Text(
-                    text = "支持 PDF / DOCX / XLSX / MD / TXT / CSV",
+                    text = "支持 PDF / DOCX / XLSX / PPTX / MD / TXT / CSV；导入后自动解析、分片、向量化。",
                     color = PrismTextFaint,
-                    fontSize = 11.sp
+                    fontSize = PrismType.micro,
+                    lineHeight = PrismType.microLine
                 )
             }
         }
@@ -1265,6 +1286,7 @@ private fun PrismIndexBar(progress: Int, modifier: Modifier = Modifier) {
         )
     }
 }
+
 
 
 

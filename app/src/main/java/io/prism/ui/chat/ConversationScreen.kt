@@ -13,6 +13,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -37,6 +38,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
@@ -82,6 +85,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -112,6 +117,7 @@ import io.prism.ui.model.ChatMessage
 import io.prism.ui.model.Role
 import io.prism.ui.model.SearchResult
 import io.prism.ui.theme.PrismBg
+import io.prism.ui.theme.PrismMotion
 import io.prism.ui.theme.PrismAccent
 import io.prism.ui.theme.PrismCyan
 import io.prism.ui.theme.PrismDanger
@@ -149,9 +155,9 @@ import kotlinx.coroutines.withContext
  * - 问题 1：消息列表自动滚动到底部（[LaunchedEffect] 监听消息数 + animateScrollToItem）
  * - 问题 3：AI 消息改用 [Markdown] 渲染（替代 stripMarkdownSymbols 剥离）
  * - 问题 5：能力开关（联网搜索 / 深度思考）置于输入框上方胶囊行
- * - 问题 6：RAG 引用来源改为可折叠区域（[CollapsibleSourcesCard]）
+ * - 问题 6：RAG 引用来源改为行式来源列表（[CitationSourceList]）
  * - 问题 7：思维链改为可折叠区域（[CollapsibleThinkingCard]），与最终答案区分
- * - 问题 8：联网搜索结果改为可折叠来源卡片（[CollapsibleSearchCard]），链接可点击跳转外部网站
+ * - 问题 8：联网搜索结果改为行式来源列表（[WebSourceList]），链接可点击跳转外部网站
  * - 问题 9：工具调用指示不再混入正文（TOOL 消息独立紧凑气泡）
  */
 @Composable
@@ -376,6 +382,13 @@ fun ConversationScreen(
                 contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
+                // UI v2（ADR-079）：新会话引导语。设计稿 `chat-empty` 是「还没有对话」，
+                // 用户要求改成欢迎语——它同时承担"这里能做什么"的暗示，比标题更有用。
+                if (messages.isEmpty() && !isTyping) {
+                    item(key = "chat-empty") {
+                        ChatWelcomeGuide()
+                    }
+                }
                 items(messages, key = { it.id }) { message ->
                     // UXR9 US-908：预构建 工具调用 id → 参数 查找表（assistant 消息携带的
                     // toolCalls 反向映射），供 TOOL 消息渲染「参数摘要」。
@@ -619,10 +632,16 @@ fun ConversationScreen(
 }
 
 /**
- * 能力开关行（UX-001 问题 5，ADR-021）—— 输入框上方胶囊式开关。
+ * 能力开关行 —— 设计稿 `.cap-row` + `.cap-chip`（`design/prism-ui-v1/screens.js` composer）。
  *
- * 对齐主流 AI 手机助手（DeepSeek/Kimi/豆包）的「联网搜索 / 深度思考」开关摆放：
- * 两个开关并排置于输入框上方，选中态高亮，未选中浅灰。
+ * 规格（逐值对应 CSS）：
+ * - `.cap-row`：间距 6dp、上 2dp / 下 8dp；
+ * - `.cap-chip`：高 36dp、左右 11dp、圆角 8dp、1px 细线、**透明底**、文字 12sp 弱化；
+ * - 内含 5dp 状态灯（`led`）+ 14dp 线性图标 + 短标签（联网 / 思考 / 后台）；
+ * - 激活态：文字提亮、描边琥珀 42%、底色 `accent-soft`。
+ *
+ * 与旧实现的差别：旧版三枚等宽胶囊（`weight(1f)`）带实底浅色块、无图标、用 8dp 圆点，
+ * 与设计稿的"细线胶囊 + 状态灯 + 图标"完全不同；标签也用设计稿的短词而非长词。
  */
 @Composable
 private fun CapabilityToggleRow(
@@ -636,47 +655,66 @@ private fun CapabilityToggleRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(start = PrismSize.page, end = PrismSize.page, top = 2.dp, bottom = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         CapabilityToggleChip(
             checked = webSearchEnabled,
-            label = "联网搜索",
-            onCheckedChange = onWebSearchChange,
-            modifier = Modifier.weight(1f)
+            label = "联网",
+            icon = PrismIcons.Globe,
+            onCheckedChange = onWebSearchChange
         )
         CapabilityToggleChip(
             checked = thinkingEnabled,
-            label = "深度思考",
-            onCheckedChange = onThinkingChange,
-            modifier = Modifier.weight(1f)
+            label = "思考",
+            icon = PrismIcons.Brain,
+            onCheckedChange = onThinkingChange
         )
         // 批次20（BG-005，ADR-045）：后台操控（手机操控在虚拟屏后台执行，用户可同时使用手机）
         CapabilityToggleChip(
             checked = backgroundControlEnabled,
-            label = "后台操控",
-            onCheckedChange = onBackgroundControlChange,
-            modifier = Modifier.weight(1f)
+            label = "后台",
+            icon = PrismIcons.Phone,
+            onCheckedChange = onBackgroundControlChange
         )
     }
 }
 
-/** 单个能力开关胶囊（选中态 PrismIndigo 描边 + 标签加亮，未选中浅灰描边）。 */
+/**
+ * 单个能力胶囊 —— 设计稿 `.cap-chip`（36dp 高 / 8dp 圆角 / 透明底 / 5dp 状态灯 + 14dp 图标）。
+ *
+ * 用 `toggleable(role = Switch)` 暴露 checked 语义（UX-001 问题 2，ADR-022 二次反馈：
+ * 用户与读屏都需要能判断开关是否生效）。
+ */
 @Composable
 private fun CapabilityToggleChip(
     checked: Boolean,
     label: String,
-    onCheckedChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onCheckedChange: (Boolean) -> Unit
 ) {
-    // UX-001 问题 2（ADR-022 二次反馈）：toggleable(role = Switch) 暴露 checked 选中态语义，
-    // 使开关状态对无障碍/读屏/UI Automator 可识别（用户反馈"看不出深度思考开关是否生效"）。
+    val borderColor by androidx.compose.animation.animateColorAsState(
+        targetValue = if (checked) PrismAccent.copy(alpha = 0.42f) else PrismLine,
+        animationSpec = PrismMotion.base(),
+        label = "capBorder"
+    )
+    val bg by androidx.compose.animation.animateColorAsState(
+        targetValue = if (checked) PrismAccent.copy(alpha = 0.12f) else Color.Transparent,
+        animationSpec = PrismMotion.base(),
+        label = "capBg"
+    )
+    val fg by androidx.compose.animation.animateColorAsState(
+        targetValue = if (checked) PrismText else PrismTextFaint,
+        animationSpec = PrismMotion.base(),
+        label = "capFg"
+    )
     Row(
-        modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (checked) PrismIndigo.copy(alpha = 0.12f) else PrismPanel2)
-            .border(1.dp, if (checked) PrismIndigo.copy(alpha = 0.6f) else PrismLine, RoundedCornerShape(10.dp))
+        modifier = Modifier
+            .height(PrismSize.capChipHeight)
+            .clip(RoundedCornerShape(PrismSize.rChip))
+            .background(bg)
+            .border(1.dp, borderColor, RoundedCornerShape(PrismSize.rChip))
             .toggleable(
                 value = checked,
                 role = androidx.compose.ui.semantics.Role.Switch,
@@ -684,22 +722,23 @@ private fun CapabilityToggleChip(
                 indication = null,
                 onValueChange = onCheckedChange
             )
-            .padding(horizontal = 10.dp, vertical = 5.dp),
+            .padding(horizontal = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         Box(
             modifier = Modifier
-                .size(8.dp)
+                .size(PrismSize.led)
                 .clip(CircleShape)
-                .background(if (checked) PrismIndigo else PrismTextFaint)
+                .background(if (checked) PrismAccent else PrismTextFaint)
         )
-        Text(
-            text = label,
-            color = if (checked) PrismText else PrismTextDim,
-            fontSize = 12.sp,
-            fontWeight = if (checked) FontWeight.SemiBold else FontWeight.Normal
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = fg,
+            modifier = Modifier.size(14.dp)
         )
+        Text(text = label, color = fg, fontSize = PrismType.meta)
     }
 }
 
@@ -819,6 +858,37 @@ private fun RagModeOption(label: String, description: String, selected: Boolean,
 }
 
 /** Provider 切换列表弹层（US-007）。 */
+
+/**
+ * 新会话引导语（设计稿 `chat-empty` 的位置，文案按用户要求改为欢迎语）。
+ *
+ * 刻意做得很轻：不占满屏、不加插画、不给"示例问题"按钮——空态的任务是告诉用户
+ * 「可以开始说话了」，而不是再叠一层装饰。
+ */
+@Composable
+private fun ChatWelcomeGuide() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 48.dp, bottom = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = "欢迎回来，今天我们要一起做些什么？",
+            color = PrismTextDim,
+            fontSize = PrismType.head,
+            lineHeight = 26.sp,
+            textAlign = TextAlign.Center
+        )
+        Spacer(Modifier.height(PrismSize.s3))
+        Text(
+            text = "在下方输入问题，或从历史会话继续",
+            color = PrismTextFaint,
+            fontSize = PrismType.sub,
+            textAlign = TextAlign.Center
+        )
+    }
+}
 
 /**
  * 单个消息气泡。
@@ -1562,12 +1632,12 @@ private fun AiBubble(message: ChatMessage, showThinking: Boolean, isStreaming: B
         // 联网搜索来源折叠区域（UX-001 问题 8）：置于答案下方，链接可点击
         message.searchResults?.takeIf { it.isNotEmpty() }?.let { results ->
             Spacer(Modifier.height(10.dp))
-            CollapsibleSearchCard(results)
+            WebSourceList(results)
         }
         // RAG 引用来源折叠区域（UX-001 问题 6）：置于答案下方
         if (message.sources.isNotEmpty()) {
             Spacer(Modifier.height(10.dp))
-            CollapsibleSourcesCard(message.sources)
+            CitationSourceList(message.sources)
         }
     }
 }
@@ -1578,7 +1648,7 @@ private fun AiBubble(message: ChatMessage, showThinking: Boolean, isStreaming: B
  * 展示：工具名（完整命名空间 `skillName__toolName`）+ 参数摘要 + 执行结果片段 + 状态徽标。
  * - 成功（结果文本不含错误标记）→ 绿色「✓ 成功」
  * - 失败（结果以"工具执行出错"/"⚠️"等开头）→ 红色「✕ 失败」
- * - 联网搜索 / 知识库结果继续由 [CollapsibleSearchCard] / 引用来源展示，此处跳过冗余卡片
+ * - 联网搜索 / 知识库结果继续由 [WebSourceList] / 引用来源展示，此处跳过冗余卡片
  *
  * 满足 US-908 AC-1/AC-2：LLM 调用 skill 时界面有明确反馈（工具名 + 参数摘要 + 状态），
  * 与既有「正在调用工具: xxx」执行中指示（[ToolCallIndicator]）互补不冲突。
@@ -1592,7 +1662,7 @@ private fun SkillCallCard(
     // UXR11 U6（ADR-033）：空 content（协议占位）不渲染；**不再跳过 web_search 工具**——
     // 联网搜索也是 Skill 能力（web-research 等 Skill 依赖 web_search__search），
     // 用户反馈"LLM 调 skills 时无界面反馈"，此卡片给出明确的「工具被调用 ✓/✕」反馈，
-    // 搜索结果正文仍由下方 CollapsibleSearchCard 完整展示（不重复）。
+    // 搜索结果正文仍由下方 WebSourceList 完整展示（不重复）。
     if (content.isEmpty()) return
     val isWebSearch = message.toolName == WebSearchLocalToolExecutor.TOOL_SEARCH
 
@@ -1648,7 +1718,7 @@ private fun SkillCallCard(
             )
         }
         Text(
-            // UXR11 U6：web_search 结果由 CollapsibleSearchCard 完整展示，卡片只给确认文本不重复摘要
+            // UXR11 U6：web_search 结果由 WebSourceList 完整展示，卡片只给确认文本不重复摘要
             text = when {
                 isWebSearch && !isFailed -> "搜索结果见下方来源卡片"
                 isWebSearch -> "搜索失败，详见下方"
@@ -1728,162 +1798,131 @@ private fun CollapsibleThinkingCard(chain: String) {
 }
 
 /**
- * 联网搜索来源折叠卡片（UX-001 问题 8，ADR-021）。
+ * RAG 引用来源 —— 设计稿 `.sources` / `.source`（`design/prism-ui-v1/app.css`）。
  *
- * 对齐 Perplexity/Kimi 风格引用来源卡片：可折叠区域展示「编号 + 标题 + 域名 + 摘要」，
- * 每条整行可点击，经 [Intent.ACTION_VIEW] 在系统浏览器打开原网页（不内置 WebView 保持轻量）。
+ * 规格：纵向 gap 6dp；每行 `[1]` 等宽琥珀 + 文档名（12sp 次级）+ 右侧等宽 meta（`#片段号`）；
+ * 行间 1px 分隔线、`padding-top 8dp`。
+ *
+ * 与旧实现的差别：旧版是「📚 引用来源（N）」可折叠卡片（绿色边框 + emoji + ▾/▸ 字符）。
+ * 设计稿没有卡片、没有折叠、没有 emoji——引用是一次性的阅读辅助，折叠反而增加一次点击。
  */
 @Composable
-private fun CollapsibleSearchCard(results: List<SearchResult>) {
-    var expanded by remember { mutableStateOf(true) }
-    val context = LocalContext.current
+private fun CitationSourceList(sources: List<io.prism.ui.model.Citation>) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(PrismPanel2.copy(alpha = 0.6f))
-            .border(1.dp, PrismLine, RoundedCornerShape(10.dp))
+            .padding(top = PrismSize.s3),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        // 折叠标题行
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = { expanded = !expanded }
-                )
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Text(text = "🔍", fontSize = 12.sp)
-            Text(text = "参考来源（${results.size}）", color = PrismTextDim, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.weight(1f))
-            Text(
-                text = if (expanded) "▾" else "▸",
-                color = PrismTextFaint,
-                fontSize = 12.sp
+        sources.forEach { citation ->
+            SourceRow(
+                index = citation.index,
+                title = citation.documentTitle,
+                meta = citation.chunkIndex?.let { "#$it" } ?: ""
             )
-        }
-        if (expanded) {
-            results.forEachIndexed { index, result ->
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            // 点击跳转外部网站（系统浏览器，ACTION_VIEW）
-                            // F-01（guardrail TKN-UX001-GUARDRAIL-001）：纵深防御 ——
-                            // 即使 parseSearchResults 已过滤，点击前仍校验 http(s) scheme，
-                            // 防止恶意 intent:// 等链接被触发（CWE-601）。
-                            onClick = {
-                                val link = result.link
-                                if (link.startsWith("http://") || link.startsWith("https://")) {
-                                    runCatching {
-                                        context.startActivity(
-                                            Intent(Intent.ACTION_VIEW, Uri.parse(link))
-                                        )
-                                    }
-                                }
-                            }
-                        )
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "${index + 1}. ",
-                            color = PrismMint,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = result.title,
-                            color = PrismText,
-                            fontSize = 12.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                    Text(
-                        text = result.link,
-                        color = PrismCyan,
-                        fontSize = 10.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    if (result.snippet.isNotBlank()) {
-                        Text(
-                            text = result.snippet,
-                            color = PrismTextFaint,
-                            fontSize = 11.sp,
-                            lineHeight = 16.sp,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(top = 2.dp)
-                        )
-                    }
-                }
-            }
         }
     }
 }
 
 /**
- * RAG 引用来源折叠卡片（UX-001 问题 6，ADR-021）。
+ * 联网搜索来源 —— 同一套 `.source` 行语言。
  *
- * 原 [SourceChip] 在正文下方平铺展示，与 AI 输出文字视觉上易混淆/重叠。
- * 改为独立可折叠区域「引用来源（N）」，展开后逐条展示 [来源N] 文档名 #片段号。
+ * **功能保留**：整行可点，跳系统浏览器；仍做 http(s) 纵深校验（CWE-601 防护，F-01）。
  */
 @Composable
-private fun CollapsibleSourcesCard(sources: List<io.prism.ui.model.Citation>) {
-    var expanded by remember { mutableStateOf(true) }
+private fun WebSourceList(results: List<SearchResult>) {
+    val context = LocalContext.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(PrismMint.copy(alpha = 0.06f))
-            .border(1.dp, PrismMint.copy(alpha = 0.2f), RoundedCornerShape(10.dp))
+            .padding(top = PrismSize.s3),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = { expanded = !expanded }
-                )
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Text(text = "📚", fontSize = 12.sp)
-            Text(text = "引用来源（${sources.size}）", color = PrismMint, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.weight(1f))
-            Text(
-                text = if (expanded) "▾" else "▸",
-                color = PrismMint,
-                fontSize = 12.sp
+        results.forEachIndexed { index, result ->
+            val link = result.link
+            val clickable = link.startsWith("http://") || link.startsWith("https://")
+            SourceRow(
+                index = index + 1,
+                title = result.title.ifBlank { link },
+                meta = hostOf(link),
+                onClick = if (clickable) {
+                    {
+                        runCatching {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link)))
+                        }
+                        Unit
+                    }
+                } else {
+                    null
+                }
             )
-        }
-        if (expanded) {
-            sources.forEach { citation ->
-                val chunkPart = citation.chunkIndex?.let { " #$it" } ?: ""
-                Text(
-                    text = "[来源${citation.index}] ${citation.documentTitle}$chunkPart",
-                    color = PrismMint,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 3.dp)
-                )
-            }
-            Spacer(Modifier.height(6.dp))
         }
     }
 }
+
+/** 单条来源行（`.source`：等宽序号 + 标题 + 右侧等宽 meta + 顶部 1px 分隔线）。 */
+@Composable
+private fun SourceRow(
+    index: Int,
+    title: String,
+    meta: String,
+    onClick: (() -> Unit)? = null
+) {
+    Column {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(PrismLine)
+        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    if (onClick != null) {
+                        Modifier.clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onClick
+                        )
+                    } else {
+                        Modifier
+                    }
+                )
+                .padding(top = 8.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text(
+                text = "[$index]",
+                color = PrismAccent,
+                fontSize = PrismType.micro,
+                fontFamily = FontFamily.Monospace
+            )
+            Text(
+                text = title,
+                color = PrismTextDim,
+                fontSize = PrismType.meta,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            if (meta.isNotBlank()) {
+                Text(
+                    text = meta,
+                    color = PrismTextFaint,
+                    fontSize = PrismType.micro,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        }
+    }
+}
+
+/** 取链接的 host（`https://a.com/x` → `a.com`）；解析失败时退回空串。 */
+private fun hostOf(link: String): String = runCatching {
+    java.net.URI(link).host?.removePrefix("www.") ?: ""
+}.getOrDefault("")
 
 /**
  * AI 打字指示 —— 三点呼吸 + 状态文案（US-019 文案修正，ADR-012 5.8 修复 R-7）。
@@ -2107,10 +2146,16 @@ private fun MessageInputBar(
 
         // UXR9 US-907：折叠栏 —— 点击"＋"展开，显示「相册 / 文件」两个上传入口。
         // 展开时挤占输入区上方空间（与键盘不同时使用：选完自动收起 + 收起键盘）。
+        // UI v2（ADR-079）：展开栏按设计稿 `.upload-bar` ——
+        // 两个 32dp 胶囊（圆角 8dp、1px 细线、surface 底、14dp 线性图标 + 12sp 文字），
+        // 顺序与设计稿一致（文件 → 相册）。旧版是 emoji + 更大的灰块。
+        // 入场只用 fade + 轻微位移（AC-11：不 animate 布局尺寸）。
         AnimatedVisibility(
             visible = uploadBarExpanded,
-            enter = expandVertically(),
-            exit = shrinkVertically()
+            enter = fadeIn(animationSpec = PrismMotion.base()) +
+                slideInVertically(animationSpec = PrismMotion.enter()) { -it / 4 },
+            exit = fadeOut(animationSpec = PrismMotion.tap()) +
+                slideOutVertically(animationSpec = PrismMotion.tap()) { -it / 4 }
         ) {
             Row(
                 modifier = Modifier
@@ -2118,14 +2163,22 @@ private fun MessageInputBar(
                     .padding(bottom = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                UploadActionChip(label = "🖼 相册", onClick = {
-                    uploadBarExpanded = false
-                    onImagePick()
-                })
-                UploadActionChip(label = "📄 文件", onClick = {
-                    uploadBarExpanded = false
-                    onFilePick()
-                })
+                UploadActionChip(
+                    icon = PrismIcons.File,
+                    label = "文件",
+                    onClick = {
+                        uploadBarExpanded = false
+                        onFilePick()
+                    }
+                )
+                UploadActionChip(
+                    icon = PrismIcons.Image,
+                    label = "相册",
+                    onClick = {
+                        uploadBarExpanded = false
+                        onImagePick()
+                    }
+                )
             }
         }
 
@@ -2139,7 +2192,7 @@ private fun MessageInputBar(
                 .background(PrismPanel, RoundedCornerShape(22.dp))
                 .border(1.dp, PrismLineStrong, RoundedCornerShape(22.dp))
                 .padding(4.dp),
-            verticalAlignment = Alignment.Bottom,
+            verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             Box(
@@ -2175,12 +2228,23 @@ private fun MessageInputBar(
                 ),
                 cursorBrush = SolidColor(PrismAccent),
                 maxLines = 4,
+                // **垂直对齐（用户反馈"＋与占位文字偏下"）**：
+                // 旧版给字段 vertical padding 7dp，字段总高 = 22 + 14 = 36dp 看似与按钮等高，
+                // 但 BasicTextField 的空文本首行基线与 36dp 按钮的视觉中心并不重合
+                //（Compose 文字行框含 leading，实际内容比 lineHeight 高），
+                // 导致占位符看起来被压到中线以下。
+                // 改为：字段自身**固定最小高 36dp 并居中内容**，去掉上下 padding；
+                // 行内 Alignment.CenterVertically 让 ＋ / 字段 / 发送键共享同一中线。
                 modifier = Modifier
                     .weight(1f)
-                    .padding(horizontal = 4.dp, vertical = 7.dp),
+                    .heightIn(min = 36.dp)
+                    .padding(horizontal = 4.dp)
+                    .wrapContentHeight(Alignment.CenterVertically),
                 decorationBox = { innerTextField ->
                     Box(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .wrapContentHeight(Alignment.CenterVertically),
                         contentAlignment = Alignment.CenterStart
                     ) {
                         if (value.isEmpty()) {
@@ -2233,23 +2297,35 @@ private fun MessageInputBar(
     }
 }
 
-/** UXR9 US-907：折叠栏内的上传方式胶囊按钮（相册 / 文件）。 */
+/** 折叠栏内的上传入口 —— 设计稿 `.upload-bar button`（32dp 高、8dp 圆角、14dp 图标 + 12sp）。 */
 @Composable
-private fun UploadActionChip(label: String, onClick: () -> Unit) {
+private fun UploadActionChip(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    onClick: () -> Unit
+) {
     Row(
         modifier = Modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(PrismPanel2.copy(alpha = 0.6f))
-            .border(1.dp, PrismLine, RoundedCornerShape(10.dp))
+            .height(32.dp)
+            .clip(RoundedCornerShape(PrismSize.rChip))
+            .background(PrismPanel)
+            .border(1.dp, PrismLine, RoundedCornerShape(PrismSize.rChip))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 onClick = onClick
             )
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        Text(text = label, color = PrismTextDim, fontSize = 12.sp)
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = PrismTextDim,
+            modifier = Modifier.size(14.dp)
+        )
+        Text(text = label, color = PrismTextDim, fontSize = PrismType.meta)
     }
 }
 
@@ -2602,6 +2678,8 @@ private fun EditAiMessageSheet(
         )
     }
 }
+
+
 
 
 

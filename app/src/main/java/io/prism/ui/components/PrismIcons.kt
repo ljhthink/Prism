@@ -120,6 +120,54 @@ object PrismIcons {
         line("bolt", "M11.5 3 L5 13 L10 13 L9 21 L16.5 10.5 L11 10.5 L11.5 3 Z")
     }
 
+    /** 联网（`.cap-chip` 的 globe，14dp）。 */
+    val Globe: ImageVector by lazy {
+        line(
+            "globe",
+            "M4 12 A8 8 0 1 0 20 12 A8 8 0 1 0 4 12 Z",
+            "M4 12 L20 12",
+            "M12 4 A14 14 0 0 1 12 20 A14 14 0 0 1 12 4 Z"
+        )
+    }
+
+    /** 深度思考（`.cap-chip` 的 brain，14dp）。 */
+    val Brain: ImageVector by lazy {
+        line(
+            "brain",
+            "M9.5 4.5 A2.5 2.5 0 0 0 7 7 A2.5 2.5 0 0 0 5.5 11.5 A2.5 2.5 0 0 0 7 16 A2.5 2.5 0 0 0 9.5 19.5 L9.5 4.5 Z",
+            "M14.5 4.5 A2.5 2.5 0 0 1 17 7 A2.5 2.5 0 0 1 18.5 11.5 A2.5 2.5 0 0 1 17 16 A2.5 2.5 0 0 1 14.5 19.5 L14.5 4.5 Z",
+            "M12 4.5 L12 19.5"
+        )
+    }
+
+    /** 后台操控（`.cap-chip` 的 phone，14dp）。 */
+    val Phone: ImageVector by lazy {
+        line(
+            "phone",
+            "M8 3 L16 3 A1.5 1.5 0 0 1 17.5 4.5 L17.5 19.5 A1.5 1.5 0 0 1 16 21 L8 21 A1.5 1.5 0 0 1 6.5 19.5 L6.5 4.5 A1.5 1.5 0 0 1 8 3 Z",
+            "M10.5 18 L13.5 18"
+        )
+    }
+
+    /** 文件（附件栏 / 文档）。 */
+    val File: ImageVector by lazy {
+        line(
+            "file",
+            "M6.5 3.5 L14 3.5 L18 7.5 L18 20.5 L6.5 20.5 Z",
+            "M14 3.5 L14 7.5 L18 7.5"
+        )
+    }
+
+    /** 相册 / 图片。 */
+    val Image: ImageVector by lazy {
+        line(
+            "image",
+            "M4.5 5.5 L19.5 5.5 L19.5 18.5 L4.5 18.5 Z",
+            "M4.5 15.5 L9.5 10.5 L14 15 L16.5 12.5 L19.5 15.5",
+            "M9 8.5 A1 1 0 1 0 9 10.5 A1 1 0 1 0 9 8.5 Z"
+        )
+    }
+
     /** 端点模式胶囊的下拉箭头（`.mode-chip .chev`，比 [ChevronRight] 更小且朝下）。 */
     val ChevronDown: ImageVector by lazy {
         line("chevronDown", "M6 9 L12 15 L18 9")
