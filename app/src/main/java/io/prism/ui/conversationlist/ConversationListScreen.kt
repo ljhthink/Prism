@@ -4,6 +4,7 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -37,6 +38,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -209,16 +211,33 @@ private fun SessionRow(
     val deleteWidthPx = with(LocalDensity.current) { DELETE_WIDTH.toPx() }
     val openThreshold = deleteWidthPx * 0.55f
 
-    Box(modifier = Modifier.fillMaxWidth()) {
-        // 删除区（行右滑开后露出）：danger 文字 + 图标，点击删除
+    // 命中判定全部收敛到**容器一处**：删除区 / 行点击 / 归位 三类意图由同一个
+    // tap 分发器按「是否已滑开 + 触点 x」决定。
+    //
+    // 为什么不用两个叠放的 clickable：叠层依赖 z 序与 graphicsLayer 位移是否参与命中，
+    // 实测在真机上出现过"点删除却进了会话"的错判（位移后的行仍抢先命中）。
+    // 单点分发没有这个不确定性，且无障碍语义可以精确地只暴露当前真实可做的动作。
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .pointerInput(session.id, deleteWidthPx) {
+                detectTapGestures { tap ->
+                    val opened = offsetX.value < -deleteWidthPx * 0.9f
+                    when {
+                        opened && tap.x > size.width - deleteWidthPx -> onDelete()
+                        opened -> scope.launch { offsetX.animateTo(0f) }
+                        else -> onClick()
+                    }
+                }
+            }
+    ) {
+        // 视觉层：删除区（仅绘制，不接管手势）
         Box(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
                 .width(DELETE_WIDTH)
                 .height(PrismSize.row)
-                .background(PrismDanger.copy(alpha = 0.14f), RoundedCornerShape(PrismSize.rControl))
-                .clickable { onDelete() }
-                .semantics { contentDescription = "删除会话" },
+                .background(PrismDanger.copy(alpha = 0.14f), RoundedCornerShape(PrismSize.rControl)),
             contentAlignment = Alignment.Center
         ) {
             Icon(
@@ -231,16 +250,14 @@ private fun SessionRow(
             Text("删除", color = PrismDanger, fontSize = PrismType.sub)
         }
 
-        // 行本体（跟随位移）
+        // 视觉层：行本体（跟随位移；不挂手势，避免与容器分发器竞争）
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .graphicsLayer { translationX = offsetX.value }
                 .background(PrismBg)
-                .pointerInput(session.id) {
-                    // 用 detectDragGestures（全向）再只取水平分量：
-                    // detectHorizontalDragGestures 在本机对 adb/快速横向滑动的手势判定过于严格，
-                    // 实测划不动；全向后再过滤方向既保证纵向滚动不被抢，也保证横向可拖动。
+                .pointerInput(session.id, deleteWidthPx) {
+                    // 手势只做拖动；点击交给容器分发器
                     var totalDx = 0f
                     var totalDy = 0f
                     detectDragGestures(
@@ -272,18 +289,6 @@ private fun SessionRow(
                         }
                     )
                 }
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = {
-                        // 已滑开时点击先归位（避免误进会话），否则才进入
-                        if (offsetX.value < 0f) {
-                            scope.launch { offsetX.animateTo(0f) }
-                        } else {
-                            onClick()
-                        }
-                    }
-                )
                 .height(PrismSize.row),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -306,7 +311,7 @@ private fun SessionRow(
             }
         }
 
-        // 分隔线（画在行底部，随行一起位移，滑开时自然断开）
+        // 分隔线（随行位移）
         Box(
             modifier = Modifier
                 .align(Alignment.BottomStart)
@@ -314,6 +319,29 @@ private fun SessionRow(
                 .graphicsLayer { translationX = offsetX.value }
                 .height(1.dp)
                 .background(PrismLine)
+        )
+
+        // 无障碍：只有滑开时才存在「删除会话」节点，且挂真实点击动作。
+        // 行本身暴露两个动作：打开会话 / 删除（后者供 TalkBack 自定义操作兜底）。
+        val opened = offsetX.value < -deleteWidthPx * 0.9f
+        Box(
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .width(DELETE_WIDTH)
+                .height(PrismSize.row)
+                .then(
+                    if (opened) {
+                        Modifier.semantics {
+                            contentDescription = "删除会话"
+                            onClick(label = "删除") {
+                                onDelete()
+                                true
+                            }
+                        }
+                    } else {
+                        Modifier
+                    }
+                )
         )
     }
 }
@@ -413,5 +441,6 @@ private fun formatRelativeTime(timestamp: Long): String {
 /** 保留给旧调用点的等宽时间格式（弹层里展示精确时间时使用）。 */
 internal fun formatExactTime(timestamp: Long): String =
     SimpleDateFormat("M月d日 HH:mm", Locale.getDefault()).format(Date(timestamp))
+
 
 

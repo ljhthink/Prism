@@ -32,6 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -137,14 +138,25 @@ fun KnowledgeBaseScreen() {
         }
     }
 
-    // 各库文档数（每次 state 变化才查询一次；库数量少，ObjectBox 快查可接受）
-    val docCounts = remember(state.libraries, state.defaultKbChunkCount, state.chunkCounts) {
-        buildMap {
-            put(
-                KnowledgeBaseRepository.DEFAULT_KB_ID,
-                viewModel.listDocuments(KnowledgeBaseRepository.DEFAULT_KB_ID).size
-            )
-            state.libraries.forEach { kb -> put(kb.id, viewModel.listDocuments(kb.id).size) }
+    // 各库文档数。
+    //
+    // **必须在 IO 线程查**：`listDocuments` 是 ObjectBox 同步查询，写在 `remember {}`
+    // 里会在组合期（主线程、每帧都可能）读库——库多时首帧掉帧，StrictMode 也会报磁盘读。
+    // 用 `produceState` + IO 调度：首次组合异步取一次，库集合/分片数变化时重取。
+    val docCounts by produceState(
+        initialValue = emptyMap<Long, Int>(),
+        state.libraries,
+        state.defaultKbChunkCount,
+        state.chunkCounts
+    ) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            buildMap {
+                put(
+                    KnowledgeBaseRepository.DEFAULT_KB_ID,
+                    viewModel.listDocuments(KnowledgeBaseRepository.DEFAULT_KB_ID).size
+                )
+                state.libraries.forEach { kb -> put(kb.id, viewModel.listDocuments(kb.id).size) }
+            }
         }
     }
 
@@ -1249,4 +1261,5 @@ private fun PrismIndexBar(progress: Int, modifier: Modifier = Modifier) {
         )
     }
 }
+
 
