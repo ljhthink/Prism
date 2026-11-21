@@ -201,7 +201,7 @@ fun KnowledgeBaseScreen() {
                     name = kb.name,
                     docCount = docCounts[kb.id] ?: 0,
                     chunkCount = state.chunkCounts[kb.id] ?: 0L,
-                    subtitle = docSubtitle(kb),
+                    subtitle = docSubtitle(docCounts[kb.id] ?: 0, kb),
                     onClick = {
                         manageTargetKb = kb
                         manageTargetKbId = kb.id
@@ -574,11 +574,15 @@ private fun formatChunks(n: Long): String {
     return s.reversed().chunked(3).joinToString(",").reversed() + " 段"
 }
 
-/** 库行副标题：「N 份文档 · 日期」（设计稿 kbRow 的第二行）。 */
-private fun docSubtitle(kb: KnowledgeBase): String {
-    val date = java.text.SimpleDateFormat("M-d", java.util.Locale.getDefault())
+/**
+ * 库行副标题 —— 设计稿 kbRow 第二行是「N 份文档 · 日期」。
+ *
+ * 之前只给了「M-d 创建」，把文档数丢了（只在顶部 count-line 汇总），已修正。
+ */
+private fun docSubtitle(docCount: Int, kb: KnowledgeBase): String {
+    val date = java.text.SimpleDateFormat("M-d HH:mm", java.util.Locale.getDefault())
         .format(java.util.Date(kb.createdAt))
-    return "$date 创建"
+    return "$docCount 份文档 · $date 创建"
 }
 
 /** 摄入状态行（Running 进度条 / Completed 完成 / Failed 错误）。 */
@@ -1261,5 +1265,7 @@ private fun PrismIndexBar(progress: Int, modifier: Modifier = Modifier) {
         )
     }
 }
+
+
 
 
