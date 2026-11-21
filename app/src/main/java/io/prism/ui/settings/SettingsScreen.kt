@@ -2681,6 +2681,23 @@ private fun appVersionName(context: android.content.Context): String =
     }.getOrNull()?.takeIf { it.isNotBlank() } ?: "1.1"
 
 
+/**
+ * 分组标签（无横向 padding）—— 供**已有横向内边距的容器内**使用。
+ *
+ * [SetSection] 自带左右 20dp（对应设计稿 `main.scroll` 的 page padding）。若在
+ * 已经 padding(horizontal = 16dp) 的 Column 里再调它，会叠成 36dp 缩进——
+ * 真机实测「播报」标签 x=99 而其它组标签 x=55。此变体只保留纵向节奏。
+ */
+@Composable
+private fun SetSectionBare(title: String) {
+    Text(
+        text = title,
+        color = PrismTextFaint,
+        fontSize = 12.sp,
+        modifier = Modifier.padding(top = 20.dp, bottom = 8.dp)
+    )
+}
+
 /** 分组标题（UI v2：小字、无字距、弱化）。 */
 @Composable
 private fun SetSection(title: String) {
@@ -3410,7 +3427,7 @@ private fun VoiceEngineSection(viewModel: SettingsViewModel) {
 
         Spacer(Modifier.height(12.dp))
         // ---- TTS 引擎选择（云端项仅在 Key + GroupId 就绪时可选）----
-        SetSection("播报")
+        SetSectionBare("播报")
 
         VoiceEngineOptionRow(
             label = "系统播报（默认）",
