@@ -1,12 +1,10 @@
-﻿package io.prism.ui.conversationlist
+package io.prism.ui.conversationlist
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,7 +23,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -35,6 +32,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
@@ -42,13 +40,10 @@ import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import kotlin.math.abs
-import androidx.compose.ui.unit.sp
 import io.prism.PrismApplication
 import io.prism.data.Session
 import io.prism.ui.components.PrismIconButton
 import io.prism.ui.components.PrismIcons
-import io.prism.ui.theme.PrismAccent
 import io.prism.ui.theme.PrismBg
 import io.prism.ui.theme.PrismDanger
 import io.prism.ui.theme.PrismLine
@@ -196,8 +191,10 @@ private fun GroupLabel(text: String) {
  * 单行会话 —— 行式 + 左滑删除。
  *
  * **手势实现（单一状态源）**：位移只有一个 `Animatable<Float>`。
- * 拖动期间 `snapTo`（跟手、无动画）；松手时按阈值/速度 `animateTo` 到打开位或 0；
- * `onDragCancel` 一律回 0，避免"用户被系统打断后行卡在半开"。
+ * 拖动期间 `snapTo`（跟手、无动画）；松手时按 55% 阈值 `animateTo` 到打开位或 0。
+ * 任何"纵向占优"的移动都立即退出本手势且不消费事件，交由父级 `LazyColumn` 滚动
+ * （2026-11-22 真机 B2：旧实现用全向 `detectDragGestures`，越过 slop 即 consume，
+ * 子节点先于 LazyColumn 拿到 Main pass 事件 → 纵向拖动被吃掉，表现为历史页无法下滑）。
  */
 @Composable
 private fun SessionRow(
@@ -209,24 +206,101 @@ private fun SessionRow(
     val scope = rememberCoroutineScope()
     val offsetX = remember(session.id) { Animatable(0f) }
     val deleteWidthPx = with(LocalDensity.current) { DELETE_WIDTH.toPx() }
-    val openThreshold = deleteWidthPx * 0.55f
 
-    // 命中判定全部收敛到**容器一处**：删除区 / 行点击 / 归位 三类意图由同一个
-    // tap 分发器按「是否已滑开 + 触点 x」决定。
+    // 手势挂在**未位移的容器**上，由 [RowGesture] 纯函数裁决意图（2026-11-22 真机 B2 修复）。
     //
-    // 为什么不用两个叠放的 clickable：叠层依赖 z 序与 graphicsLayer 位移是否参与命中，
-    // 实测在真机上出现过"点删除却进了会话"的错判（位移后的行仍抢先命中）。
-    // 单点分发没有这个不确定性，且无障碍语义可以精确地只暴露当前真实可做的动作。
+    // 为什么必须挂在容器而不是行本体：行本体带 `graphicsLayer { translationX }`，滑开时它把
+    // **命中区域**一起左移了——露出来的删除区（屏幕右侧 76dp）在行的坐标系里已被移出边界，
+    // 真机实测「滑开后点删除」完全无反应（事件落到无手势的绘制层，谁都不接）。
+    // 容器不位移，因此删除区的点击坐标始终正确。
+    //
+    // 曾经的两处错误实现（都已删除，勿回退）：
+    // ① 两个叠放的 clickable：依赖 z 序与位移后的命中语义，真机出现"点删除却进会话"；
+    // ② 容器 detectTapGestures + 行 detectDragGestures：后者全向检测，**越过 slop 就 consume**，
+    //    子节点先于 LazyColumn 拿到 Main pass 事件 → 纵向拖动被吃 → 历史列表无法下滑。
+    // 现在：只有水平占优才消费，纵向一律放行（判据见 [RowGesture.decide]）。
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .pointerInput(session.id, deleteWidthPx) {
-                detectTapGestures { tap ->
-                    val opened = offsetX.value < -deleteWidthPx * 0.9f
-                    when {
-                        opened && tap.x > size.width - deleteWidthPx -> onDelete()
-                        opened -> scope.launch { offsetX.animateTo(0f) }
-                        else -> onClick()
+                val slop = viewConfiguration.touchSlop
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var dx = 0f
+                    var dy = 0f
+                    var claimed = false
+                    // 本地账本（guardrail L-1）：`offsetX.value` 的写入经
+                    // `scope.launch` 排队，快速甩动时最后几帧可能还没落地，
+                    // 直接读它做阈值判定会"甩到 90% 却弹回"。判定一律用本账本。
+                    var applied = offsetX.value
+                    var up: androidx.compose.ui.input.pointer.PointerInputChange? = null
+                    try {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed) {
+                                up = change
+                                break
+                            }
+                            // 必须先取位移再 consume（consume 后 positionChange 归零）
+                            val delta = change.positionChange()
+                            dx += delta.x
+                            dy += delta.y
+                            if (!claimed) {
+                                when (
+                                    RowGesture.decide(
+                                        dx = dx,
+                                        dy = dy,
+                                        slop = slop,
+                                        tapX = change.position.x,
+                                        rowWidth = size.width.toFloat(),
+                                        deleteWidth = deleteWidthPx,
+                                        opened = RowGesture.isOpened(applied, deleteWidthPx)
+                                    )
+                                ) {
+                                    RowGestureIntent.DragHorizontal -> claimed = true
+                                    // 纵向占优：立刻退出本手势、不消费任何事件，LazyColumn 接管滚动
+                                    RowGestureIntent.PassThrough -> return@awaitEachGesture
+                                    else -> Unit
+                                }
+                            }
+                            if (claimed) {
+                                change.consume()
+                                applied = RowGesture.applyDrag(applied, delta.x, deleteWidthPx)
+                                // AwaitPointerEventScope 是受限挂起作用域，不能直接调
+                                // Animatable 的挂起成员；用组合作用域提交（按事件顺序排队）。
+                                val target = applied
+                                scope.launch { offsetX.snapTo(target) }
+                            }
+                        }
+                        if (claimed) {
+                            val open = RowGesture.shouldSnapOpen(applied, deleteWidthPx)
+                            scope.launch { offsetX.animateTo(if (open) -deleteWidthPx else 0f) }
+                        } else if (up != null && !up.isConsumed) {
+                            when (
+                                RowGesture.decide(
+                                    dx = dx,
+                                    dy = dy,
+                                    slop = slop,
+                                    tapX = up.position.x,
+                                    rowWidth = size.width.toFloat(),
+                                    deleteWidth = deleteWidthPx,
+                                    opened = RowGesture.isOpened(applied, deleteWidthPx)
+                                )
+                            ) {
+                                RowGestureIntent.TapDelete -> onDelete()
+                                RowGestureIntent.TapCollapse ->
+                                    scope.launch { offsetX.animateTo(0f) }
+                                RowGestureIntent.TapOpen -> onClick()
+                                else -> Unit
+                            }
+                        }
+                    } finally {
+                        // guardrail L-2：手势被取消（组合离开 / key 变化 / 系统打断）时，
+                        // 半开的行必须归位，否则下次进入该行会停在错位状态。
+                        if (claimed && applied != 0f && up == null) {
+                            scope.launch { offsetX.animateTo(0f) }
+                        }
                     }
                 }
             }
@@ -250,45 +324,12 @@ private fun SessionRow(
             Text("删除", color = PrismDanger, fontSize = PrismType.sub)
         }
 
-        // 视觉层：行本体（跟随位移；不挂手势，避免与容器分发器竞争）
+        // 视觉层：行本体（只跟随位移；手势在未位移的容器上，见上）
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .graphicsLayer { translationX = offsetX.value }
                 .background(PrismBg)
-                .pointerInput(session.id, deleteWidthPx) {
-                    // 手势只做拖动；点击交给容器分发器
-                    var totalDx = 0f
-                    var totalDy = 0f
-                    detectDragGestures(
-                        onDragStart = {
-                            totalDx = 0f
-                            totalDy = 0f
-                        },
-                        onDrag = { change, dragAmount ->
-                            totalDx += dragAmount.x
-                            totalDy += dragAmount.y
-                            // 方向判定：水平意图明显时才消费（否则让纵向滚动继续）
-                            if (abs(totalDx) > abs(totalDy)) {
-                                change.consume()
-                                scope.launch {
-                                    val next = (offsetX.value + dragAmount.x)
-                                        .coerceIn(-deleteWidthPx, 0f)
-                                    offsetX.snapTo(next)
-                                }
-                            }
-                        },
-                        onDragEnd = {
-                            scope.launch {
-                                val open = -offsetX.value > openThreshold
-                                offsetX.animateTo(if (open) -deleteWidthPx else 0f)
-                            }
-                        },
-                        onDragCancel = {
-                            scope.launch { offsetX.animateTo(0f) }
-                        }
-                    )
-                }
                 .height(PrismSize.row),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -323,7 +364,7 @@ private fun SessionRow(
 
         // 无障碍：只有滑开时才存在「删除会话」节点，且挂真实点击动作。
         // 行本身暴露两个动作：打开会话 / 删除（后者供 TalkBack 自定义操作兜底）。
-        val opened = offsetX.value < -deleteWidthPx * 0.9f
+        val opened = RowGesture.isOpened(offsetX.value, deleteWidthPx)
         Box(
             modifier = Modifier
                 .align(Alignment.CenterEnd)
