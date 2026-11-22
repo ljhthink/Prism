@@ -220,6 +220,10 @@ fun SettingsScreen(
     var shizukuState by remember { mutableStateOf(io.prism.phonecontrol.bg.ShizukuShell.currentState()) }
     // ADR-065（US-3114）：执行面形态说明 / Watch 运行态（轮询刷新，组合期快照会过期）
     var backendNote by remember { mutableStateOf(io.prism.phonecontrol.bg.VirtualDisplayManager.lastBackendNote) }
+    // 2026-11-22（guardrail B2）：note 分「回落」与「已建成但降级」两类，UI 文案不同
+    var backendNoteKind by remember {
+        mutableStateOf(io.prism.phonecontrol.bg.VirtualDisplayManager.lastBackendNoteKind)
+    }
     var watchRunning by remember { mutableStateOf(io.prism.phonecontrol.bg.DisplayWatchOverlay.isRunning) }
     var watchError by remember { mutableStateOf("") }
     // 设计稿 `.row-status` 单行：四态各给一句可执行结论（长引导移入对应系统页/App）。
@@ -258,6 +262,7 @@ fun SettingsScreen(
             shizukuState = io.prism.phonecontrol.bg.ShizukuShell.currentState()
             // ADR-065（US-3114）：同步执行面回落说明与 Watch 运行态
             backendNote = io.prism.phonecontrol.bg.VirtualDisplayManager.lastBackendNote
+            backendNoteKind = io.prism.phonecontrol.bg.VirtualDisplayManager.lastBackendNoteKind
             watchRunning = io.prism.phonecontrol.bg.DisplayWatchOverlay.isRunning
             kotlinx.coroutines.delay(PHONE_CONTROL_POLL_MS)
         }
@@ -979,11 +984,11 @@ fun SettingsScreen(
                     title = "高危操作拦截",
                     subtitle = when (highRiskApprovalMode) {
                         io.prism.config.HighRiskApprovalMode.ASK ->
-                            "支付/密码/验证码硬拦截 · 发送/删除/拨号需确认"
+                            "支付/密码/验证码硬拦截 · 购买/下单/发送/删除需确认"
                         io.prism.config.HighRiskApprovalMode.ALLOW ->
-                            "支付/密码/验证码硬拦截 · 发送/删除/拨号直接执行"
+                            "支付/密码/验证码硬拦截 · 购买/下单/发送/删除直接执行"
                         io.prism.config.HighRiskApprovalMode.BLOCK ->
-                            "支付/密码/验证码硬拦截 · 发送/删除/拨号一律拦截"
+                            "支付/密码/验证码硬拦截 · 购买/下单/发送/删除一律拦截"
                     },
                     onClick = { viewModel.setHighRiskApprovalMode(nextHighRiskApprovalMode(highRiskApprovalMode)) }
                 )
@@ -1005,9 +1010,17 @@ fun SettingsScreen(
                     title = "后台操控",
                     subtitle = when {
                         !canDrawOverlays -> "未授权悬浮窗 · 点此去授权"
-                        backendNote != null -> "已回落兼容模式 · ${backendNote}"
-                        hiddenDisplayEnabled -> "在副屏执行 · 主屏可继续使用"
-                        else -> "兼容模式 · 主屏可能出现小窗"
+                        backendNote == null -> if (hiddenDisplayEnabled) {
+                            "在副屏执行 · 主屏可继续使用"
+                        } else {
+                            "兼容模式 · 主屏可能出现小窗"
+                        }
+                        // guardrail 2026-11-22 B2：note 有两种语义，不能一律说「已回落」——
+                        // 「隐藏屏已建成、只是缺 TRUSTED」并不是回落。
+                        backendNoteKind ==
+                            io.prism.phonecontrol.bg.BackendNoteKind.DEGRADED ->
+                            "隐藏执行面已启用 · ${backendNote}"
+                        else -> "已回落兼容模式 · ${backendNote}"
                     },
                     onClick = {
                         if (!canDrawOverlays) {
@@ -2218,6 +2231,14 @@ private fun ToolApprovalSheet(
             description = "所有工具直接放行，不需审核",
             selected = current == ToolApprovalMode.AUTO,
             onClick = { onSelect(ToolApprovalMode.AUTO) }
+        )
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = " 自动审批只放行工具调用本身；手机操控里「购买/下单/发送/删除」等高危动作" +
+                "仍按上方的「高危操作拦截」处理（默认需确认）。",
+            color = PrismWarning,
+            fontSize = 11.sp,
+            lineHeight = 16.sp
         )
         Spacer(Modifier.height(8.dp))
         Text(

@@ -101,6 +101,16 @@ class RemoteShellBackend : DisplayBackend {
     @Volatile
     private var lastFrameSize: Pair<Int, Int>? = null
 
+    /**
+     * 当前隐藏屏是否**受系统信任**（含 `VIRTUAL_DISPLAY_FLAG_TRUSTED`）。
+     *
+     * false = 只能承载 `allowEmbedded` 的 Activity：目标 App 自己发起的页面跳转会被系统
+     * 放回主屏（2026-11-22 真机 B2）。上层必须据此**如实提示**，不能宣称"后台藏得住"。
+     */
+    @Volatile
+    var isTrustedDisplay: Boolean = false
+        private set
+
     override fun ensure(context: Context): Int {
         displayId.takeIf { it != android.view.Display.INVALID_DISPLAY }?.let { return it }
         if (!ShizukuShell.isReady()) {
@@ -111,7 +121,12 @@ class RemoteShellBackend : DisplayBackend {
             is ShizukuShell.HiddenDisplayResult.Ok -> {
                 displayId = result.displayId
                 lastErrorText = null
-                Log.i(TAG, "隐藏虚拟屏就绪 displayId=${result.displayId} flags=0x${Integer.toHexString(result.flags)}")
+                isTrustedDisplay = HiddenDisplayFlags.isTrusted(result.flags)
+                Log.i(
+                    TAG,
+                    "隐藏虚拟屏就绪 displayId=${result.displayId} " +
+                        "flags=0x${Integer.toHexString(result.flags)} trusted=$isTrustedDisplay"
+                )
                 result.displayId
             }
             is ShizukuShell.HiddenDisplayResult.Error -> {
@@ -126,6 +141,7 @@ class RemoteShellBackend : DisplayBackend {
         if (displayId == android.view.Display.INVALID_DISPLAY) return true
         val released = ShizukuShell.releaseHiddenDisplay()
         displayId = android.view.Display.INVALID_DISPLAY
+        isTrustedDisplay = false
         lastFrameSize = null
         if (!released) lastErrorText = "releaseHiddenDisplay 失败"
         return released
@@ -274,18 +290,52 @@ internal object HiddenDisplayFlags {
     const val TRUSTED_OWN = OWN_CONTENT_ONLY or TRUSTED or SUPPORTS_TOUCH or SHOW_SYSTEM_DECORATIONS
 
     /**
-     * 逐级降级：完整 → 去 TRUSTED → 最小 + TRUSTED → 最小 → **非镜像** → 非镜像 + TRUSTED。
+     * 非镜像 + 完整能力 + TRUSTED（2026-11-22 首选项）。
      *
-     * 后两级是 2026-11-21 真机修复（M2012K10C / Android 13）：前四级都会被判为「屏幕共享」
-     * 而要求 CAPTURE_VIDEO_OUTPUT（shell 侧未授予），见 [OWN_CONTENT_ONLY]。
+     * 等于 [FULL] 再加 [OWN_CONTENT_ONLY]，同时**去掉 [DEVICE_DISPLAY_GROUP]**
+     * （它与 [OWN_DISPLAY_GROUP] 语义互斥：一块屏不可能既属于设备display组又独占组）。
+     * 目标：既避开 Android 13 的 `CAPTURE_VIDEO_OUTPUT` 检查（非镜像），
+     * 又拿到 `TRUSTED`（允许承载第三方 App 自己发起的 Activity）。
+     */
+    const val FULL_OWN = BASE or OWN_CONTENT_ONLY or TRUSTED or OWN_DISPLAY_GROUP or
+        ALWAYS_UNLOCKED or TOUCH_FEEDBACK_DISABLED or OWN_FOCUS or STEAL_TOP_FOCUS_DISABLED
+
+    /**
+     * 该 flags 组合建出来的屏是否 **受系统信任**（`Display.isTrusted()`，即含 [TRUSTED]）。
+     *
+     * 为什么它决定成败（2026-11-22 真机 B2）：AOSP
+     * `ActivityTaskSupervisor#isCallerAllowedToLaunchOnDisplay` 对非默认屏的限制是——
+     * 屏幕 **不受信任** 时，只允许启动声明了 `allowEmbedded` 的 Activity；
+     * 目标 App 自己发起的普通 Activity（如拼多多商品详情 `NewPageActivity`）会被拒，
+     * 系统随即把 task 放回默认屏 → 用户看到「后台跑到一半整屏跳到目标 App」。
+     *
+     * 纯函数，供生产侧判定与单测共用。
+     */
+    fun isTrusted(flags: Int): Boolean = (flags and TRUSTED) != 0
+
+    /**
+     * 逐级降级（2026-11-22 重排）。**两级排序，优先级不可交换**：
+     *
+     * 1. **先按「是否非镜像」分组**（含 [OWN_CONTENT_ONLY] 的全部在前）。
+     *    理由：Android 13 起镜像式虚拟屏要求 `CAPTURE_VIDEO_OUTPUT`（shell 未授予，必然失败）；
+     *    更重要是的——万一某个 ROM 授予了该权限，镜像屏会把**用户主屏内容**投影出来并接收
+     *    注入事件，那比"能跑但不 trusted"危险得多。所以绝不让镜像变体抢在前面成功。
+     * 2. **组内再按「是否 TRUSTED」排**（trusted 在前）。
+     *    理由见 [isTrusted]：untrusted 屏承载不了第三方 App 自己发起的 Activity，后台会在
+     *    应用内跳转时逃逸到主屏。旧顺序把 `BASE_OWN`（untrusted）排在 `TRUSTED_OWN` 之前，
+     *    于是**先成功的那一个恰好是错的**（2026-11-22 真机 B2）。
+     *
+     * 因此允许「untrusted-非镜像」排在「trusted-镜像」之前：这是**有意的**，
+     * 因为镜像屏即使 trusted 也会暴露用户主屏内容。
      */
     val LADDER = intArrayOf(
-        FULL,
-        FULL and TRUSTED.inv(),
-        BASE or TRUSTED,
-        BASE,
-        BASE_OWN,
-        TRUSTED_OWN
+        FULL_OWN,                       // ① 非镜像 + trusted + 全能力（首选）
+        TRUSTED_OWN,                    // ② 非镜像 + trusted + 最小
+        BASE_OWN,                       // ③ 非镜像 + untrusted（能跑，但跳转可能逃逸）
+        FULL,                           // ④ 镜像 + trusted（老 ROM 兜底）
+        BASE or TRUSTED,                // ⑤ 镜像 + trusted + 最小
+        FULL and TRUSTED.inv(),         // ⑥ 镜像 + untrusted + 全能力
+        BASE                            // ⑦ 镜像 + untrusted + 最小
     )
 }
 

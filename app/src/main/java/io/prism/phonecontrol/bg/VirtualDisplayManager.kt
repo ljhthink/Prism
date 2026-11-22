@@ -37,6 +37,20 @@ import android.view.Display
  * **线程安全**：ensure/release 全程持 [lock]；displayId/latestFrame 走 @Volatile + 短锁。
  * ImageReader 监听跑在专用 [HandlerThread]（保持队列流动，防 Surface 队列填满后停帧）。
  */
+/**
+ * 最近一次执行面的**降级类别**（与 [VirtualDisplayManager.lastBackendNote] 配对，2026-11-22）。
+ *
+ * 为什么需要分类：旧实现只有一句 note，UI 一律渲染成「已回落兼容模式 · $note」——
+ * 但「隐藏屏已建成、只是缺 TRUSTED」并不是回落，前置那句话会自相矛盾（guardrail B2）。
+ */
+enum class BackendNoteKind {
+    /** 隐藏执行面建屏失败，已回落到兼容模式（overlay/自建虚拟屏）。 */
+    FALLBACK,
+
+    /** 隐藏执行面已建成，但能力降级（如未获 `TRUSTED`，应用内跳转可能回到主屏）。 */
+    DEGRADED
+}
+
 object VirtualDisplayManager {
 
     private const val TAG = "VirtualDisplayMgr"
@@ -95,9 +109,28 @@ object VirtualDisplayManager {
     @Volatile
     var hiddenDisplayEnabledProvider: () -> Boolean = { true }
 
+    /**
+     * 当前隐藏执行面是否**受系统信任**（含 `VIRTUAL_DISPLAY_FLAG_TRUSTED`，2026-11-22）。
+     *
+     * false 时目标 App 自己发起的 Activity 会被系统放回主屏（应用内跳转逃逸）。
+     * 供 LLM 诊断文案与设置页如实陈述——**不得**在 untrusted 时声称"trusted"。
+     */
+    val hiddenDisplayTrusted: Boolean
+        get() = (activeBackend as? RemoteShellBackend)?.isTrustedDisplay == true
+
     /** 最近一次后端回落的可读说明（null=未回落；UI/工具文案如实展示）。 */
     @Volatile
     var lastBackendNote: String? = null
+
+    /**
+     * 最近一次执行面的**降级类别**（与 [lastBackendNote] 配对，2026-11-22）。
+     *
+     * 为什么需要分类：旧实现只有一句 note，UI 一律渲染成
+     * 「已回落兼容模式 · $note」——但「隐藏屏已建成、只是缺 TRUSTED」并不是回落，
+     * 前置那句话会自相矛盾（guardrail 2026-11-22 B2）。
+     */
+    @Volatile
+    var lastBackendNoteKind: BackendNoteKind = BackendNoteKind.FALLBACK
         private set
 
     /** 最近一次以后台方式启动的组件与用户（Takeover 迁屏/迁回用；由启动链路记录）。 */
@@ -214,6 +247,7 @@ object VirtualDisplayManager {
                 resetDisplayState()
             }
             lastBackendNote = null
+            lastBackendNoteKind = BackendNoteKind.FALLBACK
             // ADR-065：按纯函数给出的顺序尝试（默认隐藏优先、失败回落 legacy）
             for (kind in backendPlan(hiddenDisplayEnabledProvider(), ShizukuShell.isReady())) {
                 if (kind == DisplayBackend.Kind.LEGACY) {
@@ -236,8 +270,22 @@ object VirtualDisplayManager {
                     }
                     displayDensity = RemoteShellBackend.DENSITY
                     Log.i(TAG, "隐藏虚拟屏执行面已就绪 displayId=$displayId（主屏零窗口）")
+                    if (!hidden.isTrustedDisplay) {
+                        // **2026-11-22（真机 B2）**：untrusted 执行面只能承载 allowEmbedded 的
+                        // Activity；目标 App 自己发起的页面跳转会被系统放回主屏（拼多多首页→
+                        // 商品详情即命中）。这里不阻拦建屏（能跑总比回落可见小窗强），但必须
+                        // **如实告知**，否则用户会以为后台一定藏得住。
+                        lastBackendNoteKind = BackendNoteKind.DEGRADED
+                        lastBackendNote = "执行面未获系统信任（TRUSTED），应用内跳转可能回到主屏"
+                        Log.w(
+                            TAG,
+                            "隐藏执行面为 untrusted（缺 VIRTUAL_DISPLAY_FLAG_TRUSTED）：" +
+                                "目标 App 的页面跳转会被系统放回主屏"
+                        )
+                    }
                     return displayId
                 }
+                lastBackendNoteKind = BackendNoteKind.FALLBACK
                 lastBackendNote = "隐藏执行面不可用（${hidden.lastError() ?: "未知原因"}），" +
                     "已回落兼容模式（主屏可能出现可见小窗）"
                 Log.w(TAG, "隐藏虚拟屏创建失败，回落 legacy：${hidden.lastError()}")
@@ -535,6 +583,22 @@ object VirtualDisplayManager {
     }
 
     /**
+     * 该包名是否可作为「回收 / 重启 / 迁屏」的目标（纯函数，可单测）。
+     *
+     * **2026-11-22 新增（自身包名守卫）**：`stopLaunchedPackages` / `stopPersistedLaunched` /
+     * `evictFromMainDisplay` 三处会对清单里的包执行 `am force-stop`，而清单来自
+     * `launch_app` 的目标——`launch_app` 此前**不拦自身**，一旦 LLM 传 `io.prism`
+     * （`getLaunchIntentForPackage("io.prism")` 因 MainActivity 有 LAUNCHER 必然命中），
+     * 后台会话收尾时就会 `force-stop io.prism`：本应用连同后台执行面一起消失，
+     * 用户看到的是「瞬间回到桌面、最近任务里也没有了」（force-stop 会清 recents）。
+     *
+     * 这是与本轮 B2（对账误杀本会话目标）同类的缺陷：**任何回收动作都必须先证明归属**，
+     * 而「自身」永远不属于可回收目标。
+     */
+    fun shouldForceStopTarget(pkg: String, selfPackage: String): Boolean =
+        pkg.isNotBlank() && pkg != selfPackage
+
+    /**
      * 判断设置值是否为本应用的模拟副屏规格（纯函数可测；[reconcileStaleOverlay] 判据）。
      */
     fun isOurOverlaySpec(value: String): Boolean = value.trim() == OVERLAY_SPEC
@@ -555,6 +619,12 @@ object VirtualDisplayManager {
      * @return 成功/失败描述文案（含诊断；由上层决定是否 settle）
      */
     fun launchApp(context: Context, packageName: String): String {
+        if (!shouldForceStopTarget(packageName, context.packageName)) {
+            // 2026-11-22：自身包名不得作为后台执行面的目标——`am start -S` 会先 force-stop
+            // 本应用（主界面与后台会话一起消失），且会把 MainActivity 启到隐藏虚拟屏。
+            return "错误：不能把 Prism 自身启动到后台执行面（会导致本应用被重启/界面消失）。" +
+                "若要操作 Prism，请直接在当前界面进行"
+        }
         if (!isCreatedAndAlive(context)) return "错误：后台虚拟屏未创建"
         val intent = context.packageManager.getLaunchIntentForPackage(packageName)
             ?: return "错误：未找到应用 $packageName 的启动入口"
@@ -585,7 +655,7 @@ object VirtualDisplayManager {
                 launchedPackages.add(packageName to launchedUser)
             }
             appContext?.let { persistLaunched(it, packageName, launchedUser) }
-            Log.i(TAG, "已启动到虚拟屏 $packageName（displayId=$displayId）")
+            Log.i(TAG, "已启动到虚拟屏 ${maskPackage(packageName)}（displayId=$displayId）")
             "已在后台虚拟屏启动应用 $packageName"
         } catch (e: SecurityException) {
             Log.w(TAG, "launchApp(后台) SecurityException: ${e.message}")
@@ -610,6 +680,13 @@ object VirtualDisplayManager {
      * @return 可读结果文案（成功含回收说明；失败含诊断与降级引导）
      */
     private fun shellLaunchAndVerify(component: String, packageName: String, userId: Int?): String {
+        // guardrail L-6（防御纵深）：这里是**所有** force-stop 式启动的唯一收口
+        // （跨用户启动 / takeOverToMainScreen / resumeFromTakeOver / recoverDisplay 都经此），
+        // 入口再挡一次自身包名，避免将来新增调用点绕过 [launchApp] 的守卫又把自己杀掉。
+        val self = appContext?.packageName
+        if (self != null && !shouldForceStopTarget(packageName, self)) {
+            return "错误：拒绝把 Prism 自身作为后台执行面目标（会 force-stop 本应用）"
+        }
         lastLaunchedComponent = component
         // guardrail r1 Q-06：记录真实用户 id（非跨用户启动时是当前用户，不能硬编码 0——
         // 工作资料/多用户设备上 --user 0 会迁错实例）。UserHandle.hashCode() 即 userId。
@@ -619,7 +696,7 @@ object VirtualDisplayManager {
         // 跨用户启动：目标 App 若已在其它屏有窗口，须 force-stop 才能迁到本副屏（真机 PoC）
         val started = backend.launch(component, packageName, userId, forceStop = userId != null)
         if (!started) {
-            Log.w(TAG, "shell am start 失败（$packageName user=${userId ?: "current"}）")
+            Log.w(TAG, "shell am start 失败（${maskPackage(packageName)} user=${userId ?: "current"}）")
             return "错误：shell 启动失败（am start 非零退出）。请确认 Shizuku 状态后重试，" +
                 "或显式传 mode=\"foreground\" 在主屏继续"
         }
@@ -641,7 +718,7 @@ object VirtualDisplayManager {
                 launchedPackages.add(packageName to launchedUser)
             }
             appContext?.let { persistLaunched(it, packageName, launchedUser) }
-            Log.i(TAG, "已在虚拟屏渲染 $packageName（displayId=$displayId, user=${userId ?: "current"}）")
+            Log.i(TAG, "已在虚拟屏渲染 ${maskPackage(packageName)}（displayId=$displayId, user=${userId ?: "current"}）")
             // 2026-11-21 修文案：隐藏执行面（isHiddenMode）**主屏不出现任何小窗**，
             // 只有兼容模式（overlay）才会。原文案不分模式一律说"主屏出现小窗"，属状态撒谎。
             return if (isHiddenMode) {
@@ -673,6 +750,9 @@ object VirtualDisplayManager {
      * @return 成功/失败描述文案（含诊断）
      */
     fun launchAppForUser(context: Context, packageName: String, userId: Int): String {
+        if (!shouldForceStopTarget(packageName, context.packageName)) {
+            return "错误：不能把 Prism 自身启动到后台执行面（会 force-stop 本应用）"
+        }
         if (!isCreatedAndAlive(context)) return "错误：后台虚拟屏未创建"
         if (!ShizukuShell.isReady()) {
             return "错误：跨用户后台启动需要 Shizuku（已安装并激活）——App 自身无法把其它用户的应用启动到副屏"
@@ -744,7 +824,7 @@ object VirtualDisplayManager {
             return "已发起迁移（会重启目标应用），但未确认目标应用已出现在主屏——请手动确认后再接管"
         }
         synchronized(lock) { takeoverActive = true }
-        Log.i(TAG, "Takeover：$component 已迁到主屏（user=$userId）")
+        Log.i(TAG, "Takeover：${maskPackage(component.substringBefore("/"))} 已迁到主屏（user=$userId）")
         return "已把后台目标应用临时迁到主屏（display 0），请手动接管；下次 AI 继续操作时会自动迁回隐藏执行面。" +
             "注意：迁入/迁回都会重启目标应用，未保存的状态可能丢失。"
     }
@@ -1148,6 +1228,8 @@ object VirtualDisplayManager {
      * 只存 `包名|userId`，不含任何用户内容；对账后立即清空。
      */
     private fun persistLaunched(context: Context, pkg: String, userId: Int) {
+        // 2026-11-22：自身包名永不落盘（落盘后一旦被对账重放 = 启动即 force-stop 自己）
+        if (!shouldForceStopTarget(pkg, context.packageName)) return
         runCatching {
             val prefs = context.getSharedPreferences(LAUNCHED_PREFS, Context.MODE_PRIVATE)
             val set = prefs.getStringSet(KEY_LAUNCHED, emptySet()).orEmpty().toMutableSet()
@@ -1165,6 +1247,35 @@ object VirtualDisplayManager {
         }
     }
 
+    /**
+     * 把持久化清单拆成「可回收目标」与「被跳过的条目」（纯函数，可单测）。
+     *
+     * 抽出它的原因（guardrail L-9）：守卫原先内联在 [stopPersistedLaunched] 的循环里，
+     * 单测只能覆盖 [shouldForceStopTarget] 本身——把调用点的 `if` 删掉，测试依然全绿。
+     * 现在过滤逻辑本身被测，删掉调用等于删掉函数调用，测试会直接失败。
+     *
+     * @param entries 形如 `pkg|userId` 的清单条目（脏数据容忍：无包名/无用户按 0 处理）
+     * @param self 本应用包名（永不回收）
+     * @return 第一项=可回收的 `包名 to userId`；第二项=被跳过的原始条目（供日志/排查）
+     */
+    fun reclaimableTargets(
+        entries: Collection<String>,
+        self: String
+    ): Pair<List<Pair<String, Int>>, List<String>> {
+        val targets = mutableListOf<Pair<String, Int>>()
+        val skipped = mutableListOf<String>()
+        entries.forEach { entry ->
+            val parts = entry.split('|')
+            val pkg = parts.firstOrNull()?.trim()?.takeIf { it.isNotBlank() }
+            if (pkg == null || !shouldForceStopTarget(pkg, self)) {
+                skipped += entry
+                return@forEach
+            }
+            targets += pkg to (parts.getOrNull(1)?.trim()?.toIntOrNull() ?: 0)
+        }
+        return targets to skipped
+    }
+
     /** 停掉持久化清单里的全部目标并清空（对账路径专用；不动内存 [launchedPackages]）。 */
     private fun stopPersistedLaunched(context: Context) {
         if (!ShizukuShell.isReady()) return
@@ -1178,10 +1289,10 @@ object VirtualDisplayManager {
                 .edit().remove(KEY_LAUNCHED).apply()
         }
         val managed = mutableListOf<String>()
-        raw.forEach { entry ->
-            val parts = entry.split('|')
-            val pkg = parts.firstOrNull()?.takeIf { it.isNotBlank() } ?: return@forEach
-            val user = parts.getOrNull(1)?.toIntOrNull() ?: 0
+        // 2026-11-22：自身包名永不回收（否则对账会把本应用 force-stop，用户看到"闪退回桌面"）
+        val (targets, skipped) = reclaimableTargets(raw, context.packageName)
+        skipped.forEach { Log.w(TAG, "对账跳过条目：${maskPackage(it.substringBefore('|'))}") }
+        targets.forEach { (pkg, user) ->
             val ok = runCatching { ShizukuShell.forceStopForUser(pkg, user) }.getOrDefault(false)
             if (ok) managed += pkg else Log.w(TAG, "对账回收失败：${maskPackage(pkg)}（user=$user）")
         }
@@ -1203,7 +1314,13 @@ object VirtualDisplayManager {
         }
         // guardrail R4-01：**force-stop 必须在锁外执行**。单条 `am force-stop` 最长 5s，
         // 若持锁执行会阻塞 create/launch/frame 等全部执行面操作（甚至 ANR 风险）。
+        val self = context.packageName
         snapshot.forEach { (pkg, userId) ->
+            // 2026-11-22：自身包名永不回收（同类风险见 [shouldForceStopTarget]）
+            if (!shouldForceStopTarget(pkg, self)) {
+                Log.w(TAG, "回收跳过自身包名：${maskPackage(pkg)}")
+                return@forEach
+            }
             val ok = if (ShizukuShell.isReady()) {
                 runCatching { ShizukuShell.forceStopForUser(pkg, userId) }.getOrDefault(false)
             } else {
@@ -1248,7 +1365,13 @@ object VirtualDisplayManager {
         val leakedByUser = snapshot.map { it.second }.distinct()
             .associateWith { MainDisplayWindows.packagesOnMainDisplayForUser(dump, it) }
         val evicted = mutableListOf<String>()
+        val self = context.packageName
         snapshot.forEach { (pkg, userId) ->
+            // 2026-11-22：自身包名永不回收（本应用就在 display 0，误判会把主界面杀掉）
+            if (!shouldForceStopTarget(pkg, self)) {
+                Log.w(TAG, "抢占主屏清理跳过自身包名：${maskPackage(pkg)}")
+                return@forEach
+            }
             // 只处理"该包确实以**它自己的**用户身份泄漏到主屏"的情形
             val leaked = leakedByUser[userId] ?: return@forEach
             if (pkg !in leaked) return@forEach
@@ -1277,6 +1400,11 @@ object VirtualDisplayManager {
         isHiddenMode = false
         takeoverActive = false
         lastLaunchedComponent = null
+        // 2026-11-22（自查，接 guardrail S6）：降级说明描述的是**当前**执行面；
+        // 执行面已释放后必须清掉，否则设置页会显示一句已不成立的提示
+        // （尤其本轮新增的 DEGRADED「未获系统信任」——会话结束后它已无意义）。
+        lastBackendNote = null
+        lastBackendNoteKind = BackendNoteKind.FALLBACK
     }
 
     /** 清空已启动包名记录（不杀进程；如任务完成后想保留应用常驻虚拟屏时用）。 */
