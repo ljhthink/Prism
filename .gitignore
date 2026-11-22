@@ -143,3 +143,10 @@ voice-clone-kit/**/__pycache__/
 # 批次24（ADR-051）：桌宠形象资产（用户私有资产，不入 Git、不入 APK）
 # 与 cyrene.rolepack 同一边界；重生成：node tmp/build-cyrene-petpack.js
 *.petpack
+
+# 2026-11-21 UI 真机截图与并排图工作目录（一次性工件，不入库）
+tmp-ui/
+design/prism-ui-v1/diff/
+# 设计稿逐屏截图（14.8MB，可由 index.html 重新生成，不入库）
+design/prism-ui-v1/screenshots/
+

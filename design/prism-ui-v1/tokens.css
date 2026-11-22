@@ -1,0 +1,99 @@
+/* Prism UI v2 · design tokens
+   Direction: optical bench — warm graphite, one amber signal, 1px hairlines.
+   Three palettes stay available so the direction can be judged, not guessed. */
+
+:root {
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s7: 28px;
+  --s8: 32px;
+
+  --r-card: 14px;
+  --r-control: 10px;
+  --r-sheet: 20px;
+  --r-pill: 999px;
+
+  --page: 20px;
+  --row: 56px;
+  --tap: 44px;
+
+  --fs-title: 22px;
+  --fs-head: 17px;
+  --fs-body: 15px;
+  --fs-sub: 13px;
+  --fs-meta: 12px;
+  --fs-micro: 11px;
+
+  /* motion: one easing family, three durations */
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --ease-spring: cubic-bezier(0.16, 1, 0.3, 1);
+  --t-tap: 110ms;
+  --t-base: 200ms;
+  --t-enter: 280ms;
+
+  --font: "PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC",
+    "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas,
+    monospace;
+}
+
+[data-theme="warm"] {
+  --bg: #111210;
+  --surface: #171816;
+  --surface-2: #1d1e1b;
+  --surface-3: #24261f;
+  --text: #ecede6;
+  --dim: #a3a69b;
+  --faint: #82867a;
+  --line: rgba(236, 237, 230, 0.08);
+  --line-strong: rgba(236, 237, 230, 0.14);
+  --accent: #e0a45c;
+  --accent-ink: #17120a;
+  --accent-soft: rgba(224, 164, 92, 0.12);
+  --live: #e0a45c;
+  --ok: #7fa98a;
+  --warn: #d6a94f;
+  --bad: #d96a5b;
+}
+
+[data-theme="cool"] {
+  --bg: #0f1112;
+  --surface: #151819;
+  --surface-2: #1b1f20;
+  --surface-3: #222728;
+  --text: #e9edee;
+  --dim: #9ba5a7;
+  --faint: #7f8a8c;
+  --line: rgba(233, 237, 238, 0.08);
+  --line-strong: rgba(233, 237, 238, 0.14);
+  --accent: #8fb8c2;
+  --accent-ink: #0c1416;
+  --accent-soft: rgba(143, 184, 194, 0.12);
+  --live: #8fb8c2;
+  --ok: #86a99c;
+  --warn: #cfa963;
+  --bad: #d3766a;
+}
+
+[data-theme="ink"] {
+  --bg: #0b0b0a;
+  --surface: #121211;
+  --surface-2: #181816;
+  --surface-3: #1f1f1c;
+  --text: #f0ece2;
+  --dim: #a5a094;
+  --faint: #86816f;
+  --line: rgba(240, 236, 226, 0.08);
+  --line-strong: rgba(240, 236, 226, 0.16);
+  --accent: #f0ece2;
+  --accent-ink: #101010;
+  --accent-soft: rgba(240, 236, 226, 0.1);
+  --live: #e0a45c;
+  --ok: #8aa990;
+  --warn: #d6a94f;
+  --bad: #d96a5b;
+}

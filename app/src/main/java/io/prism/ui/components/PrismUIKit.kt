@@ -1,4 +1,4 @@
-﻿package io.prism.ui.components
+package io.prism.ui.components
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -99,7 +100,12 @@ fun PrismGroup(
 /**
  * 标准行（`.row`）：最小高 56dp、标题 15sp + 状态 12sp、尾部控件、底部 1px 分隔线。
  *
- * [tone] 用于把状态文字染色（如 QQ 已开启 → Ok），[statusTone] 单独控制状态文字色。
+ * [statusTone] 单独控制状态文字色。
+ *
+ * [statusMaxLines] 默认 2（能力页/知识库等需要一行半摘要）；设置详情页由 [PrismRow] 的调用方
+ * `SetRow` 显式传 1——设计稿 `.row-status` 是 `white-space: nowrap`（`app.css:261-268`），
+ * 即**每行只有一行状态**。多行状态会把 56dp 行撑到 100px 以上，整页退化成文字墙
+ * （2026-11-21 真机比对确认的根因）。
  */
 @Composable
 fun PrismRow(
@@ -108,6 +114,7 @@ fun PrismRow(
     onClick: (() -> Unit)? = null,
     statusTone: Color? = null,
     leadingDot: DotTone? = null,
+    statusMaxLines: Int = 2,
     trailing: @Composable RowScope.() -> Unit = {}
 ) {
     Column {
@@ -147,7 +154,7 @@ fun PrismRow(
                         text = status,
                         color = statusTone ?: PrismTextFaint,
                         fontSize = PrismType.meta,
-                        maxLines = 2,
+                        maxLines = statusMaxLines,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.padding(top = 2.dp)
                     )
@@ -174,17 +181,37 @@ fun PrismHairline(modifier: Modifier = Modifier) {
     )
 }
 
-/** 键值行（`.kv`）：11dp 上下、底部分隔线、左键右值。 */
+/**
+ * 键值行（`.kv`）：11dp 上下、底部分隔线、左键右值。
+ *
+ * [onClick] 非空时整行可点（如「当前使用」→ 选择弹层）。
+ * [maxLines] 默认 1（设计稿 `.kv-val` 单行）；**诊断/失败原因这类唯一可执行结论必须传 2 或 3**
+ * ——否则事故原因与命令会被省略号吃掉，用户无从排查（guardrail 2026-11-21 B1）。
+ */
 @Composable
 fun PrismKv(
     key: String,
     value: String,
-    mono: Boolean = false
+    mono: Boolean = false,
+    onClick: (() -> Unit)? = null,
+    tone: Color? = null,
+    maxLines: Int = 1
 ) {
     Column {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .then(
+                    if (onClick != null) {
+                        Modifier.clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onClick
+                        )
+                    } else {
+                        Modifier
+                    }
+                )
                 .padding(vertical = 11.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -192,10 +219,10 @@ fun PrismKv(
             Spacer(Modifier.width(PrismSize.s4))
             Text(
                 text = value,
-                color = PrismText,
+                color = tone ?: PrismText,
                 fontSize = PrismType.sub,
                 textAlign = TextAlign.End,
-                maxLines = 1,
+                maxLines = maxLines,
                 overflow = TextOverflow.Ellipsis,
                 fontFamily = if (mono) FontFamily.Monospace else null,
                 modifier = Modifier.weight(1f)
@@ -391,24 +418,32 @@ fun PrismActionsRow(content: @Composable RowScope.() -> Unit) {
     )
 }
 
-/** 小按钮（`.mini` / `.btn-sm`）：34dp 高、8dp 圆角、透明底。 */
+/** 小按钮（`.mini` / `.btn-sm`）：34dp 高、8dp 圆角、透明底。[enabled] = false 时置灰且不可点。 */
 @Composable
 fun PrismMini(
     text: String,
     onClick: () -> Unit,
     danger: Boolean = false,
-    icon: ImageVector? = null
+    icon: ImageVector? = null,
+    enabled: Boolean = true
 ) {
+    val alpha = if (enabled) 1f else 0.4f
+    // 设计稿 `.mini` 只有 `line-strong` 细线；`.mini.danger` 只改文字色、**不加实红描边**。
+    // danger 描边维持 0.3 的弱化（不能因为新增 enabled 而顺手加粗，guardrail 2026-11-21 B2）。
+    val borderColor = when {
+        !enabled -> PrismLineStrong.copy(alpha = 0.4f)
+        danger -> PrismDanger.copy(alpha = 0.3f)
+        else -> PrismLineStrong
+    }
     Row(
         modifier = Modifier
+            // 设计稿 `.mini` 用 `::after { inset: -4px -2px }` 把热区外扩到 44px；
+            // Compose 侧用最小交互尺寸等价实现（视觉仍是 34dp，点击区 ≥ 44dp）。
+            .minimumInteractiveComponentSize()
             .heightIn(min = 34.dp)
             .background(Color.Transparent, RoundedCornerShape(PrismSize.rChip))
-            .border(
-                1.dp,
-                if (danger) PrismDanger.copy(alpha = 0.3f) else PrismLineStrong,
-                RoundedCornerShape(PrismSize.rChip)
-            )
-            .clickable(onClick = onClick)
+            .border(1.dp, borderColor, RoundedCornerShape(PrismSize.rChip))
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)
@@ -417,13 +452,13 @@ fun PrismMini(
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = if (danger) PrismDanger else PrismTextDim,
+                tint = (if (danger) PrismDanger else PrismTextDim).copy(alpha = alpha),
                 modifier = Modifier.size(14.dp)
             )
         }
         Text(
             text = text,
-            color = if (danger) PrismDanger else PrismTextDim,
+            color = (if (danger) PrismDanger else PrismTextDim).copy(alpha = alpha),
             fontSize = PrismType.sub
         )
     }

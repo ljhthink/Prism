@@ -1,4 +1,4 @@
-﻿package io.prism.ui.settings
+package io.prism.ui.settings
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -20,8 +20,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import io.prism.ui.components.PrismCardBox
+import io.prism.ui.components.PrismChoiceSheet
 import io.prism.ui.components.PrismKv
 import io.prism.ui.components.PrismNoteLine
+import io.prism.ui.components.PrismFootnote
 import io.prism.ui.components.PrismActionsRow
 import io.prism.ui.components.PrismMini
 import io.prism.ui.components.PrismDangerRow
@@ -75,10 +77,8 @@ import io.prism.ui.theme.PrismPanel
 import io.prism.ui.components.PrismButton
 import io.prism.ui.components.PrismButtonVariant
 import io.prism.ui.components.PrismField
-import io.prism.ui.components.PrismCard
 import io.prism.ui.components.PrismSheet
 import io.prism.ui.components.PrismSheetHost
-import io.prism.ui.components.PrismSegmented
 import io.prism.ui.components.PrismSwitch
 import io.prism.ui.components.PrismTopBar
 import io.prism.ui.theme.PrismAccent
@@ -98,6 +98,20 @@ private const val PHONE_CONTROL_POLL_MS = 1_000L
 
 /** QQ 小号助手分区轮询间隔（熔断态刷新；guardrail L-04：不复用手机操控常量）。 */
 private const val QQ_POLL_MS = 2_000L
+
+/**
+ * 设置详情页内的二级子页（ADR-079 D2 承诺的 QQ 四子页 / 语音两子页）。
+ *
+ * 为什么不用 NavHost 路由：子页不涉及数据层，只需要「改标题 + 换内容 + 返回上一级」；
+ * 放进导航图会让 Tab 切换的返回栈条目变多，且 `SettingsScreen` 的 47 项清单会被拆散在两处。
+ * 返回链：子页 → 分区首页 → 设置首页（见 [SettingsScreen] 的 BackHandler）。
+ */
+private enum class SettingsSubPage(val title: String) {
+    QQ_SCHEDULE("定时与主动消息"),
+    QQ_REPLY("自动回复"),
+    QQ_STICKERS("表情库"),
+    VOICE_PERSONA("角色与桌宠")
+}
 
 /**
  * 设置屏幕 —— 深空玻璃肌理（设计规范 v0.4 第 8.4 节）。
@@ -120,8 +134,13 @@ fun SettingsScreen(
         SettingsHome(onOpenSection = onOpenSection, viewModel = viewModel)
         return
     }
+    // 二级子页状态（切分区自动复位：`remember(section)`，避免从 QQ 表情库跳到系统页仍显示旧标题）
+    var subPage by remember(section) { mutableStateOf<SettingsSubPage?>(null) }
+    val backStep = {
+        if (subPage != null) subPage = null else onBack()
+    }
     // M-05（guardrail）：详情页先拦系统返回键回到设置首页，而不是直接弹出 SETTINGS 回聊天页。
-    androidx.activity.compose.BackHandler { onBack() }
+    androidx.activity.compose.BackHandler { backStep() }
 
 
     // v1 批次16（US-1603）：「生物识别解锁」M0 起 UI 占位从未实现，已整行移除（连同本地 state）。
@@ -203,15 +222,16 @@ fun SettingsScreen(
     var backendNote by remember { mutableStateOf(io.prism.phonecontrol.bg.VirtualDisplayManager.lastBackendNote) }
     var watchRunning by remember { mutableStateOf(io.prism.phonecontrol.bg.DisplayWatchOverlay.isRunning) }
     var watchError by remember { mutableStateOf("") }
+    // 设计稿 `.row-status` 单行：四态各给一句可执行结论（长引导移入对应系统页/App）。
     val shizukuSubtitle = when (shizukuState) {
         io.prism.phonecontrol.bg.ShizukuShell.State.NOT_INSTALLED ->
-            "未安装 Shizuku（免费开源）· 完整后台化需安装并激活：shizuku.rikka.app"
+            "未安装 · 点此下载（免费开源）"
         io.prism.phonecontrol.bg.ShizukuShell.State.NOT_RUNNING ->
-            "已安装未激活 · 请打开 Shizuku App 按引导激活（Android 11+ 可用无线调试配对，无需电脑）"
+            "已安装未激活 · 点此打开 Shizuku 激活"
         io.prism.phonecontrol.bg.ShizukuShell.State.NOT_AUTHORIZED ->
-            "已激活未授权 · 点击在弹窗中允许 Prism 使用 Shizuku"
+            "已激活未授权 · 点此允许 Prism 使用"
         io.prism.phonecontrol.bg.ShizukuShell.State.READY ->
-            "Shizuku 就绪 · 后台模式全能力（手势/滑动/返回均可用）"
+            "就绪 · 手势/滑动/返回均可用"
     }
 
     // ADR-065（US-3114）：Watch 开关（运行时；关闭只移除悬浮窗，不中断执行）
@@ -278,6 +298,14 @@ fun SettingsScreen(
         }
     }
     var qqRiskDialogVisible by remember { mutableStateOf(false) }
+    // 用户 2026-11-21 裁定：危险项做「关闭小号助手」+ 二次确认（只停用，不删配置数据）
+    var qqDisableConfirmVisible by remember { mutableStateOf(false) }
+    // 表情库子页：编辑某张表情的描述（原实现是页内常驻输入框，会随列表一起滚走）
+    var qqStickerEditVisible by remember { mutableStateOf(false) }
+    // 语音：本地音色包管理弹层（用户 2026-11-21 裁定：列表收进弹层，页面只留「已安装/当前使用」）
+    var voicePackSheetVisible by remember { mutableStateOf(false) }
+    // 网络：首选搜索引擎弹层（原在搜索弹层内的 5 选 1 分段，上移到独立行 + 弹层）
+    var preferredEngineSheetVisible by remember { mutableStateOf(false) }
     var qqContactDialogVisible by remember { mutableStateOf(false) }
     var qqContactDraft by remember { mutableStateOf("") }
     // ADR-064 / US-3110：协议端连接配置与状态
@@ -723,14 +751,11 @@ fun SettingsScreen(
         )
     }
 
-    // UI v2（ADR-079 D2）：QQ 与「语音/形象」按设计稿拆成子页（原先单页平铺 20+ 行）。
-    var voiceTab by remember { mutableStateOf(VoiceSubTab.SPEECH) }
-
     // M-1（guardrail R3）：切子页必须**回到顶部**。否则从「表情库」滚到底再切「连接」，
-    // 列表沿用旧偏移被钳到底、子页切换条滚出视口，用户会以为设置项消失。
+    // 列表沿用旧偏移被钳到底、用户会以为设置项消失。
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
-    // QQ 已改为一页平铺（无子页），只在语音两个子页切换时回到顶部。
-    LaunchedEffect(voiceTab) { listState.scrollToItem(0) }
+    // 子页切换（QQ 三子页 / 角色与桌宠）与分区切换都要回到顶部。
+    LaunchedEffect(subPage, section) { listState.scrollToItem(0) }
 
     Box {
         LazyColumn(
@@ -739,7 +764,10 @@ fun SettingsScreen(
             contentPadding = PaddingValues(bottom = 16.dp)
         ) {
             item {
-                SettingsDetailHeader(title = section.title, onBack = onBack)
+                SettingsDetailHeader(
+                    title = subPage?.title ?: section.title,
+                    onBack = backStep
+                )
             }
             if (section == SettingsSection.MODEL) {
             // ===== 设计稿 `settingsModel()`：当前端点（.card + .kv）→ 生成 → 密钥 → danger-row =====
@@ -891,31 +919,38 @@ fun SettingsScreen(
                 }
             }
             // ===== 设计稿 `settingsPhone()` 分组①：权限与安全 =====
-            // 设计稿把「无障碍服务 / 无障碍自动恢复 / 高危操作拦截 / 工具权限」归在这一组，
-            // 「后台操控 / 隐藏执行面 / 观看执行 / Shizuku」归「执行面」。
+            // 行序与设计稿一致：无障碍服务 → 无障碍自动恢复 → 高危操作拦截 → 工具权限。
+            // 每行状态**单行**（SetRow → statusMaxLines = 1）；实现细节（写回范围、回收代价、
+            // 最近一次结果）移出状态行，仅在异常态给一行可执行结论。
             item { SetSection("权限与安全") }
+            // v1 US-201（LLM 操控手机）：无障碍服务引导 + 用途声明（prominent disclosure）
+            item {
+                // **不再用 trailing PrismButton**：PrismButton 默认 fillWidth=true，
+                // 塞进行的尾部会把标题压成 0 宽（真机上这行只剩一个按钮、标题彻底不可见）。
+                // 设计稿这里本就是纯状态行。
+                SetRow(
+                    title = "无障碍服务",
+                    subtitle = if (phoneControlConnected) {
+                        "已开启 · AI 可读屏并点击/滑动/输入"
+                    } else {
+                        "未开启 · 点此打开系统无障碍设置"
+                    },
+                    onClick = openAccessibilitySettings
+                )
+            }
             // ADR-046 修订（2026-10-26；PRD US-3116）：无障碍自愈 + Shizuku 单实例说明。
-            // 真机实测 HyperOS 安全中心会清掉本应用的无障碍注册，故这里给"状态 + 一键恢复 + 开关"。
+            // 正常态只给一行「已开启 · 被系统关闭后自动重连」；只有异常时才展开状态与最近结果。
             item {
                 val a11yState = io.prism.phonecontrol.health.AccessibilityHealthMonitor.currentState
                 val selfHeal = (context.applicationContext as? io.prism.PrismApplication)
                     ?.isAccessibilitySelfHealEnabled() ?: true
                 SetRow(
                     title = "无障碍自动恢复",
-                    subtitle = buildString {
-                        append(
-                            when (a11yState) {
-                                io.prism.phonecontrol.health.AccessibilityHealth.State.OK -> "当前状态：正常"
-                                io.prism.phonecontrol.health.AccessibilityHealth.State.REBINDING ->
-                                    "当前状态：重连中（通常数秒内自动恢复）"
-                                io.prism.phonecontrol.health.AccessibilityHealth.State.DISABLED ->
-                                    "当前状态：已被系统关闭（HyperOS 常见）"
-                            }
-                        )
-                        append(" · ")
-                        append(if (selfHeal) "自动恢复已开（仅写回本应用，不动你的其它无障碍服务）" else "自动恢复已关")
-                        val last = io.prism.phonecontrol.health.AccessibilityRestorer.lastResult
-                        if (last.isNotBlank()) append("\n最近：").append(last)
+                    subtitle = when {
+                        a11yState != io.prism.phonecontrol.health.AccessibilityHealth.State.OK ->
+                            "已被系统关闭 · " + if (selfHeal) "自动恢复中" else "自动恢复已关，需手动重开"
+                        selfHeal -> "已开启 · 被系统关闭后自动重连"
+                        else -> "已关闭 · 被系统关闭后需手动重开"
                     },
                     trailing = {
                         PrismSwitch(
@@ -937,28 +972,19 @@ fun SettingsScreen(
                     }
                 )
             }
-            // v1 US-201（LLM 操控手机）：无障碍服务引导 + 用途声明（prominent disclosure）
-            item {
-                // **不再用 trailing PrismButton**：PrismButton 默认 fillWidth=true，
-                // 塞进行的尾部会把标题压成 0 宽（真机上这行只剩一个按钮、标题彻底不可见，
-                // uiautomator 抓不到「无障碍服务」节点）。设计稿这里本就是纯状态行。
-                SetRow(
-                    title = "无障碍服务",
-                    subtitle = if (phoneControlConnected) {
-                        "已开启 · AI 可读屏并点击/滑动/输入"
-                    } else {
-                        "未开启 · 点此打开系统无障碍设置"
-                    },
-                    onClick = openAccessibilitySettings
-                )
-            }
             // v1 批次16（US-1604）：安全拦截提示并入高危操作行——两者同属安全拦截功能：
             // 支付/密码/验证码为不可绕过硬拦截（固定行为），发送/删除/拨号策略由本行循环切换。
             item {
                 SetRow(
                     title = "高危操作拦截",
-                    subtitle = "支付/密码/验证码一律硬拦截 · 发送/删除/拨号：" +
-                        highRiskApprovalSubtitle(highRiskApprovalMode),
+                    subtitle = when (highRiskApprovalMode) {
+                        io.prism.config.HighRiskApprovalMode.ASK ->
+                            "支付/密码/验证码硬拦截 · 发送/删除/拨号需确认"
+                        io.prism.config.HighRiskApprovalMode.ALLOW ->
+                            "支付/密码/验证码硬拦截 · 发送/删除/拨号直接执行"
+                        io.prism.config.HighRiskApprovalMode.BLOCK ->
+                            "支付/密码/验证码硬拦截 · 发送/删除/拨号一律拦截"
+                    },
                     onClick = { viewModel.setHighRiskApprovalMode(nextHighRiskApprovalMode(highRiskApprovalMode)) }
                 )
             }
@@ -976,18 +1002,12 @@ fun SettingsScreen(
             // 批次20（BG-005，ADR-045）：后台模式说明 + 悬浮窗权限引导入口（点击跳系统授权页）
             item {
                 SetRow(
-                    title = "后台操控（执行面）",
-                    subtitle = buildString {
-                        append(
-                            if (hiddenDisplayEnabled) "隐藏虚拟屏：主屏不出现小窗（需 Shizuku）"
-                            else "兼容模式：overlay 小窗可能出现在主屏"
-                        )
-                        append(" · ")
-                        append(if (canDrawOverlays) "悬浮窗权限已授权" else "悬浮窗权限未授权（点此去授权）")
-                        // US-3117 AC-1（ac-verifier 复核缺口）：`daemon(false)` 后用户服务随 App
-                        // 进程退出回收，下次需重新连接——把代价如实告知，避免用户以为"掉了"。
-                        append("\nShizuku 服务随 App 退出回收，下次使用会重新连接（约数百毫秒）")
-                        backendNote?.let { append("\n最近回落：").append(it) }
+                    title = "后台操控",
+                    subtitle = when {
+                        !canDrawOverlays -> "未授权悬浮窗 · 点此去授权"
+                        backendNote != null -> "已回落兼容模式 · ${backendNote}"
+                        hiddenDisplayEnabled -> "在副屏执行 · 主屏可继续使用"
+                        else -> "兼容模式 · 主屏可能出现小窗"
                     },
                     onClick = {
                         if (!canDrawOverlays) {
@@ -1000,12 +1020,10 @@ fun SettingsScreen(
             item {
                 SetRow(
                     title = "隐藏执行面",
-                    subtitle = if (hiddenDisplaySaveError != null) {
-                        hiddenDisplaySaveError ?: ""
-                    } else if (hiddenDisplayEnabled) {
-                        "开启 · 优先 shell 隐藏虚拟屏；创建失败自动回落兼容模式（主屏可能出现小窗）"
-                    } else {
-                        "关闭 · 使用兼容模式（overlay / 自建虚拟屏，主屏可能出现可见小窗）"
+                    subtitle = when {
+                        hiddenDisplaySaveError != null -> "保存失败 · $hiddenDisplaySaveError"
+                        hiddenDisplayEnabled -> "已开启 · 优先 shell 隐藏虚拟屏"
+                        else -> "已关闭 · 使用兼容模式"
                     },
                     trailing = {
                         PrismSwitch(
@@ -1019,12 +1037,12 @@ fun SettingsScreen(
             // ADR-065（US-3114 AC-3）：Watch 悬浮窗（≤2fps；关闭不中断执行）
             item {
                 SetRow(
-                    title = "观看 AI 操作（Watch）",
+                    title = "观看执行",
                     subtitle = when {
                         watchError.isNotEmpty() -> watchError
-                        !canDrawOverlays -> "需要「显示在其他应用上层」权限（点此去授权）"
-                        watchRunning -> "已开启 · 悬浮窗实时显示执行面（≤2fps，画面会显示在屏幕上、可能被录屏）；关闭不影响执行"
-                        else -> "关闭 · 开启后可在悬浮窗实时查看 AI 在后台做什么（画面会显示在屏幕上）"
+                        !canDrawOverlays -> "需要悬浮窗权限 · 点此去授权"
+                        watchRunning -> "已开启 · ≤2fps，画面会显示在屏幕上"
+                        else -> "已关闭 · 关闭不影响执行"
                     },
                     trailing = {
                         PrismSwitch(
@@ -1043,7 +1061,7 @@ fun SettingsScreen(
             // 未授权→点击授权；就绪→提示全能力）
             item {
                 SetRow(
-                    title = "Shizuku（后台化增强）",
+                    title = "Shizuku",
                     subtitle = shizukuSubtitle,
                     onClick = {
                         when (shizukuState) {
@@ -1068,6 +1086,14 @@ fun SettingsScreen(
                     }
                 )
             }
+            // 设计稿「后台保活」：**只读状态行**（ADR-041：保活是按任务自动启停，没有用户开关）。
+            // 上一轮整个漏掉这行，用户看不到"任务期间会被保活"这一事实。
+            item {
+                SetRow(
+                    title = "后台保活",
+                    subtitle = "任务期间自动保持 · 结束即释放"
+                )
+            }
             // 设计稿 `.actions-row`：段末一个 ghost 小按钮跳系统设置
             item {
                 Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = PrismSize.s5)) {
@@ -1087,6 +1113,9 @@ fun SettingsScreen(
             }
             } // PHONE
             if (section == SettingsSection.QQ) {
+            // UI v2（ADR-079 D2）：QQ 拆「主页面 + 3 子页」。子页在本函数内以 [subPage] 切换
+            // （不新增导航路由），返回键：子页 → 分区首页 → 设置首页。
+            if (subPage == null) {
             // ==================== QQ 小号助手（ADR-062/063；US-3101/3105/3108） ====================
             // 设计稿 `settingsQq()` 顶部是一张**总开关状态卡**：状态点 + 「已开启/已关闭」+ 副行 +
             // 右侧总开关。原实现只有一行「QQ 小号助手」文案，用户看不出小号到底开没开。
@@ -1167,25 +1196,16 @@ fun SettingsScreen(
                     }
                 )
             }
-            // US-3101 AC-1/AC-2：总开关已上移到页面顶部的状态卡（guardrail R4-M-02）——
-            // 原实现此处还有第二枚同 checked、同回调的开关，连接子页里两枚同时可见，
-            // 用户会以为"要开两个"。风险告知闸门保留在状态卡的 onCheckedChange 里。
-            // ADR-064 / US-3110：传输通道（默认协议端；无障碍为兜底）
+            // 设计稿 `settingsQq()` 的连接组：3 行，各一行状态。
             item { SetSection("连接") }
             item {
                 SetRow(
                     title = "传输通道",
-                    subtitle = (if (qqConfig.transport == io.prism.qq.channel.QqTransport.ONEBOT) {
-                        "首选协议端 OneBot 11（未连接时自动改用无障碍兜底）· 点击切换为仅无障碍"
-                    } else {
-                        "首选无障碍（可能显示副屏小窗）· 点击切换回协议端优先"
-                    }) + if (qqConfig.transport == io.prism.qq.channel.QqTransport.ONEBOT &&
-                        qqConfig.oneBotToken.isBlank()
-                    ) {
-                        "\n协议端未配置 access_token，当前实际走无障碍兜底"
-                    } else {
-                        ""
-                    } + if (qqEffectiveChannelText.isBlank()) "" else "\n${qqEffectiveChannelText}",
+                    subtitle = when {
+                        qqConfig.transport != io.prism.qq.channel.QqTransport.ONEBOT -> "无障碍 · 点击切回协议端优先"
+                        qqConfig.oneBotToken.isBlank() -> "协议端优先 · 未配 token，实际走无障碍兜底"
+                        else -> "协议端 OneBot 11 · 点击切换为仅无障碍"
+                    },
                     onClick = {
                         qqScope.launch {
                             val next = if (qqConfig.transport == io.prism.qq.channel.QqTransport.ONEBOT) {
@@ -1198,22 +1218,14 @@ fun SettingsScreen(
                     }
                 )
             }
-            // US-3110 AC-1/AC-3/AC-7：协议端连接配置与状态
+            // US-3110 AC-1/AC-3/AC-7：协议端连接配置（脱敏展示，不回填 token）
             item {
                 SetRow(
-                    title = "协议端连接",
-                    subtitle = buildString {
-                        // 2026-10-26（US-3125）：WS 连接 ≠ QQ 在线，必须分开展示
-                        qqProtocolStateText?.let { appendLine(it) }
-                        append(
-                            qqChannelStatusText.ifBlank {
-                                if (qqConfig.oneBotToken.isBlank()) {
-                                    "未配置 · 需自建 NapCat/SnowLuma（个人自用）并填写 access_token"
-                                } else {
-                                    "HTTP ${qqConfig.oneBotBaseUrl} · WS ${qqConfig.oneBotWsUrl} · token 已隐藏（点击编辑）"
-                                }
-                            }
-                        )
+                    title = "协议端地址",
+                    subtitle = if (qqConfig.oneBotToken.isBlank()) {
+                        "未配置 · 点此填写地址与 token"
+                    } else {
+                        "${qqConfig.oneBotBaseUrl} · token 已保存"
                     },
                     onClick = {
                         qqBaseUrlDraft = qqConfig.oneBotBaseUrl
@@ -1235,7 +1247,11 @@ fun SettingsScreen(
             item {
                 SetRow(
                     title = "连接测试",
-                    subtitle = "点击检测当前生效通道与连接状态",
+                    subtitle = if (qqChannelStatusText.isBlank()) {
+                        "点击检测当前生效通道"
+                    } else {
+                        qqChannelStatusText.lineSequence().first().take(40)
+                    },
                     onClick = {
                         qqScope.launch {
                             // 如实展示**配置所选通道**的状态（协议端失败原因不再被兜底掩盖）
@@ -1246,22 +1262,111 @@ fun SettingsScreen(
                     }
                 )
             }
-            // US-308 AC-3（原文保留）：目标联系人（小号对用户主号的备注名）
-            item { SetSection("定时与主动消息") }
+            // 测试结果是多行诊断（HTTP/WS/账号分项），状态行单行会截断——所以完整结果另给一行。
+            // `qqEffectiveChannelText` 是 D-01（ac-verifier）要求的「当前**生效**通道与降级原因」，
+            // 与所选通道可能不同（协议端不可用时自动走无障碍），必须如实可见。
+            // 这与设计稿不冲突：设计稿没有诊断文案，这里只在有结论时出现，且不是常驻说明。
+            val qqConnectionNotes = listOfNotNull(
+                qqEffectiveChannelText.takeIf { it.isNotBlank() },
+                qqChannelStatusText.takeIf { it.isNotBlank() }
+            )
+            if (qqConnectionNotes.isNotEmpty()) {
+                item {
+                    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)) {
+                        PrismNoteLine(qqConnectionNotes.joinToString("\n"))
+                    }
+                }
+            }
+            // 消息组：设计稿是 3 个导航行（进入子页），而不是把 20+ 行平铺在主页。
+            item { SetSection("消息") }
+            item {
+                SetRow(
+                    title = "定时与主动消息",
+                    subtitle = if (qqConfig.scheduleEnabled) {
+                        val quota = if (qqConfig.maxPerDay <= 0) "不限次数" else "每天至多 ${qqConfig.maxPerDay} 次"
+                        "已开启 · $quota"
+                    } else {
+                        "已关闭"
+                    },
+                    onClick = { subPage = SettingsSubPage.QQ_SCHEDULE }
+                )
+            }
+            item {
+                SetRow(
+                    title = "自动回复",
+                    subtitle = if (qqConfig.autoReplyEnabled) "已开启 · 仅私聊" else "已关闭",
+                    onClick = { subPage = SettingsSubPage.QQ_REPLY }
+                )
+            }
+            item {
+                SetRow(
+                    title = "表情库",
+                    subtitle = if (qqStickerState.value.isEmpty()) {
+                        "未导入 · 导入后她会按语境挑一张发"
+                    } else {
+                        "${qqStickerState.value.size} 张 · 描述越具体越准"
+                    },
+                    onClick = { subPage = SettingsSubPage.QQ_STICKERS }
+                )
+            }
+            // US-3105 AC-3/AC-4：熔断状态与恢复（熔断时才出现，设计稿「保护」组）
+            if (qqCircuitOpen) {
+                item { SetSection("保护") }
+                item {
+                    SetRow(
+                        title = "已熔断",
+                        subtitle = "连续失败已自动停止 · 点击恢复",
+                        onClick = {
+                            qqScope.launch {
+                                qqApp?.qqRuntimeStateRepository?.resetCircuit()
+                                qqCircuitOpen = false
+                            }
+                        }
+                    )
+                }
+            }
+            // 设计稿「最近状态」：一张 kv 卡片，只放上次执行结论
+            item { SetSection("最近状态") }
+            item {
+                Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+                    PrismCardBox {
+                        PrismKv(
+                            key = "上次执行",
+                            value = qqLastOutcomeText.ifBlank { "尚无执行记录" },
+                            // guardrail 2026-11-21 B1：尾部是失败/跳过**原因**，必须完整可见
+                            maxLines = 4
+                        )
+                    }
+                }
+            }
+            // 设计稿危险项：**关闭小号助手**（用户 2026-11-21 裁定：只停用、不删配置）。
+            // 位置与配色与设计稿一致（独立置底 danger-row），但语义如实：不清除配置数据。
+            item {
+                Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = PrismSize.s6)) {
+                    PrismDangerRow(
+                        text = if (qqConfig.enabled) "关闭小号助手" else "小号助手已关闭",
+                        onClick = { if (qqConfig.enabled) qqDisableConfirmVisible = true }
+                    )
+                }
+            }
+            } // subPage == null（QQ 主页面）
+
+            // ==================== QQ 子页：定时与主动消息 ====================
+            if (subPage == SettingsSubPage.QQ_SCHEDULE) {
+            item { SetSection("主动消息") }
             item {
                 SetRow(
                     title = "随机定时主动消息",
                     subtitle = if (qqConfig.scheduleEnabled) {
-                        // 2026-10-31：上限由用户自定；0 = 不限，文案要如实说明
                         val quota = if (qqConfig.maxPerDay <= 0) "不限制" else "至多 ${qqConfig.maxPerDay} 次"
-                        "已开启 · %s 时段内随机联系你（每日%s，${if (qqConfig.usePoisson) "泊松" else "均匀"}随机）".format(
+                        "已开启 · %s 时段内随机联系你（每日%s）".format(
                             io.prism.qq.QqTimeOfDay.describe(
                                 qqConfig.windowStartMinute, qqConfig.windowEndMinute
                             ),
                             quota
                         )
                     } else {
-                        "未开启 · 在设定时段内随机时刻主动发消息（营造真实感）"
+                        "已关闭"
                     },
                     trailing = {
                         PrismSwitch(
@@ -1271,11 +1376,10 @@ fun SettingsScreen(
                     }
                 )
             }
-            // US-3109：双向对话（你发消息给小号 → AI 后台以小号身份自动回复）
             item {
                 SetRow(
                     title = "活跃时段",
-                    subtitle = "%s - %s（点击自由编辑）".format(
+                    subtitle = "%s - %s".format(
                         io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute),
                         io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
                     ),
@@ -1293,7 +1397,7 @@ fun SettingsScreen(
             item {
                 SetRow(
                     title = "每日消息上限",
-                    subtitle = "${qqConfig.dailyCap} 条 / 天 · 最小间隔 ${qqConfig.minIntervalMs / 60000} 分钟（点击自由编辑）",
+                    subtitle = if (qqConfig.dailyCap <= 0) "0 条 / 天 · 不限" else "${qqConfig.dailyCap} 条 / 天",
                     onClick = {
                         qqWindowStartDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute)
                         qqWindowEndDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
@@ -1305,15 +1409,49 @@ fun SettingsScreen(
                     }
                 )
             }
-            // 2026-10-25（US-3115 AC-6）：熄屏策略 + 上次执行结果（不再"只能看熔断"）
+            item {
+                SetRow(
+                    title = "每日定时上限",
+                    subtitle = if (qqConfig.maxPerDay <= 0) "0 条 · 不限" else "${qqConfig.maxPerDay} 条 / 天",
+                    onClick = {
+                        qqWindowStartDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute)
+                        qqWindowEndDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
+                        qqCapDraft = qqConfig.dailyCap.toString()
+                        qqPerDayDraft = qqConfig.maxPerDay.toString()
+                        qqIntervalDraft = (qqConfig.minIntervalMs / 60_000L).toString()
+                        qqScheduleError = ""
+                        qqScheduleDialogVisible = true
+                    }
+                )
+            }
+            item {
+                SetRow(
+                    title = "最小间隔",
+                    subtitle = "${qqConfig.minIntervalMs / 60_000L} 分钟",
+                    onClick = {
+                        qqWindowStartDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowStartMinute)
+                        qqWindowEndDraft = io.prism.qq.QqTimeOfDay.format(qqConfig.windowEndMinute)
+                        qqCapDraft = qqConfig.dailyCap.toString()
+                        qqPerDayDraft = qqConfig.maxPerDay.toString()
+                        qqIntervalDraft = (qqConfig.minIntervalMs / 60_000L).toString()
+                        qqScheduleError = ""
+                        qqScheduleDialogVisible = true
+                    }
+                )
+            }
+            // US-3108 AC-2；用户裁定"择优真人感"——泊松更突发，均匀更平缓
+            item {
+                SetRow(
+                    title = "随机策略",
+                    subtitle = if (qqConfig.usePoisson) "泊松 · 偶发成串" else "均匀 · 平缓随机",
+                    onClick = { qqScope.launch { qqApp?.qqConfigRepository?.setUsePoisson(!qqConfig.usePoisson) } }
+                )
+            }
+            // 2026-10-25（US-3115 AC-6）：熄屏策略
             item {
                 SetRow(
                     title = "熄屏时点亮屏幕执行",
-                    subtitle = if (qqConfig.wakeOnScreenOff) {
-                        "已开启 · 到点若屏幕熄灭，会临时点亮并保持亮屏把消息发出（执行后不强制熄屏）"
-                    } else {
-                        "已关闭 · 熄屏时跳过本次定时消息并记录原因（仅在协议端可用时不受影响）"
-                    },
+                    subtitle = if (qqConfig.wakeOnScreenOff) "已开启 · 熄屏时会点亮屏幕发出" else "已关闭 · 熄屏时跳过并记录原因",
                     trailing = {
                         PrismSwitch(
                             checked = qqConfig.wakeOnScreenOff,
@@ -1324,56 +1462,46 @@ fun SettingsScreen(
                     }
                 )
             }
+            // 执行结果：设计稿是一张 kv 卡片 + 熔断状态行
+            item { SetSection("执行结果") }
+            item {
+                Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+                    PrismCardBox {
+                        PrismKv(
+                            key = "上次",
+                            value = qqLastOutcomeText.ifBlank { "尚无执行记录" },
+                            // guardrail 2026-11-21 B1：含失败/跳过原因，必须完整可见
+                            maxLines = 4
+                        )
+                    }
+                }
+            }
             item {
                 SetRow(
-                    title = "定时任务最近状态",
-                    subtitle = qqLastOutcomeText.ifBlank {
-                        "尚无执行记录（到点后这里会展示成功/跳过/失败与原因）"
-                    } + if (qqCircuitOpen) " · 已熔断（需手动恢复）" else ""
-                )
-            }
-            // US-3112 AC-1/AC-4：历史上下文条数 + 记忆注入开关（含数据外发披露）
-            item {
-                SetRow(
-                    title = "随机策略",
-                    subtitle = if (qqConfig.usePoisson) "泊松过程 · 偶发成串，更像真人想起你（点击切换）" else "时间窗内均匀采样 · 平缓随机（点击切换）",
-                    onClick = { qqScope.launch { qqApp?.qqConfigRepository?.setUsePoisson(!qqConfig.usePoisson) } }
-                )
-            }
-            // US-3105 AC-3/AC-4：熔断状态与恢复
-            if (qqCircuitOpen) {
-                item {
-                    SetRow(
-                        title = "已熔断",
-                        subtitle = "连续多次发送失败已自动停止（保护小号账号）。点击手动恢复",
-                        onClick = {
+                    title = "熔断状态",
+                    subtitle = if (qqCircuitOpen) "已熔断 · 需手动恢复" else "正常",
+                    onClick = {
+                        if (qqCircuitOpen) {
                             qqScope.launch {
                                 qqApp?.qqRuntimeStateRepository?.resetCircuit()
                                 qqCircuitOpen = false
                             }
                         }
-                    )
-                }
-            }
-            item { SetSection("自动回复") }
-            item {
-                SetRow(
-                    title = "定时消息联系人",
-                    subtitle = qqConfig.targetContact.ifBlank { "未配置 · 小号对你的备注名（定时消息发给谁）" },
-                    onClick = {
-                        qqContactDraft = qqConfig.targetContact
-                        qqContactDialogVisible = true
                     }
                 )
             }
-            // US-3108 AC-1/AC-2：随机定时主动消息
+            } // subPage == QQ_SCHEDULE
+
+            // ==================== QQ 子页：自动回复 ====================
+            if (subPage == SettingsSubPage.QQ_REPLY) {
+            item { SetSection("回复") }
             item {
                 SetRow(
-                    title = "双向对话（自动回复）",
+                    title = "双向对话",
                     subtitle = if (qqConfig.autoReplyEnabled) {
-                        "已开启 · 你给小号发消息后，AI 会在后台以小号身份回你（消息正文会发送至你配置的模型端点以生成回复）"
+                        "已开启 · 你发消息后 AI 以小号身份回你"
                     } else {
-                        "未开启 · 开启后你发消息给小号，AI 会像真人一样回你（正文将发往模型端点）"
+                        "已关闭 · 开启后 AI 会像真人一样回你"
                     },
                     trailing = {
                         PrismSwitch(
@@ -1385,11 +1513,20 @@ fun SettingsScreen(
                     }
                 )
             }
-            // US-3115 AC-1/AC-2：活跃时段 / 每日上限 / 最小间隔**自由编辑**（不再循环预设）
+            item {
+                SetRow(
+                    title = "定时消息联系人",
+                    subtitle = qqConfig.targetContact.ifBlank { "未配置 · 小号对你的备注名" },
+                    onClick = {
+                        qqContactDraft = qqConfig.targetContact
+                        qqContactDialogVisible = true
+                    }
+                )
+            }
             item {
                 SetRow(
                     title = "历史上下文条数",
-                    subtitle = "最近 ${qqConfig.historyLimit} 条（点击编辑）· 消息与记忆会发送至模型端点",
+                    subtitle = "最近 ${qqConfig.historyLimit} 条",
                     onClick = {
                         qqHistoryDraft = qqConfig.historyLimit.toString()
                         qqHistoryError = ""
@@ -1397,13 +1534,14 @@ fun SettingsScreen(
                     }
                 )
             }
+            item { SetSection("上下文") }
             item {
                 SetRow(
                     title = "注入 Prism 记忆",
                     subtitle = if (qqConfig.memoryInjectionEnabled) {
-                        "已开启 · 回复时参考跨会话记忆与用户画像（相关片段会发送至模型端点）"
+                        "已开启 · 参考跨会话记忆与画像"
                     } else {
-                        "已关闭 · 仅使用最近对话，不注入记忆"
+                        "已关闭 · 仅用最近对话"
                     },
                     trailing = {
                         PrismSwitch(
@@ -1418,12 +1556,11 @@ fun SettingsScreen(
             // ==================== 2026-11-16（ADR-077）：拟人节奏 ====================
             item {
                 SetRow(
-                    title = "拟人节奏（思考 + 打字延迟）",
+                    title = "拟人节奏",
                     subtitle = if (qqConfig.pacingEnabled) {
-                        "已开启 · ${"%.1f".format(qqConfig.typingCharsPerSecond)} 字/秒 + 思考时间，" +
-                            "约 ${qqConfig.minReplyDelayMs / 1000}~${qqConfig.maxReplyDelayMs / 1000} 秒（深夜更慢）"
+                        "已开启 · ${"%.1f".format(qqConfig.typingCharsPerSecond)} 字/秒，深夜更慢"
                     } else {
-                        "已关闭 · 生成完立即发出（会显得「秒回」）"
+                        "已关闭 · 生成完立即发出"
                     },
                     trailing = {
                         PrismSwitch(
@@ -1436,13 +1573,14 @@ fun SettingsScreen(
                 )
             }
             // ==================== 2026-11-16（ADR-077）：能力接入 + 日记 ====================
+            item { SetSection("能力") }
             item {
                 SetRow(
                     title = "聊天里可以调用 Prism 能力",
                     subtitle = if (qqConfig.replyToolsEnabled) {
-                        "已开启 · 联网/热榜/资料库/待办/文档/写日记（上限 ${qqConfig.replyToolBudgetMs / 1000}s）"
+                        "已开启 · 联网/热榜/资料库/待办/文档/日记（上限 ${qqConfig.replyToolBudgetMs / 1000}s）"
                     } else {
-                        "已关闭 · 只根据上下文回答，不查资料、不写日记"
+                        "已关闭 · 只根据上下文回答"
                     },
                     trailing = {
                         PrismSwitch(
@@ -1458,9 +1596,9 @@ fun SettingsScreen(
                 SetRow(
                     title = "允许她在聊天里操作手机",
                     subtitle = if (qqConfig.replyPhoneControlEnabled) {
-                        "已开启 · 后台建副屏执行（较高风险，可能抢占前台）"
+                        "已开启 · 后台建副屏（较高风险）"
                     } else {
-                        "已关闭 · 不建副屏、不抢前台（推荐）"
+                        "已关闭 · 不建副屏、不抢前台"
                     },
                     trailing = {
                         PrismSwitch(
@@ -1476,9 +1614,9 @@ fun SettingsScreen(
                 SetRow(
                     title = "允许她写日记",
                     subtitle = if (qqConfig.diaryEnabled) {
-                        "已开启 · 本地保存，每天最多 ${io.prism.qq.RoleDiaryStore.MAX_PER_DAY} 条"
+                        "已开启 · 每天最多 ${io.prism.qq.RoleDiaryStore.MAX_PER_DAY} 条"
                     } else {
-                        "已关闭 · 不写入任何日记"
+                        "已关闭 · 不写入日记"
                     },
                     trailing = {
                         PrismSwitch(
@@ -1490,135 +1628,110 @@ fun SettingsScreen(
                     }
                 )
             }
-            // ==================== 2026-11-16（ADR-077）：自定义表情库 ====================
-            item { SetSection("表情库") }
+            } // subPage == QQ_REPLY
+
+            // ==================== QQ 子页：表情库（ADR-077） ====================
+            if (subPage == SettingsSubPage.QQ_STICKERS) {
             item {
-                SetRow(
-                    title = "我的表情库（${qqStickerState.value.size} 张）",
-                    subtitle = if (qqStickerState.value.isEmpty()) {
-                        "还没有导入表情。导入后，她自己会按语境挑一张发，不再只用 QQ 内置表情"
-                    } else {
-                        qqStickerMessageSink.value
-                            ?: "她会按描述挑最贴的那张；描述越具体越准"
-                    },
-                    trailing = {
-                        Text(
-                            text = "导入",
-                            color = PrismIndigo,
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.Medium,
-                            modifier = Modifier.clickable {
-                                qqStickerPicker.launch(arrayOf("image/*"))
+                val pending = qqStickerState.value.count {
+                    it.description.isBlank() && it.emotion.isBlank()
+                }
+                Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp)) {
+                    Text(
+                        text = if (qqStickerState.value.isEmpty()) {
+                            "还没有导入表情 · 单张 ≤ 2MB"
+                        } else {
+                            "${qqStickerState.value.size} 张" +
+                                (if (pending > 0) " · $pending 张待补描述" else "") +
+                                " · 单张 ≤ 2MB"
+                        },
+                        color = PrismTextFaint,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+            item { SetSection("按语境挑选") }
+            qqStickerState.value.forEach { sticker ->
+                item {
+                    Column(modifier = Modifier.padding(horizontal = 20.dp)) {
+                        PrismRow(
+                            title = (sticker.emotion.ifBlank { "未标注" }) + " · " + sticker.id,
+                            status = sticker.description.ifBlank { "（还没有描述）" },
+                            statusMaxLines = 1,
+                            onClick = {
+                                qqStickerSelectedId = sticker.id
+                                qqStickerDescDraft = sticker.description
+                                qqStickerEditVisible = true
+                            },
+                            trailing = {
+                                PrismMini(
+                                    text = "编辑",
+                                    onClick = {
+                                        qqStickerSelectedId = sticker.id
+                                        qqStickerDescDraft = sticker.description
+                                        qqStickerEditVisible = true
+                                    }
+                                )
+                                PrismMini(
+                                    text = "删除",
+                                    danger = true,
+                                    onClick = {
+                                        // guardrail R2-M-03/L-16：走 VM（IO 线程 + 可读错误），不在主线程写盘
+                                        viewModel.deleteQqSticker(sticker.id)
+                                        qqScope.launch {
+                                            kotlinx.coroutines.delay(300)
+                                            qqStickerState.value =
+                                                qqApp?.qqStickerStore?.userStickers() ?: emptyList()
+                                            qqStickerMessageSink.value = viewModel.qqStickerMessage.value
+                                        }
+                                    }
+                                )
                             }
                         )
                     }
-                )
+                }
             }
-            if (qqStickerState.value.isNotEmpty()) {
+            qqStickerMessageSink.value?.let { message ->
                 item {
-                    PrismCard {
-                        Column(Modifier.padding(16.dp)) {
-                            qqStickerState.value.forEach { sticker ->
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    // guardrail R2-M-02：点整行即选中该张，下方输入框的"保存"作用于它
-                                    modifier = Modifier.clickable {
-                                        qqStickerSelectedId = sticker.id
-                                        qqStickerDescDraft = sticker.description
-                                    }
-                                ) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(
-                                            (if (qqStickerSelectedId == sticker.id) "▶ " else "") +
-                                                sticker.description.ifBlank {
-                                                    sticker.emotion.ifBlank { "（还没有描述）" }
-                                                },
-                                            color = if (qqStickerSelectedId == sticker.id) PrismIndigo else PrismText,
-                                            fontSize = 13.sp
-                                        )
-                                        Text(
-                                            sticker.emotion.ifBlank { "无情绪标签" } + " · " + sticker.id,
-                                            color = PrismTextFaint,
-                                            fontSize = 11.sp
-                                        )
-                                    }
-                                    Text(
-                                        text = "删",
-                                        color = PrismTextDim,
-                                        fontSize = 13.sp,
-                                        modifier = Modifier.clickable {
-                                            // guardrail R2-M-03/L-16：走 VM（IO 线程 + 可读错误），不在主线程写盘
-                                            viewModel.deleteQqSticker(sticker.id)
-                                            qqScope.launch {
-                                                kotlinx.coroutines.delay(300)
-                                                qqStickerState.value =
-                                                    qqApp?.qqStickerStore?.userStickers() ?: emptyList()
-                                                qqStickerMessageSink.value = viewModel.qqStickerMessage.value
-                                            }
-                                        }
-                                    )
-                                }
-                                Spacer(Modifier.height(10.dp))
-                            }
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                PrismField(
-                                    value = qqStickerDescDraft,
-                                    onValueChange = { qqStickerDescDraft = it },
-                                    placeholder = "描述（如：粉发小人举着「抱抱」牌子）",
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Text(
-                                    text = "保存",
-                                    color = PrismIndigo,
-                                    fontSize = 13.sp,
-                                    modifier = Modifier.clickable {
-                                        // 优先作用于用户点选的那张，未选则作用于最后一张
-                                        val targetId = qqStickerSelectedId
-                                            ?: qqStickerState.value.lastOrNull()?.id
-                                        targetId?.let {
-                                            viewModel.setQqStickerDescription(it, qqStickerDescDraft)
-                                            qqScope.launch {
-                                                kotlinx.coroutines.delay(300)
-                                                qqStickerState.value =
-                                                    qqApp?.qqStickerStore?.userStickers() ?: emptyList()
-                                                qqStickerMessageSink.value = viewModel.qqStickerMessage.value
-                                            }
-                                        }
-                                    }
-                                )
-                            }
-                        }
+                    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)) {
+                        PrismNoteLine(message)
                     }
                 }
             }
-            // 随机策略（US-3108 AC-2；用户裁定"择优真人感"——泊松更突发，均匀更平缓）
+            item {
+                Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = PrismSize.s4)) {
+                    PrismActionsRow {
+                        PrismMini(
+                            text = "导入表情",
+                            icon = PrismIcons.Plus,
+                            onClick = { qqStickerPicker.launch(arrayOf("image/*")) }
+                        )
+                    }
+                    PrismFootnote("描述越具体，她越能挑到贴切的一张；导入的图片只存在应用私有目录。")
+                }
+            }
+            } // subPage == QQ_STICKERS
             } // QQ
             if (section == SettingsSection.VOICE) {
+            // ===== 设计稿 `settingsVoice()`：**单页四组**（识别 / 播报 / 本地音色包 / 角色）=====
+            // 上一轮做成「语音 / 角色与桌宠」实心分段 + 「语音引擎」折叠手风琴，与设计稿的
+            // 页面骨架不同（设计稿没有分段条，四组直接铺开、从上往下读）。
+            // 角色与桌宠在设计稿是**独立页**（`settings-persona`），这里用子页承载。
+            if (subPage == null) {
             item {
-                VoiceSubTabRow(selected = voiceTab, onSelect = { voiceTab = it })
+                VoiceEngineSection(
+                    viewModel = viewModel,
+                    onOpenPersona = { subPage = SettingsSubPage.VOICE_PERSONA },
+                    onOpenVoicePacks = { voicePackSheetVisible = true }
+                )
             }
-            whenTab(voiceTab == VoiceSubTab.SPEECH) {
-            // ===== 设计稿 `settingsVoice()` 的四组：识别 / 播报 / 本地音色包 / 语音热词 =====
-            // 原实现只有一个「语音通话」分组标签，四类设置混在一起——这是用户反馈
-            // 「语音与形象与设计存在较大出入」的结构性原因（不是单行样式问题）。
-            // 「识别 / 播报 / 本地音色包」三组的行都在 VoiceEngineSection 内（它同时管 ASR/TTS/音色包），
-            // 组标签在它展开态内部，折叠态仍是一行入口。
-            // M-05（guardrail R5）：**不在折叠态外层加组标签**。
-            // 原因：① `VoiceEngineSection` 折叠时只有一行，它同时管 ASR + TTS + 音色包，
-            // 用「识别」当组名与内容不符；② `VoiceHotwordsEditor` 折叠行标题本身就是
-            // 「语音热词」，外层再加同名组标签会连出两次。
-            // 正确做法：组标签放**展开态内部**（识别 / 播报 / 本地音色包），与设计稿一致。
-            // 批次23-A（ADR-048，A4）：语音引擎（ASR/TTS 云端双轨手选 + Key 配置 + 连通性自检）
-            item { VoiceEngineSection(viewModel) }
-            item { VoiceHotwordsEditor() }
-            }
-            whenTab(voiceTab == VoiceSubTab.PERSONA) {
-            // 批次23-C（ADR-048）：角色包（导入 / 列表切换 / 删除——通用模板，不含具体角色内容）
+            } // subPage == null（语音主页面）
+
+            // ==================== 子页：角色与桌宠 ====================
+            if (subPage == SettingsSubPage.VOICE_PERSONA) {
             item { RolePackSection(viewModel) }
-            // 批次24（ADR-051）：桌宠（开关 / 形象导入 / 尺寸 / 待机 / 权限引导）
             item { PetSection(viewModel) }
-            }
+            } // subPage == VOICE_PERSONA
             } // VOICE
             if (section == SettingsSection.SYSTEM) {
             // v1 批次15（US-1501/1502/1507）：搜索增强（智谱 / Tavily / SearXNG）
@@ -1626,14 +1739,29 @@ fun SettingsScreen(
             item {
                 SetRow(
                     title = "搜索引擎增强",
-                    subtitle = searchEnhancementSubtitle(zhipuKeyConfigured, tavilyKeyConfigured, searxngSettings != null),
+                    subtitle = searchEnhancementSubtitle(
+                        zhipu = zhipuKeyConfigured,
+                        tavily = tavilyKeyConfigured,
+                        searxng = searxngSettings != null,
+                        preferredEngine = preferredEngine
+                    ),
                     onClick = { searchEnhancementSheetVisible = true }
+                )
+            }
+            // 设计稿把「首选引擎」放在弹层里；但弹层因此多出一整组 5 选 1 分段，与设计稿
+            // 「三个字段 + 一句说明 + 保存/取消」的结构冲突。这里把它**上移到页面行**
+            // （点击开通用单选弹层），弹层恢复设计稿形态，功能零丢失（US-1509）。
+            item {
+                SetRow(
+                    title = "首选引擎",
+                    subtitle = preferredEngineLabel(preferredEngine),
+                    onClick = { preferredEngineSheetVisible = true }
                 )
             }
             item {
                 SetRow(
                     title = "WebView 渲染抓取",
-                    subtitle = "增强被反爬拦截页面的抓取成功率；仅访问公网 https 页面",
+                    subtitle = if (webviewFetchEnabled) "已开启 · 仅公网 https" else "已关闭 · 反爬页面抓取率较低",
                     trailing = {
                         PrismSwitch(
                             checked = webviewFetchEnabled,
@@ -1658,14 +1786,16 @@ fun SettingsScreen(
             item { SetSection("关于") }
             item {
                 // 设计稿 `settingsSystem()` 的「关于」组是两行：版本 / 开源许可。
-                // 原实现只有一行「关于 Prism」——把版本与许可压在同一句副标题里，
-                // 用户看不出「这是版本号」还是「这是功能描述」。
+                // 版本行状态是「v1.1 · 安装于 <真实日期>」（用户 2026-11-21 裁定：用真实数据，
+                // 不照抄设计稿的伪日期），尾部等宽版本号与设计稿一致。
                 // DEF-R3-01（ac-verifier B2）已保证版本号取自 PackageManager，不再写死。
                 val appVersion = remember { appVersionName(context) }
+                val installedOn = remember { appInstallDate(context) }
                 Column(modifier = Modifier.padding(horizontal = 20.dp)) {
                     PrismRow(
                         title = "版本",
-                        status = "v$appVersion · 零后端",
+                        status = listOfNotNull("v$appVersion", installedOn).joinToString(" · "),
+                        statusMaxLines = 1,
                         trailing = {
                             Text(
                                 text = "v$appVersion",
@@ -1678,6 +1808,7 @@ fun SettingsScreen(
                     PrismRow(
                         title = "开源许可",
                         status = "Apache 2.0",
+                        statusMaxLines = 1,
                         onClick = { licenseSheetVisible = true }
                     )
                 }
@@ -1786,6 +1917,122 @@ fun SettingsScreen(
                 onClose = { tierSheetVisible = false }
             )
         }
+    // 用户 2026-11-21 裁定：QQ 危险项做「关闭小号助手」+ 二次确认，**只停用、不删配置**。
+    // 设计稿原文是「关闭并清除配置」，但数据层没有安全的"清除配置"API（会把表情库/日记/联系人
+    // 一并抹掉且不可恢复）；这里保持危险项的**位置与配色**一致，语义如实降级为"停用"。
+    PrismSheetHost(visible = qqDisableConfirmVisible, onDismiss = { qqDisableConfirmVisible = false }) {
+        PrismSheet(
+            title = "关闭小号助手",
+            subtitle = "停用后不再自动收发消息，配置与表情库保留"
+        ) {
+            Text(
+                text = "关闭后：定时主动消息、自动回复、协议端自动化全部停止；" +
+                    "联系人、时段、上限、表情库与日记等配置**不会被删除**，重新打开即可继续使用。",
+                color = PrismTextDim,
+                fontSize = PrismType.sub,
+                lineHeight = PrismType.subLine
+            )
+            Spacer(Modifier.height(PrismSize.s5))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(PrismSize.s2)
+            ) {
+                PrismButton(
+                    text = "确认关闭",
+                    variant = PrismButtonVariant.Danger,
+                    fillWidth = false,
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        qqDisableConfirmVisible = false
+                        qqScope.launch { qqApp?.qqConfigRepository?.setEnabled(false) }
+                    }
+                )
+                PrismButton(
+                    text = "取消",
+                    variant = PrismButtonVariant.Ghost,
+                    fillWidth = false,
+                    modifier = Modifier.weight(1f),
+                    onClick = { qqDisableConfirmVisible = false }
+                )
+            }
+        }
+    }
+    // 表情库子页：编辑某张表情的描述（原实现是列表底部常驻输入框，长列表时会滚出视口）
+    PrismSheetHost(visible = qqStickerEditVisible, onDismiss = { qqStickerEditVisible = false }) {
+        PrismSheet(
+            title = "表情描述",
+            subtitle = qqStickerSelectedId?.let { "表情 $it · 描述越具体越容易挑对" } ?: "描述越具体越容易挑对"
+        ) {
+            PrismField(
+                label = "描述",
+                value = qqStickerDescDraft,
+                onValueChange = { qqStickerDescDraft = it },
+                placeholder = "如：粉发小人举着「抱抱」牌子"
+            )
+            Spacer(Modifier.height(PrismSize.s5))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(PrismSize.s2)
+            ) {
+                PrismButton(
+                    text = "保存",
+                    fillWidth = false,
+                    modifier = Modifier.weight(1f),
+                    onClick = {
+                        val targetId = qqStickerSelectedId
+                        if (targetId != null) {
+                            viewModel.setQqStickerDescription(targetId, qqStickerDescDraft)
+                            qqStickerEditVisible = false
+                            qqScope.launch {
+                                kotlinx.coroutines.delay(300)
+                                qqStickerState.value =
+                                    qqApp?.qqStickerStore?.userStickers() ?: emptyList()
+                                qqStickerMessageSink.value = viewModel.qqStickerMessage.value
+                            }
+                        } else {
+                            qqStickerEditVisible = false
+                        }
+                    }
+                )
+                PrismButton(
+                    text = "取消",
+                    variant = PrismButtonVariant.Ghost,
+                    fillWidth = false,
+                    modifier = Modifier.weight(1f),
+                    onClick = { qqStickerEditVisible = false }
+                )
+            }
+        }
+    }
+
+        // 语音：本地音色包管理弹层（列表从页面收进弹层，页面只留「已安装 / 当前使用」）
+        PrismSheetHost(visible = voicePackSheetVisible, onDismiss = { voicePackSheetVisible = false }) {
+            VoicePackSheet(viewModel = viewModel, onClose = { voicePackSheetVisible = false })
+        }
+        // 网络：首选搜索引擎（从搜索弹层上移出来的 5 选 1，功能与原 PrismSegmented 等价）
+        PrismSheetHost(
+            visible = preferredEngineSheetVisible,
+            onDismiss = { preferredEngineSheetVisible = false }
+        ) {
+            PrismChoiceSheet(
+                title = "首选引擎",
+                subtitle = "默认顺序：博查 → 智谱 → SearXNG → Tavily → Bing/Baidu",
+                options = PREFERRED_ENGINE_LABELS,
+                selectedIndex = preferredEngineIndex(preferredEngine),
+                descriptions = listOf(
+                    "按默认顺序依次尝试",
+                    "博查 AI 搜索（国内直连）",
+                    "智谱 Web Search",
+                    "自建 SearXNG 实例",
+                    "Tavily（海外）"
+                ),
+                onSelect = { index ->
+                    viewModel.setPreferredEngine(PREFERRED_ENGINE_VALUES[index])
+                    preferredEngineSheetVisible = false
+                },
+                onDismiss = { preferredEngineSheetVisible = false }
+            )
+        }
         // 问题 8a（ADR-020）：深度思考设置弹层（开关 + 强度选择）
         PrismSheetHost(visible = thinkingSheetVisible, onDismiss = { thinkingSheetVisible = false }) {
             ThinkingSheet(
@@ -1828,7 +2075,6 @@ fun SettingsScreen(
                 searxngEndpoint = searxngSettings?.endpoint.orEmpty(),
                 searxngUsername = searxngSettings?.username.orEmpty(),
                 searxngPassword = searxngSettings?.password.orEmpty(),
-                preferredEngine = preferredEngine,
                 viewModel = viewModel,
                 onClose = { searchEnhancementSheetVisible = false }
             )
@@ -1839,9 +2085,18 @@ fun SettingsScreen(
 /**
  * 搜索增强行副标题（v1 批次15，US-1501/1502/1507）。
  *
- * 无任何配置 → "未配置 · 配置 Key/端点提升搜索命中率"；有配置 → 列出已配置引擎。
+ * 无任何配置 → "未配置 · 配置 Key/端点提升搜索命中率"；
+ * 有配置 → 设计稿写法「Tavily 已配置 · 首选 Tavily」（已配置引擎 + 当前首选）。
  */
-private fun searchEnhancementSubtitle(zhipu: Boolean, tavily: Boolean, searxng: Boolean): String {
+private fun searchEnhancementSubtitle(
+    zhipu: Boolean,
+    tavily: Boolean,
+    searxng: Boolean,
+    preferredEngine: String
+): String {
+    // **只列真正配好的引擎**（Key/端点存在）。博查的 Key 不在本弹层编辑，也**没有**
+    // `bochaKeyConfigured` 数据源，所以不能把「首选 = 博查」当成「博查已配置」——
+    // 那是伪状态（guardrail 2026-11-21 建议 1）。首选引擎在 `·` 之后单独如实陈述。
     val configured = listOfNotNull(
         "智谱".takeIf { zhipu },
         "Tavily".takeIf { tavily },
@@ -1850,7 +2105,7 @@ private fun searchEnhancementSubtitle(zhipu: Boolean, tavily: Boolean, searxng: 
     return if (configured.isEmpty()) {
         "未配置 · 配置 Key/端点提升搜索命中率"
     } else {
-        "已配置：${configured.joinToString("、")}"
+        "${configured.joinToString("、")} 已配置 · 首选 ${preferredEngineLabel(preferredEngine)}"
     }
 }
 
@@ -1922,13 +2177,6 @@ private fun toolApprovalSubtitle(mode: ToolApprovalMode): String = when (mode) {
     ToolApprovalMode.MANUAL -> "每次调用工具需确认（默认）"
     ToolApprovalMode.AUTO -> "所有工具直接放行"
     ToolApprovalMode.DISABLED -> "不向 AI 提供任何工具"
-}
-
-/** 手机操控高危动作（发送/删除/拨号）策略副标题（v1 真机二次修复 Issue 4b）。 */
-private fun highRiskApprovalSubtitle(mode: io.prism.config.HighRiskApprovalMode): String = when (mode) {
-    io.prism.config.HighRiskApprovalMode.BLOCK -> "全部拦截 · 发送/删除/拨号一律不执行（最安全）"
-    io.prism.config.HighRiskApprovalMode.ALLOW -> "全部放行 · 发送/删除/拨号直接执行（最便捷）"
-    io.prism.config.HighRiskApprovalMode.ASK -> "逐次询问 · 每次发送/删除/拨号前向你确认（默认）"
 }
 
 /** 高危操作策略循环顺序：BLOCK → ALLOW → ASK → BLOCK…（点击切换）。 */
@@ -2350,8 +2598,10 @@ private fun ProviderEditSheet(config: ProviderConfig, viewModel: SettingsViewMod
     // guardrail L-28：保存被安全策略拒绝时的可读错误（如远端明文 http）
     val saveError by viewModel.providerSaveError.collectAsState()
 
-    // 仅首次进入弹层时回显已存 Key，避免重组覆盖用户输入（与 ApiKeySheet 守卫一致）
-    if (!apiKeyLoaded) {
+    // 仅首次进入弹层时回显已存 Key，避免重组覆盖用户输入（与 ApiKeySheet 守卫一致）。
+    // **guardrail R3**：原写法在组合体里 `if (!apiKeyLoaded) loadApiKey(...)`，每次重组都会
+    // 重新判定、且首帧就发起异步读——改为 LaunchedEffect(key) 只跑一次（同 ApiKeySheet/VoiceKeyField）。
+    LaunchedEffect(config.apiKeyRef) {
         viewModel.loadApiKey(config.apiKeyRef) { loaded ->
             if (loaded != null) apiKey = loaded
             apiKeyLoaded = true
@@ -2585,7 +2835,11 @@ private fun ApiKeySheet(providers: List<ProviderConfig>, viewModel: SettingsView
             var key by remember(config.id) { mutableStateOf("") }
             var loaded by remember(config.id) { mutableStateOf(false) }
 
-            if (!loaded) {
+            // **guardrail R2-6（B2）**：原实现在组合体里直接 `loadApiKey`（异步）+ 保存按钮
+            // 不等回填就可用 —— 弹层一打开立刻点「保存」时 `key` 还是空串，
+            // 按 BR-security-006 的"空值 = 删除"语义会**静默删掉已存 Key**。
+            // 与 [VoiceKeyField] / 搜索弹层（R5-M-02）同族，必须一并门控。
+            LaunchedEffect(config.apiKeyRef) {
                 viewModel.loadApiKey(config.apiKeyRef) { v ->
                     key = v.orEmpty()
                     loaded = true
@@ -2598,12 +2852,13 @@ private fun ApiKeySheet(providers: List<ProviderConfig>, viewModel: SettingsView
                 onValueChange = { key = it },
                 placeholder = if (key.isEmpty()) "未设置 API Key" else "",
                 secret = true,
-                hint = "加密保存到 DataStore"
+                hint = if (loaded) "加密保存到 DataStore" else "读取中…"
             )
             Spacer(Modifier.height(8.dp))
             PrismButton(
-                text = "保存 ${config.name} Key",
+                text = if (loaded) "保存 ${config.name} Key" else "读取中…",
                 variant = PrismButtonVariant.Ghost,
+                enabled = loaded,
                 onClick = {
                     // BR-security-006：空值时删除已存密钥，非空时加密保存。
                     // 修复 guardrail-enforcer B-2：原实现空值时 saveApiKey 静默跳过，
@@ -2620,37 +2875,6 @@ private fun ApiKeySheet(providers: List<ProviderConfig>, viewModel: SettingsView
     }
 }
 
-/** 「语音与形象」的两个子页（设计稿 `settings-voice` / `settings-persona`）。 */
-private enum class VoiceSubTab(val label: String) {
-    SPEECH("语音"),
-    PERSONA("角色与桌宠")
-}
-
-/**
- * LazyListScope 级条件分组。
- *
- * 直接写 `if (cond) { item {…} }` 也合法，但每个 item 都要各包一层，20 多个块容易错配括号；
- * 用扩展函数后分组边界只在**组**上出现一次，且被隐藏的组不会产生空 item。
- */
-private fun androidx.compose.foundation.lazy.LazyListScope.whenTab(
-    selected: Boolean,
-    content: androidx.compose.foundation.lazy.LazyListScope.() -> Unit
-) {
-    if (selected) content()
-}
-
-/** 「语音与形象」子页切换条。 */
-@Composable
-private fun VoiceSubTabRow(selected: VoiceSubTab, onSelect: (VoiceSubTab) -> Unit) {
-    PrismSegmented(
-        options = VoiceSubTab.entries,
-        selected = selected,
-        onSelect = onSelect,
-        labelOf = { it.label },
-        modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
-    )
-}
-
 /** 读取本应用 versionName（失败时退回 "1.1"，不抛异常影响设置页渲染）。 */
 private fun appVersionName(context: android.content.Context): String =
     runCatching {
@@ -2658,21 +2882,31 @@ private fun appVersionName(context: android.content.Context): String =
     }.getOrNull()?.takeIf { it.isNotBlank() } ?: "1.1"
 
 /**
- * 分组标签（无横向 padding）—— 供**已有横向内边距的容器内**使用。
+ * 本应用安装/更新时间（`yyyy-MM-dd`），失败返回 null（调用方据此省略这一段，不写死日期）。
  *
- * [SetSection] 自带左右 20dp（对应设计稿 `main.scroll` 的 page padding）。若在
- * 已经 padding(horizontal = 16dp) 的 Column 里再调它，会叠成 36dp 缩进——
- * 真机实测「播报」标签 x=99 而其它组标签 x=55。此变体只保留纵向节奏。
+ * 设计稿的「1.1 · 2026-11-20」是原型伪值；用户 2026-11-21 裁定用**真实**时间。
  */
-@Composable
-private fun SetSectionBare(title: String) {
-    Text(
-        text = title,
-        color = PrismTextFaint,
-        fontSize = 12.sp,
-        modifier = Modifier.padding(top = 20.dp, bottom = 8.dp)
-    )
-}
+private fun appInstallDate(context: android.content.Context): String? =
+    runCatching {
+        val info = context.packageManager.getPackageInfo(context.packageName, 0)
+        val millis = if (info.lastUpdateTime > 0) info.lastUpdateTime else info.firstInstallTime
+        java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US)
+            .format(java.util.Date(millis))
+    }.getOrNull()
+
+/** 首选搜索引擎的取值（空串 = 跟随默认顺序；顺序与引擎链一致）。 */
+private val PREFERRED_ENGINE_VALUES = listOf("", "bocha", "zhipu", "searxng", "tavily")
+
+/** 首选搜索引擎的显示名（与 [PREFERRED_ENGINE_VALUES] 一一对应）。 */
+private val PREFERRED_ENGINE_LABELS = listOf("默认顺序", "博查", "智谱", "SearXNG", "Tavily")
+
+/** 首选引擎在选项中的下标（未知值退回 0 = 默认顺序）。 */
+private fun preferredEngineIndex(value: String): Int =
+    PREFERRED_ENGINE_VALUES.indexOf(value).takeIf { it >= 0 } ?: 0
+
+/** 首选引擎行的一行状态（设计稿「首选 Tavily」的写法）。 */
+private fun preferredEngineLabel(value: String): String =
+    PREFERRED_ENGINE_LABELS[preferredEngineIndex(value)]
 
 /** 分组标题（UI v2：小字、无字距、弱化）。 */
 @Composable
@@ -2910,6 +3144,10 @@ private fun SettingsDetailHeader(title: String, onBack: () -> Unit) {
 /**
  * 设置行 —— 设计稿 `.row`（`design/prism-ui-v1/app.css`）：标题 15sp + 状态 12sp faint，
  * 尾部控件，底边 1px 分隔线，最小高 56dp，**无卡片、无图标**。
+ *
+ * **状态固定单行**（`statusMaxLines = 1`）：设计稿 `.row-status` 是 `nowrap + ellipsis`，
+ * 原实现 2 行会把 56dp 行撑到 100px 以上、整页变文字墙（2026-11-21 真机比对确认）。
+ * 实现细节因此必须移出状态行（子页 / 弹层 / 仅异常时的一行提示），见 ADR-079 D3。
  */
 @Composable
 private fun SetRow(
@@ -2924,6 +3162,7 @@ private fun SetRow(
             title = title,
             status = subtitle.takeIf { it.isNotBlank() },
             onClick = onClick,
+            statusMaxLines = 1,
             trailing = {
                 trailing?.invoke()
                 if (onClick != null) {
@@ -3022,7 +3261,6 @@ private fun SearchEnhancementSheet(
     searxngEndpoint: String,
     searxngUsername: String,
     searxngPassword: String,
-    preferredEngine: String,
     viewModel: SettingsViewModel,
     onClose: () -> Unit
 ) {
@@ -3033,12 +3271,6 @@ private fun SearchEnhancementSheet(
     var endpoint by remember(searxngEndpoint) { mutableStateOf(searxngEndpoint) }
     var username by remember(searxngUsername) { mutableStateOf(searxngUsername) }
     var password by remember(searxngPassword) { mutableStateOf(searxngPassword) }
-    // v1 批次15.1（US-1509）：首选引擎（空串 = 跟随默认顺序）
-    val engineOptions = listOf("默认顺序", "博查", "智谱", "SearXNG", "Tavily")
-    val engineValues = listOf("", "bocha", "zhipu", "searxng", "tavily")
-    var selectedEngine by remember(preferredEngine) {
-        mutableStateOf(engineValues.indexOf(preferredEngine).takeIf { it >= 0 } ?: 0)
-    }
 
     // **guardrail R5-M-02**：两次 loadApiKey 原本写在组合体里（每次重组都判定一次），
     // 且保存按钮不等它们完成就可用——「打开弹层立刻点保存」会在 Key 尚未回填时把空串
@@ -3059,17 +3291,14 @@ private fun SearchEnhancementSheet(
     var saveError by remember { mutableStateOf<String?>(null) }
     var saving by remember { mutableStateOf(false) }
 
-    // ===== 严格按设计稿 `search`（`screens.js:1146`）重排 =====
+    // ===== 严格按设计稿 `search`（`screens.js:1146`）排列 =====
     //
     // 设计稿结构：标题 + 副标题 + **三个字段直接排列**（Tavily Key / 智谱 Key / SearXNG 端点）
-    // + 一句 `.note-line` + 底部 `.btn-row`（保存 / 取消）。
+    // + 一句 `.note-line` + 底部 `.btn-row`（保存 / 取消）。弹层里**不再有第四组控件**。
     //
-    // 原实现是"每个字段后面跟一个独立保存按钮"（保存智谱 Key / 保存 Tavily Key / 保存 SearXNG 配置），
-    // 弹层里散着 4 个按钮 + 一个"首选引擎"分段控件抢占视觉重心 —— 与设计稿的
-    // "三个字段 + 一个保存"完全不同。用户反馈「搜索引擎增强与设计存在非常大的出入」即指此。
-    //
-    // **功能不丢**：`首选引擎`（US-1509）与 SearXNG 的 Basic Auth 仍保留，但降级为
-    // 「高级」一组的两行入口，不再占据弹层主视觉；"保存"一次写全部三项。
+    // 「首选引擎」（US-1509）已上移到系统页的独立行（点击开 5 选 1 弹层），
+    // 因此这里不再有「高级」组；SearXNG 的 Basic Auth 仅在填写了端点时出现
+    // （自建实例的实际需要，且默认视图与设计稿一致）。"保存"一次写全部三项。
     PrismSheet(
         title = "搜索引擎增强",
         subtitle = "按 博查 → 智谱 → SearXNG → Tavily → Bing/Baidu 顺序尝试"
@@ -3097,48 +3326,23 @@ private fun SearchEnhancementSheet(
         // 设计稿正文最后一句
         PrismNoteLine("端点留空保存即清除配置；自建服务可达性由你自担。")
 
-        // ---- 高级（设计稿未画，功能必须保留，降级为两行入口）----
-        Spacer(Modifier.height(PrismSize.s4))
-        SetSectionBare("高级")
-        Column(modifier = Modifier.padding(horizontal = 0.dp)) {
-            // **guardrail R5-M-03**：上一版把「首选引擎」做成了「二态开关 + 行点击循环」两个控件，
-            // 而且 on 分支硬编码切到 Tavily —— 5 个取值被压成 Boolean，用户在智谱/SearXNG 时
-            // 开关只能关不能换，也不再用开关选到博查/智谱（原 PrismSegmented 是 5 选 1）。
-            // 这是功能退化，不是简化。改回**单一 5 选 1 控件**（保持原有语义），
-            // 只是位置从弹层主视觉降级到「高级」组里。
-            PrismRow(
-                title = "首选引擎",
-                status = "默认顺序 = 按 博查 → 智谱 → SearXNG → Tavily 依次尝试"
+        // SearXNG Basic Auth：仅在填写端点后出现（用同一弹层的"保存"一次写入）
+        if (endpoint.isNotBlank()) {
+            Spacer(Modifier.height(PrismSize.s3))
+            PrismField(
+                label = "SearXNG 用户名（可选 Basic Auth）",
+                value = username,
+                onValueChange = { username = it },
+                placeholder = "未启用认证可留空"
             )
             Spacer(Modifier.height(PrismSize.s2))
-            PrismSegmented(
-                options = engineOptions,
-                selected = engineOptions[selectedEngine],
-                onSelect = { option ->
-                    val idx = engineOptions.indexOf(option)
-                    if (idx >= 0 && idx != selectedEngine) {
-                        selectedEngine = idx
-                        viewModel.setPreferredEngine(engineValues[idx])
-                    }
-                },
-                labelOf = { it }
+            PrismField(
+                label = "SearXNG 密码（可选 Basic Auth）",
+                value = password,
+                onValueChange = { password = it },
+                placeholder = "未启用认证可留空",
+                secret = true
             )
-            if (endpoint.isNotBlank()) {
-                PrismField(
-                    label = "SearXNG 用户名（可选 Basic Auth）",
-                    value = username,
-                    onValueChange = { username = it },
-                    placeholder = "未启用认证可留空"
-                )
-                Spacer(Modifier.height(PrismSize.s2))
-                PrismField(
-                    label = "SearXNG 密码（可选 Basic Auth）",
-                    value = password,
-                    onValueChange = { password = it },
-                    placeholder = "未启用认证可留空",
-                    secret = true
-                )
-            }
         }
 
         if (saveError != null) {
@@ -3294,22 +3498,12 @@ fun VoiceHotwordsEditor() {
     }
 }
 
-/**
- * 批次23-A（ADR-048，A4）：语音引擎设置区（加在「语音通话」区内）。
- *
- * - **ASR 引擎选择**：端侧（默认）/ 云端阿里云——云端项仅在 DashScope Key 非空时可选
- *   （未配置置灰 + 说明，选择持久化经 [io.prism.voice.VoiceEnginePrefs]）；
- * - **TTS 引擎选择**：系统（默认）/ 云端 MiniMax——同理（Key + GroupId 非空时可选）；
- * - **Key 配置输入行**：DashScope API Key / MiniMax API Key / MiniMax GroupId（复用
- *   [PrismField] 遮蔽样式；保存走 [SettingsViewModel.saveApiKey]，清空保存 = 删除，
- *   BR-security-006 语义与 [ApiKeySheet] 一致）；
- * - **连通性自检**：每个云端引擎一个按钮（ASR=WS run-task 握手 / TTS=task_start→
- *   task_started，3s 预算），结果文案"自检通过/失败原因"就地展示。
- *
- * 默认收缩态（与其他设置行形态一致），点击展开配置。
- */
 @Composable
-private fun VoiceEngineSection(viewModel: SettingsViewModel) {
+private fun VoiceEngineSection(
+    viewModel: SettingsViewModel,
+    onOpenPersona: () -> Unit,
+    onOpenVoicePacks: () -> Unit
+) {
     val asrChoice by viewModel.voiceAsrEngine.collectAsState()
     val ttsChoice by viewModel.voiceTtsEngine.collectAsState()
     val dashScopeReady by viewModel.dashScopeKeyConfigured.collectAsState()
@@ -3319,26 +3513,220 @@ private fun VoiceEngineSection(viewModel: SettingsViewModel) {
     val ttsCheck by viewModel.ttsSelfCheck.collectAsState()
     // LVC-1（ADR-053）：本地音色包安装状态（null = 尚未检测，与"未安装"区分呈现）
     val localVoiceStatus by viewModel.localVoiceStatus.collectAsState()
-    // TKN-LVC-016（ADR-056/057）：档位、播报模式、已安装音色包与导入态
+    // TKN-LVC-016（ADR-056/057）：档位、播报模式、已安装音色包
     val localTier by viewModel.localVoiceTier.collectAsState()
     val playbackMode by viewModel.localPlaybackMode.collectAsState()
     val installedPacks by viewModel.localVoicePacks.collectAsState()
-    val activeVoiceId by viewModel.activeLocalVoiceId.collectAsState()
     val effectiveVoiceId by viewModel.effectiveLocalVoiceId.collectAsState()
+    // 角色组两行的状态来自真实数据（与子页共用同一份 VM 状态）
+    val rolePacks by viewModel.rolePacks.collectAsState()
+    val selectedRolePackId by viewModel.selectedRolePackId.collectAsState()
+    val petConfig by viewModel.petConfig.collectAsState()
+    val petRuntime by viewModel.petRuntime.collectAsState()
+
+    // 页面常驻（设计稿无折叠）：进入即检测一次本地音色状态与音色包列表
+    LaunchedEffect(Unit) {
+        viewModel.refreshLocalVoiceStatus()
+        viewModel.refreshLocalVoicePacks()
+    }
+
+    val activePackName = installedPacks.firstOrNull { it.voiceId == effectiveVoiceId }?.name
+        ?: effectiveVoiceId
+    val rolePackStatus = when {
+        rolePacks.isEmpty() -> "未导入 · 使用出厂默认助手"
+        else -> {
+            val name = rolePacks.firstOrNull { it.id == selectedRolePackId }?.name
+            "已导入 ${rolePacks.size} 个" + (if (name != null) " · 当前：$name" else "")
+        }
+    }
+    val petStatus = when {
+        !petConfig.enabled -> "已关闭"
+        petRuntime == io.prism.pet.PetManager.RuntimeState.RUNNING -> "已开启 · 桌面显示中"
+        petRuntime == io.prism.pet.PetManager.RuntimeState.FAILED -> "启动失败 · 点此查看"
+        else -> "已开启 · 等待生效"
+    }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        // ===== 设计稿 `settingsVoice()` 组①：识别 =====
+        SetSection("识别")
+        VoiceEngineOptionRow(
+            label = "端侧识别（默认）",
+            description = "完全离线 · 音频不出设备",
+            selected = asrChoice == io.prism.voice.AsrEngineChoice.SYSTEM,
+            onClick = { viewModel.setVoiceAsrEngine(io.prism.voice.AsrEngineChoice.SYSTEM) }
+        )
+        VoiceEngineOptionRow(
+            label = "云端识别 · 阿里云百炼",
+            description = if (dashScopeReady) {
+                "Paraformer 实时流式 · 音频实时推流到阿里云"
+            } else {
+                "需先配置并保存 DashScope API Key"
+            },
+            selected = asrChoice == io.prism.voice.AsrEngineChoice.ALI_CLOUD,
+            enabled = dashScopeReady,
+            onClick = { viewModel.setVoiceAsrEngine(io.prism.voice.AsrEngineChoice.ALI_CLOUD) }
+        )
+        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = PrismSize.s2)) {
+            VoiceKeyField(
+                label = "DashScope API Key",
+                placeholder = "到阿里云百炼控制台获取",
+                keyRef = io.prism.voice.cloud.AliCloudAsrEngine.KEY_REF,
+                secret = true,
+                viewModel = viewModel
+            )
+            PrismActionsRow {
+                PrismMini(
+                    text = if (asrCheck?.running == true) "自检中…" else "自检",
+                    onClick = { viewModel.runAsrSelfCheck() }
+                )
+            }
+            asrCheck?.let { check ->
+                Text(
+                    text = "识别自检：${check.message}",
+                    color = voiceSelfCheckColor(check.message),
+                    fontSize = PrismType.micro,
+                    lineHeight = PrismType.microLine,
+                    modifier = Modifier.padding(top = PrismSize.s2)
+                )
+            }
+        }
+
+        // ===== 组②：播报 =====
+        SetSection("播报")
+        VoiceEngineOptionRow(
+            label = "系统播报（默认）",
+            description = "零依赖 · 本机 TTS",
+            selected = ttsChoice == io.prism.voice.TtsEngineChoice.SYSTEM,
+            onClick = { viewModel.setVoiceTtsEngine(io.prism.voice.TtsEngineChoice.SYSTEM) }
+        )
+        VoiceEngineOptionRow(
+            label = "云端播报 · MiniMax",
+            description = if (minimaxKeyReady && minimaxGroupReady) {
+                "T2A v2 流式合成 · 音色/语速可由角色包指定"
+            } else {
+                "需先配置 MiniMax Key 与 GroupId"
+            },
+            selected = ttsChoice == io.prism.voice.TtsEngineChoice.MINIMAX,
+            enabled = minimaxKeyReady && minimaxGroupReady,
+            onClick = { viewModel.setVoiceTtsEngine(io.prism.voice.TtsEngineChoice.MINIMAX) }
+        )
+        VoiceEngineOptionRow(
+            label = "本地音色 · 离线",
+            description = localVoiceDescription(localVoiceStatus),
+            selected = ttsChoice == io.prism.voice.TtsEngineChoice.LOCAL_CLONE,
+            enabled = isLocalVoiceSelectable(localVoiceStatus),
+            onClick = { viewModel.setVoiceTtsEngine(io.prism.voice.TtsEngineChoice.LOCAL_CLONE) }
+        )
+        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = PrismSize.s2)) {
+            VoiceKeyField(
+                label = "MiniMax API Key",
+                placeholder = "到 MiniMax 开放平台获取",
+                keyRef = io.prism.voice.cloud.MiniMaxTtsConfig.KEY_API_KEY,
+                secret = true,
+                viewModel = viewModel
+            )
+            VoiceKeyField(
+                label = "MiniMax GroupId",
+                placeholder = "MiniMax 开放平台账号信息页查看",
+                keyRef = io.prism.voice.cloud.MiniMaxTtsConfig.KEY_GROUP_ID,
+                secret = true,
+                viewModel = viewModel
+            )
+            PrismActionsRow {
+                PrismMini(
+                    text = if (ttsCheck?.running == true) "自检中…" else "自检",
+                    onClick = { viewModel.runTtsSelfCheck() }
+                )
+            }
+            ttsCheck?.let { check ->
+                Text(
+                    text = "播报自检：${check.message}",
+                    color = voiceSelfCheckColor(check.message),
+                    fontSize = PrismType.micro,
+                    lineHeight = PrismType.microLine,
+                    modifier = Modifier.padding(top = PrismSize.s2)
+                )
+            }
+        }
+        // 设计稿：档位 / 播报方式 / 热词都是**一行**（点击切换或编辑），不铺成多行单选。
+        SetRow(
+            title = "本地音色档位",
+            subtitle = when (localTier) {
+                io.prism.voice.LocalVoiceTier.QUALITY -> "质量优先"
+                io.prism.voice.LocalVoiceTier.BALANCED -> "均衡 · 约快一倍"
+                io.prism.voice.LocalVoiceTier.SPEED -> "速度优先"
+            },
+            onClick = {
+                // 循环：质量 → 均衡 → 速度 → 质量（与设计稿「点击切换」同语义）
+                val next = when (localTier) {
+                    io.prism.voice.LocalVoiceTier.QUALITY -> io.prism.voice.LocalVoiceTier.BALANCED
+                    io.prism.voice.LocalVoiceTier.BALANCED -> io.prism.voice.LocalVoiceTier.SPEED
+                    io.prism.voice.LocalVoiceTier.SPEED -> io.prism.voice.LocalVoiceTier.QUALITY
+                }
+                viewModel.setLocalVoiceTier(next)
+            }
+        )
+        SetRow(
+            title = "播报方式",
+            subtitle = when (playbackMode) {
+                io.prism.voice.LocalClonePlaybackMode.CONTINUOUS -> "连续播报 · 首声最快"
+                io.prism.voice.LocalClonePlaybackMode.WHOLE -> "整段播报 · 绝不中断"
+            },
+            onClick = {
+                viewModel.setLocalPlaybackMode(
+                    if (playbackMode == io.prism.voice.LocalClonePlaybackMode.CONTINUOUS) {
+                        io.prism.voice.LocalClonePlaybackMode.WHOLE
+                    } else {
+                        io.prism.voice.LocalClonePlaybackMode.CONTINUOUS
+                    }
+                )
+            }
+        )
+        VoiceHotwordsEditor()
+
+        // ===== 组③：本地音色包（设计稿是 card：已安装 / 当前使用 + 导入）=====
+        SetSection("本地音色包")
+        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = PrismSize.s2)) {
+            PrismCardBox {
+                PrismKv(key = "已安装", value = "${installedPacks.size} 个")
+                PrismKv(
+                    key = "当前使用",
+                    value = activePackName ?: "未选择（由角色包决定）",
+                    onClick = onOpenVoicePacks
+                )
+                PrismActionsRow {
+                    PrismMini(text = "导入音色包", onClick = onOpenVoicePacks)
+                    PrismMini(text = "管理", onClick = onOpenVoicePacks)
+                }
+            }
+            PrismFootnote("音色包存放在应用私有目录，卸载 App 后一并清除，不上传、不联网。")
+        }
+
+        // ===== 组④：角色（设计稿：两个导航行，进入「角色与桌宠」）=====
+        SetSection("角色")
+        SetRow(title = "角色包", subtitle = rolePackStatus, onClick = onOpenPersona)
+        SetRow(title = "桌宠", subtitle = petStatus, onClick = onOpenPersona)
+    }
+}
+
+/**
+ * 本地音色包管理弹层（用户 2026-11-21 裁定：列表从页面收进弹层，页面只留「已安装 / 当前使用」）。
+ *
+ * 功能与页面内列表**完全等价**：导入（SAF）、选用（点击设为当前播报音色）、删除、清除选择。
+ * 覆盖同名包的二次确认也在这里（ADR-057 决策 5：不静默覆盖）。
+ */
+@Composable
+private fun VoicePackSheet(viewModel: SettingsViewModel, onClose: () -> Unit) {
+    val installedPacks by viewModel.localVoicePacks.collectAsState()
+    val effectiveVoiceId by viewModel.effectiveLocalVoiceId.collectAsState()
+    val activeVoiceId by viewModel.activeLocalVoiceId.collectAsState()
     val packBusy by viewModel.voicePackBusy.collectAsState()
     val packMessage by viewModel.voicePackMessage.collectAsState()
     val pendingOverwrite by viewModel.pendingVoicePackOverwrite.collectAsState()
     val context = LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
-    var expanded by remember { mutableStateOf(false) }
 
-    // 展开时检测一次（侧载/换角色包后重新进入即可刷新——不引入文件监听，避免常驻轮询）
-    LaunchedEffect(expanded) {
-        if (expanded) {
-            viewModel.refreshLocalVoiceStatus()
-            viewModel.refreshLocalVoicePacks()
-        }
-    }
+    LaunchedEffect(Unit) { viewModel.refreshLocalVoicePacks() }
 
     // 音色包导入（TKN-LVC-016）：SAF 选 `.voicepack` → 拷到 cache（可 seek，便于按中央目录预检）
     // → 交 VM 校验/落盘。**上限与导入器同源**：超限的归档不进入应用私有目录之外的任何路径。
@@ -3389,174 +3777,30 @@ private fun VoiceEngineSection(viewModel: SettingsViewModel) {
         )
     }
 
-    if (!expanded) {
-        SetRow(
-            title = "语音引擎",
-            subtitle = voiceEngineSubtitle(asrChoice, ttsChoice),
-            onClick = { expanded = true }
-        )
-        return
-    }
-
-    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-        // ---- ASR 引擎选择（云端项仅在 DashScope Key 就绪时可选）----
-
-        SetSectionBare("识别")
-        VoiceEngineOptionRow(
-            label = "端侧识别（默认）",
-            description = "完全离线 · 音频不出设备",
-            selected = asrChoice == io.prism.voice.AsrEngineChoice.SYSTEM,
-            onClick = { viewModel.setVoiceAsrEngine(io.prism.voice.AsrEngineChoice.SYSTEM) }
-        )
-        Spacer(Modifier.height(8.dp))
-        VoiceEngineOptionRow(
-            label = "云端识别（阿里云百炼）",
-            description = if (dashScopeReady) {
-                "Paraformer 实时流式 · 音频实时推流到阿里云（Key 已配置）"
-            } else {
-                "需先配置并保存 DashScope API Key（配置后可选）"
-            },
-            selected = asrChoice == io.prism.voice.AsrEngineChoice.ALI_CLOUD,
-            enabled = dashScopeReady,
-            onClick = { viewModel.setVoiceAsrEngine(io.prism.voice.AsrEngineChoice.ALI_CLOUD) }
-        )
-        Spacer(Modifier.height(8.dp))
-        VoiceKeyField(
-            label = "DashScope API Key",
-            placeholder = "到阿里云百炼控制台获取",
-            keyRef = io.prism.voice.cloud.AliCloudAsrEngine.KEY_REF,
-            secret = true,
-            viewModel = viewModel
-        )
-
-        Spacer(Modifier.height(12.dp))
-        // ---- TTS 引擎选择（云端项仅在 Key + GroupId 就绪时可选）----
-        SetSectionBare("播报")
-
-        VoiceEngineOptionRow(
-            label = "系统播报（默认）",
-            description = "零依赖 · 本机 TextToSpeech",
-            selected = ttsChoice == io.prism.voice.TtsEngineChoice.SYSTEM,
-            onClick = { viewModel.setVoiceTtsEngine(io.prism.voice.TtsEngineChoice.SYSTEM) }
-        )
-        Spacer(Modifier.height(8.dp))
-        VoiceEngineOptionRow(
-            label = "云端播报（MiniMax）",
-            description = if (minimaxKeyReady && minimaxGroupReady) {
-                "T2A v2 流式合成 · 音色/语速可由角色包 voice.minimax 指定"
-            } else {
-                "需先配置并保存 MiniMax API Key 与 GroupId（配置后可选）"
-            },
-            selected = ttsChoice == io.prism.voice.TtsEngineChoice.MINIMAX,
-            enabled = minimaxKeyReady && minimaxGroupReady,
-            onClick = { viewModel.setVoiceTtsEngine(io.prism.voice.TtsEngineChoice.MINIMAX) }
-        )
-        Spacer(Modifier.height(8.dp))
-        VoiceKeyField(
-            label = "MiniMax API Key",
-            placeholder = "到 MiniMax 开放平台获取",
-            keyRef = io.prism.voice.cloud.MiniMaxTtsConfig.KEY_API_KEY,
-            secret = true,
-            viewModel = viewModel
-        )
-        Spacer(Modifier.height(8.dp))
-        VoiceKeyField(
-            label = "MiniMax GroupId",
-            placeholder = "MiniMax 开放平台账号基本信息页查看",
-            keyRef = io.prism.voice.cloud.MiniMaxTtsConfig.KEY_GROUP_ID,
-            secret = true,
-            viewModel = viewModel
-        )
-
-        Spacer(Modifier.height(8.dp))
-        // ---- LVC-1（ADR-053）：本地音色（端侧 ZipVoice 克隆，离线零费用）----
-        // 门控：仅当「生效角色包声明 voice.local.voiceId」且「音色包已侧载且完整」时可选；
-        // 文案同时给出"当前是什么状态"，避免用户面对灰按钮不知为何不可选。
-        VoiceEngineOptionRow(
-            label = "本地昔涟（离线）",
-            description = localVoiceDescription(localVoiceStatus),
-            selected = ttsChoice == io.prism.voice.TtsEngineChoice.LOCAL_CLONE,
-            enabled = isLocalVoiceSelectable(localVoiceStatus),
-            onClick = { viewModel.setVoiceTtsEngine(io.prism.voice.TtsEngineChoice.LOCAL_CLONE) }
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            text = "本地音色包可在此直接导入（.voicepack 归档），也可继续用电脑侧载" +
-                "（见 docs/runbooks/setup-local-voice-clone.md）；完全离线、不产生云端费用。",
-            color = PrismTextFaint,
-            fontSize = 11.sp,
-            lineHeight = 16.sp
-        )
-
-        // ---- TKN-LVC-016（ADR-056）：档位与播报模式（仅本地音色生效）----
-        Spacer(Modifier.height(10.dp))
-        Text(
-            text = "本地音色档位（仅影响本地引擎）",
-            color = PrismTextDim,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.4.sp
-        )
-        Spacer(Modifier.height(6.dp))
-        VoiceEngineOptionRow(
-            label = "质量优先（默认）",
-            description = "完全沿用音色包参数（步数/线程不变）",
-            selected = localTier == io.prism.voice.LocalVoiceTier.QUALITY,
-            onClick = { viewModel.setLocalVoiceTier(io.prism.voice.LocalVoiceTier.QUALITY) }
-        )
-        Spacer(Modifier.height(6.dp))
-        VoiceEngineOptionRow(
-            label = "均衡",
-            description = "6 步 / 3 线程 · 合成约快一倍，音色略降",
-            selected = localTier == io.prism.voice.LocalVoiceTier.BALANCED,
-            onClick = { viewModel.setLocalVoiceTier(io.prism.voice.LocalVoiceTier.BALANCED) }
-        )
-        Spacer(Modifier.height(6.dp))
-        VoiceEngineOptionRow(
-            label = "速度优先",
-            description = "4 步 / 4 线程 · 最快，音色相似度实测略降；长时间播报可能发热降速",
-            selected = localTier == io.prism.voice.LocalVoiceTier.SPEED,
-            onClick = { viewModel.setLocalVoiceTier(io.prism.voice.LocalVoiceTier.SPEED) }
-        )
-
-        Spacer(Modifier.height(10.dp))
-        Text(
-            text = "播报方式（仅影响本地引擎）",
-            color = PrismTextDim,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.4.sp
-        )
-        Spacer(Modifier.height(6.dp))
-        VoiceEngineOptionRow(
-            label = "连续播报（默认）",
-            description = "边合成边播 · 首声最快；合成速度跟不上时可能出现短暂停顿",
-            selected = playbackMode == io.prism.voice.LocalClonePlaybackMode.CONTINUOUS,
-            onClick = {
-                viewModel.setLocalPlaybackMode(io.prism.voice.LocalClonePlaybackMode.CONTINUOUS)
+    PrismSheet(
+        title = "音色包管理",
+        subtitle = "点击某个包即设为当前播报音色；未选择时由角色包决定"
+    ) {
+        if (installedPacks.isEmpty()) {
+            Text(
+                text = "尚未检测到任何音色包。点下方「导入音色包」选择 .voicepack 文件即可。",
+                color = PrismTextFaint,
+                fontSize = 11.sp,
+                lineHeight = 16.sp
+            )
+            Spacer(Modifier.height(PrismSize.s3))
+        } else {
+            installedPacks.forEach { pack ->
+                VoicePackRow(
+                    pack = pack,
+                    busy = packBusy,
+                    selected = effectiveVoiceId != null && pack.voiceId == effectiveVoiceId,
+                    onSelect = { viewModel.selectLocalVoicePack(pack.voiceId) },
+                    onDelete = { viewModel.deleteVoicePack(pack.voiceId) }
+                )
+                Spacer(Modifier.height(6.dp))
             }
-        )
-        Spacer(Modifier.height(6.dp))
-        VoiceEngineOptionRow(
-            label = "整段播报",
-            description = "全部语句合成完再一次性播放 · 绝不中断，但开口要等更久" +
-                "（超过 200 字自动改用连续播报）",
-            selected = playbackMode == io.prism.voice.LocalClonePlaybackMode.WHOLE,
-            onClick = { viewModel.setLocalPlaybackMode(io.prism.voice.LocalClonePlaybackMode.WHOLE) }
-        )
-
-        // ---- TKN-LVC-016（ADR-057）+ BUG-20260924-001/002：音色包 导入/列表/选用/删除 ----
-        //  标题与"导入"按钮**必须分两行**：PrismButton 默认 fillMaxWidth，与标题同排会各自
-        // 抢占整行宽度（真机现象："本地音色包"与"导入音色包"被挤在同一行）。
-        Spacer(Modifier.height(10.dp))
-        Text(
-            text = if (installedPacks.isEmpty()) "本地音色包"
-            else "本地音色包（${installedPacks.size} 个 · 点击设为当前播报音色）",
-            color = PrismTextDim,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.4.sp
-        )
+        }
         packMessage?.let { message ->
             Spacer(Modifier.height(6.dp))
             Text(
@@ -3569,121 +3813,47 @@ private fun VoiceEngineSection(viewModel: SettingsViewModel) {
                 lineHeight = 16.sp
             )
         }
-        if (installedPacks.isEmpty()) {
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "尚未检测到任何音色包。点下方「导入音色包」选择 .voicepack 文件即可。",
-                color = PrismTextFaint,
-                fontSize = 11.sp
-            )
-        } else {
-            Spacer(Modifier.height(6.dp))
-            installedPacks.forEach { pack ->
-                VoicePackRow(
-                    pack = pack,
-                    busy = packBusy,
-                    selected = effectiveVoiceId != null && pack.voiceId == effectiveVoiceId,
-                    onSelect = { viewModel.selectLocalVoicePack(pack.voiceId) },
-                    onDelete = { viewModel.deleteVoicePack(pack.voiceId) }
-                )
-                Spacer(Modifier.height(6.dp))
-            }
-        }
         if (activeVoiceId != null) {
+            Spacer(Modifier.height(PrismSize.s2))
             PrismButton(
                 text = "清除选择（改由角色包声明决定）",
                 variant = PrismButtonVariant.Ghost,
                 enabled = !packBusy,
                 onClick = { viewModel.selectLocalVoicePack(null) }
             )
-            Spacer(Modifier.height(6.dp))
         }
-        PrismButton(
-            text = if (packBusy) "处理中…" else "导入音色包（.voicepack）",
-            variant = PrismButtonVariant.Ghost,
-            enabled = !packBusy,
-            onClick = {
-                viewModel.consumeVoicePackMessage()
-                // MIME 无法可靠表达 `.voicepack`（zip），用 application/zip + 通配兜底
-                packImportLauncher.launch(
-                    arrayOf("application/zip", "application/octet-stream", "*/*")
-                )
-            }
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(
-            text = "点击某个包即设为当前播报音色（显示「使用中」）；未选择时由角色包 voice.local.voiceId 决定。" +
-                "音色包存放在应用私有目录，卸载 App 后一并清除，不上传、不联网。",
-            color = PrismTextFaint,
-            fontSize = 11.sp,
-            lineHeight = 16.sp
-        )
-
-        Spacer(Modifier.height(12.dp))
-        // ---- 连通性自检（每个云端引擎一个按钮；结果就地展示）----
-        //  同一行放两个 PrismButton 时必须 `fillWidth = false` + `weight(1f)`：默认
-        // fillMaxWidth 会让**第一个**吃满整行、第二个被压成 0 宽（BUG-20260924-001 同类漏改）。
+        Spacer(Modifier.height(PrismSize.s5))
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            horizontalArrangement = Arrangement.spacedBy(PrismSize.s2)
         ) {
             PrismButton(
-                text = "自检云端识别",
+                text = if (packBusy) "处理中…" else "导入音色包",
                 variant = PrismButtonVariant.Ghost,
-                enabled = asrCheck?.running != true,
+                enabled = !packBusy,
                 fillWidth = false,
                 modifier = Modifier.weight(1f),
-                onClick = { viewModel.runAsrSelfCheck() }
+                onClick = {
+                    viewModel.consumeVoicePackMessage()
+                    // MIME 无法可靠表达 `.voicepack`（zip），用 application/zip + 通配兜底
+                    packImportLauncher.launch(
+                        arrayOf("application/zip", "application/octet-stream", "*/*")
+                    )
+                }
             )
             PrismButton(
-                text = "自检云端 TTS",
-                variant = PrismButtonVariant.Ghost,
-                enabled = ttsCheck?.running != true,
+                text = "关闭",
                 fillWidth = false,
                 modifier = Modifier.weight(1f),
-                onClick = { viewModel.runTtsSelfCheck() }
+                onClick = onClose
             )
         }
-        asrCheck?.let { check ->
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "识别自检：${check.message}",
-                color = voiceSelfCheckColor(check.message),
-                fontSize = 11.sp,
-                lineHeight = 16.sp
-            )
-        }
-        ttsCheck?.let { check ->
-            Spacer(Modifier.height(6.dp))
-            Text(
-                text = "播报自检：${check.message}",
-                color = voiceSelfCheckColor(check.message),
-                fontSize = 11.sp,
-                lineHeight = 16.sp
-            )
-        }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "云端引擎仅在 Key 就绪时可选；通话中云端连接失败会自动回退端侧并提示。",
-            color = PrismTextFaint,
-            fontSize = 11.sp
+        PrismFootnote(
+            "音色包存放在应用私有目录，卸载 App 后一并清除，不上传、不联网。"
         )
-        Spacer(Modifier.height(8.dp))
-        PrismButton(text = "收起", variant = PrismButtonVariant.Ghost, onClick = { expanded = false })
     }
 }
 
-/** 语音引擎区收缩态副标题（当前选择摘要）。 */
-private fun voiceEngineSubtitle(
-    asr: io.prism.voice.AsrEngineChoice,
-    tts: io.prism.voice.TtsEngineChoice
-): String =
-    "识别：${if (asr == io.prism.voice.AsrEngineChoice.ALI_CLOUD) "云端（阿里云）" else "端侧"} · " +
-        "播报：${when (tts) {
-            io.prism.voice.TtsEngineChoice.MINIMAX -> "云端（MiniMax）"
-            io.prism.voice.TtsEngineChoice.LOCAL_CLONE -> "本地昔涟"
-            io.prism.voice.TtsEngineChoice.SYSTEM -> "系统"
-        }} · 点此配置"
 
 /**
  * LVC-1（ADR-053）：本地音色选项的描述文案（把"为什么不可选"直接说清楚）。
@@ -3899,7 +4069,11 @@ private fun VoiceKeyField(
     var value by remember(keyRef) { mutableStateOf("") }
     var loaded by remember(keyRef) { mutableStateOf(false) }
 
-    if (!loaded) {
+    // **guardrail 2026-11-21（建议 2 / 与 R5-M-02 同类）**：原实现在组合体里直接触发
+    // `loadApiKey`（每次重组都可能判定一次），且"保存"按钮不等回填就可用——
+    // 打开语音页立刻点保存，会把尚未回填的空串当"清空"，**静默删掉已存 Key**。
+    // 本轮语音区从折叠改为常驻，暴露窗口变大，必须修：LaunchedEffect 只跑一次 + 按钮以 loaded 门控。
+    LaunchedEffect(keyRef) {
         viewModel.loadApiKey(keyRef) { v ->
             value = v.orEmpty()
             loaded = true
@@ -3912,12 +4086,16 @@ private fun VoiceKeyField(
         onValueChange = { value = it },
         placeholder = placeholder,
         secret = secret,
-        hint = "Keystore 加密存储 · 清空后保存即删除"
+        hint = if (loaded) "Keystore 加密存储 · 清空后保存即删除" else "读取中…"
     )
     Spacer(Modifier.height(8.dp))
     PrismButton(
-        text = "保存 $label",
+        text = when {
+            !loaded -> "读取中…"
+            else -> "保存 $label"
+        },
         variant = PrismButtonVariant.Ghost,
+        enabled = loaded,
         onClick = {
             if (value.isEmpty()) {
                 viewModel.removeApiKey(keyRef)
@@ -3929,19 +4107,14 @@ private fun VoiceKeyField(
 }
 
 /**
- * 批次23-C（ADR-048）：角色包管理区（加在「语音通话」区内，通用模板——不含任何具体角色内容）。
+ * 「角色与桌宠」子页 · 角色包（批次23-C ADR-048）。
  *
- * - **导入**：SAF [androidx.activity.result.contract.ActivityResultContracts.OpenDocument]
- *   （mime 用通配符——.rolepack/.json 均可由内容识别）→ 复制到应用缓存再读文本（content URI
- *   不保证可重复打开）→ [SettingsViewModel.importRolePack]（先解析校验再落盘，文件名以
- *   包 id 规范化）；结果就地展示（成功/失败原因）；
- * - **列表**：已导入角色包（按显示名排序），当前选中带「生效中」标记；点击切换
- *   （loader.select，热切换——下次语音轮次 persona 覆盖与播报装配即生效）；行尾 ✕ 按钮
- *   删除（loader.remove，删除选中包自动回落出厂默认助手）；
- * - 装配语义在 ConversationViewModel（语音轮次 persona）与 VoiceSessionController
- *   （voice.system / style 分段）内实现，本区只调 loader，无额外接线。
+ * - **导入**：SAF 选 `.json` → 复制到缓存再读文本 → [SettingsViewModel.importRolePack]
+ *   （先解析校验再落盘，文件名以包 id 规范化）；结果就地展示（成功/失败原因）；
+ * - **列表**：已导入角色包 + 出厂默认行，点击切换（热切换，下次语音轮次生效），行尾删除；
+ * - 装配语义在 ConversationViewModel / VoiceSessionController 内，本区只调 loader。
  *
- * 默认收缩态（与其他设置行形态一致），点击展开管理。
+ * 视觉按设计稿 `settingsPersona()`：卡片（已导入 / 当前）+ 导入按钮 + 脚注，列表在其下。
  */
 @Composable
 private fun RolePackSection(viewModel: SettingsViewModel) {
@@ -3949,11 +4122,10 @@ private fun RolePackSection(viewModel: SettingsViewModel) {
     val selectedId by viewModel.selectedRolePackId.collectAsState()
     val context = LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
-    var expanded by remember { mutableStateOf(false) }
     var importOk by remember { mutableStateOf(false) }
     var importMessage by remember { mutableStateOf<String?>(null) }
 
-    // 进入设置页即刷新（收缩态副标题也依赖列表/选中态；loader 自带 IO 调度）
+    // 进入子页即刷新（卡片与列表都依赖真实列表；loader 自带 IO 调度）
     LaunchedEffect(Unit) { viewModel.refreshRolePacks() }
 
     // SAF 文件选择（批次23-C）：选中后复制到缓存再读文本，交 VM 解析导入
@@ -3989,158 +4161,63 @@ private fun RolePackSection(viewModel: SettingsViewModel) {
         }
     }
 
-    if (!expanded) {
-        val selectedName = packs.firstOrNull { it.id == selectedId }?.name
-        SetRow(
-            title = "角色包",
-            subtitle = when {
-                packs.isEmpty() -> "未导入 · 导入角色包 JSON 可切换语音通话人格 · 点此管理"
-                selectedName != null -> "已导入 ${packs.size} 个 · 当前：$selectedName"
-                else -> "已导入 ${packs.size} 个 · 当前：默认助手"
-            },
-            onClick = { expanded = true }
-        )
-        return
-    }
-
-    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
-        Text(
-            text = "已导入角色包（点击切换 · 下次语音轮次生效）",
-            color = PrismTextDim,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.4.sp
-        )
-        Spacer(Modifier.height(8.dp))
-        if (packs.isEmpty()) {
-            Text(text = "尚未导入角色包。", color = PrismTextFaint, fontSize = 11.sp)
-            Spacer(Modifier.height(8.dp))
+    val selectedName = packs.firstOrNull { it.id == selectedId }?.name
+    SetSection("角色包")
+    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = PrismSize.s2)) {
+        PrismCardBox {
+            PrismKv(key = "已导入", value = "${packs.size} 个")
+            PrismKv(key = "当前", value = selectedName ?: "出厂默认助手")
+            PrismActionsRow {
+                PrismMini(
+                    text = "导入角色包",
+                    onClick = { importLauncher.launch(arrayOf("*/*")) }
+                )
+            }
         }
-        // 出厂默认角色包行（BUG-20260908-002）：始终展示——未选中任何包时即「生效中」，
-        // 点击清除选中回落 B0；默认包不可删除（无 ✕）
-        RolePackRow(
-            pack = io.prism.voice.rolepack.RolePack.DEFAULT_ROLE_PACK,
-            selected = selectedId == null,
-            onSelect = { viewModel.clearRolePackSelection() },
-            onDelete = {},
-            showDelete = false
-        )
-        Spacer(Modifier.height(8.dp))
-        packs.forEach { pack ->
-            RolePackRow(
-                pack = pack,
-                selected = pack.id == selectedId,
-                onSelect = { viewModel.selectRolePack(pack.id) },
-                onDelete = { viewModel.deleteRolePack(pack.id) }
-            )
-            Spacer(Modifier.height(8.dp))
-        }
-        PrismButton(
-            text = "导入角色包（.json）",
-            variant = PrismButtonVariant.Primary,
-            onClick = { importLauncher.launch(arrayOf("*/*")) }
-        )
-        importMessage?.let { message ->
-            Spacer(Modifier.height(6.dp))
+        importMessage?.let { msg ->
             Text(
-                text = message,
+                text = msg,
                 color = if (importOk) PrismMint else PrismWarning,
                 fontSize = 11.sp,
                 lineHeight = 16.sp
             )
         }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "角色包为本地 JSON 文件（Schema prism-rolepack/1），存储于应用私有目录，随应用卸载清除；" +
-                "选中后作用于语音通话人设与播报风格，未选中时使用出厂默认助手。",
-            color = PrismTextFaint,
-            fontSize = 11.sp,
-            lineHeight = 16.sp
+        PrismFootnote(
+            "角色包为本地 JSON（prism-rolepack/1），存在应用私有目录，随卸载清除；" +
+                "选中后作用于语音通话人设与播报风格。"
         )
-        Spacer(Modifier.height(8.dp))
-        PrismButton(text = "收起", variant = PrismButtonVariant.Ghost, onClick = { expanded = false })
     }
-}
 
-/** 角色包列表行（批次23-C）：点击切换选中，行尾 ✕ 按钮删除（复用引擎选项行视觉）；
- *  showDelete=false 时隐藏删除按钮（出厂默认行专用，默认包不可删）。 */
-@Composable
-private fun RolePackRow(
-    pack: io.prism.voice.rolepack.RolePack,
-    selected: Boolean,
-    onSelect: () -> Unit,
-    onDelete: () -> Unit,
-    showDelete: Boolean = true
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(if (selected) PrismMint.copy(alpha = 0.08f) else PrismPanel2)
-            .border(
-                1.dp,
-                if (selected) PrismMint.copy(alpha = 0.4f) else PrismLine,
-                RoundedCornerShape(12.dp)
-            )
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onSelect
-            )
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        Box(
-            modifier = Modifier
-                .size(34.dp)
-                .background(
-                    if (selected) PrismMint.copy(alpha = 0.12f) else PrismPanel2,
-                    RoundedCornerShape(10.dp)
-                ),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = if (selected) "✓" else "○",
-                color = if (selected) PrismMint else PrismTextDim,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
-        Column(modifier = Modifier.weight(1f)) {
-            Text(text = pack.name, color = PrismText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Text(text = "v${pack.version} · ${pack.id}", color = PrismTextFaint, fontSize = 11.sp)
-        }
-        if (selected) {
-            Text(text = "生效中", color = PrismMint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-        }
-        if (showDelete) {
-            Box(
-                modifier = Modifier
-                    .size(32.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(PrismPanel2)
-                    .border(1.dp, PrismLine, RoundedCornerShape(8.dp))
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = onDelete
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(text = "✕", color = PrismTextDim, fontSize = 12.sp)
-            }
-        }
+    // 已导入列表：点击切换，尾部删除（出厂默认行不可删）
+    SetRow(
+        title = "出厂默认助手",
+        subtitle = if (selectedId == null) "生效中" else "点击切换",
+        onClick = { viewModel.clearRolePackSelection() }
+    )
+    packs.forEach { pack ->
+        SetRow(
+            title = pack.name,
+            subtitle = if (pack.id == selectedId) "生效中" else "点击切换",
+            trailing = {
+                PrismMini(
+                    text = "删除",
+                    danger = true,
+                    onClick = { viewModel.deleteRolePack(pack.id) }
+                )
+            },
+            onClick = { viewModel.selectRolePack(pack.id) }
+        )
     }
 }
 
 /**
- * 桌宠设置区（批次24，ADR-051 / PRD US-2412）。
+ * 「角色与桌宠」子页 · 桌宠（批次24 ADR-051）。
  *
- * **权限文案必须说清是"桌宠显示"用途**：项目里既有的 `SYSTEM_ALERT_WINDOW` 引导
- * （后台操控/虚拟屏）说的是"后台启动应用"，与悬浮窗绘制**不是同一件事**
- * （考古报告 §C：现有权限语义是"后台启动 Activity 的豁免条件"）。
- * 复用同一句文案会造成用户误解，故本区自带独立说明。
+ * 视觉按设计稿 `settingsPersona()` 的「桌宠」组：每项一行（标题 + 一行状态 + 控件/chevron），
+ * 形象选择、大小、不透明度、表情回正各自进一个弹层（设计稿也是行 + 弹层，不是页内长列表）。
+ *
+ * 权限状态**必须轮询**（guardrail M-3）：用户点「前往授权」回到 App 后，
+ * 立刻重读必然还是 false（系统设置页是另一个 Task，此刻还没走完）。
  */
 @Composable
 private fun PetSection(viewModel: SettingsViewModel) {
@@ -4151,15 +4228,15 @@ private fun PetSection(viewModel: SettingsViewModel) {
     val lastError by viewModel.petLastError.collectAsState()
     val message by viewModel.petMessage.collectAsState()
 
-    var expanded by remember { mutableStateOf(false) }
     var canOverlay by remember { mutableStateOf(android.provider.Settings.canDrawOverlays(context)) }
+    var appearanceSheet by remember { mutableStateOf(false) }
+    var sizeSheet by remember { mutableStateOf(false) }
+    var opacitySheet by remember { mutableStateOf(false) }
+    var resetSheet by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { viewModel.refreshPet() }
-    // 权限状态**必须轮询**（guardrail M-3）：用户点"前往设置"授权后回到 App，
-    // 在 startActivity 之后立刻重读必然还是 false（系统设置页是另一个 Task，
-    // 此刻还没走完）。项目既有做法是 1s 轮询（同文件后台操控引导段），此处对齐。
-    LaunchedEffect(expanded) {
-        while (expanded) {
+    LaunchedEffect(Unit) {
+        while (true) {
             canOverlay = android.provider.Settings.canDrawOverlays(context)
             kotlinx.coroutines.delay(1000)
         }
@@ -4176,192 +4253,216 @@ private fun PetSection(viewModel: SettingsViewModel) {
         if (uri != null) viewModel.importPetAsset(uri, isPack = false)
     }
 
-    if (!expanded) {
-        SetRow(
-            title = "桌宠",
-            subtitle = when {
-                !config.enabled -> "已关闭 · 打开后角色会出现在手机桌面上 · 点此设置"
-                runtime == io.prism.pet.PetManager.RuntimeState.RUNNING ->
-                    "显示中 · ${appearances.firstOrNull { it.id == config.appearanceId }?.name ?: "未选形象"}"
-                runtime == io.prism.pet.PetManager.RuntimeState.FAILED ->
-                    "启动失败 · ${lastError ?: "未知原因"}"
-                else -> "已开启（等待生效）"
-            },
-            onClick = { expanded = true }
-        )
-        return
+    val currentAppearance = appearances.firstOrNull { it.id == config.appearanceId }
+    val sizeLabel = when {
+        config.scale <= 0.85f -> "小"
+        config.scale >= 1.15f -> "大"
+        else -> "中"
     }
+    val opacityLabel = "${(config.opacity * 100).toInt()}%"
+    val resetLabel = if (config.expressionResetSeconds <= 0) "关闭" else "${config.expressionResetSeconds} 秒"
 
-    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) {
+    SetSection("桌宠")
+    SetRow(
+        title = "显示桌宠",
+        subtitle = when {
+            !config.enabled -> "已关闭"
+            runtime == io.prism.pet.PetManager.RuntimeState.RUNNING -> "已开启 · 桌面显示中"
+            runtime == io.prism.pet.PetManager.RuntimeState.FAILED ->
+                "启动失败 · ${lastError ?: "未知原因"}"
+            else -> "已开启 · 等待生效"
+        },
+        trailing = {
+            PrismSwitch(
+                checked = config.enabled,
+                enabled = canOverlay,
+                onCheckedChange = { viewModel.setPetEnabled(it) }
+            )
+        },
+        onClick = { if (canOverlay) viewModel.setPetEnabled(!config.enabled) }
+    )
+    if (!canOverlay) {
         SetRow(
-            title = "显示桌宠",
-            subtitle = "在手机桌面显示角色形象（悬浮窗，可随时收起）",
-            trailing = {
-                PrismSwitch(
-                    checked = config.enabled,
-                    enabled = canOverlay,
-                    onCheckedChange = { viewModel.setPetEnabled(it) }
-                )
-            },
-            onClick = { if (canOverlay) viewModel.setPetEnabled(!config.enabled) }
-        )
-
-        if (!canOverlay) {
-            Spacer(Modifier.height(6.dp))
-            SetRow(
-                title = "需要「显示在其他应用上层」权限",
-                subtitle = "桌宠是一个浮在桌面上的小窗口，必须授予该权限才能显示。点此前往系统设置开启。",
-                onClick = {
-                    runCatching {
-                        context.startActivity(
-                            android.content.Intent(
-                                android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                android.net.Uri.parse("package:${context.packageName}")
-                            ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
-                    }
-                    canOverlay = android.provider.Settings.canDrawOverlays(context)
+            title = "需要「显示在其他应用上层」权限",
+            subtitle = "未授权 · 点此去系统设置开启",
+            onClick = {
+                runCatching {
+                    context.startActivity(
+                        android.content.Intent(
+                            android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                            android.net.Uri.parse("package:${context.packageName}")
+                        ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
                 }
+                canOverlay = android.provider.Settings.canDrawOverlays(context)
+            }
+        )
+    }
+    SetRow(
+        title = "桌宠形象",
+        subtitle = currentAppearance?.let {
+            it.name + if (it.kind == io.prism.pet.model.PetAppearanceKind.LIVE2D) " · Live2D" else " · 图片"
+        } ?: "未导入 · 点此选择",
+        onClick = { appearanceSheet = true }
+    )
+    SetRow(title = "大小", subtitle = sizeLabel, onClick = { sizeSheet = true })
+    SetRow(title = "不透明度", subtitle = opacityLabel, onClick = { opacitySheet = true })
+    SetRow(title = "表情回正", subtitle = "$resetLabel 后恢复默认", onClick = { resetSheet = true })
+    SetRow(
+        title = "待机小动作",
+        subtitle = if (config.idleEnabled) "没人理时偶尔动一下" else "已关闭",
+        trailing = {
+            PrismSwitch(
+                checked = config.idleEnabled,
+                onCheckedChange = { viewModel.setPetIdleEnabled(it) }
             )
-        }
-
-        lastError?.let { err ->
-            Spacer(Modifier.height(6.dp))
-            Text(text = "上次启动失败：$err", color = PrismWarning, fontSize = 11.sp, lineHeight = 16.sp)
-        }
-
-        Spacer(Modifier.height(10.dp))
-        Text(
-            text = "桌宠形象（点选切换 · 立即生效）",
-            color = PrismTextDim,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.4.sp
-        )
-        Spacer(Modifier.height(8.dp))
-
-        if (appearances.isEmpty()) {
-            Text(
-                text = "尚未导入形象。可导入 .petpack 形象包（含 Live2D 模型），或直接选一张图片。",
-                color = PrismTextFaint,
-                fontSize = 11.sp,
-                lineHeight = 16.sp
+        },
+        onClick = { viewModel.setPetIdleEnabled(!config.idleEnabled) }
+    )
+    SetRow(
+        title = "减少动效",
+        subtitle = if (config.reduceMotion) "停止待机动作与呼吸" else "已关闭 · 保留呼吸与待机动作",
+        trailing = {
+            PrismSwitch(
+                checked = config.reduceMotion,
+                onCheckedChange = { viewModel.setPetReduceMotion(it) }
             )
-            Spacer(Modifier.height(8.dp))
-        }
-        appearances.forEach { appearance ->
-            PetAppearanceRow(
-                name = appearance.name,
-                detail = if (appearance.kind == io.prism.pet.model.PetAppearanceKind.LIVE2D) {
-                    "Live2D · ${appearance.actions.size} 个动作"
-                } else {
-                    "图片"
-                },
-                selected = appearance.id == config.appearanceId,
-                onSelect = { viewModel.setPetAppearance(appearance.id) },
-                onDelete = { viewModel.deletePetAppearance(appearance.id) }
+        },
+        onClick = { viewModel.setPetReduceMotion(!config.reduceMotion) }
+    )
+    SetRow(
+        title = "显示对话气泡",
+        subtitle = if (config.bubbleEnabled) "回复时在形象旁显示文字" else "已关闭",
+        trailing = {
+            PrismSwitch(
+                checked = config.bubbleEnabled,
+                onCheckedChange = { viewModel.setPetBubbleEnabled(it) }
             )
-            Spacer(Modifier.height(8.dp))
-        }
-
-        // 署名展示（ADR-051 §后果"导入页显著标注"；guardrail M-5 指出数据已解析但从未接线）。
-        // 合规意义：昔涟模型的原作者授权**以署名为条件**，把署名只放进包里不展示等于没履行。
-        appearances.firstOrNull { it.id == config.appearanceId }?.attribution?.let { attribution ->
-            Text(
-                text = attribution,
-                color = PrismTextFaint,
-                fontSize = 10.sp,
-                lineHeight = 14.sp
+        },
+        onClick = { viewModel.setPetBubbleEnabled(!config.bubbleEnabled) }
+    )
+    SetRow(
+        title = "低功耗模式",
+        subtitle = if (config.lowPowerMode) "15fps · 省电优先" else "已关闭 · 正常帧率",
+        trailing = {
+            PrismSwitch(
+                checked = config.lowPowerMode,
+                onCheckedChange = { viewModel.setPetLowPowerMode(it) }
             )
-            Spacer(Modifier.height(8.dp))
-        }
-
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            PrismButton(
-                text = "导入形象包（.petpack）",
-                variant = PrismButtonVariant.Primary,
-                onClick = { packLauncher.launch(arrayOf("*/*")) }
-            )
-        }
-        Spacer(Modifier.height(6.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            PrismButton(
-                text = "导入单张图片",
-                variant = PrismButtonVariant.Ghost,
-                onClick = { imageLauncher.launch(arrayOf("image/*")) }
-            )
-        }
-
-        message?.let { msg ->
-            Spacer(Modifier.height(6.dp))
-            Text(text = msg, color = PrismTextFaint, fontSize = 11.sp, lineHeight = 16.sp)
-        }
-
-        Spacer(Modifier.height(12.dp))
-        PetChoiceRow(
-            label = "大小",
-            options = listOf("小" to 0.7f, "中" to 1.0f, "大" to 1.3f),
-            selectedValue = config.scale,
-            onSelect = { viewModel.setPetScale(it) }
-        )
-        PetChoiceRow(
-            label = "不透明度",
-            options = listOf("70%" to 0.7f, "85%" to 0.85f, "100%" to 1.0f),
-            selectedValue = config.opacity,
-            onSelect = { viewModel.setPetOpacity(it) }
-        )
-        PetChoiceRow(
-            label = "表情回正",
-            options = listOf("关闭" to 0f, "5 秒" to 5f, "8 秒" to 8f, "15 秒" to 15f),
-            selectedValue = config.expressionResetSeconds.toFloat(),
-            onSelect = { viewModel.setPetExpressionResetSeconds(it.toInt()) }
-        )
-
-        Spacer(Modifier.height(6.dp))
-        PetToggleRow(
-            label = "待机小动作",
-            subtitle = "没人理的时候偶尔自己动一下",
-            checked = config.idleEnabled,
-            onCheckedChange = { viewModel.setPetIdleEnabled(it) }
-        )
-        PetToggleRow(
-            label = "减少动效",
-            subtitle = "停止待机动作与呼吸，仅保留眨眼和你触发的动作",
-            checked = config.reduceMotion,
-            onCheckedChange = { viewModel.setPetReduceMotion(it) }
-        )
-        PetToggleRow(
-            label = "显示对话气泡",
-            subtitle = "角色回复时在形象旁显示一小段文字",
-            checked = config.bubbleEnabled,
-            onCheckedChange = { viewModel.setPetBubbleEnabled(it) }
-        )
-        PetToggleRow(
-            label = "低功耗模式",
-            subtitle = "渲染帧率降到 15fps，省电优先",
-            checked = config.lowPowerMode,
-            onCheckedChange = { viewModel.setPetLowPowerMode(it) }
-        )
-
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            PrismButton(
+        },
+        onClick = { viewModel.setPetLowPowerMode(!config.lowPowerMode) }
+    )
+    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = PrismSize.s4)) {
+        message?.let { PrismNoteLine(it) }
+        PrismActionsRow {
+            PrismMini(
                 text = "重置位置",
-                variant = PrismButtonVariant.Ghost,
                 onClick = { viewModel.resetPetPosition() }
             )
         }
-
-        Spacer(Modifier.height(10.dp))
-        Text(
-            text = "形象资产保存在应用私有目录（filesDir/pets/），随应用卸载清除，不会上传；" +
-                "请确认你拥有所导入形象的使用权。若形象来自他人创作，请保留其署名信息。",
-            color = PrismTextFaint,
-            fontSize = 11.sp,
-            lineHeight = 16.sp
+        PrismFootnote(
+            "形象资产保存在 filesDir/pets/，不上传。请确认你拥有所导入形象的使用权" +
+                "（第三方形象需保留署名）。"
         )
-        Spacer(Modifier.height(8.dp))
-        PrismButton(text = "收起", variant = PrismButtonVariant.Ghost, onClick = { expanded = false })
+    }
+
+    // ---- 形象选择弹层（选择 / 导入 / 删除；署名就地在弹层内展示）----
+    PrismSheetHost(visible = appearanceSheet, onDismiss = { appearanceSheet = false }) {
+        PrismSheet(
+            title = "桌宠形象",
+            subtitle = "点选立即切换"
+        ) {
+            if (appearances.isEmpty()) {
+                Text(
+                    text = "尚未导入形象。可导入 .petpack 形象包（含 Live2D 模型），或直接选一张图片。",
+                    color = PrismTextFaint,
+                    fontSize = 11.sp,
+                    lineHeight = 16.sp
+                )
+                Spacer(Modifier.height(PrismSize.s3))
+            }
+            appearances.forEach { appearance ->
+                PetAppearanceRow(
+                    name = appearance.name,
+                    detail = if (appearance.kind == io.prism.pet.model.PetAppearanceKind.LIVE2D) {
+                        "Live2D · ${appearance.actions.size} 个动作"
+                    } else {
+                        "图片"
+                    },
+                    selected = appearance.id == config.appearanceId,
+                    onSelect = {
+                        viewModel.setPetAppearance(appearance.id)
+                        appearanceSheet = false
+                    },
+                    onDelete = { viewModel.deletePetAppearance(appearance.id) }
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+            // 署名展示（ADR-051；guardrail M-5 指出数据已解析但从未接线）。
+            // 合规意义：昔涟模型的原作者授权**以署名为条件**。
+            currentAppearance?.attribution?.let { attribution ->
+                Text(
+                    text = attribution,
+                    color = PrismTextFaint,
+                    fontSize = 10.sp,
+                    lineHeight = 14.sp
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+            PrismActionsRow {
+                PrismMini(
+                    text = "导入形象包",
+                    onClick = { packLauncher.launch(arrayOf("*/*")) }
+                )
+                PrismMini(
+                    text = "导入图片",
+                    onClick = { imageLauncher.launch(arrayOf("image/*")) }
+                )
+            }
+            Spacer(Modifier.height(PrismSize.s5))
+            PrismButton(text = "关闭", onClick = { appearanceSheet = false })
+        }
+    }
+
+    PrismSheetHost(visible = sizeSheet, onDismiss = { sizeSheet = false }) {
+        PrismChoiceSheet(
+            title = "大小",
+            selectedIndex = when (sizeLabel) { "小" -> 0; "大" -> 2; else -> 1 },
+            options = listOf("小", "中", "大"),
+            onSelect = { index ->
+                viewModel.setPetScale(listOf(0.7f, 1.0f, 1.3f)[index])
+                sizeSheet = false
+            },
+            onDismiss = { sizeSheet = false }
+        )
+    }
+    PrismSheetHost(visible = opacitySheet, onDismiss = { opacitySheet = false }) {
+        PrismChoiceSheet(
+            title = "不透明度",
+            selectedIndex = listOf(0.7f, 0.85f, 1.0f)
+                .indexOfFirst { kotlin.math.abs(it - config.opacity) < 0.01f }
+                .coerceAtLeast(0),
+            options = listOf("70%", "85%", "100%"),
+            onSelect = { index ->
+                viewModel.setPetOpacity(listOf(0.7f, 0.85f, 1.0f)[index])
+                opacitySheet = false
+            },
+            onDismiss = { opacitySheet = false }
+        )
+    }
+    PrismSheetHost(visible = resetSheet, onDismiss = { resetSheet = false }) {
+        val resetOptions = listOf(0, 5, 8, 15)
+        PrismChoiceSheet(
+            title = "表情回正",
+            subtitle = "表情在多少秒后回到默认",
+            selectedIndex = resetOptions.indexOf(config.expressionResetSeconds).coerceAtLeast(0),
+            options = listOf("关闭", "5 秒", "8 秒", "15 秒"),
+            onSelect = { index ->
+                viewModel.setPetExpressionResetSeconds(resetOptions[index])
+                resetSheet = false
+            },
+            onDismiss = { resetSheet = false }
+        )
     }
 }
 
@@ -4419,99 +4520,3 @@ private fun PetAppearanceRow(
         }
     }
 }
-
-/** 桌宠离散选项行（复用分段选择的视觉：选中项薄荷色描边）。 */
-@Composable
-private fun <T> PetChoiceRow(
-    label: String,
-    options: List<Pair<String, T>>,
-    selectedValue: T,
-    onSelect: (T) -> Unit
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp)
-    ) {
-        Text(text = label, color = PrismTextDim, fontSize = 12.sp, modifier = Modifier.width(72.dp))
-        options.forEach { (text, value) ->
-            val selected = value == selectedValue
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(if (selected) PrismMint.copy(alpha = 0.12f) else PrismPanel2)
-                    .border(
-                        1.dp,
-                        if (selected) PrismMint.copy(alpha = 0.5f) else PrismLine,
-                        RoundedCornerShape(10.dp)
-                    )
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = { onSelect(value) }
-                    )
-                    .padding(horizontal = 10.dp, vertical = 6.dp)
-            ) {
-                Text(
-                    text = text,
-                    color = if (selected) PrismMint else PrismTextDim,
-                    fontSize = 12.sp
-                )
-            }
-        }
-    }
-}
-
-/** 桌宠开关行（标题 + 说明 + 开关）。 */
-@Composable
-private fun PetToggleRow(
-    label: String,
-    subtitle: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 4.dp)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = { onCheckedChange(!checked) }
-            ),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(text = label, color = PrismText, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-            Text(text = subtitle, color = PrismTextFaint, fontSize = 11.sp)
-        }
-        PrismSwitch(checked = checked, onCheckedChange = onCheckedChange)
-    }
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
