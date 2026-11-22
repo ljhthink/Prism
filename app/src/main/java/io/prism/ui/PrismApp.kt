@@ -201,6 +201,13 @@ private fun ToolConfirmationHost() {
         gate.requests.collect { queue.add(it) }
     }
 
+    // 2026-11-22（guardrail M-3）：已失效（超时/取消）的请求必须**撤卡片**。
+    // 否则用户对着一张失效的对话框点「允许」，动作不会执行也没有任何反馈 ——
+    // 与用户报的"一直说检测到敏感操作"是同一类体验缺陷。
+    LaunchedEffect(gate) {
+        gate.expired.collect { id -> queue.removeAll { it.id == id } }
+    }
+
     // 逐条处理队首请求
     queue.firstOrNull()?.let { request ->
         // DEF-006（Bug-7）：解析富信息标题/内容（跨 App 工具显示 App 名），消除与聊天页重复弹窗后的体验降级
@@ -285,8 +292,13 @@ private fun resolveConfirmationContent(
             "AI 请求选取媒体" to "类型：$mediaType\nAI 将通过系统选择器让你选取照片或文档。"
         }
         else -> {
-            // M4 Skill 工具或其他工具：通用展示
-            "AI 请求执行工具" to "工具：$toolName\n参数：$args"
+            if (toolName == io.prism.PrismApplication.HIGH_RISK_CONFIRM_TOOL) {
+                // 2026-11-22：手机操控高危动作的同步确认（用户点「允许」→ 立即执行原动作）
+                "检测到敏感操作" to (args["question"]?.toString() ?: "是否允许继续？")
+            } else {
+                // M4 Skill 工具或其他工具：通用展示
+                "AI 请求执行工具" to "工具：$toolName\n参数：$args"
+            }
         }
     }
 }

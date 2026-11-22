@@ -1208,6 +1208,16 @@ class PrismApplication : Application() {
                     io.prism.config.HighRiskApprovalMode.ASK
                 }
             },
+            // 2026-11-22（B2 修复）：高危动作的 ASK 改为**同步确认**——用户点「允许」后立即执行原动作。
+            // 旧路径返回 ask_user 标记会中断整个工具回路，允许后动作不执行、模型重来再撞同一个拦截，
+            // 表现为"一直弹检测到敏感操作"。这里复用「AI 请求执行工具」对话框，超时按拒绝。
+            highRiskConfirmation = { question ->
+                confirmationGate.confirm(
+                    HIGH_RISK_CONFIRM_TOOL,
+                    mapOf("question" to question),
+                    HIGH_RISK_CONFIRM_TIMEOUT_MS
+                )
+            },
             // v1 真机二次修复（Issue 5）：后台执行高危动作时发系统通知让用户在其它 App 也能作答
             askUserNotifier = phoneControlAskUserNotifier,
             // v1 批次11（D9）：UI 树受限时截图 + OCR 提取「文字+坐标」，供纯文本模型继续操作
@@ -3618,6 +3628,25 @@ class PrismApplication : Application() {
 
         /** Fetch MCP 工具请求超时（UXR9 Bug5 修复）：目标站多样，15s 缓冲。 */
         private const val FETCH_REQUEST_TIMEOUT_MS = 15_000L
+
+        /**
+         * 手机操控高危动作的同步确认"工具名"（2026-11-22，B2 修复）。
+         *
+         * 借用通用确认门禁（[confirmationGate]）的对话框，但用一个独立标识，让 UI 能渲染成
+         * 「检测到敏感操作」而非"AI 请求执行工具 xxx"。
+         */
+        internal const val HIGH_RISK_CONFIRM_TOOL = "phone_control_high_risk"
+
+        /**
+         * 高危确认等待上限（2026-11-22）。
+         *
+         * **必须显著小于工具调用外层超时**：`SkillExecutor.executeToolCall` 用
+         * [io.prism.skill.SkillExecutor.DEFAULT_TOOL_TIMEOUT_MS]（30s）包住整个工具执行
+         * （含 ensureDisplay/找节点/截图），若确认窗口取 20s，前置工作一晃就用光预算，
+         * 外层超时会把整次调用打断成"工具超时"，用户点「允许」也来不及生效。
+         * 15s 给前置留出 15s，且超时后 UI 会收到 `expired` 撤卡片（guardrail M-3）。
+         */
+        private const val HIGH_RISK_CONFIRM_TIMEOUT_MS = 15_000L
 
         /** 今日热榜 API Key 引用（ApiKeyRepository 加密键，US-002）。 */
         private const val HOTLIST_API_KEY_REF = "tophubdata"

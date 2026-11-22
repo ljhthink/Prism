@@ -60,6 +60,17 @@ class PhoneControlLocalToolExecutor(
     private val highRiskApprovalProvider: suspend () -> io.prism.config.HighRiskApprovalMode =
         { io.prism.config.HighRiskApprovalMode.ASK },
     /**
+     * **同步**确认高危动作（2026-11-22，B2 修复）：ASK 模式下调用，返回 true 才执行原动作。
+     *
+     * 为什么必须同步：旧实现返回 `ask_user` 标记，其语义是**中断整个工具回路**并把问题抛给用户；
+     * 用户点「允许」只是把一句回答变成新的 user 消息，**原动作不会执行**，模型只能从头再来，
+     * 于是每次都撞同一个拦截 —— 用户看到的就是"一直说检测到敏感操作"。
+     *
+     * 生产由 [io.prism.PrismApplication] 注入 `UiConfirmationGate.confirm`（「AI 请求执行工具」
+     * 对话框，超时按拒绝）。null 时降级为旧的 ask_user 行为（向后兼容既有测试）。
+     */
+    private val highRiskConfirmation: (suspend (String) -> Boolean)? = null,
+    /**
      * 手机操控高危确认通知桥（v1 真机二次修复 Issue 5）：LLM 操控手机时 Prism 常在后台，
      * 发送/删除/拨号的「逐次询问」提问卡片用户看不见。注入后，每次触发强制 MANUAL（ask_user）
      * 时额外发一条高优先级通知（含 允许/拒绝 操作按钮），让用户在其它 App 也能作答。
@@ -198,10 +209,19 @@ class PhoneControlLocalToolExecutor(
             // DeepSeek 会话：LLM 连续 6 次盲试坐标），必须明确劝阻并指向 foreground/take_over。
             val bgHint = if (PhoneControlAccessibilityService.instance?.isBackgroundExecution == true) {
                 when {
-                    // ADR-065：隐藏虚拟屏（shell 自建 PUBLIC+TRUSTED，主屏零窗口）——输入可用
-                    io.prism.phonecontrol.bg.VirtualDisplayManager.isHiddenMode ->
+                    // ADR-065：隐藏虚拟屏（shell 自建，主屏零窗口）。
+                    // **2026-11-22（guardrail B2）**：不能一律说 trusted —— 阶梯第③级 BASE_OWN
+                    // 是 untrusted 屏，此时目标 App 自己发起的页面跳转会被系统放回主屏。
+                    // 必须按真实信任态分流，否则 LLM 会以为"后台没问题"而继续在错的前提上重试。
+                    io.prism.phonecontrol.bg.VirtualDisplayManager.isHiddenMode &&
+                        io.prism.phonecontrol.bg.VirtualDisplayManager.hiddenDisplayTrusted ->
                         "\n【后台模式诊断】当前执行面为隐藏虚拟屏（trusted，主屏无小窗）。" +
                             "若多次尝试仍无变化，说明目标 App/显示面不接受合成输入——改用 mode=foreground 或 take_over"
+                    io.prism.phonecontrol.bg.VirtualDisplayManager.isHiddenMode ->
+                        "\n【后台模式诊断】当前执行面为隐藏虚拟屏，但**未获系统信任（untrusted）**：" +
+                            "目标 App 自己发起的页面跳转（详情页/登录页）会被系统放回主屏，" +
+                            "后台可能中途失效。改前进可继续用节点操作；若发现界面跑到了主屏，" +
+                            "说明已逃逸——请 take_over 或改用 mode=foreground 并向用户说明"
                     io.prism.phonecontrol.bg.VirtualDisplayManager.isOverlayMode ->
                         "\n【后台模式诊断】虚拟屏注入可能受息屏/焦点限制（亮屏锁已在会话期保持，若用户仍处于息屏状态请先亮屏）。" +
                             "若多次尝试仍无变化，说明目标 App/显示面不接受合成输入——改用 mode=foreground 或 take_over"
@@ -368,18 +388,30 @@ class PhoneControlLocalToolExecutor(
         }
         // guardrail R-1（TKN-V1B11-GUARDRAIL-002）：敏感判断必须**始终优先命中节点/坐标/OCR 的真实文本**。
         // 覆盖 node_id + text 双传场景（query 可能不敏感但节点真实文本如"确认支付"敏感 → 必须拦截）。
-        // 优先级：锚点命中文本（OCR/UI 树）> nodeTextOf(nodeId) 回读 > nodeTextAt(x,y) 回读 > 查询词（兜底）。
-        val realTargetText = resolvedMatchedText
-            ?.takeIf { it.isNotBlank() }
-            ?: withServiceOrNull { it.nodeTextOf(nodeId) }
-            ?: withServiceOrNull { it.nodeTextAt(x, y) }
-        val effectiveTargetText = realTargetText?.takeIf { it.isNotBlank() } ?: anchorText
+        //
+        // **2026-11-22（B2 误判修复）**：UI 树命中时，判定文本从"子树聚合"改为"目标自身文案"
+        // （[PhoneControlAccessibilityService.nodeLabelOf]）。聚合文本会把容器内**所有后代**的文案
+        // 拼进来——拼多多商品详情页的可点击容器聚合文本含「免拼购买」（真机 dump 原文：
+        // `优惠剩3件¥13 优惠剩3件 ¥ 13 免拼购买`），于是"点标题进详情"被判成"购买"，
+        // 每次都弹「检测到敏感操作」，购物任务无法推进。
+        // 现在：高危（ASK/BLOCK）判定用目标**自身**文案 → 点标题/图片不再命中；
+        // **硬拦截**（支付/密码/验证码）在自身文案为空时回落到子树聚合，保护不降级（guardrail M-2）。
+        // 坐标点击（无 nid）用落点回读 `nodeTextAt(x,y)`，绝不因"没给文本"就跳过（guardrail M-1）。
+        val judgement = resolveJudgementTexts(
+            hasNodeId = nodeId != null,
+            ownLabel = if (nodeId != null) withServiceOrNull { it.nodeLabelOf(nodeId) } else null,
+            aggregateLabel = if (nodeId != null) withServiceOrNull { it.nodeTextOf(nodeId) } else null,
+            coordinateHitText = if (nodeId == null) withServiceOrNull { it.nodeTextAt(x, y) } else null,
+            ocrMatched = resolvedMatchedText,
+            anchor = anchorText
+        )
+        val effectiveTargetText = judgement.manualText
         // 附加防御纵深：查询词本身含敏感词（支付/转账/密码等）也一律硬拦截，不因回读失败而放行
         if (anchorText != null && PhoneControlSecurity.isSensitiveTargetText(anchorText)) {
             return blocked("目标文本含敏感内容（${anchorText.take(40)}），已硬拦截（支付/密码/验证码类操作请用 take_over 交还用户手动）")
         }
-        if (PhoneControlSecurity.isSensitiveTargetText(effectiveTargetText)) {
-            return blocked("目标含敏感内容（${effectiveTargetText?.take(40)}），已硬拦截（支付/密码/验证码类操作请用 take_over 交还用户手动）")
+        if (PhoneControlSecurity.isSensitiveTargetText(judgement.hardBlockText)) {
+            return blocked("目标含敏感内容（${judgement.hardBlockText?.take(40)}），已硬拦截（支付/密码/验证码类操作请用 take_over 交还用户手动）")
         }
         val node = withServiceOrNull { it.nodeAt(nodeId, x, y) }
         if (node != null && PhoneControlSecurity.isPasswordNode(node)) {
@@ -388,14 +420,40 @@ class PhoneControlLocalToolExecutor(
         // v1 批次12（E，D15）：动作前捕获屏幕签名，供执行后 before/after 校验
         val beforeSig = withServiceOrNull { screenSignature(it) }
         if (PhoneControlSecurity.isManualAction(action, effectiveTargetText.orEmpty())) {
+            // 2026-11-22（B2）：记录**命中的关键词**（文本脱敏）。原日志只说"触发了确认"，
+            // 而判定文本被截断，从卡片上看不出问题——真正的词在别的节点的按钮文案里。
+            Log.i(
+                TAG,
+                "高危动作命中：kw=${PhoneControlSecurity.firstManualKeyword(action, effectiveTargetText.orEmpty())} " +
+                    "action=$action text=${maskLogText(effectiveTargetText.orEmpty())}"
+            )
             // v1 真机二次修复 Issue 4b：高危动作按用户三态策略处置（BLOCK 拦截 / ALLOW 放行 / ASK 询问）
             return when (highRiskApprovalProvider()) {
                 io.prism.config.HighRiskApprovalMode.BLOCK ->
                     blocked("高危操作已在设置中被拦截（${action}「${effectiveTargetText?.take(30)}」）。如需执行请调整「高危操作」设置或使用 take_over 手动操作")
                 io.prism.config.HighRiskApprovalMode.ALLOW ->
                     performWithStateCheck(beforeSig) { withService { perform(it, nodeId, x, y) } }
-                io.prism.config.HighRiskApprovalMode.ASK ->
-                    manualConfirm("检测到敏感操作：${action}「${effectiveTargetText?.take(30)}」，是否允许继续？")
+                io.prism.config.HighRiskApprovalMode.ASK -> {
+                    val question =
+                        "检测到敏感操作：${action}「${effectiveTargetText?.take(30)}」，是否允许继续？"
+                    // 2026-11-22（B2 修复）：优先走**同步确认**——用户点「允许」后立即执行原动作。
+                    // 旧实现返回 ask_user 标记，其语义是"中断整个工具回路"，允许后动作并不会执行，
+                    // 模型只能从头再来并再次撞上同一个拦截 → 用户看到"一直弹敏感操作"。
+                    if (highRiskConfirmation != null) {
+                        val allowed = highRiskConfirmation.invoke(question)
+                        if (allowed) {
+                            // guardrail L-6：确认期间屏幕可能已变化，before/after 基准必须**重新捕获**，
+                            // 否则会拿十几秒前的签名做比较，误报「动作后屏幕无变化」。
+                            performWithStateCheck(withServiceOrNull { screenSignature(it) }) {
+                                withService { perform(it, nodeId, x, y) }
+                            }
+                        } else {
+                            blocked("高危操作未获允许（用户拒绝或确认超时），已跳过该动作")
+                        }
+                    } else {
+                        manualConfirm(question)
+                    }
+                }
             }
         }
         return performWithStateCheck(beforeSig) { withService { perform(it, nodeId, x, y) } }
@@ -430,6 +488,8 @@ class PhoneControlLocalToolExecutor(
             // → 支付类硬拦截/人工确认不绕过），而非 LLM 查询词（"确认" 本身非敏感）。
             val realText = withServiceOrNull { it.nodeTextOf(treeNid) }
             Log.i(TAG, "tap text 锚点 UI 树命中 nid=$treeNid（query=${maskLogText(text)}）")
+            // 2026-11-22：UI 树分支返回的 matchedText 是**子树聚合**，只保留给日志/调试参考，
+            // 不再用于高危判定（判定改用 nodeLabelOf 的自身文案，见 pickJudgementText）。
             return AnchorTarget(nodeId = treeNid, matchedText = anchorSecurityText(text, realText))
         }
         // 批次20（BG-004）：后台执行面下 OCR 兜底不可用（主屏截图≠虚拟屏画面，坐标错位）——
@@ -475,6 +535,11 @@ class PhoneControlLocalToolExecutor(
             return blocked("输入内容含凭据（密码/验证码/卡号），已硬拦截（请用 take_over 交还用户手动输入）")
         }
         if (PhoneControlSecurity.isManualAction("type", text)) {
+            Log.i(
+                TAG,
+                "高危输入命中：kw=${PhoneControlSecurity.firstManualKeyword("type", text)} " +
+                    "text=${maskLogText(text)}"
+            )
             // v1 真机二次修复 Issue 4b：高危输入按用户三态策略处置
             return when (highRiskApprovalProvider()) {
                 io.prism.config.HighRiskApprovalMode.BLOCK ->
@@ -483,8 +548,21 @@ class PhoneControlLocalToolExecutor(
                     performWithStateCheck(withServiceOrNull { screenSignature(it) }) {
                         withService { it.performType(nodeId, x, y, text) }
                     }
-                io.prism.config.HighRiskApprovalMode.ASK ->
-                    manualConfirm("检测到敏感输入：向目标输入「${text.take(30)}」，是否允许继续？")
+                io.prism.config.HighRiskApprovalMode.ASK -> {
+                    val question = "检测到敏感输入：向目标输入「${text.take(30)}」，是否允许继续？"
+                    // 2026-11-22：与 runTargetAction 同一修复——同步确认，允许即执行
+                    if (highRiskConfirmation != null) {
+                        if (highRiskConfirmation.invoke(question)) {
+                            performWithStateCheck(withServiceOrNull { screenSignature(it) }) {
+                                withService { it.performType(nodeId, x, y, text) }
+                            }
+                        } else {
+                            blocked("高危输入未获允许（用户拒绝或确认超时），已跳过该输入")
+                        }
+                    } else {
+                        manualConfirm(question)
+                    }
+                }
             }
         }
         // v1 批次13（D，D16）：type 也做 before/after 校验（输入未生效时软提示）
@@ -1037,6 +1115,89 @@ class PhoneControlLocalToolExecutor(
          * @return 用于敏感判断的文本：realText 优先，null 时回退 query（防御性）
          */
         internal fun anchorSecurityText(query: String, realText: String?): String = realText ?: query
+
+        /**
+         * 选择**高危/敏感判定**用的文本（纯函数，2026-11-22 B2 误判修复）。
+         *
+         * 为什么要单独抽出来：判定文本来源错位（用子树聚合代替目标自身文案）导致拼多多商品页
+         * "点标题进详情"被判成"购买"，每次点击都弹「检测到敏感操作」。这条选择规则是本轮修复的
+         * 核心，必须可单测，不能埋在 suspend 的分支里。
+         *
+         * 规则：
+         * 1. UI 树命中（[hasNodeId]）：用目标**自身**文案 [ownLabel]（`nodeLabelOf`，不含子节点）；
+         *    为空时回退查询词 [anchor]（"想点什么"比"这块区域里有什么"更接近意图）。
+         *    —— 不能用子树聚合：聚合会把同屏无关的「免拼购买」等按钮文案算进来。
+         * 2. OCR 命中（无 nodeId）：[ocrMatched] 是手指位置上的可见文案，直接用；为空回退 [anchor]。
+         *
+         * @param hasNodeId 是否命中/指定了 UI 节点
+         * @param ownLabel 目标节点自身文案（可为 null）
+         * @param ocrMatched OCR 命中行的文本（可为 null）
+         * @param anchor LLM 查询词（可为 null）
+         * @return 判定文本；全为 null/空白时返回 null
+         */
+        internal fun pickJudgementText(
+            hasNodeId: Boolean,
+            ownLabel: String?,
+            ocrMatched: String?,
+            anchor: String?
+        ): String? {
+            val primary = if (hasNodeId) ownLabel else ocrMatched
+            return primary?.takeIf { it.isNotBlank() } ?: anchor?.takeIf { it.isNotBlank() }
+        }
+
+        /**
+         * 判定文本的两个口径（2026-11-22 guardrail M-1/M-2 修复后的最终形态）。
+         *
+         * @property hardBlockText **硬拦截**（支付/密码/验证码）用；自身文案为空时回落子树聚合，
+         *   保证"文案挂在子节点、容器自身为空"的支付按钮仍被拦（不能因为修误判而丢保护）。
+         * @property manualText **高危动作**（购买/下单/发送/删除 → ASK/BLOCK）用；只认自身文案，
+         *   否则回退到"用户想点什么"（锚点/OCR/坐标落点），绝不用聚合——
+         *   聚合会把同屏无关的「免拼购买」算进来，正是本次误判根因。
+         */
+        internal data class JudgementTexts(
+            val hardBlockText: String?,
+            val manualText: String?
+        )
+
+        /**
+         * 解析判定文本（纯函数，2026-11-22）。
+         *
+         * 三个来源优先级不同，不能合并成一条链（合并就会重演 guardrail M-1/M-2 的安全降级）：
+         * - **nid 命中**：自身文案 `ownLabel`。
+         * - **纯坐标点击**（无 nid）：必须用**落点回读** `nodeTextAt(x,y)`——旧链路里有这一条，
+         *   去掉就等于"LLM 只给坐标时永远不判敏感"，WebView/Compose 空树场景可按坐标点掉支付按钮。
+         * - **OCR 命中**：命中行文本。
+         * 三者都拿不到时才用锚点查询词兜底（查询词是被约束方自证，只能作为最后兜底）。
+         *
+         * @param hasNodeId 是否带 UI 节点（nid）
+         * @param ownLabel 目标节点自身文案（`nodeLabelOf`）
+         * @param aggregateLabel 目标节点子树聚合文案（`nodeTextOf`；仅硬拦截兜底用）
+         * @param coordinateHitText 坐标落点回读文案（`nodeTextAt`；仅纯坐标点击时非空）
+         * @param ocrMatched OCR 命中行文本
+         * @param anchor LLM 查询词（最后兜底）
+         */
+        internal fun resolveJudgementTexts(
+            hasNodeId: Boolean,
+            ownLabel: String?,
+            aggregateLabel: String?,
+            coordinateHitText: String?,
+            ocrMatched: String?,
+            anchor: String?
+        ): JudgementTexts {
+            val anchorOrNull = anchor?.takeIf { it.isNotBlank() }
+            val primary = when {
+                hasNodeId -> ownLabel?.takeIf { it.isNotBlank() }
+                else -> coordinateHitText?.takeIf { it.isNotBlank() }
+                    ?: ocrMatched?.takeIf { it.isNotBlank() }
+            }
+            val manual = primary ?: anchorOrNull
+            val hardBlock = when {
+                hasNodeId -> ownLabel?.takeIf { it.isNotBlank() }
+                    ?: aggregateLabel?.takeIf { it.isNotBlank() }
+                else -> primary
+            } ?: anchorOrNull
+            return JudgementTexts(hardBlockText = hardBlock, manualText = manual)
+        }
 
         /**
          * guardrail R-4（TKN-V1B11-GUARDRAIL-002）：日志文本脱敏（CWE-532）。

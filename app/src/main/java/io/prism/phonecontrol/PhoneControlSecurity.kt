@@ -145,9 +145,22 @@ object PhoneControlSecurity {
      * @param params 动作参数拼接（如目标节点文本/输入文本）
      * @return true 高危（需触发 ask_user 人工确认/接管）
      */
-    fun isManualAction(action: String, params: String): Boolean {
+    fun isManualAction(action: String, params: String): Boolean =
+        firstManualKeyword(action, params) != null
+
+    /**
+     * 返回命中的高危关键词（诊断用；无命中返回 null）。
+     *
+     * 为什么需要：2026-11-22 真机误判（点商品卡被判"购买"）之所以难以定位，是因为日志只记了
+     * 「触发了确认」，没记「被哪个词触发」。判定文本是脱敏截断的，从卡片看不出问题——
+     * 真正的词在后代节点的购买按钮里。带关键词的日志能让下一次同类问题一条 log 定位。
+     *
+     * @param action 动作名
+     * @param params 判定文本（**应为目标自身文案**，见 `nodeLabelOf`）
+     */
+    fun firstManualKeyword(action: String, params: String): String? {
         val joined = "$action $params"
-        return containsAny(joined, MANUAL_ACTION_KEYWORDS)
+        return MANUAL_ACTION_KEYWORDS.firstOrNull { containsKeyword(joined, it) }
     }
 
     /**

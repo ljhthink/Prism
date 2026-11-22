@@ -150,3 +150,7 @@ design/prism-ui-v1/diff/
 # 设计稿逐屏截图（14.8MB，可由 index.html 重新生成，不入库）
 design/prism-ui-v1/screenshots/
 
+# 2026-11-22 一次性 adb 复现/取证脚本（含 `am force-stop io.prism` 等真机强停命令，
+# 且会固化目标包名；按 rules/05 §12.6 禁止入库。真机取证请在 tmp/ 下操作）
+_v*.ps1
+

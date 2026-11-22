@@ -1626,6 +1626,79 @@
 - 适用场景：dev
 - 状态：active
 
+#### BR-ui-004: 行级手势只能按方向消费，全向 drag 会吃掉父级滚动
+
+- 类别：ui
+- 规则：列表行内的自定义拖动手势（左滑删除等）**禁止**使用全向 `detectDragGestures`。它在越过
+  touch slop 的瞬间就 `consume()`（与方向无关），而子节点在 Main pass 先于父级 `scrollable` 拿到
+  事件 → 纵向拖动被行吞掉，列表完全不能滚动。必须自己按方向裁决：`|dx| > slop && |dx| > |dy|` 才
+  consume 并跟随位移；`|dy| > slop && |dy| >= |dx|` 立即退出本手势且**不消费任何事件**。
+  另外，手势必须挂在**未位移**的容器上：行本体带 `graphicsLayer{translationX}` 时，命中区域会一起
+  平移，滑开后露出的删除区在行的坐标系里已越界 → 点删除无反应。
+- 反例：`.pointerInput { detectDragGestures(onDrag = { c, d -> if (abs(dx) > abs(dy)) c.consume() }) }`
+  ——方向判断写在 onDrag 里已经太晚，slop 早已被消费；历史会话页因此完全无法下滑。
+- 正例：`RowGesture.decide(dx, dy, slop, …)` 纯函数裁决 + `awaitEachGesture` 里只有
+  `DragHorizontal` 分支 `change.consume()`，`PassThrough` 直接 `return@awaitEachGesture`。
+- 来源：真机 B2「历史会话页无法下滑」（2026-11-22，commit 840e39b 引入的回归）
+- 添加日期：2026-11-22
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-ops-025: 任何"回收 / 重启 / 迁屏"的目标集合必须先排除自身包名
+
+- 类别：ops
+- 规则：对目标 App 执行 `am force-stop` / `am start -S` / `killBackgroundProcesses` 之前，必须先用
+  纯函数排除 `context.packageName`（精确匹配，不做前缀匹配）。目标集合来自运行期清单
+  （`launchedPackages`、持久化 `prism_vd_launched.xml`）时必须**逐条过滤**，且过滤逻辑本身要被单测
+  覆盖（抽成 `reclaimableTargets(entries, self)` 之类的纯函数），不能只测 `shouldForceStopTarget`
+  ——否则删掉调用点的 `if` 测试仍全绿。启动入口与启动函数的公共收口**各挡一道**，覆盖
+  takeover / resume / recover 等间接路径。
+- 反例：`launchedPackages.forEach { ShizukuShell.forceStopForUser(it.first, it.second) }` ——
+  LLM 只要 `launch_app(package="io.prism")` 把自身写进清单，会话收尾就会 force-stop 本应用，
+  force-stop 会清 recents，用户看到的是"闪退回桌面、最近任务也没了"。
+- 正例：7 处接线（`launchApp` / `launchAppForUser` / `shellLaunchAndVerify` / `persistLaunched` /
+  `stopLaunchedPackages` / `stopPersistedLaunched` / `evictFromMainDisplay`）+ `reclaimableTargets`
+  单测（自身条目被跳过、多 userId、脏条目容错、空清单）。
+- 来源：2026-11-22 后台操控「闪退」排查（与 BR-ops-023 同类：清理动作必须先证明归属）
+- 添加日期：2026-11-22
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-ui-005: 安全判定不得用「容器子树聚合文本」，但也绝不能用被约束方的自证
+
+- 类别：ui
+- 规则：判定"这次点击危不危险"时，**不能**用可点击容器的子树聚合文本——聚合会把同屏其它动作的
+  文案算进来（拼多多详情页：容器 `contentDescription="优惠剩3件¥13"`，子节点 `TextView("免拼购买")`
+  → "点标题进详情"被判成"购买"，购物任务彻底无法推进）。但也**不能**退化成"只信 LLM 给的查询词"
+  （等于把是否危险交给被约束方自证）。正确做法是**按风险等级拆两口径**：
+  - 硬拦截（支付/密码/验证码）：自身文案 → 为空时**回落子树聚合**（宁可多拦，不可漏拦）；
+  - 高危动作（购买/下单/发送/删除 → 询问）：自身文案 → 为空时回退**落点回读/OCR 命中/查询词**，
+    永不用聚合。
+  纯坐标点击（无 nodeId）必须有落点回读 `nodeTextAt(x,y)`，否则 WebView/空树场景按坐标点掉支付按钮。
+- 反例：`val text = nodeTextOf(nid)`（聚合）直接喂 `isManualAction` —— 购物页必误判。
+- 正例：`resolveJudgementTexts(...) → JudgementTexts(hardBlockText, manualText)`，两条链分别取值。
+- 来源：真机 B2「选购任务一直弹检测到敏感操作」（2026-11-22）
+- 添加日期：2026-11-22
+- 适用场景：dev / bugfix
+- 状态：active
+
+#### BR-ui-006: 需要用户确认的动作必须「同步确认后执行」，不能借 ask_user 中断回路
+
+- 类别：ui
+- 规则：`ask_user` 的语义是**中断整个工具回路**并把问题抛给用户；用户点「允许」只是把一句回答
+  变成新的 user 消息，**原动作不会执行**。任何"确认后应当继续做这件事"的场景（高危点击、危险输入）
+  必须走**同步确认**：门禁挂起等待布尔结果 → 允许则执行原动作并回真实结果 → 拒绝/超时返回拦截文案。
+  同时，确认超时必须**通知 UI 撤掉对话框**（`expired` 事件），否则用户对失效卡片点「允许」会
+  得到"没反应也没提示"——与"一直弹确认"是同一类体验缺陷。
+- 反例：`return manualConfirm(question)`（返回 ask_user 标记）→ 用户点允许后动作不执行，模型重跑
+  再撞同一拦截，无限循环。
+- 正例：`highRiskConfirmation.invoke(question)` 为 true → `performWithStateCheck(...) { perform(...) }`；
+  gate 内 `finally { pending.remove(id); if (!completed) emit(expired) }`。
+- 来源：同上（2026-11-22 真机 21:21 日志：`ask_user tool triggered` ×3 连续触发）
+- 添加日期：2026-11-22
+- 适用场景：dev / bugfix
+- 状态：active
+
 ## 审计记录
 
 | 日期 | 审计人 | 结果 | 备注 |
@@ -1706,3 +1779,5 @@
 | 2026-09-24 | 主 Agent（**真机反馈驱动**，审查与验收进行中） | 新增 **BR-ui-003 + BR-interface-039 + BR-ops-019 + BR-security-018** | 批次28「端侧音色质量 / 设置页音色包 UI / 资产与临时文件治理」（ADR-058/059，BUG-20260924-001/002/003，P2）。用户 5 项真机反馈 + 3 目标。**取证纪律**：先证"测的就是这一版"（设备 `base.apk` SHA256 与本地 debug APK 逐字节相同），并如实登记**日志通道限制**——logcat 主缓冲区无任何 TTS 业务日志（`LocalClone*`/`TextPlayback*` 零命中）、crash 缓冲区为空 ⇒ 本轮"拉日志"实际只取到设备产物状态，**不等于"已核对无异常"**。**根因三条（含两条被实测证伪的流行假设）**：①"语速过快"= **停顿被压缩**（有声帧占比 0.849 vs 语料 0.736、平均停顿 −57%），而**发声速率反而比语料慢**（字/有声秒 6.65 vs 8.615）⇒ 调 epoch/调 speed 治不了；②"有气无力"= 声源周期性 p25 −19% + 动态范围 −1.25 dB + HF/LF −14%（16 kHz 底模硬上限），**RMS 与语料仅差 0.08 dB ⇒ 音量不是原因**；③音高整体漂高 +1.4 半音。**证伪项**：`silence_scale`（0.2 vs 1.0 总时长 16.42 s vs 16.45 s，对 VITS 近无效）、int8 量化（与 fp32 各指标几乎一致）；**代理指标互相矛盾如实登记**（周期性指标 e100→e500 略降，而 `loss/g/mel` 22.5→11.87 仍单调下降未进平台期、谱亮度 e500 更好）⇒ 明确以用户听感为最终判据。**`voicebox` 路线裁决关闭**：`jamiepine/voicebox`（55,568★）是桌面 GUI、仓库内 ONNX 零命中、Mobile 端仅远程控制；Meta Voicebox 无官方仓库、权重从未公开；各复现仓库均无可用权重。**19 臂扫参（独立子代理）**：`gap` 是三个轴里**唯一**能改停顿结构的（gap 0→300→400 ms ⇒ voiced 0.912→0.845→0.823），`noise_scale` 轴差异**小于 VITS 自身推理随机性地板**（跨轴差均小于同参数重跑抖动的已验证结论）⇒ 否掉"细扫 noise_scale 解决有气无力"。**治理**：38 项迁移经 `-Verify` 全绿（目标存在 + 源不存在 + 体积/文件数一致），`tmp/README.md` + `voice-clone-kit/README.md` + `docs/ASSETS.md` 建立职责边界；46 项积压变更经全量 `--rerun` 全绿（**217 类 / 3145 用例 / 0 失败 / 0 错误 / 32 跳过**）后本地收口 `4011f13`。**4 条新规则分别来自**：共享组件 `fillMaxWidth()` 压垮 `weight` 兄弟（三症状同源、且无 UI 测试 ⇒ 结构性不可见）；"用户不可操作的资产声明"应上移为用户选择并单点判定（连带：改判定来源会破坏 Kotlin 智能转换）；`.gitignore` 模式合并的 un-ignore 副作用（实证 54.9 MB 日志暴露）；工作树内疑似真实凭据的处置口径（`.gitignore` ≠ 安全边界）。**环境降级如实登记**：`memory-forge` MCP 不可用 ⇒ 本轮经验未沉淀进知识库；本会话无 `guardrail-enforcer` 技能 ⇒ 以「独立子代理 + OCR（`open-code-review`）+ 安全清单」替代 |
 | 2026-09-24 | 独立审查子代理（`fc786743`）+ 主 Agent 整改 | 发现 **2 high / 1 medium / 6 low / 4 obs**；新增 **BR-ops-020**；整改后重冻重验 | 批次28 审查闭环（`tmp/reviews/batch28-independent-review.md`，冻结哈希 `A2805641E13F9AEF` 核对 **MATCH**）。**H-1**（`SettingsScreen` 热词编辑器"保存/取消"两按钮同排、既无 `weight` 又未关 `fillWidth` ⇒ 第二个按钮 **0 宽不可点**）——**本批次自己新写的 BR-ui-003 在三个调用点里漏了这一个**（"规则写了、扫描没扫到"）；**H-2**（`deleteVoicePack` 不清 `voice_local_voice_id` ⇒ 失效 id 遮蔽角色包声明、装配点降级系统播报，与 KDoc 承诺相反）——**BUG-20260924-002 新引入的回归**，且违反 BR-interface-039 ④；**M-1**（三处"同源"调用**入参**分叉：装配点有 `DEFAULT_ROLE_PACK` 兜底，另两处为 null）。**整改**：H-1 两按钮补 `fillWidth=false`+`weight(1f)`；H-2 抽纯函数 `resolveSelectionAfterDelete(selected, deleted)` 并在删包成功后清选，**并补可失败用例 + 变异反证**（`if(selected!=null&&selected==deleted)`→`if(false)` ⇒ `VoiceEnginePrefsTest` **18 tests / 1 failed**，恢复后哈希一致）；M-1 三处入参改为逐字同源（实测 `DEFAULT_ROLE_PACK.voice.local.voiceId == null` ⇒ 行为等价）；L-1 加 `MAX_SILENCE_SAMPLES` 硬上界（防异常采样率下 `FloatArray(Int.MAX_VALUE)`≈8 GiB）；L-2 调用点计数 71→**70**（71 是匹配数，含 1 处声明）；L-3 放宽 BR-ui-003 ②（已带 `weight` 时 `fillMaxWidth` 退化为 no-op，无需再传 `fillWidth=false`）；L-4 `rebuild-clone-audio.ps1` 去 `Invoke-Expression` 改数组实参（CWE-78）；L-5 `.gitignore` 保留 `logs/`；L-6 登记为既有同型问题（4 处 DataStore 读取未包 `runCatching`，非本批引入）。**方法论收获**：①"共用同一纯函数"必须**连入参一起同源**，只同函数体不算；②修复共享组件缺陷时，**新写的规则不会自动扫到自己漏掉的那一处**——规则落地后须按规则做一次机械扫描，且该扫描必须是**结构化（按 `Row` 作用域）**而非滑动窗口（本批滑动窗口启发式产出 111 个窗口、绝大多数是 `Column` 假阳性 ⇒ **判据不可用**，已登记未闭环）|
 | 2026-11-22 | 主 Agent（真机反馈驱动）+ guardrail-enforcer | 新增 **BR-ops-023 + BR-testing-024** | 后台操控「虚拟屏无窗口」→ 回落主屏回归（B2 严重 / P1 常规）。真机日志时序证明根因：`reconcileResidualHiddenDisplay` 把本进程自己创建的隐藏屏当成上次进程残留 → `stopPersistedLaunched` force-stop 掉正在屏上跑的目标 → 随后 `if (isCreated) return` 放弃释放 → 屏在、窗口 0 → `get_ui_state` 判「大概率风控」→ LLM 改用前台 → 应用出现在用户主屏。修复：入口守卫（持有存活执行面直接跳过）+ 归属判定纯函数 `isResidualHiddenDisplay`（排除自有 displayId）+ 正常释放后清空持久化清单。真机复核：`启动对账：本进程持有存活执行面（displayId=10），跳过残留对账`，`Display #10 rootTasks=1` 且主屏仅 Prism；进程杀死重启后残留仍被正确回收（旧能力不回退）。新增 4 个归属判定单测。 |
+| 2026-11-22 | 主 Agent + guardrail-enforcer | 新增 **BR-ui-004 + BR-ops-025** | 历史会话页无法下滑（B2/P1）+ 后台操控「闪退」排查。Bug1 根因：`840e39b` 把行内左滑删除从 `detectHorizontalDragGestures` 换成全向 `detectDragGestures`，越过 slop 即 consume，子节点先于 LazyColumn 拿到 Main pass 事件 → 纵向滚动被吃。真机对照：行上 swipe 前后 dump 逐节点一致；组标签空隙 swipe 列表上移 305px。修复为纯函数 `RowGesture.decide` + `awaitEachGesture` 按方向消费，手势挂在未位移容器（滑开后删除区才可点）。Bug2：系统侧无 Java 崩溃/ANR，用户窗口内 3 次 FORCE STOP 经时间戳比对确认来自本仓库一次性 adb 脚本（`_v3.ps1`/`_v4.ps1`）→ 属取证噪声；但连带发现回收路径不排除自身包名的潜在缺陷（force-stop 自身会清 recents），已加 7 处守卫并用 `reclaimableTargets` 单测锁定。回归：`io.prism.phonecontrol.*` + `io.prism.ui.conversationlist.*` 267 例 0 失败；全量 4110 例 0 失败。|
+| 2026-11-22 | 主 Agent + guardrail-enforcer | 新增 **BR-ui-005 + BR-ui-006** | 真实 Bug 修复闭环（B2/P2）：「在拼多多挑选商品」任务一直弹「检测到敏感操作」，即使用户已把「工具权限」设为自动审批。三段根因：① 高危判定用**容器子树聚合文本**——详情页可点击 ViewGroup 的 `contentDescription` 是价格、子节点有 `TextView("免拼购买")`，聚合命中「购买」，点标题进详情被判成购买；② ASK 走 `ask_user`（中断整个工具回路），用户点「允许」后**动作不执行**，模型重跑再撞同一拦截 → 无限弹；③ `ToolApprovalMode.AUTO` 与 `HighRiskApprovalMode`（默认 ASK）互不相干，UI 未说明。修复：判定文本拆两口径（硬拦截自身文案为空回落聚合、高危只用自身文案 / 落点回读 / OCR / 查询词，永不聚合）+ ASK 改**同步确认**（允许即执行）+ 确认门禁 `finally` 清 pending 并 `expired` 撤卡片 + 设置文案说明两层关系。真机复验：同一任务全程 `mode=background`，**无 `高危动作命中`、无 `ask_user tool triggered`**，详情页 `NewPageActivity` 在隐藏屏打开、主屏仍 Prism。guardrail R1 = 阻断（M-1 纯坐标路径丢失硬拦截、M-2 自身文案为空时保护降级、M-3 超时后允许变 no-op）→ 三项全部整改并补单测；定向 320 例 / 全量 4133 例 0 失败。|
