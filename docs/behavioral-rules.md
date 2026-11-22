@@ -1589,6 +1589,43 @@
 | BR-ops-024 | ops | **"自动登录账号"不等于"免扫码"——免扫码依赖客户端保存的会话凭据，而该凭据会被平台侧清空**。任何"重启后自动恢复"的方案必须区分三层：①**配置**（登录哪个号 `autoLoginAccount`）；②**凭据**（`GetQuickLoginList` 快登会话 / 或密码回退）；③**进程**（容器是否在跑）。只配 ① 时，一旦账号被踢下线清空 ②，重启必然回到人工扫码。要求：自愈脚本在重启前**先探测 ② 是否可用**，不可用就**不要重启**（重启只会弹码且加重风控），直接告警"需人工扫码"；状态命令也要把"下次重启要不要扫码"提前显示出来 | 反例：把 `autoLoginAccount` 写好后断言"以后免扫码"，实际被踢一次后 `GetQuickLoginList` 变空（踢前 `3904755943` → 踢后 `[]`），重启即弹码；若无探测，supervisor 会反复"重启→弹码→无人看见" | 正例：`Test-QuickLoginAvailable` 在 `supervisor.ps1` 重启前判定，`$false` 时只写"重启无用，请扫码"并 `exit 0`；`status.ps1` 输出 `快登凭据：可用/不可用 → 重启免不免扫码` | 来源：2026-10-26 重新扫码后复测（TKN-QQ-MEDIA-001） | 2026-10-26 | ops | active |
 | BR-interface-042 | interface | **"模型能力"不能用写死的名字白名单判断，且白名单必须带"否定优先"**：①白名单是**历史经验快照**，模型厂商新增多模态能力时必然漏判（本项目实证：用户配 `deepseek-v4-flash` 实为多模态，却因名单里没有 deepseek 家族被判 `vision=false`，导致收图只能走 OCR）；②扩充名单时**必须同时维护 `NON_VISION` 拒绝表并让它优先**——只加正向模式、用裸厂商名（如 `"deepseek"`）会把同厂纯文本型号（`deepseek-v4-pro`）误判为支持，把图片发给纯文本模型换 400，**这类反向误判比漏判更难排查**；③判定结果必须**运行时兜底**：判错时不能让整条请求失败，要能降级并留日志；④UI 必须显示"当前实际生效值"，不能只显示存储的用户开关（否则用户看到 `false` 而功能明明可用） | 反例：`VISION_MODEL_PATTERNS` 只有 glm/qwen/gemini/gpt/claude，`detectVisionSupport("deepseek-v4-flash")=false`；若简单补一条 `"deepseek"` 则 `deepseek-v4-pro` 也被判支持（官方明确 pro 不支持 Vision） | 正例：`NON_VISION_PATTERNS`（pro/chat/reasoner/coder/v3/r1）先判 false，再匹配 `VISION_MODEL_PATTERNS`（含 `deepseek-flash`/`deepseek-v4-flash`）；视觉请求失败自动降级 OCR 重试；设置页提示"已按模型名自动判定为支持视觉（当前实际生效：开）" | 来源：2026-10-26 用户质疑 `supportsVision=false`（TKN-QQ-MEDIA-001） | 2026-10-26 | all | active |
 
+#### BR-ops-023: 系统资源「对账/清理」必须先证明归属，禁止把本进程持有的资源判为残留
+
+- 类别：ops / interface
+- 规则：任何"启动对账 / 残留清理"逻辑（清理虚拟屏、释放服务、回收任务、删除临时文件），
+  在统计"残留"时必须**排除本进程当前持有的实例 id**，并在执行破坏性动作（force-stop、
+  release、delete）前再次确认"本进程确实没有存活实例"。破坏性动作必须晚于归属判定，
+  不能因为"计数 > 0"就直接清。
+- 反例（2026-11-22 真机 B2）：
+  `reconcileResidualHiddenDisplay` 按 `name == "prism-hidden-vd"` 统计残留，不排除本进程刚建的
+  同名 display → 会话中无障碍一重连（`onServiceConnected` 会调对账）就
+  `stopPersistedLaunched()` 把**正在虚拟屏上跑的目标 App force-stop 掉**，随后
+  `if (isCreated) return` 又放弃释放 → 屏在、窗口 0 → `get_ui_state` 判「目标未渲染，
+  大概率风控」→ LLM 改用前台 → 应用跑到用户主屏 + 报「后台不可用」。
+- 正例：入口先判 `isCreated && (!isHiddenMode || isCurrentDisplayAlive)` 直接跳过；
+  残留判定改纯函数 `isResidualHiddenDisplay(candidateId, name, ownedId, ownedCreated)`，
+  持有时排除 `ownedId`；破坏性动作仍留在锁外。
+- 来源：后台操控「虚拟屏无窗口」回归（docs/reports/2026-11-22-bg-control-reconcile-kills-target-bug.md）
+- 添加日期：2026-11-22
+- 适用场景：ops / dev
+- 状态：active
+
+#### BR-testing-024: 修复「自己杀自己」类 Bug，回归用例必须锁「归属判定」且真机复验对账入口
+
+- 类别：testing
+- 规则：对账/清理类缺陷的回归测试，不能只断言"清理函数被调用过"或"日志出现清理字样"，
+  必须对**归属判定纯函数**逐分支断言：本进程持有 → 不算残留；同 id 未持有 → 算残留；
+  异 id → 算残留；非本应用命名 → 永不清。同时必须真机上做一次"会话存活期间触发对账入口
+  （无障碍断开/重连）"的验证，确认目标仍在执行面。
+- 反例：只加一条"对账后残留数为 0"的断言 —— 修复前也成立（因为它把自己也清了）。
+- 正例：`VirtualDisplayManagerResidualTest` 四分支 + 真机日志
+  `启动对账：本进程持有存活执行面（displayId=10），跳过残留对账` 与
+  `Display #10 rootTasks=1` 同时成立。
+- 来源：同上（2026-11-22 后台操控回归）
+- 添加日期：2026-11-22
+- 适用场景：dev
+- 状态：active
+
 ## 审计记录
 
 | 日期 | 审计人 | 结果 | 备注 |
@@ -1668,3 +1705,4 @@
 | 2026-09-20 | 主 Agent（B 面） | 新增 **BR-testing-022** | 端侧 VITS 微调全链路（TKN-LVC-014）。首次实测得到三类一手事实：① 导出 onnx 不能直接加载——comment 元数据为空串会让 sherpa-onnx 的唯一无 DEFAULT 元数据宏判缺失并 SHERPA_ONNX_EXIT(-1) 原生崩溃；② 工具链三个底模配置的 sampling_rate 都是 16000 且 data_utils 不重采样 ⇒ 语料必须 16 kHz；③ LOCAL.md 记的 inetune_speaker_v2.py CLI 在该 fork 不可用（签名不匹配）。成绩：78 条/513.67s、100 epochs ≈35 分钟、PC 侧 fp32 RTF **0.10–0.11**（ZipVoice 0.836）、int8 反而 0.90–1.00。**新规则 BR-testing-022**：判定“回调是增量还是累积”时必须在**同一次调用内**比较块之和与该次返回长度——跨调用比较得 1.02–1.05 会被 VITS 的随机长度污染成“像累积”，同调用内得 137472 == 137472（ratio 1.0）才是增量；若按前者下结论会给 VITS 关闭流式。 |
 | 2026-09-24 | 主 Agent（**真机反馈驱动**，审查与验收进行中） | 新增 **BR-ui-003 + BR-interface-039 + BR-ops-019 + BR-security-018** | 批次28「端侧音色质量 / 设置页音色包 UI / 资产与临时文件治理」（ADR-058/059，BUG-20260924-001/002/003，P2）。用户 5 项真机反馈 + 3 目标。**取证纪律**：先证"测的就是这一版"（设备 `base.apk` SHA256 与本地 debug APK 逐字节相同），并如实登记**日志通道限制**——logcat 主缓冲区无任何 TTS 业务日志（`LocalClone*`/`TextPlayback*` 零命中）、crash 缓冲区为空 ⇒ 本轮"拉日志"实际只取到设备产物状态，**不等于"已核对无异常"**。**根因三条（含两条被实测证伪的流行假设）**：①"语速过快"= **停顿被压缩**（有声帧占比 0.849 vs 语料 0.736、平均停顿 −57%），而**发声速率反而比语料慢**（字/有声秒 6.65 vs 8.615）⇒ 调 epoch/调 speed 治不了；②"有气无力"= 声源周期性 p25 −19% + 动态范围 −1.25 dB + HF/LF −14%（16 kHz 底模硬上限），**RMS 与语料仅差 0.08 dB ⇒ 音量不是原因**；③音高整体漂高 +1.4 半音。**证伪项**：`silence_scale`（0.2 vs 1.0 总时长 16.42 s vs 16.45 s，对 VITS 近无效）、int8 量化（与 fp32 各指标几乎一致）；**代理指标互相矛盾如实登记**（周期性指标 e100→e500 略降，而 `loss/g/mel` 22.5→11.87 仍单调下降未进平台期、谱亮度 e500 更好）⇒ 明确以用户听感为最终判据。**`voicebox` 路线裁决关闭**：`jamiepine/voicebox`（55,568★）是桌面 GUI、仓库内 ONNX 零命中、Mobile 端仅远程控制；Meta Voicebox 无官方仓库、权重从未公开；各复现仓库均无可用权重。**19 臂扫参（独立子代理）**：`gap` 是三个轴里**唯一**能改停顿结构的（gap 0→300→400 ms ⇒ voiced 0.912→0.845→0.823），`noise_scale` 轴差异**小于 VITS 自身推理随机性地板**（跨轴差均小于同参数重跑抖动的已验证结论）⇒ 否掉"细扫 noise_scale 解决有气无力"。**治理**：38 项迁移经 `-Verify` 全绿（目标存在 + 源不存在 + 体积/文件数一致），`tmp/README.md` + `voice-clone-kit/README.md` + `docs/ASSETS.md` 建立职责边界；46 项积压变更经全量 `--rerun` 全绿（**217 类 / 3145 用例 / 0 失败 / 0 错误 / 32 跳过**）后本地收口 `4011f13`。**4 条新规则分别来自**：共享组件 `fillMaxWidth()` 压垮 `weight` 兄弟（三症状同源、且无 UI 测试 ⇒ 结构性不可见）；"用户不可操作的资产声明"应上移为用户选择并单点判定（连带：改判定来源会破坏 Kotlin 智能转换）；`.gitignore` 模式合并的 un-ignore 副作用（实证 54.9 MB 日志暴露）；工作树内疑似真实凭据的处置口径（`.gitignore` ≠ 安全边界）。**环境降级如实登记**：`memory-forge` MCP 不可用 ⇒ 本轮经验未沉淀进知识库；本会话无 `guardrail-enforcer` 技能 ⇒ 以「独立子代理 + OCR（`open-code-review`）+ 安全清单」替代 |
 | 2026-09-24 | 独立审查子代理（`fc786743`）+ 主 Agent 整改 | 发现 **2 high / 1 medium / 6 low / 4 obs**；新增 **BR-ops-020**；整改后重冻重验 | 批次28 审查闭环（`tmp/reviews/batch28-independent-review.md`，冻结哈希 `A2805641E13F9AEF` 核对 **MATCH**）。**H-1**（`SettingsScreen` 热词编辑器"保存/取消"两按钮同排、既无 `weight` 又未关 `fillWidth` ⇒ 第二个按钮 **0 宽不可点**）——**本批次自己新写的 BR-ui-003 在三个调用点里漏了这一个**（"规则写了、扫描没扫到"）；**H-2**（`deleteVoicePack` 不清 `voice_local_voice_id` ⇒ 失效 id 遮蔽角色包声明、装配点降级系统播报，与 KDoc 承诺相反）——**BUG-20260924-002 新引入的回归**，且违反 BR-interface-039 ④；**M-1**（三处"同源"调用**入参**分叉：装配点有 `DEFAULT_ROLE_PACK` 兜底，另两处为 null）。**整改**：H-1 两按钮补 `fillWidth=false`+`weight(1f)`；H-2 抽纯函数 `resolveSelectionAfterDelete(selected, deleted)` 并在删包成功后清选，**并补可失败用例 + 变异反证**（`if(selected!=null&&selected==deleted)`→`if(false)` ⇒ `VoiceEnginePrefsTest` **18 tests / 1 failed**，恢复后哈希一致）；M-1 三处入参改为逐字同源（实测 `DEFAULT_ROLE_PACK.voice.local.voiceId == null` ⇒ 行为等价）；L-1 加 `MAX_SILENCE_SAMPLES` 硬上界（防异常采样率下 `FloatArray(Int.MAX_VALUE)`≈8 GiB）；L-2 调用点计数 71→**70**（71 是匹配数，含 1 处声明）；L-3 放宽 BR-ui-003 ②（已带 `weight` 时 `fillMaxWidth` 退化为 no-op，无需再传 `fillWidth=false`）；L-4 `rebuild-clone-audio.ps1` 去 `Invoke-Expression` 改数组实参（CWE-78）；L-5 `.gitignore` 保留 `logs/`；L-6 登记为既有同型问题（4 处 DataStore 读取未包 `runCatching`，非本批引入）。**方法论收获**：①"共用同一纯函数"必须**连入参一起同源**，只同函数体不算；②修复共享组件缺陷时，**新写的规则不会自动扫到自己漏掉的那一处**——规则落地后须按规则做一次机械扫描，且该扫描必须是**结构化（按 `Row` 作用域）**而非滑动窗口（本批滑动窗口启发式产出 111 个窗口、绝大多数是 `Column` 假阳性 ⇒ **判据不可用**，已登记未闭环）|
+| 2026-11-22 | 主 Agent（真机反馈驱动）+ guardrail-enforcer | 新增 **BR-ops-023 + BR-testing-024** | 后台操控「虚拟屏无窗口」→ 回落主屏回归（B2 严重 / P1 常规）。真机日志时序证明根因：`reconcileResidualHiddenDisplay` 把本进程自己创建的隐藏屏当成上次进程残留 → `stopPersistedLaunched` force-stop 掉正在屏上跑的目标 → 随后 `if (isCreated) return` 放弃释放 → 屏在、窗口 0 → `get_ui_state` 判「大概率风控」→ LLM 改用前台 → 应用出现在用户主屏。修复：入口守卫（持有存活执行面直接跳过）+ 归属判定纯函数 `isResidualHiddenDisplay`（排除自有 displayId）+ 正常释放后清空持久化清单。真机复核：`启动对账：本进程持有存活执行面（displayId=10），跳过残留对账`，`Display #10 rootTasks=1` 且主屏仅 Prism；进程杀死重启后残留仍被正确回收（旧能力不回退）。新增 4 个归属判定单测。 |

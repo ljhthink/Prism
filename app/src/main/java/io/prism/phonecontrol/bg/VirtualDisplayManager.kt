@@ -437,17 +437,36 @@ object VirtualDisplayManager {
      * 防死循环）；每次释放都由 shell 侧销毁其持有的那一个 display。
      */
     private fun reconcileResidualHiddenDisplay(context: Context) {
+        // **2026-11-22 回归修复（B2，真机复现）**：本进程正持有**存活**执行面时，绝不能做残留对账。
+        // 根因：本进程建的隐藏屏与「上次进程死亡的残留」同名（prism-hidden-vd），旧实现不排除
+        // 自己那一块 → 计数 > 0 → 先 `stopPersistedLaunched` 把**本会话刚启动的目标 force-stop**
+        // → 随后 `if (isCreated) return` 又放弃释放屏 —— 屏幕还在、目标已死、窗口为 0。
+        // 真机日志时序（M2012K10C / 2026-11-22）：
+        //   19:14:29 已在虚拟屏渲染 com.android.settings（displayId=5）
+        //   19:14:42 启动对账：已回收泄漏目标 [com.android.settings]     ← 自己杀自己
+        //   19:15:42 直启后虚拟屏无目标窗口（actual=null）→ 判定拒绝渲染
+        // 结果链：LLM 判定「后台无法使用」→ 改用前台 → 应用出现在主屏。
+        // **R2-1/R2-2（guardrail 2026-11-22）**：决策收敛到单一纯函数
+        // [shouldSkipResidualReconcile]，生产点只此一处调用，语义与重构前内联条件
+        // `isCreated && (!isHiddenMode || isCurrentDisplayAlive(context))` **逐组合等价**。
+        // 首次重构把 overlay 分支写成 `isHiddenMode && alive` 是错的：overlay 会话会从
+        // 「跳过」变成「不跳过」，若系统仍有残留隐藏屏就会 force-stop 掉本会话目标
+        // （症状与本次 B2 同构）。现在 overlay 恒视为本进程独占，hidden 才探测系统列表。
+        val displayAlive = if (isHiddenMode) isCurrentDisplayAlive(context) else true
+        if (shouldSkipResidualReconcile(isCreated, isHiddenMode, displayAlive)) {
+            Log.i(TAG, "启动对账：本进程持有存活执行面（displayId=$displayId），跳过残留对账")
+            return
+        }
         val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
         repeat(MAX_RESIDUAL_RELEASE_ROUNDS) {
             val residualCount = runCatching {
-                dm.getDisplays().count {
-                    it.displayId != Display.DEFAULT_DISPLAY && it.name == HIDDEN_DISPLAY_NAME
+                dm.getDisplays().count { d ->
+                    isResidualHiddenDisplay(d.displayId, d.name, displayId, isCreated)
                 }
             }.getOrDefault(0)
             if (residualCount == 0) return
-            // 2026-11-21 修复（真机 M2012K10C / Android 13）：残留屏释放**前**必须先杀掉跑在它上面的目标。
-            // 否则系统在「显示面消失、目标仍在跑」的窗口里把 task 迁回 display 0 —— 用户看到
-            // 应用（实测 com.android.settings）自己跑到主屏，即「隐藏执行面藏不住副屏」。
+            // 走到这里 = 本进程没有存活执行面，剩下的同名屏确属残留。
+            // （`stopPersistedLaunched` 内含多次 force-stop，单条最长 5s，必须留在锁外 —— R4-01）
             stopPersistedLaunched(context)
             synchronized(lock) {
                 if (isCreated) return
@@ -461,6 +480,58 @@ object VirtualDisplayManager {
                 Log.i(TAG, "启动对账：已释放一个残留隐藏虚拟屏（释放前剩余 $residualCount）")
             }
         }
+    }
+
+    /**
+     * 是否应**跳过**残留对账（纯函数，可单测；2026-11-22 回归主因的守卫）。
+     *
+     * 语义（与重构前内联条件**逐组合等价**，见 8 组合真值表用例）：
+     * `ownedCreated && (!hiddenMode || displayAlive)`
+     *
+     * - `ownedCreated=false`：本进程没有执行面 → 不跳过（冷启动必须清理上次残留）。
+     * - `hiddenMode=false`（overlay/legacy 执行面）：本进程独占该执行面 → 持有即跳过。
+     *   **这一支不能写成 `hiddenMode && …`**：overlay 会话若被放行去对账，系统里任何残留
+     *   隐藏屏都会触发 `stopPersistedLaunched`，把本会话刚启动到 overlay 屏的目标杀掉
+     *   （症状与 2026-11-22 B2 同构）——guardrail R2-1 实测发现的语义回退。
+     * - `hiddenMode=true && !displayAlive`：持有但已失效（shell 重启/显示被移除）→ 不跳过，
+     *   交给 [isResidualHiddenDisplay] 的 `ownedCreated` 分支按 id 判定（失效 id 不在系统列表，
+     *   因此等价于"全部算残留"）。
+     *
+     * 为什么不拆成两个布尔参数分别断言：R2-2 实测「整块删掉生产守卫」时旧真值表仍 8/8 绿。
+     * 把三参数决策收敛到此函数后，任何语义改动都必须在 8 组合表上体现。
+     *
+     * @param ownedCreated 本进程当前是否持有执行面（[isCreated]）
+     * @param hiddenMode 当前执行面是否为隐藏虚拟屏（[isHiddenMode]）
+     * @param displayAlive 隐藏执行面是否仍在系统显示列表中（overlay 模式调用方传 true）
+     */
+    fun shouldSkipResidualReconcile(
+        ownedCreated: Boolean,
+        hiddenMode: Boolean,
+        displayAlive: Boolean
+    ): Boolean = ownedCreated && (!hiddenMode || displayAlive)
+
+    /**
+     * 某块 display 是否属于「上次进程死亡的残留」隐藏执行面（纯函数，可单测）。
+     *
+     * **必须排除本进程自己持有的 displayId**（2026-11-22 回归根因）：本进程创建的隐藏屏与残留
+     * 同名，若不排除就会把「自己正在用的屏」当残留处理 —— 先 force-stop 屏上的目标、再放弃释放，
+     * 表现为「屏在、窗口为 0、后台操控不可用」。
+     *
+     * @param candidateId 待判定的 displayId
+     * @param candidateName display 名
+     * @param ownedDisplayId 本进程持有的 displayId（未创建时为 [Display.INVALID_DISPLAY]）
+     * @param ownedCreated 本进程当前是否持有执行面
+     */
+    fun isResidualHiddenDisplay(
+        candidateId: Int,
+        candidateName: String,
+        ownedDisplayId: Int,
+        ownedCreated: Boolean
+    ): Boolean {
+        if (candidateId == Display.DEFAULT_DISPLAY) return false
+        if (candidateName != HIDDEN_DISPLAY_NAME) return false
+        if (ownedCreated && candidateId == ownedDisplayId) return false
+        return true
     }
 
     /**
@@ -842,6 +913,9 @@ object VirtualDisplayManager {
                     mapOf(
                         DisplayTeardown.Step.STOP_LAUNCHED_PACKAGES to {
                             stoppedCount = stopLaunchedPackages(context).size
+                            // 2026-11-22：正常释放已把目标全回收，持久化清单随之作废——否则旧条目会
+                            // 在被下一次「对账」重放，误杀同名 App（跨会话累积）。
+                            clearPersistedLaunched(context)
                         },
                         DisplayTeardown.Step.RELEASE_DISPLAY to {
                             released = activeBackend?.release(context) ?: false
@@ -1083,6 +1157,14 @@ object VirtualDisplayManager {
         }
     }
 
+    /** 清空持久化清单（正常释放路径调用；不执行任何 force-stop）。 */
+    private fun clearPersistedLaunched(context: Context) {
+        runCatching {
+            context.getSharedPreferences(LAUNCHED_PREFS, Context.MODE_PRIVATE)
+                .edit().remove(KEY_LAUNCHED).apply()
+        }
+    }
+
     /** 停掉持久化清单里的全部目标并清空（对账路径专用；不动内存 [launchedPackages]）。 */
     private fun stopPersistedLaunched(context: Context) {
         if (!ShizukuShell.isReady()) return
@@ -1103,7 +1185,10 @@ object VirtualDisplayManager {
             val ok = runCatching { ShizukuShell.forceStopForUser(pkg, user) }.getOrDefault(false)
             if (ok) managed += pkg else Log.w(TAG, "对账回收失败：${maskPackage(pkg)}（user=$user）")
         }
-        if (managed.isNotEmpty()) Log.i(TAG, "启动对账：已回收泄漏目标 $managed")
+        if (managed.isNotEmpty()) {
+            // S5（guardrail 2026-11-22）：对账日志只打脱敏包名，避免把用户装了哪些 App 落进日志
+            Log.i(TAG, "启动对账：已回收泄漏目标 ${managed.map { maskPackage(it) }}")
+        }
     }
 
     private fun stopLaunchedPackages(context: Context): List<String> {
