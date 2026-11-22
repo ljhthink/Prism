@@ -138,9 +138,9 @@ class QqProactiveComposer(
         // 20–40 字单段、且每条都以问句收尾。矛盾指令会显著降低遵循（研究证据），
         // 故这里**不再替人设规定长度**，只保留跨角色通用的一句话。
         val persona = personaSystemPrompt?.takeIf { it.isNotBlank() }
-            ?.let { "$it\n\n$SCENE_HINT" }
+            ?.let { "$it\n\n$STATIC_SUFFIX" }
             ?: "你是一个像真人一样和用户聊天的 AI 伙伴" +
-            "${companionAddress?.let { "（用户叫你「$it」）" } ?: ""}。\n\n$SCENE_HINT"
+            "${companionAddress?.let { "（用户叫你「$it」）" } ?: ""}。\n\n$STATIC_SUFFIX"
         val userContext = buildReplyUserContext(
             history = history,
             incoming = incoming,
@@ -350,6 +350,21 @@ class QqProactiveComposer(
             "不写动作、神态、旁白。想分几条说就单独一行写 --- 分隔（最多 3 条，别硬拆）。"
 
     /**
+     * 时间**用法**规则（静态；2026-11-22；ADR-080）。
+     *
+     * 为什么规则进 system、时间本身留在 user：动态时间放进 system 会让每次请求的
+     * 前缀都不同，直接击穿 provider 的前缀缓存（成本与延迟双输）。真机日志已证实
+     * user 首行 `【现在】` 一直都在（[buildReplyUserContext]），缺的是"该怎么用"。
+     */
+    private const val TIME_RULE =
+        "【时间】每轮 user 开头都写着【现在】和距他上一条隔了多久——那是真的时间，直接拿来用。" +
+            "被问几点/几号/星期几/隔了多久，就照它回答；它没给的信息（比如具体年份的新闻）" +
+            "不许凭训练记忆猜，说不知道或者去查。"
+
+    /** persona 之后的**全部静态**后缀（顺序固定，利于缓存命中）。 */
+    private const val STATIC_SUFFIX = "$SCENE_HINT\n\n$TIME_RULE"
+
+    /**
      * **工具回路**用的 system prompt（2026-11-16；ADR-077）。
      *
      * 与单次补全的区别只有两点：
@@ -364,11 +379,14 @@ class QqProactiveComposer(
         diaryEnabled: Boolean
     ): String {
         val base = personaSystemPrompt?.takeIf { it.isNotBlank() }
-            ?.let { "$it\n\n$SCENE_HINT" }
-            ?: "你是一个像真人一样和用户聊天的 AI 伙伴。\n\n$SCENE_HINT"
-        val toolHint = "\n\n【可以真的去做】他说的事需要查资料、看热榜、翻资料库、记待办、" +
+            ?.let { "$it\n\n$STATIC_SUFFIX" }
+            ?: "你是一个像真人一样和用户聊天的 AI 伙伴。\n\n$STATIC_SUFFIX"
+        val toolHint = "\n\n【可以真的去做】他说的事需要查资料、翻资料库、记待办、" +
             "生成文档，或者要看一眼手机时，你**直接去做**，然后基于真实结果回答——" +
-            "不要只说「人家去查」却没有查。做完就自然地说结果，不要报流水账。"
+            "不要只说「人家去查」却没有查。做完就自然地说结果，不要报流水账。" +
+            "**凡是有时效性或者你不确定的事实（今天/最近/多少钱/是谁/什么时候/天气/新闻/" +
+            "有没有这回事），先调用搜索工具核实再开口**；查不到就说没查到，不许编。" +
+            "把结果**用自己的嘴讲出来**，不要念标题、不要带 [1][2] 这种编号。"
         val diaryHint = if (diaryEnabled) "\n\n" + io.prism.qq.DiaryLocalToolExecutor.TRIGGER_HINT else ""
         return base + toolHint + diaryHint + "\n\n" + TAIL_NOTE
     }

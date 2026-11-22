@@ -110,6 +110,14 @@ private enum class SettingsSubPage(val title: String) {
     QQ_SCHEDULE("定时与主动消息"),
     QQ_REPLY("自动回复"),
     QQ_STICKERS("表情库"),
+    /**
+     * 她的日记（2026-11-22 新增；ADR-080）。
+     *
+     * 为什么必须有：ADR-077 D23 承诺「设置页可读可删、不可代写」，但实现只落了一个
+     * 开关——日记写得进去、用户看不到（真机 `files/diaries/cyrene.json` 已有 12 条，
+     * 界面上零入口）。这一页补的就是那个缺口，语义严格保持「只读 + 可删 + 可清空」。
+     */
+    QQ_DIARY("她的日记"),
     VOICE_PERSONA("角色与桌宠")
 }
 
@@ -302,11 +310,52 @@ fun SettingsScreen(
             }
         }
     }
-    var qqRiskDialogVisible by remember { mutableStateOf(false) }
-    // 用户 2026-11-21 裁定：危险项做「关闭小号助手」+ 二次确认（只停用，不删配置数据）
+    var qqRiskDialogVisible by remember { mutableStateOf(false) }    // 用户 2026-11-21 裁定：危险项做「关闭小号助手」+ 二次确认（只停用，不删配置数据）
     var qqDisableConfirmVisible by remember { mutableStateOf(false) }
     // 表情库子页：编辑某张表情的描述（原实现是页内常驻输入框，会随列表一起滚走）
     var qqStickerEditVisible by remember { mutableStateOf(false) }
+    // 2026-11-22（ADR-080）：她的日记（只读 + 可删 + 可清空；不可代写，ADR-077 D23）
+    var qqDiaryRoleId by remember { mutableStateOf("") }
+    val qqDiaryEntries = remember { mutableStateOf(emptyList<io.prism.qq.RoleDiaryStore.Entry>()) }
+    var qqDiaryClearConfirm by remember { mutableStateOf(false) }
+    var qqDiaryMessage by remember { mutableStateOf<String?>(null) }
+    // 刷新：切角色 / 删除 / 清空后都走同一条路径（IO 线程读盘）
+    val reloadDiary: () -> Unit = {
+        val app = qqApp
+        if (app != null) {
+            qqScope.launch {
+                val roleId = runCatching { app.rolePackLoader.effectiveRolePack()?.id }
+                    .getOrNull()?.takeIf { it.isNotBlank() }
+                    ?: qqDiaryRoleId.takeIf { it.isNotBlank() }
+                    ?: io.prism.qq.DiaryLocalToolExecutor.DEFAULT_ROLE_ID
+                qqDiaryRoleId = roleId
+                val loaded = runCatching {
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        app.roleDiaryStore.all(roleId)
+                    }
+                }.getOrDefault(emptyList())
+                qqDiaryEntries.value = loaded
+                // 诊断：没有这条日志时，"看不到日记"无法区分 ①没写进去 ②写进别的角色 id
+                // ③写进去了但 UI 没刷出来。只记数量，不记正文（隐私）。
+                android.util.Log.i("PrismSettings", "日记可读=role=$roleId 条数=${loaded.size}")
+            }
+        }
+    }
+    // 首帧 + 进入日记子页时都刷新（写日记是后台异步的，缓存会过期）
+    LaunchedEffect(qqApp) { reloadDiary() }
+    LaunchedEffect(subPage) { if (subPage == SettingsSubPage.QQ_DIARY) reloadDiary() }
+    val qqDiarySummary: String = run {
+        val list = qqDiaryEntries.value
+        if (list.isEmpty()) {
+            "还没有写过 · 她动心的时候会记一句"
+        } else {
+            val day = runCatching {
+                java.time.Instant.ofEpochMilli(list.last().at)
+                    .atZone(java.time.ZoneId.systemDefault()).toLocalDate()
+            }.getOrNull()
+            "${list.size} 条" + (day?.let { " · 最近 %02d-%02d".format(it.monthValue, it.dayOfMonth) } ?: "")
+        }
+    }
     // 语音：本地音色包管理弹层（用户 2026-11-21 裁定：列表收进弹层，页面只留「已安装/当前使用」）
     var voicePackSheetVisible by remember { mutableStateOf(false) }
     // 网络：首选搜索引擎弹层（原在搜索弹层内的 5 选 1 分段，上移到独立行 + 弹层）
@@ -1322,6 +1371,15 @@ fun SettingsScreen(
                     onClick = { subPage = SettingsSubPage.QQ_STICKERS }
                 )
             }
+            // 2026-11-22（ADR-080）：日记入口。此前只有"允许她写日记"的开关，
+            // 写进去的内容无处可看（ADR-077 D23 承诺的 UI 一直缺位）。
+            item {
+                SetRow(
+                    title = SettingsSubPage.QQ_DIARY.title,
+                    subtitle = qqDiarySummary,
+                    onClick = { subPage = SettingsSubPage.QQ_DIARY }
+                )
+            }
             // US-3105 AC-3/AC-4：熔断状态与恢复（熔断时才出现，设计稿「保护」组）
             if (qqCircuitOpen) {
                 item { SetSection("保护") }
@@ -1724,6 +1782,136 @@ fun SettingsScreen(
                 }
             }
             } // subPage == QQ_STICKERS
+            // ==================== 2026-11-22（ADR-080）：她的日记 ====================
+            // 语义严格按 ADR-077 D23：**只读、可删、可清空，不可代写**。
+            // 没有"新增"按钮是刻意的——代写会破坏"这是她自己写的"这一前提。
+            if (subPage == SettingsSubPage.QQ_DIARY) {
+                item {
+                    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp)) {
+                        Text(
+                            text = qqDiarySummary +
+                                " · 角色 ${qqDiaryRoleId.ifBlank { io.prism.qq.DiaryLocalToolExecutor.DEFAULT_ROLE_ID }}" +
+                                " · 每天最多 ${io.prism.qq.RoleDiaryStore.MAX_PER_DAY} 条",
+                            color = PrismTextFaint,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+                if (qqDiaryEntries.value.isEmpty()) {
+                    item {
+                        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = PrismSize.s4)) {
+                            PrismFootnote(
+                                "她还没写下什么。当某个瞬间让她心里动了一下（你说的话、你们的约定、" +
+                                    "她忽然想通的事），她会自己记一句——这部分内容不会发给你。"
+                            )
+                        }
+                    }
+                } else {
+                    // 倒序：最新的在最上面
+                    qqDiaryEntries.value.asReversed().forEach { entry ->
+                        item {
+                            Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)) {
+                                PrismRow(
+                                    title = runCatching {
+                                        java.time.Instant.ofEpochMilli(entry.at)
+                                            .atZone(java.time.ZoneId.systemDefault())
+                                            .let {
+                                                "%02d-%02d %02d:%02d".format(
+                                                    it.monthValue, it.dayOfMonth, it.hour, it.minute
+                                                )
+                                            }
+                                    }.getOrDefault("") +
+                                        entry.mood.takeIf { it.isNotBlank() }?.let { " · $it" }.orEmpty(),
+                                    trailing = {
+                                        PrismMini(
+                                            text = "删除",
+                                            danger = true,
+                                            onClick = {
+                                                qqScope.launch {
+                                                    val ok = runCatching {
+                                                        kotlinx.coroutines.withContext(
+                                                            kotlinx.coroutines.Dispatchers.IO
+                                                        ) {
+                                                            qqApp?.roleDiaryStore
+                                                                ?.remove(qqDiaryRoleId, entry.at)
+                                                        }
+                                                    }.getOrDefault(false)
+                                                    qqDiaryMessage = if (ok == true) "已删除一条" else "删除失败"
+                                                    reloadDiary()
+                                                }
+                                            }
+                                        )
+                                    }
+                                )
+                                // 正文单独渲染：日记是**成段的第一人称文字**，塞进 SetRow 的
+                                // 单行状态位会被截断（设计规范 `.row-status` 强制单行）。
+                                Text(
+                                    text = entry.text,
+                                    color = PrismText,
+                                    fontSize = PrismType.body,
+                                    lineHeight = PrismType.bodyLine,
+                                    modifier = Modifier.padding(top = 4.dp, bottom = 6.dp, end = 8.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+                qqDiaryMessage?.let { message ->
+                    item {
+                        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)) {
+                            PrismNoteLine(message)
+                        }
+                    }
+                }
+                // 危险操作独立置底（与设计稿规则一致：不与普通行混排）
+                if (qqDiaryEntries.value.isNotEmpty()) {
+                    item { SetSection("危险") }
+                    item {
+                        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = PrismSize.s4)) {
+                            PrismActionsRow {
+                                PrismMini(
+                                    text = "清空她的日记",
+                                    danger = true,
+                                    onClick = { qqDiaryClearConfirm = true }
+                                )
+                                PrismMini(
+                                    text = "刷新",
+                                    onClick = { reloadDiary() }
+                                )
+                            }
+                            PrismFootnote("清空不可恢复。日记只存在应用私有目录，不会上传到任何地方。")
+                        }
+                    }
+                }
+                if (qqDiaryClearConfirm) {
+                    item {
+                        Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)) {
+                            PrismNoteLine("确定清空「${qqDiaryRoleId}」的全部日记？此操作不可恢复。")
+                            PrismActionsRow {
+                                PrismMini(
+                                    text = "确定清空",
+                                    danger = true,
+                                    onClick = {
+                                        qqDiaryClearConfirm = false
+                                        qqScope.launch {
+                                            val ok = runCatching {
+                                                kotlinx.coroutines.withContext(
+                                                    kotlinx.coroutines.Dispatchers.IO
+                                                ) {
+                                                    qqApp?.roleDiaryStore?.clear(qqDiaryRoleId)
+                                                }
+                                            }.getOrDefault(false)
+                                            qqDiaryMessage = if (ok == true) "已清空" else "清空失败"
+                                            reloadDiary()
+                                        }
+                                    }
+                                )
+                                PrismMini(text = "取消", onClick = { qqDiaryClearConfirm = false })
+                            }
+                        }
+                    }
+                }
+            } // subPage == QQ_DIARY
             } // QQ
             if (section == SettingsSection.VOICE) {
             // ===== 设计稿 `settingsVoice()`：**单页四组**（识别 / 播报 / 本地音色包 / 角色）=====
