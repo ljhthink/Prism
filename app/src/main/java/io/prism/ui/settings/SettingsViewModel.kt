@@ -1446,10 +1446,22 @@ class SettingsViewModel(
         }
     }
 
-    /** 保存 API Key（加密后落盘）。空值跳过（BR-security-006）。 */
+    /**
+     * 保存 API Key（加密后落盘）。空值跳过（BR-security-006）。
+     *
+     * **guardrail R5-M-02**：原实现没有 try-catch。`apiKeyRepository.saveApiKey` 内部走
+     * Tink AEAD 加密，硬件密钥库异常（引脚/Keystore 损坏）会抛 `GeneralSecurityException`——
+     * 在 `viewModelScope.launch` 里未捕获 → 直接崩溃。改为捕获并记日志（不静默，落 Log.e）。
+     */
     fun saveApiKey(key: String, value: String) {
         viewModelScope.launch {
-            apiKeyRepository.saveApiKey(key, value)
+            try {
+                apiKeyRepository.saveApiKey(key, value)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "保存 API Key 失败（key=$key）: ${e::class.simpleName}: ${e.message}", e)
+            }
         }
     }
 
@@ -1460,7 +1472,61 @@ class SettingsViewModel(
      */
     fun removeApiKey(key: String) {
         viewModelScope.launch {
-            apiKeyRepository.removeApiKey(key)
+            try {
+                apiKeyRepository.removeApiKey(key)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "删除 API Key 失败（key=$key）: ${e::class.simpleName}: ${e.message}", e)
+            }
+        }
+    }
+
+    /**
+     * 一次性保存「搜索引擎增强」的全部配置（Tavily Key / 智谱 Key / SearXNG 端点与认证）。
+     *
+     * **为什么需要它（guardrail R5-M-02）**：UI 原本依次调 5 个 fire-and-forget 方法
+     * （`removeApiKey`/`saveApiKey` 两两成对 + `saveSearxngSettings`），存在三个问题：
+     * 1. **非原子**：中间某步失败，前面已写入，用户看到的是"保存成功"但状态不一致；
+     * 2. **无回执**：这些方法不返回结果，UI 无法区分成功与失败，只能假定成功后关闭弹层；
+     * 3. **空串即删除**：若 Key 字段尚未异步回填完成（`loadApiKey` 在途），用户点保存会把
+     *    已存的 Key 当成"空 → 删除"，属于**静默数据丢失**。
+     *
+     * 本方法在同一协程里顺序执行全部写入，任一步抛异常即中止并把错误回传给调用方
+     * （[onResult] 的 `error` 非 null）；调用方据此**不关闭弹层**并提示。
+     * 空串语义保持不变（空 = 删除），因为 UI 侧已保证只有加载完成后才允许保存。
+     */
+    fun saveSearchEnhancementAll(
+        tavilyKey: String,
+        zhipuKey: String,
+        searxngEndpoint: String,
+        searxngUsername: String,
+        searxngPassword: String,
+        onResult: (error: String?) -> Unit
+    ) {
+        viewModelScope.launch {
+            try {
+                // 三组写入顺序固定：先 Key 后 SearXNG（后者最可能因网络/配置失败）
+                if (tavilyKey.isBlank()) {
+                    apiKeyRepository.removeApiKey(TAVILY_API_KEY_REF)
+                } else {
+                    apiKeyRepository.saveApiKey(TAVILY_API_KEY_REF, tavilyKey)
+                }
+                if (zhipuKey.isBlank()) {
+                    apiKeyRepository.removeApiKey(ZHIPU_API_KEY_REF)
+                } else {
+                    apiKeyRepository.saveApiKey(ZHIPU_API_KEY_REF, zhipuKey)
+                }
+                searchEnhancementRepository?.setSearxngSettings(
+                    searxngEndpoint, searxngUsername, searxngPassword
+                )
+                onResult(null)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "保存搜索增强配置失败: ${e::class.simpleName}: ${e.message}", e)
+                onResult(e.message ?: e::class.simpleName ?: "未知错误")
+            }
         }
     }
 

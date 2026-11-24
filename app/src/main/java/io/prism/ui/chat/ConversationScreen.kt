@@ -1,4 +1,4 @@
-package io.prism.ui.chat
+﻿package io.prism.ui.chat
 
 import android.app.Activity
 import android.content.Context
@@ -13,6 +13,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.ActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -26,6 +27,8 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -37,10 +40,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -82,6 +88,12 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.draw.drawBehind
+import io.prism.ui.theme.PrismOk
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -103,6 +115,7 @@ import io.prism.ui.components.PrismButtonVariant
 import io.prism.ui.components.PrismGlassCard
 import io.prism.ui.components.PrismField
 import io.prism.ui.components.PrismSheet
+import io.prism.ui.components.PrismIcons
 import io.prism.ui.components.PrismSheetHost
 import io.prism.ui.components.PrismTopBar
 import io.prism.ui.components.PrismTopBarAction
@@ -110,17 +123,25 @@ import io.prism.voice.VoiceCallOverlay
 import io.prism.ui.model.ChatMessage
 import io.prism.ui.model.Role
 import io.prism.ui.model.SearchResult
+import io.prism.ui.theme.PrismBg
+import io.prism.ui.theme.PrismMotion
+import io.prism.ui.theme.PrismAccent
 import io.prism.ui.theme.PrismCyan
+import io.prism.ui.theme.PrismDanger
 import io.prism.ui.theme.PrismError
 import io.prism.ui.theme.PrismIndigo
 import io.prism.ui.theme.PrismIndigoSoft
 import io.prism.ui.theme.PrismLine
+import io.prism.ui.theme.PrismLineStrong
 import io.prism.ui.theme.PrismMint
 import io.prism.ui.theme.PrismPanel
 import io.prism.ui.theme.PrismPanel2
+import io.prism.ui.theme.PrismPanel3
+import io.prism.ui.theme.PrismSize
 import io.prism.ui.theme.PrismText
 import io.prism.ui.theme.PrismTextDim
 import io.prism.ui.theme.PrismTextFaint
+import io.prism.ui.theme.PrismType
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -141,9 +162,9 @@ import kotlinx.coroutines.withContext
  * - 问题 1：消息列表自动滚动到底部（[LaunchedEffect] 监听消息数 + animateScrollToItem）
  * - 问题 3：AI 消息改用 [Markdown] 渲染（替代 stripMarkdownSymbols 剥离）
  * - 问题 5：能力开关（联网搜索 / 深度思考）置于输入框上方胶囊行
- * - 问题 6：RAG 引用来源改为可折叠区域（[CollapsibleSourcesCard]）
+ * - 问题 6：RAG 引用来源改为行式来源列表（[CitationSourceList]）
  * - 问题 7：思维链改为可折叠区域（[CollapsibleThinkingCard]），与最终答案区分
- * - 问题 8：联网搜索结果改为可折叠来源卡片（[CollapsibleSearchCard]），链接可点击跳转外部网站
+ * - 问题 8：联网搜索结果改为行式来源列表（[WebSourceList]），链接可点击跳转外部网站
  * - 问题 9：工具调用指示不再混入正文（TOOL 消息独立紧凑气泡）
  */
 @Composable
@@ -160,6 +181,14 @@ fun ConversationScreen(
      * 完成后回调 [onSessionLoaded] 清空待加载状态（一次性消费）。
      */
     sessionIdToLoad: Long? = null,
+    /**
+     * UI v2（ADR-079）：历史页「新对话」的一次性令牌。自增即触发 [ConversationViewModel.startNewConversation]。
+     *
+     * 为什么用令牌而不是回调：聊天页与新会话的 ViewModel 生命周期由 NavHost 持有，
+     * 历史页无法直接拿到聊天页的 VM；令牌把"请求"变成可比较的值，消费端用
+     * `LaunchedEffect` 比较上一值，天然幂等（重组不会重复触发）。
+     */
+    newConversationTick: Int = 0,
     /** UX-001 问题 4（ADR-021）：loadSession 完成后回调（导航层清空待加载状态）。 */
     onSessionLoaded: () -> Unit = {}
 ) {
@@ -321,6 +350,16 @@ fun ConversationScreen(
         }
     }
 
+    // UI v2（ADR-079）：历史页点「新对话」后回到本页 → 直接开新会话。
+    // 初值 0 视为"未请求"，避免首次进入就清空正在恢复的会话。
+    var lastNewTick by remember { mutableIntStateOf(newConversationTick) }
+    LaunchedEffect(newConversationTick) {
+        if (newConversationTick != lastNewTick) {
+            lastNewTick = newConversationTick
+            viewModel.startNewConversation()
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         // UXR3 问题 13（ADR-023）：复制消息到剪贴板所需的 Context（消息气泡内使用）
         val context = LocalContext.current
@@ -329,51 +368,18 @@ fun ConversationScreen(
         // 键盘弹出时 NavBar 上移带动 content 收缩，消息列表 weight(1f) 自然收缩，
         // 输入区贴合 NavBar 上缘；顶部状态栏 inset 由 PrismApp 的 statusBarsPadding 统一处理。
         Column(modifier = Modifier.fillMaxSize()) {
-            PrismTopBar(
-                title = "Prism",
-                subtitle = "深空 AI · ${activeProvider?.name ?: "未配置"}",
-                actions = {
-                    // 批次20（VC-005，ADR-044）：语音通话入口（全屏覆盖层，轮次进同一会话）
-                    PrismTopBarAction(
-                        icon = { Icon(Icons.Filled.Mic, null, tint = PrismTextDim) },
-                        contentDescription = "语音通话",
-                        onClick = { voiceCallVisible = true }
-                    )
-                    // UX-001 问题 4（ADR-021）：历史会话入口（顶栏按钮，null 时隐藏）
-                    if (onOpenHistory != null) {
-                        PrismTopBarAction(
-                            icon = { Icon(Icons.Filled.History, null, tint = PrismTextDim) },
-                            contentDescription = "历史会话",
-                            onClick = onOpenHistory
-                        )
-                    }
-                    PrismTopBarAction(
-                        icon = { Icon(Icons.Filled.Add, null, tint = PrismTextDim) },
-                        contentDescription = "新会话",
-                        onClick = { viewModel.startNewConversation() }
-                    )
-                    PrismTopBarAction(icon = { Icon(Icons.Filled.Bolt, null, tint = PrismTextDim) }, contentDescription = "能力")
-                }
+            // UI v2（ADR-079）：单行顶栏——模式胶囊（端点 / 知识库）+ 三个图标动作。
+            // 去掉「Prism / 深空 AI · xxx」标题栏：它不携带信息，却占 52dp 消息可视区。
+            ChatHeaderBar(
+                providerName = activeProvider?.name,
+                ragLabel = ragLabelOf(ragTarget),
+                ragActive = ragTarget != RagTarget.Off,
+                onProviderClick = { providerSelectorVisible = true },
+                onRagClick = { ragSelectorVisible = true },
+                onVoiceCall = { voiceCallVisible = true },
+                onOpenHistory = onOpenHistory,
+                onNewConversation = { viewModel.startNewConversation() }
             )
-
-            // Provider 选择器 + RAG 模式切换器并排（US-007 + US-019）
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                ProviderChip(
-                    name = activeProvider?.name,
-                    onClick = { providerSelectorVisible = true },
-                    modifier = Modifier.weight(1f)
-                )
-                RagModeChip(
-                    target = ragTarget,
-                    onClick = { ragSelectorVisible = true }
-                )
-            }
 
             LazyColumn(
                 state = listState,
@@ -383,6 +389,13 @@ fun ConversationScreen(
                 contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
+                // UI v2（ADR-079）：新会话引导语。设计稿 `chat-empty` 是「还没有对话」，
+                // 用户要求改成欢迎语——它同时承担"这里能做什么"的暗示，比标题更有用。
+                if (messages.isEmpty() && !isTyping) {
+                    item(key = "chat-empty") {
+                        ChatWelcomeGuide()
+                    }
+                }
                 items(messages, key = { it.id }) { message ->
                     // UXR9 US-908：预构建 工具调用 id → 参数 查找表（assistant 消息携带的
                     // toolCalls 反向映射），供 TOOL 消息渲染「参数摘要」。
@@ -425,16 +438,18 @@ fun ConversationScreen(
                         toolArgsById = toolArgsById
                     )
                 }
-                // UX-001 问题 7（ADR-022）：工具调用状态可视化 —— 调用中显示「正在调用工具: xxx」
-                activeTool?.let { toolName ->
-                    item { ToolCallIndicator(toolName) }
-                }
+                // UI v2（ADR-079）：原「工具指示 + 打字指示」两条并列提示，合并为一张
+                // 带时间轴的执行轨迹卡（设计稿 `.trace`）。数据仍只来自 isTyping/activeTool，
+                // 每步耗时由组件本地实测，不编造。
                 if (isTyping) {
-                    // ADR-050（2026-09-12）：知识库**不再自动检索**——`ragRetrieving` 因此恒为 false
-                    // （ConversationViewModel 侧已无置位路径，字段保留以备将来接工具事件），
-                    // 本指示事实上恒显示「正在思考…」。"正在查资料"的可见性改由上方工具调用
-                    // 指示（activeTool → ToolCallIndicator）承载：知识库工具会显示为「查知识库」。
-                    item { TypingIndicator(isRagOn = ragRetrieving) }
+                    item {
+                        AgentTraceCard(
+                            isTyping = isTyping,
+                            activeTool = activeTool,
+                            thinkingEnabled = thinkingEnabled,
+                            isRagOn = ragRetrieving
+                        )
+                    }
                 }
             }
 
@@ -525,7 +540,7 @@ fun ConversationScreen(
 
         // Provider 切换弹层（US-007）
         PrismSheetHost(visible = providerSelectorVisible, onDismiss = { providerSelectorVisible = false }) {
-            ProviderSelectorSheet(
+            ProviderListSheet(
                 providers = providers,
                 activeId = activeProvider?.id,
                 onSelect = { viewModel.setActiveProvider(it); providerSelectorVisible = false },
@@ -535,7 +550,7 @@ fun ConversationScreen(
 
         // RAG 模式切换弹层（US-019）
         PrismSheetHost(visible = ragSelectorVisible, onDismiss = { ragSelectorVisible = false }) {
-            RagModeSelectorSheet(
+            RagModeSheet(
                 current = ragTarget,
                 onSelect = { viewModel.setRagTarget(it); ragSelectorVisible = false },
                 onClose = { ragSelectorVisible = false }
@@ -613,6 +628,14 @@ fun ConversationScreen(
 
         // 批次20（VC-005，ADR-044）：语音通话全屏覆盖层（共享本页 ConversationViewModel，
         // 语音轮次与文字轮次同会话同历史；挂断即关闭覆盖层）
+        // **直接 if，不做 AnimatedVisibility**（guardrail R4-M-01 纠正了我上一版的错误归因）：
+        //
+        // 我原本加 fadeIn 想"柔化硬切"，但 `fadeIn` 的 t=0 是 **alpha=0（全透明）**——
+        // 首帧反而让聊天页 100% 可见 160ms，比硬切更糟；退出期 120ms 内覆盖层的
+        // `pointerInput` 还会吞掉点击（挂断后立刻点聊天页没反应）。
+        //
+        // "闪过之前的 UI" 的真实根因是**装配期占位用了旧靛蓝 `#141A2E`**（见 VoiceCallOverlay
+        // 占位块注释），换色后占位与正式界面底色逐字相同，切换时没有任何可感知变化。
         if (voiceCallVisible) {
             VoiceCallOverlay(
                 conversation = viewModel,
@@ -624,10 +647,16 @@ fun ConversationScreen(
 }
 
 /**
- * 能力开关行（UX-001 问题 5，ADR-021）—— 输入框上方胶囊式开关。
+ * 能力开关行 —— 设计稿 `.cap-row` + `.cap-chip`（`design/prism-ui-v1/screens.js` composer）。
  *
- * 对齐主流 AI 手机助手（DeepSeek/Kimi/豆包）的「联网搜索 / 深度思考」开关摆放：
- * 两个开关并排置于输入框上方，选中态高亮，未选中浅灰。
+ * 规格（逐值对应 CSS）：
+ * - `.cap-row`：间距 6dp、上 2dp / 下 8dp；
+ * - `.cap-chip`：高 36dp、左右 11dp、圆角 8dp、1px 细线、**透明底**、文字 12sp 弱化；
+ * - 内含 5dp 状态灯（`led`）+ 14dp 线性图标 + 短标签（联网 / 思考 / 后台）；
+ * - 激活态：文字提亮、描边琥珀 42%、底色 `accent-soft`。
+ *
+ * 与旧实现的差别：旧版三枚等宽胶囊（`weight(1f)`）带实底浅色块、无图标、用 8dp 圆点，
+ * 与设计稿的"细线胶囊 + 状态灯 + 图标"完全不同；标签也用设计稿的短词而非长词。
  */
 @Composable
 private fun CapabilityToggleRow(
@@ -638,50 +667,74 @@ private fun CapabilityToggleRow(
     onWebSearchChange: (Boolean) -> Unit,
     onBackgroundControlChange: (Boolean) -> Unit
 ) {
+    // guardrail B2-1（ac-verifier R2）：720px 窄屏下三枚胶囊会溢出、末枚被裁到屏外且节点消失
+    //（无滚动/换行兜底）。设计稿是 390px 定宽帧，没覆盖这个情况。
+    // 修法：整行改为**横向可滚动**——正常宽度不滚动（内容不足一行），窄屏可滑出被遮部分；
+    // 胶囊自身尺寸不变，观感与设计稿在常规屏一致。
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+            .horizontalScroll(rememberScrollState())
+            .padding(start = PrismSize.page, end = PrismSize.page, top = 2.dp, bottom = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         CapabilityToggleChip(
             checked = webSearchEnabled,
-            label = "联网搜索",
-            onCheckedChange = onWebSearchChange,
-            modifier = Modifier.weight(1f)
+            label = "联网",
+            icon = PrismIcons.Globe,
+            onCheckedChange = onWebSearchChange
         )
         CapabilityToggleChip(
             checked = thinkingEnabled,
-            label = "深度思考",
-            onCheckedChange = onThinkingChange,
-            modifier = Modifier.weight(1f)
+            label = "思考",
+            icon = PrismIcons.Brain,
+            onCheckedChange = onThinkingChange
         )
         // 批次20（BG-005，ADR-045）：后台操控（手机操控在虚拟屏后台执行，用户可同时使用手机）
         CapabilityToggleChip(
             checked = backgroundControlEnabled,
-            label = "后台操控",
-            onCheckedChange = onBackgroundControlChange,
-            modifier = Modifier.weight(1f)
+            label = "后台",
+            icon = PrismIcons.Phone,
+            onCheckedChange = onBackgroundControlChange
         )
     }
 }
 
-/** 单个能力开关胶囊（选中态 PrismIndigo 描边 + 标签加亮，未选中浅灰描边）。 */
+/**
+ * 单个能力胶囊 —— 设计稿 `.cap-chip`（36dp 高 / 8dp 圆角 / 透明底 / 5dp 状态灯 + 14dp 图标）。
+ *
+ * 用 `toggleable(role = Switch)` 暴露 checked 语义（UX-001 问题 2，ADR-022 二次反馈：
+ * 用户与读屏都需要能判断开关是否生效）。
+ */
 @Composable
 private fun CapabilityToggleChip(
     checked: Boolean,
     label: String,
-    onCheckedChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onCheckedChange: (Boolean) -> Unit
 ) {
-    // UX-001 问题 2（ADR-022 二次反馈）：toggleable(role = Switch) 暴露 checked 选中态语义，
-    // 使开关状态对无障碍/读屏/UI Automator 可识别（用户反馈"看不出深度思考开关是否生效"）。
+    val borderColor by androidx.compose.animation.animateColorAsState(
+        targetValue = if (checked) PrismAccent.copy(alpha = 0.42f) else PrismLine,
+        animationSpec = PrismMotion.base(),
+        label = "capBorder"
+    )
+    val bg by androidx.compose.animation.animateColorAsState(
+        targetValue = if (checked) PrismAccent.copy(alpha = 0.12f) else Color.Transparent,
+        animationSpec = PrismMotion.base(),
+        label = "capBg"
+    )
+    val fg by androidx.compose.animation.animateColorAsState(
+        targetValue = if (checked) PrismText else PrismTextFaint,
+        animationSpec = PrismMotion.base(),
+        label = "capFg"
+    )
     Row(
-        modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (checked) PrismIndigo.copy(alpha = 0.12f) else PrismPanel2)
-            .border(1.dp, if (checked) PrismIndigo.copy(alpha = 0.6f) else PrismLine, RoundedCornerShape(10.dp))
+        modifier = Modifier
+            .height(PrismSize.capChipHeight)
+            .clip(RoundedCornerShape(PrismSize.rChip))
+            .background(bg)
+            .border(1.dp, borderColor, RoundedCornerShape(PrismSize.rChip))
             .toggleable(
                 value = checked,
                 role = androidx.compose.ui.semantics.Role.Switch,
@@ -689,23 +742,31 @@ private fun CapabilityToggleChip(
                 indication = null,
                 onValueChange = onCheckedChange
             )
-            .padding(horizontal = 10.dp, vertical = 5.dp),
+            .padding(horizontal = 11.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
         Box(
             modifier = Modifier
-                .size(8.dp)
+                .size(PrismSize.led)
                 .clip(CircleShape)
-                .background(if (checked) PrismIndigo else PrismTextFaint)
+                .background(if (checked) PrismAccent else PrismTextFaint)
         )
-        Text(
-            text = label,
-            color = if (checked) PrismText else PrismTextDim,
-            fontSize = 12.sp,
-            fontWeight = if (checked) FontWeight.SemiBold else FontWeight.Normal
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = fg,
+            modifier = Modifier.size(14.dp)
         )
+        Text(text = label, color = fg, fontSize = PrismType.meta)
     }
+}
+
+/** RAG 模式胶囊文案（UI v2：与设计稿「全库检索 / 知识库关」一致）。 */
+private fun ragLabelOf(target: RagTarget): String = when (target) {
+    RagTarget.Off -> "知识库关"
+    RagTarget.AllLibraries -> "全库检索"
+    is RagTarget.SpecificLibrary -> "知识库 #${target.kbId}"
 }
 
 /** 当前 Provider 胶囊 —— 点击弹出切换列表（US-007）。 */
@@ -782,39 +843,6 @@ private fun RagModeChip(target: RagTarget, onClick: () -> Unit) {
 }
 
 /** RAG 模式切换弹层（US-019，ADR-012 5.2；语义按 ADR-050 收窄为"知识库能力开关"）。 */
-@Composable
-private fun RagModeSelectorSheet(
-    current: RagTarget,
-    onSelect: (RagTarget) -> Unit,
-    onClose: () -> Unit
-) {
-    PrismSheet(
-        title = "知识库检索模式",
-        subtitle = "开启后 AI 可主动检索你的知识库并在回答中标注引用来源；不该查时不会查"
-    ) {
-        RagModeOption(
-            label = "全库检索",
-            description = "AI 需要时可在全部知识库中检索并引用",
-            selected = current is RagTarget.AllLibraries,
-            onClick = { onSelect(RagTarget.AllLibraries) }
-        )
-        Spacer(Modifier.height(8.dp))
-        RagModeOption(
-            label = "关闭知识库",
-            description = "AI 不检索知识库，按普通对话回答",
-            selected = current is RagTarget.Off,
-            onClick = { onSelect(RagTarget.Off) }
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "提示：指定库检索将通过知识库管理页选择具体库后启用（暂未开放）",
-            color = PrismTextFaint,
-            fontSize = 11.sp
-        )
-        Spacer(Modifier.height(16.dp))
-        PrismButton(text = "关闭", variant = PrismButtonVariant.Ghost, onClick = onClose)
-    }
-}
 
 /** RAG 模式选项行（US-019）。 */
 @Composable
@@ -850,50 +878,35 @@ private fun RagModeOption(label: String, description: String, selected: Boolean,
 }
 
 /** Provider 切换列表弹层（US-007）。 */
+
+/**
+ * 新会话引导语（设计稿 `chat-empty` 的位置，文案按用户要求改为欢迎语）。
+ *
+ * 刻意做得很轻：不占满屏、不加插画、不给"示例问题"按钮——空态的任务是告诉用户
+ * 「可以开始说话了」，而不是再叠一层装饰。
+ */
 @Composable
-private fun ProviderSelectorSheet(
-    providers: List<ProviderConfig>,
-    activeId: Long?,
-    onSelect: (Long) -> Unit,
-    onClose: () -> Unit
-) {
-    PrismSheet(
-        title = "切换 Provider",
-        subtitle = "切换后保留对话历史，新消息走新 Provider"
+private fun ChatWelcomeGuide() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 48.dp, bottom = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        if (providers.isEmpty()) {
-            Text(text = "尚未配置 Provider，请到「设置」中添加并激活。", color = PrismTextFaint, fontSize = 12.sp)
-            Spacer(Modifier.height(16.dp))
-        }
-        providers.forEach { config ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(PrismPanel2)
-                    .border(1.dp, if (config.id == activeId) PrismMint.copy(alpha = 0.4f) else PrismLine, RoundedCornerShape(12.dp))
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = { onSelect(config.id) }
-                    )
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Text(text = "◈", color = PrismIndigo, fontSize = 14.sp)
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(text = config.name, color = PrismText, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    Text(text = config.baseUrl, color = PrismTextFaint, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                if (config.id == activeId) {
-                    Text(text = "当前", color = PrismMint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                }
-            }
-            Spacer(Modifier.height(8.dp))
-        }
-        Spacer(Modifier.height(8.dp))
-        PrismButton(text = "关闭", variant = PrismButtonVariant.Ghost, onClick = onClose)
+        Text(
+            text = "欢迎回来，今天我们要一起做些什么？",
+            color = PrismTextDim,
+            fontSize = PrismType.head,
+            lineHeight = 26.sp,
+            textAlign = TextAlign.Center
+        )
+        Spacer(Modifier.height(PrismSize.s3))
+        Text(
+            text = "在下方输入问题，或从历史会话继续",
+            color = PrismTextFaint,
+            fontSize = PrismType.sub,
+            textAlign = TextAlign.Center
+        )
     }
 }
 
@@ -1131,14 +1144,14 @@ private fun SystemNoticeBubble(message: ChatMessage) {
 
 @Composable
 private fun UserBubble(message: ChatMessage) {
+    // UI v2（ADR-079）：设计稿 `.msg-user` —— surface-2 实底 + 1px 细线 + 14dp 圆角 +
+    // 10/12 内边距 + 右侧对齐 + 最大宽 300dp。原「靛蓝渐变 + 单角切角」属旧语言，已删。
     Box(
         modifier = Modifier
-            .background(
-                Brush.linearGradient(listOf(PrismIndigo.copy(alpha = 0.45f), PrismIndigoSoft.copy(alpha = 0.35f))),
-                RoundedCornerShape(topStart = 18.dp, topEnd = 6.dp, bottomStart = 18.dp, bottomEnd = 18.dp)
-            )
-            .border(1.dp, PrismIndigo.copy(alpha = 0.4f), RoundedCornerShape(topStart = 18.dp, topEnd = 6.dp, bottomStart = 18.dp, bottomEnd = 18.dp))
-            .padding(horizontal = 15.dp, vertical = 11.dp)
+            .widthIn(max = 300.dp)
+            .background(PrismPanel2, RoundedCornerShape(PrismSize.rCard))
+            .border(1.dp, PrismLine, RoundedCornerShape(PrismSize.rCard))
+            .padding(horizontal = 12.dp, vertical = 10.dp)
     ) {
         Column(horizontalAlignment = Alignment.End) {
             // UXR8 N3（ADR-030）：图片消息渲染（data URL 解码 → Bitmap → Image）
@@ -1164,8 +1177,8 @@ private fun UserBubble(message: ChatMessage) {
                 Text(
                     text = message.content,
                     color = PrismText,
-                    fontSize = 14.sp,
-                    lineHeight = 23.sp
+                    fontSize = PrismType.body,
+                    lineHeight = PrismType.bodyLine
                 )
             }
         }
@@ -1580,6 +1593,21 @@ private fun prismMarkdownTypography(): MarkdownTypography {
 @Composable
 private fun AiBubble(message: ChatMessage, showThinking: Boolean, isStreaming: Boolean) {
     Column(modifier = Modifier.fillMaxWidth()) {
+        // UI v2（ADR-079）：设计稿 `.ai-mark` —— AI 回复**无气泡容器**，仅在正文上方
+        // 给一个 13dp 闪电 + 「Prism」的 11sp 微标记；下方留 6dp。
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(PrismSize.s2),
+            modifier = Modifier.padding(bottom = 6.dp)
+        ) {
+            Icon(
+                imageVector = PrismIcons.Bolt,
+                contentDescription = null,
+                tint = PrismTextFaint,
+                modifier = Modifier.size(13.dp)
+            )
+            Text(text = "Prism", color = PrismTextFaint, fontSize = PrismType.micro)
+        }
         // 思维链折叠区域（UX-001 问题 7）：置于答案上方，默认收起，与最终答案视觉区分。
         // UXR4 问题 1/4/6（ADR-024）：展示受 [showThinking]（深度思考开关）控制——
         // 开关关闭时即使 thinkingChain 有内容（协议层为回传而累积）也不展示思考区。
@@ -1624,26 +1652,29 @@ private fun AiBubble(message: ChatMessage, showThinking: Boolean, isStreaming: B
         // 联网搜索来源折叠区域（UX-001 问题 8）：置于答案下方，链接可点击
         message.searchResults?.takeIf { it.isNotEmpty() }?.let { results ->
             Spacer(Modifier.height(10.dp))
-            CollapsibleSearchCard(results)
+            WebSourceList(results)
         }
         // RAG 引用来源折叠区域（UX-001 问题 6）：置于答案下方
         if (message.sources.isNotEmpty()) {
             Spacer(Modifier.height(10.dp))
-            CollapsibleSourcesCard(message.sources)
+            CitationSourceList(message.sources)
         }
     }
 }
 
 /**
- * UXR9 US-908：Skill/工具调用卡片 —— 会话内嵌工具调用反馈。
+ * 工具调用卡 —— 设计稿 `.tool-card`（`design/prism-ui-v1/screens.js` 的 `chatGenerating()`）。
  *
- * 展示：工具名（完整命名空间 `skillName__toolName`）+ 参数摘要 + 执行结果片段 + 状态徽标。
- * - 成功（结果文本不含错误标记）→ 绿色「✓ 成功」
- * - 失败（结果以"工具执行出错"/"⚠️"等开头）→ 红色「✕ 失败」
- * - 联网搜索 / 知识库结果继续由 [CollapsibleSearchCard] / 引用来源展示，此处跳过冗余卡片
+ * 规格（逐值对应 `app.css`）：
+ * - 外框：1px `line` 描边 + **左侧 2px 琥珀竖条**、10dp 圆角、`surface` 底、9/11 内边距；
+ * - 头行：左侧等宽（mono）工具名，右侧「✓ + 状态」；
+ * - 参数行：等宽 `key: value` 形态；结果行：次级文本。
  *
- * 满足 US-908 AC-1/AC-2：LLM 调用 skill 时界面有明确反馈（工具名 + 参数摘要 + 状态），
- * 与既有「正在调用工具: xxx」执行中指示（[ToolCallIndicator]）互补不冲突。
+ * 与旧实现的差别：旧版用 `◈ ` 字符前缀 + 「参数：」中文标签 + 「✓ 成功」中文状态，
+ * 与设计稿的 mono 名 + 图标状态不一致；也没有左侧琥珀竖条。
+ *
+ * **不伪造耗时**：`ChatMessage` 只带结果文本，没有工具执行时长，
+ * 因此状态位显示「✓」/「✕」而不显示 `2.4s`（设计稿那是 mock 数据）。
  */
 @Composable
 private fun SkillCallCard(
@@ -1651,77 +1682,106 @@ private fun SkillCallCard(
     toolArgsById: Map<String, io.prism.ui.model.ToolCallRef>
 ) {
     val content = message.content.trim()
-    // UXR11 U6（ADR-033）：空 content（协议占位）不渲染；**不再跳过 web_search 工具**——
-    // 联网搜索也是 Skill 能力（web-research 等 Skill 依赖 web_search__search），
-    // 用户反馈"LLM 调 skills 时无界面反馈"，此卡片给出明确的「工具被调用 ✓/✕」反馈，
-    // 搜索结果正文仍由下方 CollapsibleSearchCard 完整展示（不重复）。
+    // UXR11 U6（ADR-033）：空 content（协议占位）不渲染。
     if (content.isEmpty()) return
+
     val isWebSearch = message.toolName == WebSearchLocalToolExecutor.TOOL_SEARCH
-
     val toolFullName = message.toolName ?: "工具"
-    // 状态判定（Q-LOW-7 修复，guardrail TKN-UXR9-GUARDRAIL-002/003）：复用 SkillExecutor 的
-    // 单一事实来源 isFailureResult（固定失败前缀集合），而非 UI 自造启发式（此前
-    // `contains("失败：")` 会把含该子串的成功结果误判为失败）。
+    // 状态判定复用 SkillExecutor 的单一事实来源 isFailureResult（固定失败前缀集合），
+    // 不用 UI 自造启发式（`contains("失败：")` 会把含该子串的成功结果误判为失败）。
     val isFailed = SkillExecutor.isFailureResult(content)
-    val statusColor = if (isFailed) PrismError else PrismMint
-    val statusText = if (isFailed) "✕ 失败" else "✓ 成功"
+    val statusColor = if (isFailed) PrismDanger else PrismOk
 
-    // 参数摘要：按 toolCallId 从 assistant 消息的 toolCalls 反查 arguments JSON
-    val argsSummary = toolArgsById[message.toolCallId]?.arguments
-        ?.let { summarizeToolArguments(it) }
+    // 参数摘要：按 toolCallId 反查 arguments JSON
+    val argsRaw = toolArgsById[message.toolCallId]?.arguments
+    val argsSummary = argsRaw?.let { summarizeToolArguments(it) }
 
-    Column(
+    // 结果行：联网结果由下方 WebSourceList 承载，卡片只给结论，避免重复
+    val resultLine = when {
+        isWebSearch && !isFailed -> "返回结果已列在下方来源"
+        isWebSearch -> "搜索失败，详见下方"
+        isFailed -> content.take(160)
+        else -> content.take(120) + if (content.length > 120) "…" else ""
+    }
+
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(PrismPanel.copy(alpha = 0.5f))
-            .border(1.dp, PrismLine, RoundedCornerShape(10.dp))
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .padding(vertical = 4.dp)
+            // 左侧 2dp 琥珀竖条 = 设计稿 `border-left: 2px solid var(--accent)`。
+            //
+            // **绘制顺序**（guardrail R3-M-02 纠正了我此前的错误结论）：Compose 按 modifier
+            // **链从左到右**绘制，`drawBehind` 最后注册 = 最后绘制 = 在最上层。因此正确顺序是
+            // `background → border → drawBehind`（HEAD 版本即如此）。
+            // 若把 drawBehind 放最前，不透明背景 (#171816) 会把竖条整块盖住 → 真机不可见。
+            .background(PrismPanel, RoundedCornerShape(PrismSize.rControl))
+            .border(1.dp, PrismLine, RoundedCornerShape(PrismSize.rControl))
+            .drawBehind {
+                // 圆角内画竖条：上下各留一个圆角半径，避免盖住圆角；高度兜底非负。
+                val r = 10.dp.toPx()
+                val barHeight = (size.height - 2 * r).coerceAtLeast(0f)
+                drawRoundRect(
+                    color = PrismAccent,
+                    size = androidx.compose.ui.geometry.Size(2.dp.toPx(), barHeight),
+                    topLeft = androidx.compose.ui.geometry.Offset(0f, r),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(1.dp.toPx())
+                )
+            }
+            .padding(start = 13.dp, end = 11.dp, top = 9.dp, bottom = 9.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        Column(modifier = Modifier.weight(1f)) {
+            // 头行：mono 工具名 + 状态图标
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = toolFullName,
+                    color = PrismTextDim,
+                    fontSize = PrismType.micro,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(Modifier.width(PrismSize.s2))
+                if (isFailed) {
+                    Icon(
+                        imageVector = PrismIcons.Close,
+                        contentDescription = "工具执行失败",
+                        tint = statusColor,
+                        modifier = Modifier.size(11.dp)
+                    )
+                } else {
+                    Icon(
+                        imageVector = PrismIcons.Check,
+                        contentDescription = "工具执行成功",
+                        tint = statusColor,
+                        modifier = Modifier.size(11.dp)
+                    )
+                }
+            }
+            if (argsSummary != null) {
+                Text(
+                    text = "args: $argsSummary",
+                    color = PrismTextFaint,
+                    fontSize = PrismType.micro,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
             Text(
-                text = "◈ $toolFullName",
-                color = PrismText,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false)
-            )
-            Spacer(Modifier.weight(1f))
-            Text(
-                text = statusText,
-                color = statusColor,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
-        if (argsSummary != null) {
-            Text(
-                text = "参数：$argsSummary",
-                color = PrismTextFaint,
-                fontSize = 10.sp,
+                text = resultLine,
+                color = if (isFailed) PrismDanger else PrismTextFaint,
+                fontSize = PrismType.micro,
+                lineHeight = PrismType.microLine,
                 maxLines = 2,
-                overflow = TextOverflow.Ellipsis
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 4.dp)
             )
         }
-        Text(
-            // UXR11 U6：web_search 结果由 CollapsibleSearchCard 完整展示，卡片只给确认文本不重复摘要
-            text = when {
-                isWebSearch && !isFailed -> "搜索结果见下方来源卡片"
-                isWebSearch -> "搜索失败，详见下方"
-                isFailed -> content.take(160)
-                else -> content.take(120) + if (content.length > 120) "…" else ""
-            },
-            color = if (isFailed) PrismError else PrismTextFaint,
-            fontSize = 11.sp,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
     }
 }
 
@@ -1790,161 +1850,147 @@ private fun CollapsibleThinkingCard(chain: String) {
 }
 
 /**
- * 联网搜索来源折叠卡片（UX-001 问题 8，ADR-021）。
+ * RAG 引用来源 —— 设计稿 `.sources` / `.source`（`design/prism-ui-v1/app.css`）。
  *
- * 对齐 Perplexity/Kimi 风格引用来源卡片：可折叠区域展示「编号 + 标题 + 域名 + 摘要」，
- * 每条整行可点击，经 [Intent.ACTION_VIEW] 在系统浏览器打开原网页（不内置 WebView 保持轻量）。
+ * 规格：纵向 gap 6dp；每行 `[1]` 等宽琥珀 + 文档名（12sp 次级）+ 右侧等宽 meta（`#片段号`）；
+ * 行间 1px 分隔线、`padding-top 8dp`。
+ *
+ * 与旧实现的差别：旧版是「📚 引用来源（N）」可折叠卡片（绿色边框 + emoji + ▾/▸ 字符）。
+ * 设计稿没有卡片、没有折叠、没有 emoji——引用是一次性的阅读辅助，折叠反而增加一次点击。
  */
 @Composable
-private fun CollapsibleSearchCard(results: List<SearchResult>) {
-    var expanded by remember { mutableStateOf(true) }
+private fun CitationSourceList(sources: List<io.prism.ui.model.Citation>) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = PrismSize.s3),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        sources.forEach { citation ->
+            SourceRow(
+                index = citation.index,
+                title = citation.documentTitle,
+                meta = citation.chunkIndex?.let { "#$it" } ?: ""
+            )
+        }
+    }
+}
+
+/**
+ * 联网搜索来源 —— 同一套 `.source` 行语言。
+ *
+ * **功能保留**：整行可点，跳系统浏览器；仍做 http(s) 纵深校验（CWE-601 防护，F-01）。
+ */
+@Composable
+private fun WebSourceList(results: List<SearchResult>) {
     val context = LocalContext.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(PrismPanel2.copy(alpha = 0.6f))
-            .border(1.dp, PrismLine, RoundedCornerShape(10.dp))
+            .padding(top = PrismSize.s3),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        // 折叠标题行
+        results.forEachIndexed { index, result ->
+            val link = result.link
+            val clickable = link.startsWith("http://") || link.startsWith("https://")
+            SourceRow(
+                index = index + 1,
+                title = result.title.ifBlank { link },
+                meta = hostOf(link),
+                onClick = if (clickable) {
+                    {
+                        // guardrail R2-L-04：原来 runCatching 静默吞掉 ActivityNotFoundException，
+                        // 用户点了没反应且不知道为什么。失败时给一次可见提示。
+                        val started = runCatching {
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link)))
+                        }.isSuccess
+                        if (!started) {
+                            android.widget.Toast.makeText(
+                                context,
+                                "没有可打开该链接的应用",
+                                android.widget.Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                        Unit
+                    }
+                } else {
+                    null
+                }
+            )
+        }
+    }
+}
+
+/** 单条来源行（`.source`：等宽序号 + 标题 + 右侧等宽 meta + 顶部 1px 分隔线）。 */
+@Composable
+private fun SourceRow(
+    index: Int,
+    title: String,
+    meta: String,
+    onClick: (() -> Unit)? = null
+) {
+    Column {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(PrismLine)
+        )
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = { expanded = !expanded }
+                .then(
+                    if (onClick != null) {
+                        Modifier.clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onClick
+                        )
+                    } else {
+                        Modifier
+                    }
                 )
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(top = 8.dp, bottom = 2.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Text(text = "🔍", fontSize = 12.sp)
-            Text(text = "参考来源（${results.size}）", color = PrismTextDim, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.weight(1f))
             Text(
-                text = if (expanded) "▾" else "▸",
-                color = PrismTextFaint,
-                fontSize = 12.sp
+                text = "[$index]",
+                color = PrismAccent,
+                fontSize = PrismType.micro,
+                fontFamily = FontFamily.Monospace
             )
-        }
-        if (expanded) {
-            results.forEachIndexed { index, result ->
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            // 点击跳转外部网站（系统浏览器，ACTION_VIEW）
-                            // F-01（guardrail TKN-UX001-GUARDRAIL-001）：纵深防御 ——
-                            // 即使 parseSearchResults 已过滤，点击前仍校验 http(s) scheme，
-                            // 防止恶意 intent:// 等链接被触发（CWE-601）。
-                            onClick = {
-                                val link = result.link
-                                if (link.startsWith("http://") || link.startsWith("https://")) {
-                                    runCatching {
-                                        context.startActivity(
-                                            Intent(Intent.ACTION_VIEW, Uri.parse(link))
-                                        )
-                                    }
-                                }
-                            }
-                        )
-                        .padding(horizontal = 12.dp, vertical = 6.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "${index + 1}. ",
-                            color = PrismMint,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = result.title,
-                            color = PrismText,
-                            fontSize = 12.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                    Text(
-                        text = result.link,
-                        color = PrismCyan,
-                        fontSize = 10.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    if (result.snippet.isNotBlank()) {
-                        Text(
-                            text = result.snippet,
-                            color = PrismTextFaint,
-                            fontSize = 11.sp,
-                            lineHeight = 16.sp,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(top = 2.dp)
-                        )
-                    }
-                }
+            Text(
+                text = title,
+                color = PrismTextDim,
+                fontSize = PrismType.meta,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            if (meta.isNotBlank()) {
+                Text(
+                    text = meta,
+                    color = PrismTextFaint,
+                    fontSize = PrismType.micro,
+                    fontFamily = FontFamily.Monospace
+                )
             }
         }
     }
 }
 
 /**
- * RAG 引用来源折叠卡片（UX-001 问题 6，ADR-021）。
+ * 取链接的 host（`https://a.com/x` → `a.com`）。
  *
- * 原 [SourceChip] 在正文下方平铺展示，与 AI 输出文字视觉上易混淆/重叠。
- * 改为独立可折叠区域「引用来源（N）」，展开后逐条展示 [来源N] 文档名 #片段号。
+ * **两级解析**（guardrail R2-L-05）：先 `java.net.URI`（严格，能正确剔除 user:pass 凭证），
+ * 失败或 host 为 null 时回退 Android `Uri`（宽松，能接受 IDN 中文域名、下划线主机名——
+ * 这些在 `java.net.URI` 下 host 恒为 null，会导致 meta 列静默空白）。
  */
-@Composable
-private fun CollapsibleSourcesCard(sources: List<io.prism.ui.model.Citation>) {
-    var expanded by remember { mutableStateOf(true) }
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(PrismMint.copy(alpha = 0.06f))
-            .border(1.dp, PrismMint.copy(alpha = 0.2f), RoundedCornerShape(10.dp))
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = { expanded = !expanded }
-                )
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Text(text = "📚", fontSize = 12.sp)
-            Text(text = "引用来源（${sources.size}）", color = PrismMint, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.weight(1f))
-            Text(
-                text = if (expanded) "▾" else "▸",
-                color = PrismMint,
-                fontSize = 12.sp
-            )
-        }
-        if (expanded) {
-            sources.forEach { citation ->
-                val chunkPart = citation.chunkIndex?.let { " #$it" } ?: ""
-                Text(
-                    text = "[来源${citation.index}] ${citation.documentTitle}$chunkPart",
-                    color = PrismMint,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 3.dp)
-                )
-            }
-            Spacer(Modifier.height(6.dp))
-        }
-    }
+private fun hostOf(link: String): String {
+    val strict = runCatching { java.net.URI(link).host }.getOrNull()
+    val host = strict ?: runCatching { Uri.parse(link).host }.getOrNull()
+    return host?.removePrefix("www.").orEmpty()
 }
 
 /**
@@ -2137,14 +2183,26 @@ private fun MessageInputBar(
                         modifier = Modifier.weight(1f)
                     )
                 } else {
-                    Text(
-                        text = "📄 ${pendingFileName ?: "文档"}",
-                        color = PrismTextDim,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
+                    // UI v2（ADR-079）：附件草稿的 📄 emoji 换成 14dp 线性图标（禁 emoji 于图标位）
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Icon(
+                            imageVector = PrismIcons.File,
+                            contentDescription = null,
+                            tint = PrismTextDim,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Text(
+                            text = pendingFileName ?: "文档",
+                            color = PrismTextDim,
+                            fontSize = PrismType.meta,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
                 Text(
                     text = "输入需求后发送",
@@ -2169,10 +2227,16 @@ private fun MessageInputBar(
 
         // UXR9 US-907：折叠栏 —— 点击"＋"展开，显示「相册 / 文件」两个上传入口。
         // 展开时挤占输入区上方空间（与键盘不同时使用：选完自动收起 + 收起键盘）。
+        // UI v2（ADR-079）：展开栏按设计稿 `.upload-bar` ——
+        // 两个 32dp 胶囊（圆角 8dp、1px 细线、surface 底、14dp 线性图标 + 12sp 文字），
+        // 顺序与设计稿一致（文件 → 相册）。旧版是 emoji + 更大的灰块。
+        // 入场只用 fade + 轻微位移（AC-11：不 animate 布局尺寸）。
         AnimatedVisibility(
             visible = uploadBarExpanded,
-            enter = expandVertically(),
-            exit = shrinkVertically()
+            enter = fadeIn(animationSpec = PrismMotion.base()) +
+                slideInVertically(animationSpec = PrismMotion.enter()) { -it / 4 },
+            exit = fadeOut(animationSpec = PrismMotion.tap()) +
+                slideOutVertically(animationSpec = PrismMotion.tap()) { -it / 4 }
         ) {
             Row(
                 modifier = Modifier
@@ -2180,34 +2244,91 @@ private fun MessageInputBar(
                     .padding(bottom = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                UploadActionChip(label = "🖼 相册", onClick = {
-                    uploadBarExpanded = false
-                    onImagePick()
-                })
-                UploadActionChip(label = "📄 文件", onClick = {
-                    uploadBarExpanded = false
-                    onFilePick()
-                })
+                UploadActionChip(
+                    icon = PrismIcons.File,
+                    label = "文件",
+                    onClick = {
+                        uploadBarExpanded = false
+                        onFilePick()
+                    }
+                )
+                UploadActionChip(
+                    icon = PrismIcons.Image,
+                    label = "相册",
+                    onClick = {
+                        uploadBarExpanded = false
+                        onImagePick()
+                    }
+                )
             }
         }
 
+        // UI v2（ADR-079）：输入区按设计稿 `.composer-shell` 重排——
+        // ①「＋」在输入框**左侧**（原在右侧且与发送键同为圆形，语义易混）；
+        // ② 占位符与输入文本共用同一 Box 中心线，不再偏低；
+        // ③ 发送改为**文字按钮**（发送 / 停止），不再是 ➤ 箭头。
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(PrismPanel, RoundedCornerShape(22.dp))
+                .border(1.dp, PrismLineStrong, RoundedCornerShape(22.dp))
+                .padding(4.dp),
+            // 设计稿 `.composer-shell { align-items: flex-end }`：**多行时按钮贴底**。
+            // 单行时三者同为 36dp，贴底与居中结果相同（实测 ＋ 与占位符中心差 0px）；
+            // 一旦输入换行，贴底才符合设计稿，居中会让 ＋/发送悬浮在文字块中间。
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             Box(
                 modifier = Modifier
+                    .size(36.dp)
+                    .clip(CircleShape)
+                    .clickable { uploadBarExpanded = !uploadBarExpanded },
+                contentAlignment = Alignment.Center
+            ) {
+                if (uploadBarExpanded) {
+                    Icon(
+                        imageVector = io.prism.ui.components.PrismIcons.Close,
+                        contentDescription = "收起附件",
+                        tint = PrismAccent,
+                        modifier = Modifier.size(18.dp)
+                    )
+                } else {
+                    Icon(
+                        imageVector = io.prism.ui.components.PrismIcons.Plus,
+                        contentDescription = "添加附件",
+                        tint = PrismTextDim,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+            // **垂直对齐（用户两次反馈"＋ 与占位符相对文本框偏下"）**
+            //
+            // 根因不是"和 ＋ 没对齐"，而是**文字相对输入框（composer-shell）偏下**：
+            // 之前给字段加 `heightIn(min=36dp)` + `wrapContentHeight`，但 BasicTextField 的
+            // 内部文本行框高度 = lineHeight(22sp→约 29px) + 字体 leading，实测 > 36dp 的一半，
+            // 于是文字被"顶"到 36dp 框的下半部分；而 ＋ / 发送键是几何居中的。
+            //
+            // 改为**单一 Box 承载**：Box 固定 36dp 高 + contentAlignment = CenterStart，
+            // 占位符与 innerTextField 都是它的子节点、由同一个 Box 居中，因此两者必然同心，
+            // 且同心于 36dp 的输入框本体（不再是 36dp 里再套一层居中）。
+            Box(
+                modifier = Modifier
                     .weight(1f)
-                    .background(PrismPanel, RoundedCornerShape(24.dp))
-                    .border(1.dp, PrismLine, RoundedCornerShape(24.dp))
-                    .padding(horizontal = 16.dp, vertical = 13.dp)
+                    // **必须 heightIn 而非 height**：设计稿 `.composer-field` 是
+                    // `min-height: 36px`。固定 36dp 时 2–4 行输入会被裁切（Box 不传递溢出）。
+                    // 单行 = 36dp（占位符居中）；多行时随内容增长，底部对齐由行内
+                    // `Alignment.Bottom` 保证 ＋ / 发送贴底。
+                    .heightIn(min = 36.dp)
+                    .padding(horizontal = 4.dp),
+                contentAlignment = Alignment.CenterStart
             ) {
                 if (value.isEmpty()) {
                     Text(
-                        text = "输入问题…",
+                        text = "给 Prism 发消息",
                         color = PrismTextFaint,
-                        fontSize = 14.sp
+                        fontSize = 15.sp,
+                        lineHeight = 22.sp
                     )
                 }
                 BasicTextField(
@@ -2215,74 +2336,88 @@ private fun MessageInputBar(
                     onValueChange = onValueChange,
                     textStyle = androidx.compose.ui.text.TextStyle(
                         color = PrismText,
-                        fontSize = 14.sp
+                        fontSize = 15.sp,
+                        lineHeight = 22.sp
                     ),
-                    cursorBrush = SolidColor(PrismCyan),
+                    cursorBrush = SolidColor(PrismAccent),
                     maxLines = 4,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        // 占位符语义（ac-verifier B3 回归）：占位符视觉 Text 在 decorationBox 里，
+                        // 与输入框本体分离后 uiautomator/读屏抓不到它。这里把「消息」
+                        // 与占位提示挂到输入框节点上，空文本时读屏会念出提示。
+                        .semantics {
+                            contentDescription = if (value.isEmpty()) "给 Prism 发消息" else "消息"
+                        }
                 )
             }
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(
-                        Brush.linearGradient(listOf(PrismIndigo, PrismIndigoSoft)),
-                        CircleShape
-                    )
-                    .border(1.dp, PrismIndigo.copy(alpha = 0.5f), CircleShape)
-                    // R5：附件存在时也可发送（"只发图/文件不配字"场景）
-                    // v1 批次11（终止输出）：isGenerating 时按钮始终可点（作为「停止」入口），即使输入为空
-                    .clickable(enabled = value.isNotBlank() || hasAttachment || isGenerating) { onSend() },
-                contentAlignment = Alignment.Center
-            ) {
-                // v1 批次11（终止输出）：生成中显示「■ 停止」以替代「➤ 发送」，提示可二次点击终止
-                Text(
-                    text = if (isGenerating) "■" else "➤",
-                    color = if (isGenerating) PrismCyan else Color.White,
-                    fontSize = 17.sp
-                )
+            // 发送 / 停止：文字按钮；生成中变成描边「停止」，语义与既有 onSend 分支一致。
+            val sendEnabled = value.isNotBlank() || hasAttachment || isGenerating
+            val sendBg = when {
+                isGenerating -> Color.Transparent
+                sendEnabled -> PrismText
+                else -> PrismPanel3
             }
-            // UXR9 US-907："＋"折叠栏开关（发送按钮右侧）—— 相册 / 文件两种上传方式
-            Box(
+            val sendFg = when {
+                isGenerating -> PrismDanger
+                sendEnabled -> PrismBg
+                else -> PrismTextFaint
+            }
+            Row(
                 modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (uploadBarExpanded) PrismIndigoSoft.copy(alpha = 0.5f) else PrismPanel,
-                        CircleShape
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(sendBg)
+                    .then(
+                        if (isGenerating) {
+                            Modifier.border(1.dp, PrismDanger.copy(alpha = 0.4f), RoundedCornerShape(18.dp))
+                        } else {
+                            Modifier
+                        }
                     )
-                    .border(1.dp, if (uploadBarExpanded) PrismIndigo else PrismLine, CircleShape)
-                    .clickable { uploadBarExpanded = !uploadBarExpanded },
-                contentAlignment = Alignment.Center
+                    .clickable(enabled = sendEnabled) { onSend() }
+                    .padding(horizontal = 14.dp, vertical = 9.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = if (uploadBarExpanded) "✕" else "＋",
-                    color = if (uploadBarExpanded) PrismIndigo else PrismTextDim,
-                    fontSize = 18.sp
+                    text = if (isGenerating) "停止" else "发送",
+                    color = sendFg,
+                    fontSize = 13.sp,
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Medium
                 )
             }
         }
     }
 }
 
-/** UXR9 US-907：折叠栏内的上传方式胶囊按钮（相册 / 文件）。 */
+/** 折叠栏内的上传入口 —— 设计稿 `.upload-bar button`（32dp 高、8dp 圆角、14dp 图标 + 12sp）。 */
 @Composable
-private fun UploadActionChip(label: String, onClick: () -> Unit) {
+private fun UploadActionChip(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    onClick: () -> Unit
+) {
     Row(
         modifier = Modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(PrismPanel2.copy(alpha = 0.6f))
-            .border(1.dp, PrismLine, RoundedCornerShape(10.dp))
+            .height(32.dp)
+            .clip(RoundedCornerShape(PrismSize.rChip))
+            .background(PrismPanel)
+            .border(1.dp, PrismLine, RoundedCornerShape(PrismSize.rChip))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
                 onClick = onClick
             )
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        Text(text = label, color = PrismTextDim, fontSize = 12.sp)
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = PrismTextDim,
+            modifier = Modifier.size(14.dp)
+        )
+        Text(text = label, color = PrismTextDim, fontSize = PrismType.meta)
     }
 }
 
@@ -2635,3 +2770,15 @@ private fun EditAiMessageSheet(
         )
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+

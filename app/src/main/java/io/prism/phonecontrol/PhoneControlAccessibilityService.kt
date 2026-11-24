@@ -611,26 +611,61 @@ class PhoneControlAccessibilityService : AccessibilityService() {
 
     fun nodeTextOf(nodeId: Int?): String? {
         if (nodeId == null) return null
+        val t = nodeByNid(nodeId) ?: return null
+        return aggregateNodeText(t)
+    }
+
+    /**
+     * 按 BFS 序号（nid，与 `get_ui_state` 的 `[N]` 一致）定位节点。
+     *
+     * 抽取自 [nodeTextOf]，供 [nodeLabelOf] 等"按 nid 取节点"的调用点复用，
+     * 避免多处各写一遍计数语义导致 nid 漂移。
+     */
+    private fun nodeByNid(nodeId: Int): AccessibilityNodeInfoCompat? {
         val root = executionRoot() ?: return null
-        // 按 nid 定位节点（BFS 计数器语义与 findNodeByNid / mapNode 一致）
-        val rootCompat = AccessibilityNodeInfoCompat.wrap(root)
         val locate = ArrayDeque<AccessibilityNodeInfoCompat>()
-        locate.add(rootCompat)
+        locate.add(AccessibilityNodeInfoCompat.wrap(root))
         var idx = 0
-        var target: AccessibilityNodeInfoCompat? = null
         while (locate.isNotEmpty()) {
             val n = locate.removeFirst()
-            if (idx == nodeId) {
-                target = n
-                break
-            }
+            if (idx == nodeId) return n
             idx++
             for (i in 0 until n.childCount) {
                 locate.addLast(n.getChild(i) ?: continue)
             }
         }
-        val t = target ?: return null
-        return aggregateNodeText(t)
+        return null
+    }
+
+    /**
+     * **高危/敏感判定专用**：目标节点「自身」的动作文案（2026-11-22，B2 误判修复）。
+     *
+     * 为什么不能复用 [nodeTextOf] 的子树聚合：聚合会把容器内**所有后代**的文案拼进来。
+     * 拼多多商品详情页有这种结构（真机 dump 原文，可点击 ViewGroup）：
+     * ```
+     * 容器 contentDescription = "优惠剩3件¥13"
+     * 直接子节点 = [ImageView, View, FrameLayout, TextView("优惠剩3件 ¥ 13"), View, View, TextView("免拼购买")]
+     * ```
+     * 聚合文本 = `优惠剩3件¥13 优惠剩3件 ¥ 13 免拼购买` → 命中「购买」。
+     * 于是"点标题/图片进入详情"被判成"点购买"，每次都弹「检测到敏感操作」，购物任务无法推进。
+     *
+     * 取值口径：**只取节点自身的 `text` / `contentDescription`**。
+     * - 不递归子节点：子节点的「免拼购买」是**同页另一个动作**，不是这次点击的目标；
+     * - 自身为空时返回 null，由调用方用 LLM 的锚点查询词兜底（见
+     *   `PhoneControlLocalToolExecutor.pickJudgementText`）——"想点什么"比"这块区域里有什么"
+     *   更接近这次点击的真实意图，也不会被同屏无关文案污染；
+     * - 真实按钮（自身文案就是「免拼购买」「确认订单」）仍然命中，保护不降级。
+     *
+     * 注意：锚点匹配（`findNodeByTextNid` / [nodeTextOf]）继续用子树聚合，语义不变——
+     * "按文案找节点"需要大范围匹配，"判这次点击危不危险"只看目标自身。
+     *
+     * @param nodeId BFS 序号（可为 null）
+     * @return 自身文案；空返回 null
+     */
+    fun nodeLabelOf(nodeId: Int?): String? {
+        if (nodeId == null) return null
+        val node = nodeByNid(nodeId) ?: return null
+        return nodeLabelFrom(node)
     }
 
     /**
@@ -1501,6 +1536,42 @@ class PhoneControlAccessibilityService : AccessibilityService() {
 
         /** 节点子树文本聚合预算（guardrail M-1：聚合后代文本时最多取 N 条，防上下文膨胀）。 */
         private const val TEXT_AGG_BUDGET = 12
+
+        /**
+         * 只取节点**自身**文案（[nodeLabelOf] 的纯函数内核，可单测；2026-11-22 高危误判修复）。
+         *
+         * **绝不递归子节点**：详情页的「免拼购买」是同一容器里的**另一个动作**，
+         * 把它拼进判定文本会让"点标题进详情"被判成"购买"（真机 B2）。
+         * guardrail M-2 的"聚合回落"发生在调用方（`resolveJudgementTexts`），只用于硬拦截，
+         * 不在本函数里做——否则本函数一改就又回到误判。
+         *
+         * @param text 节点自身 text
+         * @param desc 节点自身 contentDescription
+         * @return `text desc` 去空白；都为空返回 null
+         */
+        internal fun selfLabel(text: String?, desc: String?): String? {
+            val joined = listOfNotNull(
+                text?.trim()?.takeIf { it.isNotBlank() },
+                desc?.trim()?.takeIf { it.isNotBlank() }
+            ).joinToString(" ")
+            return joined.takeIf { it.isNotBlank() }
+        }
+
+        /**
+         * [nodeLabelOf] 的节点级内核（2026-11-22）：只取自身文案，绝不递归子节点。
+         *
+         * 拆出节点级入口的唯一目的是**能被单测直接钉住**：ac-verifier 变异核对发现全仓对
+         * `nodeLabelOf` 引用数为 0 —— 把它改成子树聚合，所有测试仍全绿，而那正是本次误判的回归点。
+         * `PhoneControlNodeLabelTest` 用 Robolectric 构造真机同构节点树（容器只有价格描述、
+         * 子节点是「免拼购买」），断言返回值不含子节点文案。
+         *
+         * @param node 目标节点（可空）
+         * @return 自身 text/desc 拼接；空返回 null
+         */
+        internal fun nodeLabelFrom(node: AccessibilityNodeInfoCompat?): String? {
+            if (node == null) return null
+            return selfLabel(node.text?.toString(), node.contentDescription?.toString())
+        }
 
         /**
          * v1 批次11（坐标吸附）：吸附距离阈值（px，屏幕空间）。LLM 给的坐标（尤其 OCR 定位）

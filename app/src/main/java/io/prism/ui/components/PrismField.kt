@@ -1,11 +1,13 @@
-package io.prism.ui.components
+﻿package io.prism.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -54,12 +56,17 @@ fun PrismField(
                 modifier = Modifier.padding(bottom = 7.dp)
             )
         }
+        // 设计稿 `.field input`：**无圆角框**，只有一条底边细线（`border-bottom: 1px line-strong`），
+        // 34dp 高、左对齐、透明底。旧实现是圆角实底框，属另一套表单语言。
+        // 设计稿 `.field input`：无圆角框，只有一条**底边细线**。
+        // 之前只删了框、漏了这条线 → 输入区在深色背景上边界完全消失（不可用）。
+        Column(modifier = Modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(PrismPanel, RoundedCornerShape(10.dp))
-                .border(1.dp, PrismLineStrong, RoundedCornerShape(10.dp))
-                .padding(horizontal = 13.dp, vertical = 11.dp),
+                .height(34.dp)
+                .background(Color.Transparent)
+                .padding(horizontal = 0.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
@@ -83,6 +90,14 @@ fun PrismField(
                 }
             )
             if (trailing != null) trailing()
+        }
+        // 底边细线（`.field input { border-bottom: 1px solid var(--line-strong) }`）
+        androidx.compose.foundation.layout.Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(PrismLineStrong)
+        )
         }
         if (hint != null) {
             Text(

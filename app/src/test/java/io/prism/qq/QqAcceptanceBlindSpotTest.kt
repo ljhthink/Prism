@@ -636,7 +636,18 @@ class QqAcceptanceBlindSpotTest {
         listOf("mediaNote", "pending", "shapeHint", "buildReplyUserContext", "incoming").forEach {
             assertFalse("system 段不得引用动态内容：$it", systemBlock.contains(it))
         }
-        assertTrue("system 段必须含静态场景声明", systemBlock.contains("SCENE_HINT"))
+        assertTrue(
+            "system 段必须含静态场景声明（ADR-080 起由 STATIC_SUFFIX 承载 SCENE_HINT + TIME_RULE）",
+            systemBlock.contains("STATIC_SUFFIX")
+        )
+        // STATIC_SUFFIX 自身必须是**纯静态**的：只允许引用两个常量，不得引用任何动态参数
+        val suffixDef = src.substringAfter("private const val STATIC_SUFFIX")
+            .substringBefore("\n\n")
+        assertTrue("STATIC_SUFFIX 必须包含场景声明", suffixDef.contains("SCENE_HINT"))
+        assertTrue("STATIC_SUFFIX 必须包含时间用法规则", suffixDef.contains("TIME_RULE"))
+        listOf("now", "mediaNote", "pending", "incoming").forEach {
+            assertFalse("STATIC_SUFFIX 不得引用动态内容：$it", suffixDef.contains("\$$it"))
+        }
         // 字数硬约束不得回到 system（AC-1）
         assertFalse("system 段不得再规定字数上限", Regex("""不超过\s*\d+\s*字""").containsMatchIn(src))
     }

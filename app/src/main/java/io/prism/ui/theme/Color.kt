@@ -74,49 +74,49 @@ val PrismDarkOnError = Color(0xFF690005)
 // ---------------------------------------------------------------------------
 
 /** 屏底（最深层）—— `--bg`。 */
-val PrismBg = Color(0xFF0C0C11)
+val PrismBg = Color(0xFF111210)
 
 /** L1 卡片 / 底栏 / 输入 —— `--surface`。 */
-val PrismPanel = Color(0xFF14141A)
+val PrismPanel = Color(0xFF171816)
 
 /** L2 浮层 / hover / 图标底 —— `--surface-2`。 */
-val PrismPanel2 = Color(0xFF1A1A22)
+val PrismPanel2 = Color(0xFF1D1E1B)
 
 /** L3 弹层 / 分段 thumb / 开关轨 —— `--surface-3`。 */
-val PrismPanel3 = Color(0xFF20202A)
+val PrismPanel3 = Color(0xFF24261F)
 
 /** 品牌强调色（光）—— 靛蓝紫 `--primary`。 */
-val PrismIndigo = Color(0xFF6E62FF)
+val PrismIndigo = Color(0xFFE0A45C) // 语义已迁移：唯一强调色（琥珀）
 
 /** 靛蓝紫深一档（按压态）—— `--primary-strong`。 */
-val PrismIndigoSoft = Color(0xFF5A4EFF)
+val PrismIndigoSoft = Color(0xFFC98F4A) // 按压态
 
 /** 功能光 —— 青（MCP 运行中 / 知识检索 / 连接光）`--cyan`。 */
-val PrismCyan = Color(0xFF22C7E0)
+val PrismCyan = Color(0xFFE0A45C) // 语义已迁移：不再有第二强调色
 
 /** 功能光 —— 薄荷（成功 / 已连接 / 引用来源）`--mint`。 */
-val PrismMint = Color(0xFF2FBF8F)
+val PrismMint = Color(0xFF7FA98A) // 语义已迁移：成功/已连接
 
 /** 功能光 —— 琥珀（需配置 / 待处理）`--warning`。 */
-val PrismWarning = Color(0xFFD99A2B)
+val PrismWarning = Color(0xFFD6A94F)
 
 /** 功能光 —— 玫红（错误 / 连接失败）`--danger`。 */
-val PrismDanger = Color(0xFFE5484D)
+val PrismDanger = Color(0xFFD96A5B)
 
 /** 主文本。 */
-val PrismText = Color(0xFFEAEAF0)
+val PrismText = Color(0xFFECEDE6)
 
 /** 次级文本。 */
-val PrismTextDim = Color(0xFFA0A0AC)
+val PrismTextDim = Color(0xFFA3A69B)
 
 /** 弱化 / 占位 / 摘要。 */
-val PrismTextFaint = Color(0xFF6E6E7A)
+val PrismTextFaint = Color(0xFF82867A)
 
 /** 描边分隔 `--line`（rgba(255,255,255,.07)）。 */
-val PrismLine = Color(0x12FFFFFF)
+val PrismLine = Color(0x14ECEDE6)
 
 /** 强调描边 / 输入框 `--line-strong`（rgba(255,255,255,.12)）。 */
-val PrismLineStrong = Color(0x1FFFFFFF)
+val PrismLineStrong = Color(0x24ECEDE6)
 
 // ---------------------------------------------------------------------------
 // 向后兼容别名（已废弃，v0.4 起使用上述 v0.4 语义色）
@@ -141,3 +141,19 @@ val PrismGlass = PrismLine
 /** @deprecated v0.4 起使用 [PrismLineStrong]。 */
 @Deprecated("Use PrismLineStrong")
 val PrismGlassStrong = PrismLineStrong
+
+// ---------------------------------------------------------------------------
+// UI v2 语义别名（ADR-079）：新代码请用这些名字，语义唯一、不含历史包袱。
+// ---------------------------------------------------------------------------
+
+/** 唯一强调色：激活 / 运行 / 选中 / 关键数字。 */
+val PrismAccent = PrismIndigo
+
+/** 琥珀上的文字色（深墨）。 */
+val PrismAccentInk = Color(0xFF17120A)
+
+/** 琥珀 12% 底色（选中行背景）。 */
+val PrismAccentSoft = Color(0x1FE0A45C)
+
+/** 成功 / 已连接。 */
+val PrismOk = PrismMint

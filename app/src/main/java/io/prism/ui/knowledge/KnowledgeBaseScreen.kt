@@ -1,4 +1,4 @@
-package io.prism.ui.knowledge
+﻿package io.prism.ui.knowledge
 
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -32,6 +32,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -43,6 +44,9 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
@@ -55,17 +59,23 @@ import io.prism.ui.components.PrismCard
 import io.prism.ui.components.PrismField
 import io.prism.ui.components.PrismSheet
 import io.prism.ui.components.PrismSheetHost
+import io.prism.ui.components.PrismIcons
+import io.prism.ui.components.PrismTextAction
 import io.prism.ui.components.PrismTopBar
 import io.prism.ui.components.PrismTopBarAction
 import io.prism.ui.theme.PrismCyan
 import io.prism.ui.theme.PrismDanger
+import io.prism.ui.theme.PrismAccent
 import io.prism.ui.theme.PrismIndigo
 import io.prism.ui.theme.PrismLine
+import io.prism.ui.theme.PrismLineStrong
 import io.prism.ui.theme.PrismMint
 import io.prism.ui.theme.PrismPanel2
+import io.prism.ui.theme.PrismSize
 import io.prism.ui.theme.PrismText
 import io.prism.ui.theme.PrismTextDim
 import io.prism.ui.theme.PrismTextFaint
+import io.prism.ui.theme.PrismType
 import io.prism.ui.theme.PrismWarning
 
 /**
@@ -129,47 +139,70 @@ fun KnowledgeBaseScreen() {
         }
     }
 
+    // 各库文档数。
+    //
+    // **必须在 IO 线程查**：`listDocuments` 是 ObjectBox 同步查询，写在 `remember {}`
+    // 里会在组合期（主线程、每帧都可能）读库——库多时首帧掉帧，StrictMode 也会报磁盘读。
+    // 用 `produceState` + IO 调度：首次组合异步取一次，库集合/分片数变化时重取。
+    val docCounts by produceState(
+        initialValue = emptyMap<Long, Int>(),
+        state.libraries,
+        state.defaultKbChunkCount,
+        state.chunkCounts
+    ) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            buildMap {
+                put(
+                    KnowledgeBaseRepository.DEFAULT_KB_ID,
+                    viewModel.listDocuments(KnowledgeBaseRepository.DEFAULT_KB_ID).size
+                )
+                state.libraries.forEach { kb -> put(kb.id, viewModel.listDocuments(kb.id).size) }
+            }
+        }
+    }
+
     Box {
         LazyColumn(
             modifier = Modifier.fillMaxWidth(),
             contentPadding = PaddingValues(bottom = 16.dp)
         ) {
+            // 设计稿 `.topbar`：标题 22sp + 右侧文字动作「导入」
             item {
                 PrismTopBar(
-                    title = "知识库",
-                    subtitle = formatStatsSubtitle(state),
+                    title = "知识",
                     actions = {
-                        PrismTopBarAction(
-                            icon = { Icon(Icons.Filled.Add, null, tint = PrismTextDim) },
-                            contentDescription = "导入",
-                            onClick = { importSheetVisible = true }
-                        )
+                        PrismTextAction(text = "导入", onClick = { importSheetVisible = true })
                     }
                 )
             }
-            item { SectionHeader("知识库", "管理") }
 
-            // 默认库卡（点击可管理库内文档）
+            // `.count-line`：N 个库 · M 份文档 · K 段
             item {
-                DefaultKbCard(
-                    chunkCount = state.defaultKbChunkCount,
-                    onClick = {
-                        manageTargetKb = null
-                        manageTargetKbId = KnowledgeBaseRepository.DEFAULT_KB_ID
-                        manageTargetDefault = true
-                        documents = viewModel.listDocuments(KnowledgeBaseRepository.DEFAULT_KB_ID)
-                        documentDeleted = false
-                    },
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+                val libCount = state.libraries.size + 1
+                val docTotal = docCounts.values.sum()
+                val chunkTotal = state.defaultKbChunkCount + state.chunkCounts.values.sum()
+                Text(
+                    text = "$libCount 个库 · $docTotal 份文档 · $chunkTotal 段",
+                    color = PrismTextFaint,
+                    fontSize = PrismType.micro,
+                    modifier = Modifier.padding(
+                        start = PrismSize.page,
+                        end = PrismSize.page,
+                        top = PrismSize.s2,
+                        bottom = PrismSize.s4
+                    )
                 )
             }
 
-            // 自建库列表（点击可管理库内文档，含删除按钮）
+            item { GroupLabel("库") }
+
+            // 自建库（行式：名称 + 文档数/时间 + 等宽段数 + chevron）
             items(state.libraries, key = { it.id }) { kb ->
-                KbSpaceCard(
-                    kb = kb,
+                KbRow(
+                    name = kb.name,
+                    docCount = docCounts[kb.id] ?: 0,
                     chunkCount = state.chunkCounts[kb.id] ?: 0L,
-                    onDelete = { deleteTargetKb = kb },
+                    subtitle = docSubtitle(docCounts[kb.id] ?: 0, kb),
                     onClick = {
                         manageTargetKb = kb
                         manageTargetKbId = kb.id
@@ -177,22 +210,53 @@ fun KnowledgeBaseScreen() {
                         documents = viewModel.listDocuments(kb.id)
                         documentDeleted = false
                     },
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+                    onDelete = { deleteTargetKb = kb }
                 )
             }
 
-            // 添加库卡
+            // 创建知识库行（设计稿：accent 标题 + 加号）
             item {
-                AddSpaceCard(
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
-                    onClick = { createSheetVisible = true }
+                CreateKbRow(onClick = { createSheetVisible = true })
+            }
+
+            // 分组：默认库
+            item { GroupLabel("默认库") }
+            item {
+                KbRow(
+                    name = "未分类文档",
+                    docCount = docCounts[KnowledgeBaseRepository.DEFAULT_KB_ID] ?: 0,
+                    chunkCount = state.defaultKbChunkCount,
+                    subtitle = "未归入任何分库",
+                    onClick = {
+                        manageTargetKb = null
+                        manageTargetKbId = KnowledgeBaseRepository.DEFAULT_KB_ID
+                        manageTargetDefault = true
+                        documents = viewModel.listDocuments(KnowledgeBaseRepository.DEFAULT_KB_ID)
+                        documentDeleted = false
+                    },
+                    onDelete = null
+                )
+            }
+
+            // `.footnote`
+            item {
+                Text(
+                    text = "支持 PDF / DOCX / XLSX / PPTX / MD / TXT / CSV；导入后自动解析、分片、向量化。",
+                    color = PrismTextFaint,
+                    fontSize = PrismType.micro,
+                    lineHeight = PrismType.microLine,
+                    modifier = Modifier.padding(
+                        start = PrismSize.page,
+                        end = PrismSize.page,
+                        top = PrismSize.s5
+                    )
                 )
             }
 
             // 摄入进度区（仅 Running / Completed / Failed 时展示）
             val ingestionState = state.ingestionState
             if (ingestionState !is KnowledgeBaseViewModel.IngestionUiState.Idle) {
-                item { SectionHeader("摄入", if (ingestionState is KnowledgeBaseViewModel.IngestionUiState.Running) "进行中" else "完成") }
+                item { GroupLabel("摄入") }
                 item {
                     IngestionStatusRow(
                         state = ingestionState,
@@ -356,182 +420,186 @@ private fun formatStatsSubtitle(state: KnowledgeBaseViewModel.KnowledgeBaseUiSta
     return "$libCount 个库 · $totalChunks 分片"
 }
 
-/** 顶栏分组标题。 */
+/**
+ * 分组标签（无横向 padding）—— 供**弹层内**使用。
+ *
+ * `PrismSheet` 的内容区已有 `padding(horizontal = 20.dp)`；若这里再用 `GroupLabel`
+ * （自带左右 20dp），弹层里的分组标题会比其它内容左右各窄 20dp，视觉上像被缩进了一层。
+ */
 @Composable
-private fun SectionHeader(title: String, action: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 10.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(text = title, color = PrismTextDim, fontSize = 12.sp, letterSpacing = 0.4.sp)
-        Text(text = action, color = PrismIndigo, fontSize = 11.sp)
-    }
+private fun GroupLabelBare(text: String) {
+    Text(
+        text = text,
+        color = PrismTextFaint,
+        fontSize = PrismType.meta,
+        modifier = Modifier.padding(top = PrismSize.s3, bottom = PrismSize.s2)
+    )
 }
 
-/** 默认库卡（ADR-011 5.6：单独展示，禁用删除；UX-001 问题 2：点击管理库内文档）。 */
+/** 分组标签 —— 设计稿 `.group-label`：12sp 弱化、下 8dp。 */
 @Composable
-private fun DefaultKbCard(chunkCount: Long, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    PrismCard(modifier = modifier.fillMaxWidth()) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onClick
-                )
-        ) {
-            // 配色光晕（青色，与自建库区分）
-            Box(
-                modifier = Modifier
-                    .size(90.dp)
-                    .align(Alignment.TopEnd)
-                    .clip(RoundedCornerShape(45.dp))
-                    .background(
-                        Brush.radialGradient(
-                            colors = listOf(PrismCyan.copy(alpha = 0.4f), Color.Transparent)
-                        )
-                    )
-            )
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = "◈  默认库",
-                    color = PrismText,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Text(
-                    text = "未分类文档\n$chunkCount 分片",
-                    color = PrismTextFaint,
-                    fontSize = 11.sp,
-                    lineHeight = 17.sp,
-                    modifier = Modifier.padding(top = 6.dp)
-                )
-                Text(
-                    text = "默认 · 点击管理",
-                    color = PrismCyan,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(top = 12.dp)
-                )
-            }
-        }
-    }
+private fun GroupLabel(text: String) {
+    Text(
+        text = text,
+        color = PrismTextFaint,
+        fontSize = PrismType.meta,
+        modifier = Modifier.padding(
+            start = PrismSize.page,
+            end = PrismSize.page,
+            top = PrismSize.s5,
+            bottom = PrismSize.s2
+        )
+    )
 }
 
-/** 自建库卡片（含删除按钮；UX-001 问题 2：点击管理库内文档）。 */
+/**
+ * 库行 —— 设计稿 `.row` + `kbRow`：最小高 56dp、底部 1px 分隔线、无卡片。
+ *
+ * 左侧两行（名称 15sp / 状态 12sp），右侧等宽段数 + chevron；
+ * [onDelete] 不为 null 时在 chevron 左侧给一个 36dp 删除热区（默认库没有）。
+ */
 @Composable
-private fun KbSpaceCard(
-    kb: KnowledgeBase,
+private fun KbRow(
+    name: String,
+    docCount: Int,
     chunkCount: Long,
-    onDelete: () -> Unit,
+    subtitle: String,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    onDelete: (() -> Unit)?
 ) {
-    PrismCard(modifier = modifier.fillMaxWidth()) {
-        Box(
+    Column {
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .height(PrismSize.row)
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
                     onClick = onClick
                 )
+                .padding(horizontal = PrismSize.page),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            // 配色光晕
-            Box(
-                modifier = Modifier
-                    .size(90.dp)
-                    .align(Alignment.TopEnd)
-                    .clip(RoundedCornerShape(45.dp))
-                    .background(
-                        Brush.radialGradient(
-                            colors = listOf(PrismIndigo.copy(alpha = 0.5f), Color.Transparent)
-                        )
-                    )
-            )
-            Column(modifier = Modifier.padding(16.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "◈  ${kb.name}",
-                        color = PrismText,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.weight(1f)
-                    )
-                    // 删除按钮（图标按钮）
-                    Box(
-                        modifier = Modifier
-                            .size(28.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(PrismPanel2.copy(alpha = 0.6f))
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null,
-                                onClick = onDelete
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.Filled.Delete,
-                            contentDescription = "删除",
-                            tint = PrismDanger,
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
-                }
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "$chunkCount 分片 · 点击管理",
+                    text = name,
+                    color = PrismText,
+                    fontSize = PrismType.body,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = subtitle,
                     color = PrismTextFaint,
-                    fontSize = 11.sp,
-                    modifier = Modifier.padding(top = 6.dp)
+                    fontSize = PrismType.meta,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 2.dp)
                 )
             }
-        }
-    }
-}
-
-/** 添加库卡（虚线玻璃风格）。 */
-@Composable
-private fun AddSpaceCard(modifier: Modifier = Modifier, onClick: () -> Unit = {}) {
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .background(PrismPanel2.copy(alpha = 0.6f))
-            .border(1.dp, PrismLine, RoundedCornerShape(18.dp))
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick
+            Text(
+                text = formatChunks(chunkCount),
+                color = PrismTextFaint,
+                fontSize = PrismType.meta,
+                fontFamily = FontFamily.Monospace
             )
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
+            if (onDelete != null) {
+                Spacer(Modifier.width(PrismSize.s2))
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onDelete
+                        )
+                        .semantics { contentDescription = "删除知识库" },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = PrismIcons.Close,
+                        contentDescription = null,
+                        tint = PrismTextFaint,
+                        modifier = Modifier.size(15.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.width(PrismSize.s2))
+            Icon(
+                imageVector = PrismIcons.ChevronRight,
+                contentDescription = null,
+                tint = PrismTextFaint,
+                modifier = Modifier.size(16.dp)
+            )
+        }
         Box(
             modifier = Modifier
-                .size(40.dp)
-                .background(PrismPanel2, RoundedCornerShape(14.dp))
-                .border(1.dp, PrismLine, RoundedCornerShape(14.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(Icons.Filled.Add, contentDescription = null, tint = PrismIndigo)
-        }
-        Text(
-            text = "创建知识库",
-            color = PrismTextFaint,
-            fontSize = 12.sp,
-            modifier = Modifier.padding(top = 8.dp)
+                .fillMaxWidth()
+                .padding(horizontal = PrismSize.page)
+                .height(1.dp)
+                .background(PrismLine)
         )
     }
+}
+
+/** 创建知识库行 —— 设计稿：accent 标题 + 加号 chevron。 */
+@Composable
+private fun CreateKbRow(onClick: () -> Unit) {
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(PrismSize.row)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onClick
+                )
+                .padding(horizontal = PrismSize.page),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("创建知识库", color = PrismAccent, fontSize = PrismType.body)
+                Text(
+                    "新建一个分库",
+                    color = PrismTextFaint,
+                    fontSize = PrismType.meta,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
+            Icon(
+                imageVector = PrismIcons.Plus,
+                contentDescription = null,
+                tint = PrismTextFaint,
+                modifier = Modifier.size(16.dp)
+            )
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = PrismSize.page)
+                .height(1.dp)
+                .background(PrismLine)
+        )
+    }
+}
+
+/** 段数格式化：≥1000 用 1,642 形态（设计稿 `.mono` 列）。 */
+private fun formatChunks(n: Long): String {
+    val s = n.toString()
+    if (s.length <= 3) return "$s 段"
+    return s.reversed().chunked(3).joinToString(",").reversed() + " 段"
+}
+
+/**
+ * 库行副标题 —— 设计稿 kbRow 第二行是「N 份文档 · 日期」。
+ *
+ * 之前只给了「M-d 创建」，把文档数丢了（只在顶部 count-line 汇总），已修正。
+ */
+private fun docSubtitle(docCount: Int, kb: KnowledgeBase): String {
+    val date = java.text.SimpleDateFormat("M-d HH:mm", java.util.Locale.getDefault())
+        .format(java.util.Date(kb.createdAt))
+    return "$docCount 份文档 · $date 创建"
 }
 
 /** 摄入状态行（Running 进度条 / Completed 完成 / Failed 错误）。 */
@@ -670,13 +738,26 @@ private fun CreateLibrarySheet(
             Text(text = error, color = PrismDanger, fontSize = 11.sp)
         }
         Spacer(Modifier.height(20.dp))
-        PrismButton(
-            text = "创建",
-            onClick = { onCreate(name) },
-            enabled = name.isNotBlank()
-        )
-        Spacer(Modifier.height(12.dp))
-        PrismButton(text = "取消", variant = PrismButtonVariant.Ghost, onClick = onCancel)
+        // 设计稿 `.btn-row`：主按钮 + ghost **并排**（纵向两个全宽按钮看起来像两个同等重要的决定）
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            PrismButton(
+                text = "创建",
+                onClick = { onCreate(name) },
+                enabled = name.isNotBlank(),
+                fillWidth = false,
+                modifier = Modifier.weight(1f)
+            )
+            PrismButton(
+                text = "取消",
+                variant = PrismButtonVariant.Ghost,
+                onClick = onCancel,
+                fillWidth = false,
+                modifier = Modifier.weight(1f)
+            )
+        }
     }
 }
 
@@ -711,9 +792,25 @@ private fun DeleteLibraryConfirmSheet(
             Text(text = error, color = PrismDanger, fontSize = 11.sp)
         }
         Spacer(Modifier.height(20.dp))
-        PrismButton(text = "确认删除", variant = PrismButtonVariant.Danger, onClick = onConfirm)
-        Spacer(Modifier.height(12.dp))
-        PrismButton(text = "取消", variant = PrismButtonVariant.Ghost, onClick = onCancel)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            PrismButton(
+                text = "确认删除",
+                variant = PrismButtonVariant.Danger,
+                onClick = onConfirm,
+                fillWidth = false,
+                modifier = Modifier.weight(1f)
+            )
+            PrismButton(
+                text = "取消",
+                variant = PrismButtonVariant.Ghost,
+                onClick = onCancel,
+                fillWidth = false,
+                modifier = Modifier.weight(1f)
+            )
+        }
     }
 }
 
@@ -742,49 +839,55 @@ private fun ImportSheet(
     }
 
     PrismSheet(title = "导入内容", subtitle = "解析 → 分片 → 向量化索引") {
-        // 目标库选择
-        Text(
-            text = "目标知识库",
-            color = PrismTextDim,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.4.sp
-        )
-        Spacer(Modifier.height(8.dp))
-        // 用 PrismSegmented 选择目标库；库数量多时可能溢出，故用 LazyRow 风格的横向 Row
-        // 简化：直接用 Row 平铺（库数量预期 <=5，4GB 低端机限制）
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            targetOptions.forEach { (id, name) ->
-                val isSelected = id == selectedTargetId
-                val bg = if (isSelected) PrismIndigo else PrismPanel2
-                val fg = if (isSelected) Color.White else PrismTextDim
+        // UI v2（ADR-079）：目标库选择改用**单选行**（`.option` 语言：圆环 + 名称 + 行尾对勾），
+        // 取代旧的等宽实底 segmented 色块。库数量多时等高线性排布，不会像等宽胶囊那样挤压文字。
+        GroupLabelBare("目标知识库")
+        targetOptions.forEach { (id, name) ->
+            val selected = id == selectedTargetId
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(44.dp)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { onSelectTarget(id) }
+                    ),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(PrismSize.s3)
+            ) {
                 Box(
                     modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(bg)
+                        .size(18.dp)
                         .border(
-                            1.dp,
-                            if (isSelected) Color.Transparent else PrismLine,
-                            RoundedCornerShape(10.dp)
+                            width = 1.dp,
+                            color = if (selected) PrismAccent else PrismLineStrong,
+                            shape = androidx.compose.foundation.shape.CircleShape
                         )
-                        .clickable(
-                            interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
-                            onClick = { onSelectTarget(id) }
+                        .background(
+                            if (selected) PrismAccent.copy(alpha = 0.12f)
+                            else androidx.compose.ui.graphics.Color.Transparent,
+                            androidx.compose.foundation.shape.CircleShape
                         )
-                        .padding(vertical = 10.dp, horizontal = 6.dp),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(text = name, color = fg, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                )
+                Text(
+                    text = name,
+                    color = if (selected) PrismText else PrismTextDim,
+                    fontSize = PrismType.body,
+                    modifier = Modifier.weight(1f)
+                )
+                if (selected) {
+                    Icon(
+                        imageVector = PrismIcons.Check,
+                        contentDescription = "已选中",
+                        tint = PrismAccent,
+                        modifier = Modifier.size(16.dp)
+                    )
                 }
             }
         }
 
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(PrismSize.s4))
 
         // 摄入状态展示（Running / Completed / Failed）
         when (ingestionState) {
@@ -851,15 +954,29 @@ private fun ImportSheet(
                 PrismButton(text = "关闭", onClick = onDismissIngestion)
             }
             KnowledgeBaseViewModel.IngestionUiState.Idle -> {
-                PrismButton(text = "选择文件", onClick = onPickFile)
-                Spacer(Modifier.height(10.dp))
-                // UX-001 问题 2（ADR-021）：文本笔记入口（只输入文字保存）
-                PrismButton(text = "文本笔记", variant = PrismButtonVariant.Ghost, onClick = onAddTextNote)
-                Spacer(Modifier.height(12.dp))
+                // 设计稿 `.btn-row`：主按钮 + ghost 并排（不给纵向两个全宽按钮——它们看起来像两个同等重要的决定）
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    PrismButton(
+                        text = "选择文件",
+                        onClick = onPickFile,
+                        modifier = Modifier.weight(1f)
+                    )
+                    PrismButton(
+                        text = "文本笔记",
+                        variant = PrismButtonVariant.Ghost,
+                        onClick = onAddTextNote,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+                Spacer(Modifier.height(PrismSize.s3))
                 Text(
-                    text = "支持 PDF / DOCX / XLSX / MD / TXT / CSV",
+                    text = "支持 PDF / DOCX / XLSX / PPTX / MD / TXT / CSV；导入后自动解析、分片、向量化。",
                     color = PrismTextFaint,
-                    fontSize = 11.sp
+                    fontSize = PrismType.micro,
+                    lineHeight = PrismType.microLine
                 )
             }
         }
@@ -1055,29 +1172,35 @@ private fun ManageDocumentsSheet(
                     .padding(horizontal = 12.dp, vertical = 10.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = PrismIcons.File,
+                        contentDescription = null,
+                        tint = PrismTextFaint,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(Modifier.width(PrismSize.s2))
                     Text(
-                        text = "📄  $title",
+                        text = title,
                         color = PrismText,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        fontSize = PrismType.sub,
                         modifier = Modifier.weight(1f),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
-                    // 查看内容按钮（UXR3 问题 12，ADR-023）
+                    // 查看内容：设计稿 `.mini` 是文字按钮，不是眼睛 emoji
                     Box(
                         modifier = Modifier
-                            .size(30.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(PrismCyan.copy(alpha = 0.12f))
+                            .height(32.dp)
+                            .clip(RoundedCornerShape(PrismSize.rChip))
                             .clickable(
                                 interactionSource = remember { MutableInteractionSource() },
                                 indication = null,
                                 onClick = { onView(title) }
-                            ),
+                            )
+                            .padding(horizontal = 10.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text(text = "👁", fontSize = 13.sp)
+                        Text(text = "查看", color = PrismTextDim, fontSize = PrismType.micro)
                     }
                     Spacer(Modifier.width(6.dp))
                     // 删除按钮
@@ -1214,3 +1337,8 @@ private fun PrismIndexBar(progress: Int, modifier: Modifier = Modifier) {
         )
     }
 }
+
+
+
+
+

@@ -23,6 +23,7 @@ package io.prism.qq
  * | 文档生成 | `document__*` | ✅ | 生成 Word/Excel |
  * | 手机操控 | `phone_control__*` | ✅（用户显式开启） | 高风险：后台可能建副屏/抢前台 |
  * | 角色日记 | `diary__*` | ✅ | 本批次新增（ADR-077） |
+ * | 当前时间 | `time__now`（无前缀） | ✅ | 2026-11-22 新增（ADR-080）：让"隔了多久"可算而非靠猜 |
  * | QQ 自身工具 | `qq__*` | ❌ | **自噬**：在应答链路里再发 QQ 消息会与回复流程打架 |
  * | 反问用户 | `ask_user__*` | ❌ | QQ 里"反问"等于要发消息，无法等待用户点按 |
  * | 桌宠 | `pet__*` | ❌ | 与聊天无关，纯噪声 |
@@ -57,7 +58,7 @@ object QqReplyToolPolicy {
     )
 
     /** 允许的**精确名**（无命名空间前缀的工具）。 */
-    private val ALLOWED_EXACT = listOf("todo_write")
+    private val ALLOWED_EXACT = listOf("todo_write", "time__now")
 
     /** 明确禁止的前缀（即使将来白名单放宽也不该放进来）。 */
     private val DENIED_PREFIXES = listOf(

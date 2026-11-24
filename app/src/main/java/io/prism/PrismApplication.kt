@@ -1208,6 +1208,16 @@ class PrismApplication : Application() {
                     io.prism.config.HighRiskApprovalMode.ASK
                 }
             },
+            // 2026-11-22（B2 修复）：高危动作的 ASK 改为**同步确认**——用户点「允许」后立即执行原动作。
+            // 旧路径返回 ask_user 标记会中断整个工具回路，允许后动作不执行、模型重来再撞同一个拦截，
+            // 表现为"一直弹检测到敏感操作"。这里复用「AI 请求执行工具」对话框，超时按拒绝。
+            highRiskConfirmation = { question ->
+                confirmationGate.confirm(
+                    HIGH_RISK_CONFIRM_TOOL,
+                    mapOf("question" to question),
+                    HIGH_RISK_CONFIRM_TIMEOUT_MS
+                )
+            },
             // v1 真机二次修复（Issue 5）：后台执行高危动作时发系统通知让用户在其它 App 也能作答
             askUserNotifier = phoneControlAskUserNotifier,
             // v1 批次11（D9）：UI 树受限时截图 + OCR 提取「文字+坐标」，供纯文本模型继续操作
@@ -1995,7 +2005,12 @@ class PrismApplication : Application() {
                     diaryEnabled = cfg.diaryEnabled
                 ) + runCatching {
                     io.prism.network.KnowledgeBaseLocalToolExecutor.buildToolDefinitions()
-                }.getOrDefault(emptyList())
+                }.getOrDefault(emptyList()) + listOf(
+                    // 2026-11-22（ADR-080）：本地只读时间工具（零网络）。
+                    // 聊天里"隔了多久/现在几点/到十二点半还有多久"靠模型心算会答错，
+                    // 而答错时间最伤"活人感"。只注入 QQ 工具回路，不进主聊天工具清单。
+                    io.prism.skill.TimeNowLocalToolExecutor.buildToolDefinition()
+                )
                 val phoneControlAllowed = cfg.replyPhoneControlEnabled &&
                     runCatching { tierManager.currentTier.isPhoneControlEnabled }.getOrDefault(false)
                 val tools = io.prism.qq.QqReplyToolPolicy.filter(
@@ -2021,7 +2036,17 @@ class PrismApplication : Application() {
                     lastMessageAtMs = lastMessageAtMs,
                     imageAttached = false,
                     diarySection = diarySection
-                )
+                ) + io.prism.qq.QqToolIntent.hintFor(replyTarget).orEmpty().let { hint ->
+                    // 2026-11-22（ADR-080）：代码侧前置判定——命中"会变的事实"时**硬提示先查**。
+                    // 真机证据：工具下发了 20 个，但模型对"今天新闻"这类问题照样凭记忆答。
+                    if (hint.isNotEmpty()) {
+                        android.util.Log.i(
+                            "QqProactiveSchedule",
+                            "检索前置判定=命中（${io.prism.qq.QqToolIntent.reasonOf(replyTarget)}）"
+                        )
+                    }
+                    hint
+                }
                 val systemPrompt = io.prism.qq.QqProactiveComposer.buildSystemPromptForTools(
                     personaSystemPrompt = persona,
                     diaryEnabled = cfg.diaryEnabled
@@ -2609,6 +2634,20 @@ class PrismApplication : Application() {
                     } else {
                         io.prism.qq.QqReplyDirective.stripMarkers(reply)
                     }
+                }.let { raw ->
+                    // 2026-11-22（ADR-080）：**出口风格闸门**。
+                    // 人设卡是软约束，多轮之后会漂回默认腔调；真机 101 条实测：32.7% 问句收尾、
+                    // 42.6% 带 `\n\n` 段落、5.9% "不是…而是"、工具轮次还会带 `[1][3]`。
+                    // 这里只动**形态**（Markdown/引用/段落/问句数），不改语义、不缩短技术解释。
+                    // 放在 `parsed` 之后：指令标记已剥掉，不会被误删。
+                    val guarded = io.prism.qq.QqReplyTextGuard.apply(raw)
+                    if (guarded.changed) {
+                        android.util.Log.i(
+                            "QqProactiveSchedule",
+                            "出口闸门：" + guarded.logLine()
+                        )
+                    }
+                    guarded.text.ifBlank { raw }
                 }
                 // 2026-11-15（ADR-076）：一次回复可拆成**多条短消息**——真人在 QQ 上
                 // 通常是"先应一声、再补一句"。约束：最多 3 条、单条 ≤120 字、仅协议端
@@ -2625,6 +2664,9 @@ class PrismApplication : Application() {
                     channel.transport != io.prism.qq.channel.QqTransport.ONEBOT ->
                         listOf(textToSend)
                     else -> io.prism.qq.QqReplyBubbles.split(textToSend)
+                        // guardrail L-07：闸门可能删掉整句/整段 → 拆分后可能出现空白气泡
+                        // （或只剩悬空的 `---` 分隔）。发空气泡会让 QQ 里出现一条空气泡。
+                        .filter { it.isNotBlank() }
                         .let { if (it.size <= maxBubblesNow) it else listOf(it.joinToString("\n")) }
                 }
                 // 2026-11-16（ADR-077）：**拟人节奏**——发之前先像人一样"想一想 + 打字"。
@@ -3104,6 +3146,32 @@ class PrismApplication : Application() {
                 // guardrail R-1（验收）：补发窗口 60 分钟内积压可能 >20 条，故补发入口显式传
                 // 更大的轮数；被动外发仍受 `QqThrottle` 的 60s 窗口（20 条）与气泡额度双重约束。
                 repeat(maxRounds) {
+                    // 2026-11-22（ADR-080）：**接收侧合并窗口**。
+                    // 旧实现事件到达即刻 claim，批里永远只有一条 → 用户"一句话 + 一个表情"
+                    // 被拆成两次生成、两次回复（真机 22:23 / 22:37 两组证据）。
+                    //
+                    // guardrail B-01（关键）：本函数的调用方**必须**是独立协程，不能是
+                    // `incoming().collect{}` 体内——collect 体内串行时，这里 delay 期间新事件
+                    // 只进 `_events` 缓冲、进不了收件箱，`claimDue` 永远只拿到 1 条，
+                    // 整个合并窗口就变成"每条回复白等 1.2s"的死逻辑。
+                    // 现在事件路径只做 enqueue + 唤醒（见下方 `inboxWake`），本函数在执行协程里跑。
+                    var waited = 0L
+                    while (waited < io.prism.qq.QqInboxCoalescer.MAX_LOOP_WAIT_MS) {
+                        val nowMs = System.currentTimeMillis()
+                        val queued = qqInboxStore.due(nowMs)
+                        if (queued.isEmpty()) break
+                        val waitMs = io.prism.qq.QqInboxCoalescer.waitMs(nowMs, queued.map { it.atMs })
+                        if (waitMs <= 0L) break
+                        if (waited == 0L) {
+                            android.util.Log.i(
+                                "QqProactiveSchedule",
+                                "合并窗口：等 ${waitMs}ms（待处理=${queued.size} 条，" +
+                                    "${io.prism.qq.QqInboxCoalescer.reasonOf(nowMs, queued.map { it.atMs })}）"
+                            )
+                        }
+                        kotlinx.coroutines.delay(waitMs)
+                        waited += waitMs
+                    }
                     val claimed = qqInboxStore.claimDue(
                         System.currentTimeMillis(),
                         limit = io.prism.qq.QqInboxStore.BURST_LIMIT
@@ -3134,6 +3202,90 @@ class PrismApplication : Application() {
                             }
                         )
                     }.sortedBy { it.timestampMs }
+                    // 2026-11-22（ADR-080）：**纯媒体跟随上一条回复**。
+                    // 用户「一句问候 + 一个表情包」不该得到两条回复（真机 22:37 证据）。
+                    // 折叠 = 只清收件箱、写历史，不生成、不外发；下一轮模型仍看得见这张图。
+                    val foldDecisionAt = System.currentTimeMillis()
+                    val lastRepliedAt = runCatching {
+                        qqRuntimeStateRepository.get().lastRepliedAtMs
+                    }.getOrDefault(0L)
+                    // guardrail L-02：判据只在 QqMediaFollow 里定义一次（原先这里重复了
+                    // "无可见文本"谓词，两处口径容易漂移）。
+                    val foldMedia = io.prism.qq.QqMediaFollow.shouldFold(
+                        texts = messages.map { it.text },
+                        mediaKinds = messages.flatMap { m -> m.media.map { it.kind.name } },
+                        nowMs = foldDecisionAt,
+                        lastRepliedAtMs = lastRepliedAt
+                    )
+                    if (foldMedia) {
+                        android.util.Log.i(
+                            "QqProactiveSchedule",
+                            "（收件箱）批=${claimed.size} 条 " +
+                                io.prism.qq.QqMediaFollow.logLine(
+                                    foldDecisionAt, lastRepliedAt, folded = true
+                                )
+                        )
+                        // guardrail M-02：**历史落盘失败时绝不能 done()**。
+                        // 原实现 runCatching 吞失败后仍终结条目 → 收件箱已删、历史没写、
+                        // 不生成回复、无日志：这条消息就永久消失了。
+                        // 现在：add 失败 → retryLater（保留消息，下一轮重来），且不吞取消。
+                        val contact = runCatching { qqConfigRepository.get().targetContact }
+                            .getOrDefault("")
+                        var appendFailed = false
+                        for (message in messages) {
+                            try {
+                                val ok = qqConversationStore.append(
+                                    contact = contact,
+                                    message = if (message.mediaNote.isNullOrBlank() &&
+                                        message.media.isNotEmpty()
+                                    ) {
+                                        message.copy(
+                                            mediaNote = io.prism.qq.QqMediaDescriber.describe(message.media)
+                                        )
+                                    } else {
+                                        message
+                                    }
+                                )
+                                if (!ok) appendFailed = true
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                appendFailed = true
+                                android.util.Log.w(
+                                    "QqProactiveSchedule",
+                                    "折叠分支入历史失败：${e::class.simpleName}"
+                                )
+                            }
+                        }
+                        if (appendFailed) {
+                            // 不终结：交给退避重试，宁可晚一条也不静默丢消息
+                            claimed.forEach { item ->
+                                val dropped = qqInboxStore.retryLater(
+                                    item.id, "折叠入历史失败", foldDecisionAt
+                                )
+                                if (dropped) {
+                                    liveInboxMessages.remove(item.id)
+                                    android.util.Log.w(
+                                        "QqProactiveSchedule",
+                                        "折叠条目放弃（重试次数用尽，attempts=${item.attempts + 1}）"
+                                    )
+                                }
+                            }
+                            android.util.Log.w(
+                                "QqProactiveSchedule",
+                                "（收件箱）批=${claimed.size} 条 折叠失败已退避重试"
+                            )
+                            handled += claimed.size
+                            return@repeat
+                        }
+                        // 折叠条目也必须终结（claim 不悬空）。
+                        claimed.forEach { item ->
+                            qqInboxStore.done(item.id)
+                            liveInboxMessages.remove(item.id)
+                        }
+                        handled += claimed.size
+                        return@repeat
+                    }
                     val result = autoReplyBurst(messages)
                     val decision = io.prism.qq.QqInboxPolicy.decide(result.kind, result.message)
                     val now = System.currentTimeMillis()
@@ -3350,6 +3502,35 @@ class PrismApplication : Application() {
                 }
             }
 
+            // 2026-11-22（ADR-080 / guardrail B-01）：**收件箱处理协程**。
+            //
+            // 与采集协程分离的原因见 collect 体里的注释：合并窗口需要 `delay`，
+            // 若 delay 与 enqueue 在同一协程串行，新事件进不了收件箱，批永远只有 1 条。
+            //
+            // CONFLATED 语义：消费期间来的多条事件只保留一次唤醒；`processInboxOnce`
+            // 本身就是"取到空为止"的循环（`repeat(maxRounds)` + 空则 return），
+            // 因此一次唤醒足以消化全部积压，不存在丢唤醒。
+            //
+            // 与 15s 重试 worker 的关系：两者都调 `processInboxOnce`，`claimDue` 原子取件
+            // （guardrail R-03）保证同一条不会被双方各领一次；`replyMutex` 串行化生成。
+            val inboxWake = kotlinx.coroutines.channels.Channel<Unit>(
+                capacity = kotlinx.coroutines.channels.Channel.CONFLATED
+            )
+            appScope.launch {
+                for (unit in inboxWake) {
+                    try {
+                        processInboxOnce()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        android.util.Log.w(
+                            "PrismApplication",
+                            "事件应答异常：${e::class.simpleName}"
+                        )
+                    }
+                }
+            }
+
             appScope.launch {
                 // guardrail R2-01：采集协程必须**整体**兜底并自愈。
                 // 旧实现只 try 了 processInboxOnce，`collect` 本体与上游 `incoming()`
@@ -3363,16 +3544,13 @@ class PrismApplication : Application() {
                             rememberLiveInboxMessage(message)
                             // 实时事件已着落：显式推进水位（不再依赖 enqueue 的副作用）
                             qqInboxStore.markSeen(message.timestampMs)
-                            try {
-                                processInboxOnce()
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
-                                android.util.Log.w(
-                                    "PrismApplication",
-                                    "事件应答异常：${e::class.simpleName}"
-                                )
-                            }
+                            // 2026-11-22（ADR-080 / guardrail B-01）：**采集与处理必须解耦**。
+                            // 原实现在 collect 体内直接 `processInboxOnce()`——串行执行意味着
+                            // 合并窗口的 `delay` 期间新事件只进 `_events` 缓冲、进不了收件箱，
+                            // `claimDue` 永远只拿 1 条（合并窗口变成"每条白等 1.2s"的死逻辑）。
+                            // 现在这里只做 enqueue + 唤醒；等待与生成在下方独立的消费协程里跑。
+                            // CONFLATED：多条事件只需唤醒一次，不会堆积、不会阻塞协议端。
+                            inboxWake.trySend(Unit)
                         }
                         // collect 正常返回（流结束）：退出循环，不再重订阅
                         return@launch
@@ -3618,6 +3796,25 @@ class PrismApplication : Application() {
 
         /** Fetch MCP 工具请求超时（UXR9 Bug5 修复）：目标站多样，15s 缓冲。 */
         private const val FETCH_REQUEST_TIMEOUT_MS = 15_000L
+
+        /**
+         * 手机操控高危动作的同步确认"工具名"（2026-11-22，B2 修复）。
+         *
+         * 借用通用确认门禁（[confirmationGate]）的对话框，但用一个独立标识，让 UI 能渲染成
+         * 「检测到敏感操作」而非"AI 请求执行工具 xxx"。
+         */
+        internal const val HIGH_RISK_CONFIRM_TOOL = "phone_control_high_risk"
+
+        /**
+         * 高危确认等待上限（2026-11-22）。
+         *
+         * **必须显著小于工具调用外层超时**：`SkillExecutor.executeToolCall` 用
+         * [io.prism.skill.SkillExecutor.DEFAULT_TOOL_TIMEOUT_MS]（30s）包住整个工具执行
+         * （含 ensureDisplay/找节点/截图），若确认窗口取 20s，前置工作一晃就用光预算，
+         * 外层超时会把整次调用打断成"工具超时"，用户点「允许」也来不及生效。
+         * 15s 给前置留出 15s，且超时后 UI 会收到 `expired` 撤卡片（guardrail M-3）。
+         */
+        private const val HIGH_RISK_CONFIRM_TIMEOUT_MS = 15_000L
 
         /** 今日热榜 API Key 引用（ApiKeyRepository 加密键，US-002）。 */
         private const val HOTLIST_API_KEY_REF = "tophubdata"

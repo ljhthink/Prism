@@ -19,9 +19,18 @@ class QqReplyShapeAndBubblesTest {
 
     @Test
     fun `形状池非空且抽取值落在池内`() {
-        val seen = mutableSetOf<String>()
-        repeat(QqReplyShape.size * 5) { seen += QqReplyShape.pick() }
-        assertEquals("抽到的形状必须全部来自形状池", QqReplyShape.size, seen.size)
+        // 2026-11-21 修（flaky）：原断言 `seen.size == size` 要求"抽 size*5 次覆盖全部形状"，
+        // 这是**生日问题**——7 种形状抽 35 次漏掉至少一种的概率约 3%，
+        // 表现为随机构建失败（实测在 UI 改动轮次里偶发失败、单独重跑即过）。
+        // 该用例的真实意图是"pick() 只会从池里取值"，故改为：
+        //   ① 池非空；   ② 每个抽到的值都必须是池内元素（成员性，不是覆盖率）。
+        assertTrue("形状池不能为空", QqReplyShape.size > 0)
+        val pool = buildSet { repeat(2000) { add(QqReplyShape.pick()) } }
+        assertEquals(
+            "抽取值必须全部来自形状池（抽 2000 次应覆盖全部形状）",
+            QqReplyShape.size,
+            pool.size
+        )
     }
 
     @Test

@@ -64,8 +64,8 @@ object PrismDestinations {
 
 /** 底部 4 主入口。 */
 private val bottomNavItems = listOf(
-    PrismNavItem(PrismDestinations.CHAT, "聊天", Icons.AutoMirrored.Filled.Chat),
-    PrismNavItem(PrismDestinations.KNOWLEDGE, "知识库", Icons.Filled.MenuBook),
+    PrismNavItem(PrismDestinations.CHAT, "对话", Icons.AutoMirrored.Filled.Chat),
+    PrismNavItem(PrismDestinations.KNOWLEDGE, "知识", Icons.Filled.MenuBook),
     PrismNavItem(PrismDestinations.CAPABILITIES, "能力", Icons.Filled.Bolt),
     PrismNavItem(PrismDestinations.SETTINGS, "设置", Icons.Filled.Settings)
 )
@@ -86,6 +86,11 @@ fun PrismApp() {
     // 历史页选中会话后写入，经此状态传递给聊天页；聊天页 LaunchedEffect 触发
     // `loadSession` 后通过 [ConversationScreen.onSessionLoaded] 清空（一次性消费）。
     var pendingSessionId by remember { mutableStateOf<Long?>(null) }
+
+    // UI v2（ADR-079）：历史页「新对话」的一次性令牌（自增即触发，聊天页消费）。
+    var newConversationTick by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    // UI v2（ADR-079 D2）：设置详情页当前分区；null = 设置首页。
+    var settingsSection by remember { mutableStateOf<io.prism.ui.settings.SettingsSection?>(null) }
 
     Scaffold(
         containerColor = PrismBg,
@@ -108,6 +113,8 @@ fun PrismApp() {
                         launchSingleTop = true
                         restoreState = true
                     }
+                    // 切走设置 Tab 时回到首页，避免下次进入直接落在某个详情页。
+                    if (route != PrismDestinations.SETTINGS) settingsSection = null
                 }
             )
         }
@@ -131,12 +138,22 @@ fun PrismApp() {
                     ConversationScreen(
                         onOpenHistory = { navController.navigate(PrismDestinations.CONVERSATION_LIST) },
                         sessionIdToLoad = pendingSessionId,
+                        newConversationTick = newConversationTick,
                         onSessionLoaded = { pendingSessionId = null }
                     )
                 }
                 composable(PrismDestinations.KNOWLEDGE) { KnowledgeBaseScreen() }
                 composable(PrismDestinations.CAPABILITIES) { CapabilitiesScreen() }
-                composable(PrismDestinations.SETTINGS) { SettingsScreen() }
+                composable(PrismDestinations.SETTINGS) {
+                    // UI v2（ADR-079 D2）：设置分为「首页 6 入口」+「详情页 47 项」两级。
+                    // section 状态放在导航图之外（Tab 内切换不新增返回栈条目），
+                    // 系统返回键在详情页时先回到首页。
+                    SettingsScreen(
+                        section = settingsSection,
+                        onOpenSection = { settingsSection = it },
+                        onBack = { settingsSection = null }
+                    )
+                }
                 // UX-001 问题 4（ADR-021）：会话历史列表页。
                 // 选中会话 → 写入 pendingSessionId 并返回聊天页（聊天页自动 loadSession 恢复）。
                 composable(PrismDestinations.CONVERSATION_LIST) {
@@ -144,6 +161,14 @@ fun PrismApp() {
                         onBack = { navController.popBackStack() },
                         onSessionSelected = { sessionId ->
                             pendingSessionId = sessionId
+                            navController.popBackStack()
+                        },
+                        // UI v2（ADR-079）：历史页顶栏「新对话」——回到聊天页并**真的开新会话**。
+                        // guardrail R3-M-04：整文件覆盖时漏了令牌自增，导致点「新对话」只返回、
+                        // 旧对话原样保留（功能回归）。令牌由聊天页 LaunchedEffect 消费。
+                        onCreateNew = {
+                            pendingSessionId = null
+                            newConversationTick += 1
                             navController.popBackStack()
                         }
                     )
@@ -174,6 +199,13 @@ private fun ToolConfirmationHost() {
     // 收集确认请求入队（FIFO）
     LaunchedEffect(gate) {
         gate.requests.collect { queue.add(it) }
+    }
+
+    // 2026-11-22（guardrail M-3）：已失效（超时/取消）的请求必须**撤卡片**。
+    // 否则用户对着一张失效的对话框点「允许」，动作不会执行也没有任何反馈 ——
+    // 与用户报的"一直说检测到敏感操作"是同一类体验缺陷。
+    LaunchedEffect(gate) {
+        gate.expired.collect { id -> queue.removeAll { it.id == id } }
     }
 
     // 逐条处理队首请求
@@ -260,8 +292,13 @@ private fun resolveConfirmationContent(
             "AI 请求选取媒体" to "类型：$mediaType\nAI 将通过系统选择器让你选取照片或文档。"
         }
         else -> {
-            // M4 Skill 工具或其他工具：通用展示
-            "AI 请求执行工具" to "工具：$toolName\n参数：$args"
+            if (toolName == io.prism.PrismApplication.HIGH_RISK_CONFIRM_TOOL) {
+                // 2026-11-22：手机操控高危动作的同步确认（用户点「允许」→ 立即执行原动作）
+                "检测到敏感操作" to (args["question"]?.toString() ?: "是否允许继续？")
+            } else {
+                // M4 Skill 工具或其他工具：通用展示
+                "AI 请求执行工具" to "工具：$toolName\n参数：$args"
+            }
         }
     }
 }

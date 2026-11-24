@@ -1,4 +1,4 @@
-package io.prism.ui.components
+﻿package io.prism.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -25,9 +25,12 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.prism.ui.theme.PrismBg
 import io.prism.ui.theme.PrismDanger
 import io.prism.ui.theme.PrismIndigo
 import io.prism.ui.theme.PrismIndigoSoft
+import io.prism.ui.theme.PrismPanel3
+import io.prism.ui.theme.PrismLineStrong
 import io.prism.ui.theme.PrismLine
 import io.prism.ui.theme.PrismPanel
 import io.prism.ui.theme.PrismPanel2
@@ -71,14 +74,17 @@ fun PrismButton(
     val fg: Color
     when (variant) {
         PrismButtonVariant.Primary -> {
-            bg = if (pressed) PrismIndigoSoft else PrismIndigo
+            // 设计稿 `.btn-primary`：**白底（text 色）+ 深墨字（bg 色）**，不是彩色主色块。
+            // 旧实现用 PrismIndigo 实底 + 白字，在暖灰石墨底上是唯一大面积彩色块，与设计稿不符。
+            bg = if (pressed) PrismPanel3 else PrismText
             border = Color.Transparent
-            fg = Color.White
+            fg = PrismBg
         }
         PrismButtonVariant.Ghost -> {
-            bg = if (pressed) PrismPanel2 else PrismPanel
-            border = PrismLine
-            fg = PrismTextDim
+            // 设计稿 `.btn-ghost`：**透明底** + `line-strong` 描边 + 正文色。
+            bg = if (pressed) PrismPanel2 else Color.Transparent
+            border = PrismLineStrong
+            fg = PrismText
         }
         PrismButtonVariant.Danger -> {
             bg = PrismDanger.copy(alpha = if (pressed) 0.12f else 0.08f)

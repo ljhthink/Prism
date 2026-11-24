@@ -48,7 +48,7 @@ fun PrismSheet(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(PrismPanel, RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp))
+            .background(PrismPanel, RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
             .padding(top = 8.dp, bottom = 28.dp)
     ) {
         // 顶部手柄
@@ -68,9 +68,9 @@ fun PrismSheet(
                     Text(
                         text = title,
                         color = PrismText,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = -0.2.sp
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Medium,
+                        letterSpacing = (-0.2f).sp
                     )
                     if (subtitle != null) {
                         Text(
